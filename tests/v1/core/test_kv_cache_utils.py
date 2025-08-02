@@ -40,6 +40,7 @@ def make_request(request_id,
     return Request(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
+        token_type_ids=None,
         multi_modal_inputs=multi_modal_inputs,
         multi_modal_hashes=mm_hashes,
         multi_modal_placeholders=mm_positions,

@@ -28,7 +28,7 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 
-from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
+from .interfaces import SupportsCrossEncoding, SupportsQuant
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -508,8 +508,8 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
         })
 
 
-class BertForSequenceClassification(nn.Module, SupportsV0Only,
-                                    SupportsCrossEncoding, SupportsQuant):
+class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
+                                    SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for

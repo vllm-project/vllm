@@ -184,12 +184,27 @@ def get_score_prompt(
         model_config,
         tokenizer,
     )
+    from vllm.model_executor.model_loader import get_model_cls
 
-    full_prompt = apply_score_template(model_config, prompt_1, prompt_2)
-
-    prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
+    model = get_model_cls(model_config)
+    if supports_score_template(model):
+        full_prompt = apply_score_template(model_config, prompt_1, prompt_2)
+        prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
+    elif model_config.use_pad_token:
+        # cross_encoder models defaults to using pad_token.
+        prompt_inputs = tokenizer(text=prompt_1,
+                                  text_pair=prompt_2,
+                                  **tokenization_kwargs)
+        full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
+    else:
+        # `llm as reranker` models defaults to not using pad_token.
+        full_prompt = prompt_1 + prompt_2
+        prompt_inputs = tokenizer(text=full_prompt, **tokenization_kwargs)
 
     engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["input_ids"])
+
+    if (token_type_ids := prompt_inputs.get("token_type_ids")) is not None:
+        engine_prompt["token_type_ids"] = token_type_ids
 
     post_process_tokens(model_config, engine_prompt)
 
