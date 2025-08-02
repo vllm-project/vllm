@@ -329,6 +329,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.kv_sharing_fast_prefill_logits_indices = torch.zeros(
                 self.max_num_tokens, dtype=torch.int32, device=self.device)
 
+        # GPU timing events
+        self.forward_start_event = torch.cuda.Event(enable_timing=True)
+        self.forward_end_event = torch.cuda.Event(enable_timing=True)
+
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
         Update the order of requests in the batch based on the attention
@@ -1564,6 +1568,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
+        forward_cpu_time_ms = 0.0
         with set_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -1573,6 +1578,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ):
             self.maybe_setup_kv_connector(scheduler_output)
 
+            cpu_start_time = time.perf_counter()
+            self.forward_start_event.record()
             model_output = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -1583,6 +1590,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     device=self.device,
                 ),
             )
+            self.forward_end_event.record()
+            forward_cpu_time_ms = (time.perf_counter() -
+                                   cpu_start_time) * 1000.0
 
             self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (
@@ -1758,6 +1768,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.eplb_step()
 
+        forward_gpu_time_ms = self.forward_start_event.elapsed_time(
+            self.forward_end_event)
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -1769,6 +1781,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             finished_sending=finished_sending,
             finished_recving=finished_recving,
             num_nans_in_logits=num_nans_in_logits,
+            forward_cpu_time_ms=forward_cpu_time_ms,
+            forward_gpu_time_ms=forward_gpu_time_ms,
         )
 
     def propose_draft_token_ids(

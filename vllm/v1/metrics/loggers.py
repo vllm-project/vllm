@@ -185,6 +185,22 @@ class PrometheusStatLogger(StatLoggerBase):
         #
         # Scheduler state
         #
+        gauge_forward_cpu_time_ms = self._gauge_cls(
+            name="vllm:forward_cpu_time_ms",
+            documentation="Time spent launching a forward pass on CPU.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames)
+        self.gauge_forward_cpu_time_ms = make_per_engine(
+            gauge_forward_cpu_time_ms, engine_indexes, model_name)
+
+        gauge_forward_gpu_time_ms = self._gauge_cls(
+            name="vllm:forward_gpu_time_ms",
+            documentation="Time spent executing a forward pass on GPU.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames)
+        self.gauge_forward_gpu_time_ms = make_per_engine(
+            gauge_forward_gpu_time_ms, engine_indexes, model_name)
+
         gauge_scheduler_running = self._gauge_cls(
             name="vllm:num_requests_running",
             documentation="Number of requests in model execution batches.",
@@ -497,6 +513,11 @@ class PrometheusStatLogger(StatLoggerBase):
                 scheduler_stats.num_running_reqs)
             self.gauge_scheduler_waiting[engine_idx].set(
                 scheduler_stats.num_waiting_reqs)
+
+            self.gauge_forward_cpu_time_ms[engine_idx].set(
+                scheduler_stats.forward_cpu_time_ms)
+            self.gauge_forward_gpu_time_ms[engine_idx].set(
+                scheduler_stats.forward_gpu_time_ms)
 
             self.gauge_gpu_cache_usage[engine_idx].set(
                 scheduler_stats.kv_cache_usage)

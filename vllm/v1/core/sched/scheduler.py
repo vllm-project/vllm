@@ -757,6 +757,8 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
+        forward_cpu_time_ms = model_runner_output.forward_cpu_time_ms
+        forward_gpu_time_ms = model_runner_output.forward_gpu_time_ms
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
@@ -908,8 +910,12 @@ class Scheduler(SchedulerInterface):
 
         if engine_core_outputs:
             # Return stats to only one of the front-ends.
-            next(iter(engine_core_outputs.values())).scheduler_stats = (
-                self.make_stats(spec_decoding_stats))
+            scheduler_stats = self.make_stats(spec_decoding_stats)
+            if scheduler_stats is not None:
+                scheduler_stats.forward_cpu_time_ms = forward_cpu_time_ms
+                scheduler_stats.forward_gpu_time_ms = forward_gpu_time_ms
+            next(iter(engine_core_outputs.values())
+                 ).scheduler_stats = scheduler_stats
 
         return engine_core_outputs
 
