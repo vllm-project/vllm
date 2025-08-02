@@ -1,7 +1,4 @@
----
-title: Quantized KV Cache
----
-[](){ #quantized-kvcache }
+# Quantized KV Cache
 
 ## FP8 KV Cache
 
@@ -35,7 +32,7 @@ Studies have shown that FP8 E4M3 quantization typically only minimally degrades 
 
 Here is an example of how to enable FP8 quantization:
 
-??? Code
+??? code
 
     ```python
     # To calculate kv cache scales on the fly enable the calculate_kv_scales
@@ -53,6 +50,7 @@ Here is an example of how to enable FP8 quantization:
     ```
 
 The `kv_cache_dtype` argument specifies the data type for KV cache storage:
+
 - `"auto"`: Uses the model's default "unquantized" data type
 - `"fp8"` or `"fp8_e4m3"`: Supported on CUDA 11.8+ and ROCm (AMD GPU)
 - `"fp8_e5m2"`: Supported on CUDA 11.8+
@@ -73,7 +71,7 @@ pip install llmcompressor
 
 Here's a complete example using `meta-llama/Llama-3.1-8B-Instruct` (most models can use this same pattern):
 
-??? Code
+??? code
 
     ```python
     from datasets import load_dataset

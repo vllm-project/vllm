@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Union
+
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
@@ -40,10 +42,17 @@ async def client(server):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("stream", [True, False])
-@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+@pytest.mark.parametrize("tool_choice", [
+    "auto", "required", {
+        "type": "function",
+        "function": {
+            "name": "get_current_weather"
+        }
+    }
+])
 @pytest.mark.parametrize("enable_thinking", [True, False])
 async def test_function_tool_use(client: openai.AsyncOpenAI, model_name: str,
-                                 stream: bool, tool_choice: str,
+                                 stream: bool, tool_choice: Union[str, dict],
                                  enable_thinking: bool):
     tools = [
         {
@@ -72,8 +81,43 @@ async def test_function_tool_use(client: openai.AsyncOpenAI, model_name: str,
                             "The unit to fetch the temperature in",
                             "enum": ["celsius", "fahrenheit"],
                         },
+                        "options": {
+                            "$ref": "#/$defs/WeatherOptions",
+                            "description":
+                            "Optional parameters for weather query",
+                        },
                     },
                     "required": ["country", "unit"],
+                    "$defs": {
+                        "WeatherOptions": {
+                            "title": "WeatherOptions",
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "unit": {
+                                    "type": "string",
+                                    "enum": ["celsius", "fahrenheit"],
+                                    "default": "celsius",
+                                    "description": "Temperature unit",
+                                    "title": "Temperature Unit",
+                                },
+                                "include_forecast": {
+                                    "type": "boolean",
+                                    "default": False,
+                                    "description":
+                                    "Whether to include a 24-hour forecast",
+                                    "title": "Include Forecast",
+                                },
+                                "language": {
+                                    "type": "string",
+                                    "default": "zh-CN",
+                                    "description": "Language of the response",
+                                    "title": "Language",
+                                    "enum": ["zh-CN", "en-US", "ja-JP"],
+                                },
+                            },
+                        },
+                    },
                 },
             },
         },
@@ -145,7 +189,11 @@ async def test_function_tool_use(client: openai.AsyncOpenAI, model_name: str,
                     "enable_thinking": enable_thinking
                 }
             })
-
+        if enable_thinking:
+            assert chat_completion.choices[0].message.\
+                reasoning_content is not None
+            assert chat_completion.choices[0].message.\
+                reasoning_content != ""
         assert chat_completion.choices[0].message.tool_calls is not None
         assert len(chat_completion.choices[0].message.tool_calls) > 0
     else:

@@ -234,10 +234,16 @@ class MinPLogitsProcessor(LogitsProcessor):
                                             device="cpu",
                                             pin_memory=pin_memory)
         self.min_p_cpu = self.min_p_cpu_tensor.numpy()
-        # Pre-allocated device tensor
-        self.min_p_device: torch.Tensor = torch.empty((max_num_reqs, ),
-                                                      dtype=torch.float32,
-                                                      device=device)
+
+        self.use_double_tensor = torch.device("cpu") != torch.device(device)
+
+        if self.use_double_tensor:
+            # Pre-allocated device tensor
+            self.min_p_device: torch.Tensor = torch.empty((max_num_reqs, ),
+                                                          dtype=torch.float32,
+                                                          device=device)
+        else:
+            self.min_p_device = self.min_p_cpu_tensor
         # Current slice of the device tensor
         self.min_p: torch.Tensor = self.min_p_device[:0]
 
@@ -284,7 +290,9 @@ class MinPLogitsProcessor(LogitsProcessor):
         size = batch_update.batch_size
         if self.min_p_count and (needs_update or self.min_p.shape[0] != size):
             self.min_p = self.min_p_device[:size]
-            self.min_p.copy_(self.min_p_cpu_tensor[:size], non_blocking=True)
+            if self.use_double_tensor:
+                self.min_p.copy_(self.min_p_cpu_tensor[:size],
+                                 non_blocking=True)
             self.min_p.unsqueeze_(1)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
@@ -327,14 +335,19 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         if not batch_update:
             return
 
+        needs_update: bool = False
         # Process added requests.
-        needs_update = bool(batch_update.added)
         for index, params, _ in batch_update.added:
             if isinstance(params, SamplingParams) and (lb :=
                                                        params.logit_bias):
                 self.biases[index] = lb
+                needs_update = True
             else:
-                self.biases.pop(index, None)
+                # Drop biases metadata at batch index
+                if self.biases.pop(index, None) is not None:
+                    # If a new request replaces an old request which
+                    # specified biases, we should update processor tensors
+                    needs_update = True
 
         if self.biases:
             # Process removed requests.
@@ -411,7 +424,6 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
         if batch_update:
             # Process added requests.
-            needs_update |= bool(batch_update.added)
             for index, params, output_tok_ids in batch_update.added:
                 if (isinstance(params, SamplingParams)
                         and (min_tokens := params.min_tokens)
@@ -419,9 +431,13 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                     # Replace request metadata at batch index
                     self.min_toks[index] = (min_tokens, output_tok_ids,
                                             params.all_stop_token_ids)
+                    needs_update = True
                 else:
-                    # Drop request metadata at batch index
-                    self.min_toks.pop(index, None)
+                    # Drop min_toks metadata at batch index
+                    if self.min_toks.pop(index, None) is not None:
+                        # If a new request replaces an old request which
+                        # specified min_toks, we should update processor tensors
+                        needs_update = True
 
             if self.min_toks:
                 # Process removed requests.
