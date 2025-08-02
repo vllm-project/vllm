@@ -192,7 +192,6 @@ def compute_encoder_budget(
     if not model_config.is_multimodal_model:
         return 0, 0
 
-    # TODO: handle encoder-decoder models once we support them.
     (
         encoder_compute_budget,
         encoder_cache_size,
