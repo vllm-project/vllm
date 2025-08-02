@@ -132,7 +132,7 @@ def bench_run(
             (marlin_24_w_ref, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s) = (
                 marlin_24_quantize(b, quant_type, group_size)
             )
-        return (marlin_24_w_ref, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s)
+        return marlin_24_w_ref, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s
 
     def gen_repack_params():
         q_w_gptq = None

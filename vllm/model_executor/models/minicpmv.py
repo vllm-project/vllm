@@ -210,8 +210,8 @@ def get_version_by_config(config: PretrainedConfig) -> tuple[int, ...]:
     # TODO: Remove this after the HF repos are updated
     if version_float is None:
         if config.hidden_size == 2304 and config.query_num == 64:
-            return (2, 0)
-        return (2, 5)
+            return 2, 0
+        return 2, 5
     version_str = str(version_float)
     return tuple(int(x) for x in version_str.split("."))
 
