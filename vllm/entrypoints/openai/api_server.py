@@ -11,7 +11,6 @@ import multiprocessing
 import os
 import signal
 import socket
-import sys
 import tempfile
 import uuid
 from argparse import Namespace
@@ -95,15 +94,15 @@ from vllm.entrypoints.openai.serving_transcription import (
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     log_non_default_args, with_cancellation)
-from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
-                        is_valid_ipv6_address, set_process_title, set_ulimit)
+from vllm.utils import (Device, FlexibleArgumentParser, decorate_logs,
+                        get_open_zmq_ipc_path, is_valid_ipv6_address,
+                        set_ulimit)
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -200,15 +199,18 @@ async def build_async_engine_client_from_engine_args(
 
         from vllm.v1.engine.async_llm import AsyncLLM
         async_llm: Optional[AsyncLLM] = None
+        client_count = client_config.pop(
+            "client_count") if client_config else 1
         client_index = client_config.pop(
             "client_index") if client_config else 0
         try:
             async_llm = AsyncLLM.from_vllm_config(
                 vllm_config=vllm_config,
                 usage_context=usage_context,
-                disable_log_requests=engine_args.disable_log_requests,
+                enable_log_requests=engine_args.enable_log_requests,
                 disable_log_stats=engine_args.disable_log_stats,
                 client_addresses=client_config,
+                client_count=client_count,
                 client_index=client_index)
 
             # Don't keep the dummy data in memory
@@ -228,7 +230,7 @@ async def build_async_engine_client_from_engine_args(
             engine_client = AsyncLLMEngine.from_vllm_config(
                 vllm_config=vllm_config,
                 usage_context=usage_context,
-                disable_log_requests=engine_args.disable_log_requests,
+                enable_log_requests=engine_args.enable_log_requests,
                 disable_log_stats=engine_args.disable_log_stats)
             yield engine_client
         finally:
@@ -273,7 +275,7 @@ async def build_async_engine_client_from_engine_args(
             target=run_mp_engine,
             args=(vllm_config, UsageContext.OPENAI_API_SERVER, ipc_path,
                   engine_args.disable_log_stats,
-                  engine_args.disable_log_requests, engine_alive))
+                  engine_args.enable_log_requests, engine_alive))
         engine_process.start()
         engine_pid = engine_process.pid
         assert engine_pid is not None, "Engine process failed to start."
@@ -1571,10 +1573,10 @@ async def init_app_state(
     else:
         served_model_names = [args.model]
 
-    if args.disable_log_requests:
-        request_logger = None
-    else:
+    if args.enable_log_requests:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
+    else:
+        request_logger = None
 
     base_model_paths = [
         BaseModelPath(name=name, model_path=args.model)
@@ -1808,10 +1810,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
 
     # Add process-specific prefix to stdout and stderr.
-    process_name = "APIServer"
-    pid = os.getpid()
-    _add_prefix(sys.stdout, process_name, pid)
-    _add_prefix(sys.stderr, process_name, pid)
+    decorate_logs("APIServer")
 
     listen_address, sock = setup_server(args)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
@@ -1828,7 +1827,7 @@ async def run_server_worker(listen_address,
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
     server_index = client_config.get("client_index", 0) if client_config else 0
-    set_process_title("APIServer", str(server_index))
+
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
     if log_config is not None:

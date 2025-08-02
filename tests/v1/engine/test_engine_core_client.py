@@ -305,10 +305,10 @@ def echo_dc(
     return_list: bool = False,
 ) -> Union[MyDataclass, list[MyDataclass]]:
     print(f"echo dc util function called: {msg}")
+    val = None if msg is None else MyDataclass(msg)
     # Return dataclass to verify support for returning custom types
     # (for which there is special handling to make it work with msgspec).
-    return [MyDataclass(msg) for _ in range(3)] if return_list \
-        else MyDataclass(msg)
+    return [val for _ in range(3)] if return_list else val
 
 
 @pytest.mark.asyncio(loop_scope="function")
@@ -351,6 +351,15 @@ async def test_engine_core_client_util_method_custom_return(
             assert isinstance(result, list) and all(
                 isinstance(r, MyDataclass) and r.message == "testarg2"
                 for r in result)
+
+            # Test returning None and list of Nones
+            result = await core_client.call_utility_async(
+                "echo_dc", None, False)
+            assert result is None
+            result = await core_client.call_utility_async(
+                "echo_dc", None, True)
+            assert isinstance(result, list) and all(r is None for r in result)
+
         finally:
             client.shutdown()
 
