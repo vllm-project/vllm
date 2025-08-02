@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Optional, Union
+from typing import ClassVar, Optional, Union
 
 import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
@@ -21,16 +21,16 @@ from vllm.logger import init_logger
 from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.flashinfer import use_trtllm_decode_attention
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
-from vllm.v1.attention.backends.utils import (
-    AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
-    get_kv_cache_layout, get_per_layer_parameters,
-    infer_global_hyperparameters, reorder_batch_to_split_decodes_and_prefills,
-    split_decodes_and_prefills)
+# yapf conflicts with isort for this block
+# yapf: disable
+from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                              AttentionMetadataBuilder,
+                                              CommonAttentionMetadata,
+                                              get_kv_cache_layout,
+                                              get_per_layer_parameters,
+                                              infer_global_hyperparameters,
+                                              split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 
@@ -179,6 +179,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.PURE_DECODE_ONLY
 
+    reorder_batch_threshold: ClassVar[int] = 1
+
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         self.device = device
@@ -238,12 +240,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.block_table_arange = torch.arange(max_num_pages_per_req,
                                                dtype=torch.int32,
                                                device=self.device)
-
-    def reorder_batch(self, input_batch: InputBatch,
-                      scheduler_output: SchedulerOutput) -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(input_batch,
-                                                           scheduler_output,
-                                                           decode_threshold=1)
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
