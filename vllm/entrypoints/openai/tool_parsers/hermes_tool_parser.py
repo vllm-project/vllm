@@ -319,9 +319,9 @@ class Hermes2ProToolParser(ToolParser):
                              cur_arguments_json)
 
                 # get the location where previous args differ from current
-                if (delta_text not in cur_arguments_json[:-2]):
+                if (delta_text not in cur_arguments_json):
                     return None
-                args_delta_start_loc = cur_arguments_json[:-2]. \
+                args_delta_start_loc = cur_arguments_json. \
                                            rindex(delta_text) + \
                                            len(delta_text)
 
