@@ -5,7 +5,7 @@ import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 import torch.distributed
@@ -23,6 +23,8 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
+from vllm.separated_encoder.worker.encoder_gpu_model_runner import (
+    EncoderGPUModelRunner)
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
@@ -92,6 +94,12 @@ class Worker(WorkerBase):
                     torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
+        if self.vllm_config.epd_disagg_config.instance_type != "NoEPD":
+            self.separated_encode = True
+            self.instance_type = \
+                self.vllm_config.epd_disagg_config.instance_type
+        else:
+            self.separated_encode = False
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
@@ -197,8 +205,13 @@ class Worker(WorkerBase):
         set_random_seed(self.model_config.seed)
 
         # Construct the model runner
-        self.model_runner: GPUModelRunner = GPUModelRunner(
-            self.vllm_config, self.device)
+        self.model_runner: Union[EncoderGPUModelRunner, GPUModelRunner]
+
+        if self.separated_encode and self.instance_type == "encode":
+            self.model_runner = EncoderGPUModelRunner(self.vllm_config,
+                                                      self.device)
+        else:
+            self.model_runner = GPUModelRunner(self.vllm_config, self.device)
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.

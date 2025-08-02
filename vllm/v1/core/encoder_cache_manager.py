@@ -168,6 +168,52 @@ class EncoderCacheManager:
         self.freed = []
         return freed
 
+    ########################################################################
+    # Disaggregated Encoder Instance Related Methods
+    ########################################################################
+    def can_allocate_disag(self, encoder_cache_size: int) -> bool:
+        """Check if there's sufficient cache space for a multimodal input.
+
+        Args:
+            encoder_cache_size: Size of the multimodal input's encoder cache  
+
+        Returns:
+            True if there's enough free cache space to store the encoder output
+            for this multimodal input
+        """
+        return encoder_cache_size <= self.num_free_slots
+
+    def allocate_disag(self, request_id: str, input_id: int,
+                       encoder_cache_size: int) -> None:
+        """Allocate cache space for a multimodal input's encoder output.
+
+        This method reserves cache space for storing the encoder output of
+        the specified multimodal input. The actual encoder output storage
+        happens in the model runner, but this method ensures the cache
+        manager tracks the allocation.
+
+        Args:
+            request_id: Id of the request containing the multimodal input
+            input_id: Index of the multimodal input within the request
+            encoder_cache_size: Size of the multimodal input's encoder cache
+
+        Note:
+            This method assumes can_allocate_disag() returned True for the same
+            request and input_id. It will reduce available cache space.
+        """
+        if request_id not in self.cached:
+            self.cached[request_id] = set()
+        self.cached[request_id].add(input_id)
+        self.num_free_slots -= encoder_cache_size
+
+    def has_cached_inputs_disag(self, request_id) -> bool:
+        """Check whether request with request_id has cached inputs 
+        
+        Args:
+            request_id: Id of the request containing the multimodal input
+        """
+        return (request_id in self.cached)
+
 
 def compute_encoder_budget(
     model_config: "ModelConfig",
