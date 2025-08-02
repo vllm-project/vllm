@@ -519,3 +519,17 @@ class MistralTokenizer(TokenizerBase):
             tokens = [self.tokenizer.id_to_byte_piece(id) for id in ids]
 
         return tokens
+
+    def num_special_tokens_to_add(self, pair: bool = False) -> int:
+        # accomodates for [INST] and [/INST], which are always added
+        num_tokens = 2
+
+        # MistralTokenizer does not appear to add an eos token
+        if hasattr(self, "bos_token_id") and self.bos_token_id is not None:
+            num_tokens += 1
+
+        # SentencePiece adds <0x0A><0x0A> in this case, tekken does not
+        if pair and self.is_spm:
+            num_tokens += 2
+
+        return num_tokens
