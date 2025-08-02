@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
 
@@ -33,12 +33,16 @@ class PoolingParams(
     requires_token_ids: bool = False
     """Internal use only."""
 
+    extra_kwargs: Optional[dict[str, Any]] = None
+    """Internal use only."""
+
     def clone(self) -> "PoolingParams":
         """Returns a deep copy of the PoolingParams instance."""
         return PoolingParams(
             dimensions=self.dimensions,
             task=self.task,
             requires_token_ids=self.requires_token_ids,
+            extra_kwargs=self.extra_kwargs,
         )
 
     def verify(self, task: PoolingTask, model_config: "ModelConfig") -> None:
@@ -74,7 +78,8 @@ class PoolingParams(
         return (f"PoolingParams("
                 f"dimensions={self.dimensions}, "
                 f"task={self.task}, "
-                f"requires_token_ids={self.requires_token_ids})")
+                f"requires_token_ids={self.requires_token_ids}, "
+                f"extra_kwargs={self.extra_kwargs})")
 
     def __post_init__(self) -> None:
         assert self.output_kind == RequestOutputKind.FINAL_ONLY,\
