@@ -497,14 +497,20 @@ class DeepseekForCausalLMWithAdditionalHeads(DeepseekForCausalLM):
             {
                 "name": "self_harm",
                 "location": "/path/to/self_harm_head.safetensors",
-                "num_layers": 2,
-                "head_hidden_size": 4096
+                "num_hidden_layers": 2,
+                "hidden_dim": 4096
             },
             {
                 "name": "scim",
                 "location": "/path/to/scim_head.safetensors",
-                "num_layers": 1,
-                "head_hidden_size": 4096
+                "num_hidden_layers": 1,
+                "hidden_dim": 4096
+            },
+            {
+                "name": "simple_classifier",
+                "location": "/path/to/simple_head.safetensors",
+                "num_hidden_layers": 0,
+                "hidden_dim": 4096  # Not used when num_hidden_layers == 0
             }
         ]
     """
@@ -520,37 +526,36 @@ class DeepseekForCausalLMWithAdditionalHeads(DeepseekForCausalLM):
 
         for head_config in score_heads_config:
             head_name = head_config["name"]
-            num_layers = head_config["num_layers"]
-            head_hidden_size = head_config["head_hidden_size"]
-
-            head = self._build_classification_head(head_hidden_size, num_layers)
-            self.classifier_heads[head_name] = head
+            num_hidden_layers = head_config["num_hidden_layers"]
+            hidden_dim = head_config.get("hidden_dim")
+            self.classifier_heads[head_name] = self._build_classification_head(num_hidden_layers, hidden_dim)
             self.head_names.append(head_name)
 
         # Flag to avoid re-loading head weights multiple times
         self._heads_loaded = False
 
-    def _build_classification_head(self, head_hidden_size: int, num_layers: int) -> nn.Sequential:
-        """Build a binary classification head with the specified number of layers."""
-        layers = []
+    def _build_classification_head(self, num_hidden_layers: int, hidden_dim: Optional[int]) -> nn.Sequential:
+        """Build a binary classification head with the specified number of hidden layers."""
         token_hidden_size = self.config.hidden_size
 
-        if num_layers == 1:
-            layers = [nn.Linear(token_hidden_size, 1), nn.Sigmoid()]
-        else:
-            # First layer: token_hidden_size -> head_hidden_size
-            layers.append(nn.Linear(token_hidden_size, head_hidden_size))
+        if num_hidden_layers == 0:
+            return nn.Sequential(nn.Linear(token_hidden_size, 1), nn.Sigmoid())
+        if num_hidden_layers == 1:
+            return nn.Sequential(
+                nn.Linear(token_hidden_size, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1),
+                nn.Sigmoid()
+            )
+        # Multiple hidden layers
+        layers = []
+        layers.append(nn.Linear(token_hidden_size, hidden_dim))
+        layers.append(nn.ReLU())
+        for _ in range(num_hidden_layers - 2):
+            layers.append(nn.Linear(hidden_dim, hidden_dim))
             layers.append(nn.ReLU())
-
-            # Middle layers: head_hidden_size -> head_hidden_size
-            for _ in range(num_layers - 2):
-                layers.append(nn.Linear(head_hidden_size, head_hidden_size))
-                layers.append(nn.ReLU())
-
-            # Final layer: head_hidden_size -> 1
-            layers.append(nn.Linear(head_hidden_size, 1))
-            layers.append(nn.Sigmoid())
-
+        layers.append(nn.Linear(hidden_dim, 1))
+        layers.append(nn.Sigmoid())
         return nn.Sequential(*layers)
 
     def _load_classification_heads_from_files(self) -> set[str]:
