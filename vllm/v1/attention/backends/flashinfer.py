@@ -21,6 +21,8 @@ from vllm.logger import init_logger
 from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.flashinfer import use_trtllm_decode_attention
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
