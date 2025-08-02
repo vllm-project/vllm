@@ -41,6 +41,20 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
+  - block: "Build FlashInfer wheel"
+    key: block-build-flashinfer-wheel
+    depends_on: ~
+
+  - label: "Build and upload FlashInfer wheel - CUDA 12.8"
+    depends_on: block-build-flashinfer-wheel
+    id: build-upload-flashinfer-wheel
+    agents:
+      queue: gpu_1_queue
+    commands:
+      - "bash .buildkite/scripts/build-upload-flashinfer-wheel.sh 12.8.1"
+    env:
+      DOCKER_BUILDKIT: "1"
+
   - block: "Build release image"
     depends_on: ~
     key: block-release-image-build
