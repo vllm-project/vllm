@@ -3,8 +3,9 @@
 """Inference-only Kimi-Audio model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from subprocess import CalledProcessError, run, Popen, PIPE
-from typing import Any, Optional, TypedDict, Union, Tuple, List
+from typing import Any, Optional, TypedDict, Union, Tuple, List, Dict
 from functools import lru_cache
 
 import os
@@ -13,10 +14,14 @@ import torch
 import torch.nn as nn
 import transformers
 
-from transformers import BatchFeature
+from transformers import AutoTokenizer, BatchFeature
+from transformers.activations import ACT2FN
 
 from vllm.config import VllmConfig
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.layers.linear import (
+    ReplicatedLinear, RowParallelLinear, ColumnParallelLinear)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs)
@@ -32,7 +37,6 @@ from vllm.transformers_utils.processors import KimiAudioProcessor
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
-from .whisper import WhisperModel
 
 from packaging import version
 
@@ -46,9 +50,9 @@ from vllm.transformers_utils.configs import KimiAudioConfig
 import torch.nn.functional as F
 from transformers.models.qwen2.modeling_qwen2 import (
     Qwen2RMSNorm,
-    Qwen2MLP,
     Qwen2PreTrainedModel,
 )
+from transformers.models.whisper.modeling_whisper import WhisperModel
 from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb
 from transformers.models.whisper import WhisperFeatureExtractor
 if version.parse(transformers.__version__) >= version.parse("4.35.0"):
@@ -124,54 +128,6 @@ def _upad_input(query_layer, key_layer, value_layer, padding_mask, query_length)
     )
 
 
-# Copied from transformers.models.bart.modeling_bart._make_causal_mask
-def _make_causal_mask(
-    input_ids_shape: torch.Size,
-    dtype: torch.dtype,
-    device: torch.device,
-    past_key_values_length: int = 0,
-):
-    """
-    Make causal mask used for bi-directional self-attention.
-    """
-    bsz, tgt_len = input_ids_shape
-    mask = torch.full((tgt_len, tgt_len), torch.finfo(dtype).min, device=device)
-    mask_cond = torch.arange(mask.size(-1), device=device)
-    mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
-    mask = mask.to(dtype)
-
-    if past_key_values_length > 0:
-        mask = torch.cat(
-            [
-                torch.zeros(
-                    tgt_len, past_key_values_length, dtype=dtype, device=device
-                ),
-                mask,
-            ],
-            dim=-1,
-        )
-    return mask[None, None, :, :].expand(
-        bsz, 1, tgt_len, tgt_len + past_key_values_length
-    )
-
-
-# Copied from transformers.models.bart.modeling_bart._expand_mask
-def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None):
-    """
-    Expands attention_mask from `[bsz, seq_len]` to `[bsz, 1, tgt_seq_len, src_seq_len]`.
-    """
-    bsz, src_len = mask.size()
-    tgt_len = tgt_len if tgt_len is not None else src_len
-
-    expanded_mask = mask[:, None, None, :].expand(bsz, 1, tgt_len, src_len).to(dtype)
-
-    inverted_mask = 1.0 - expanded_mask
-
-    return inverted_mask.masked_fill(
-        inverted_mask.to(torch.bool), torch.finfo(dtype).min
-    )
-
-
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
         super().__init__()
@@ -214,10 +170,41 @@ class RotaryEmbedding(nn.Module):
         )
 
 
+class MoonshotMLP(nn.Module):
+    def __init__(self, config, prefix: str = ""):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.gate_proj = ReplicatedLinear(
+            self.hidden_size, 
+            self.intermediate_size, 
+            bias=False,
+            prefix=f"{prefix}.gate_proj"
+        )
+        self.up_proj = ReplicatedLinear(
+            self.hidden_size, 
+            self.intermediate_size, 
+            bias=False,
+            prefix=f"{prefix}.up_proj"
+        )
+        self.down_proj = ReplicatedLinear(
+            self.intermediate_size, 
+            self.hidden_size, 
+            bias=False,
+            prefix=f"{prefix}.down_proj"
+        )
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, x):
+        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return down_proj
+
+
 class MoonshotAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: KimiAudioConfig):
+    def __init__(self, config: KimiAudioConfig, prefix: str = ""):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -232,23 +219,34 @@ class MoonshotAttention(nn.Module):
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
                 f" and `num_heads`: {self.num_heads})."
             )
-        self.q_proj = nn.Linear(
-            self.hidden_size, self.num_heads * self.head_dim, bias=True
+        self.q_proj = ColumnParallelLinear(
+            self.hidden_size, 
+            self.num_heads * self.head_dim,
+            bias=True,
+            prefix=f"{prefix}.q_proj"
         )
-        self.k_proj = nn.Linear(
-            self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True
+        self.k_proj = ColumnParallelLinear(
+            self.hidden_size, 
+            self.num_key_value_heads * self.head_dim, 
+            bias=True,
+            prefix=f"{prefix}.k_proj"
         )
-        self.v_proj = nn.Linear(
-            self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True
+        self.v_proj = ColumnParallelLinear(
+            self.hidden_size, 
+            self.num_key_value_heads * self.head_dim, 
+            bias=True,
+            prefix=f"{prefix}.v_proj"
         )
-        self.o_proj = nn.Linear(
-            self.num_heads * self.head_dim, self.hidden_size, bias=False
+        self.o_proj = RowParallelLinear(
+            self.num_heads * self.head_dim, 
+            self.hidden_size, 
+            bias=False,
+            prefix=f"{prefix}.o_proj"
         )
 
         self._init_rope()
 
     def _init_rope(self):
-
         self.rotary_emb = RotaryEmbedding(
             self.head_dim,
             max_position_embeddings=self.max_position_embeddings,
@@ -428,15 +426,15 @@ class MoonshotAttention(nn.Module):
 
 
 class MoonshotDecoderLayer(nn.Module):
-    def __init__(self, config: KimiAudioConfig):
+    def __init__(self, config: KimiAudioConfig, prefix: str = ""):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.config = config
 
         logger.warning_once("using normal flash attention")
-        self.self_attn = MoonshotAttention(config=config)
+        self.self_attn = MoonshotAttention(config=config, prefix=f"{prefix}.self_attn")
 
-        self.mlp = Qwen2MLP(config)
+        self.mlp = MoonshotMLP(config, prefix=f"{prefix}.mlp")
         self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Qwen2RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
@@ -502,18 +500,35 @@ class MoonshotDecoderLayer(nn.Module):
 
 
 class VQAdaptor(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, prefix: str = ""):
         super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(config.kimia_adaptor_input_dim, config.hidden_size, bias=True),
-            nn.SiLU(),
-            nn.Dropout(0.0),
-            nn.Linear(config.hidden_size, config.hidden_size, bias=True),
-            nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps, bias=True),
+        self.lin1 = ReplicatedLinear(
+            config.kimia_adaptor_input_dim, 
+            config.hidden_size,
+            bias=True, 
+            prefix=f"{prefix}.layers.0"
+        )
+        self.act = nn.SiLU()
+        self.dropout = nn.Dropout(0.0)
+        self.lin2 = ReplicatedLinear(
+            config.hidden_size, 
+            config.hidden_size,
+            bias=True, 
+            prefix=f"{prefix}.layers.3"
+        )
+        self.norm = nn.LayerNorm(
+            config.hidden_size, 
+            eps=config.rms_norm_eps,
+            bias=True
         )
 
     def forward(self, x):
-        return self.layers(x)
+        x = self.lin1(x)
+        x = self.act(x)
+        x = self.dropout(x)
+        x = self.lin2(x)
+        return self.norm(x)
+
 
 # hard-coded audio hyperparameters
 SAMPLE_RATE = 16000
@@ -522,30 +537,6 @@ N_MELS = 120
 HOP_LENGTH = 160
 CHUNK_LENGTH = 30
 N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE  # 480000 samples in a 30-second chunk
-
-
-def load_bytesio_audio(content, sr: int = SAMPLE_RATE):
-    cmd = [
-        "ffmpeg",
-        "-nostdin",
-        "-threads",
-        "0",
-        "-i",
-        "pipe:",
-        "-f",
-        "s16le",
-        "-ac",
-        "1",
-        "-acodec",
-        "pcm_s16le",
-        "-ar",
-        str(sr),
-        "pipe:",
-    ]
-    p = Popen(cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE, bufsize=-1)
-    out, _ = p.communicate(input=content)
-    return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
-
 
 def load_audio(file: str, sr: int = SAMPLE_RATE):
     """
@@ -673,7 +664,10 @@ def log_mel_spectrogram(
 
 class WhisperEncoder(nn.Module):
     def __init__(
-        self, model_path, mel_batch_size=40, unfreeze_online_whisper_model=False
+        self, 
+        model_path: str, 
+        mel_batch_size=40, 
+        unfreeze_online_whisper_model=False,
     ):
         super().__init__()
         self.speech_encoder = WhisperModel.from_pretrained(model_path).encoder
@@ -709,10 +703,10 @@ class WhisperEncoder(nn.Module):
             if kimia_whisper_clip_silence:
                 input_seq_lens_list = [token_len * 4]
                 input_seq_lens = torch.LongTensor(input_seq_lens_list).to(
-                    torch.cuda.current_device()
+                    self.embed_tokens.weight.device
                 )
                 audio_embedding = self.speech_encoder(
-                    mel.unsqueeze(0).to(torch.cuda.current_device()).to(torch.bfloat16),
+                    mel.unsqueeze(0).to(self.embed_tokens.weight.device).to(torch.bfloat16),
                     return_dict=True,
                     input_seq_lens=input_seq_lens,
                 ).last_hidden_state
@@ -735,17 +729,10 @@ class WhisperEncoder(nn.Module):
     
 
 class MoonshotKimiaModel(Qwen2PreTrainedModel):
-    """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`QwenDecoderLayer`]
-
-    Args:
-        config: KimiAudioConfig
-    """
-
     config_class = KimiAudioConfig
 
-    def __init__(self, config: KimiAudioConfig):
-        super().__init__(config)
+    def __init__(self, config: KimiAudioConfig, prefix: str = ""):
+        super().__init__()
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.kimia_mimo_transformer_from_layer_index = (
@@ -756,18 +743,20 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
             config.vocab_size, config.hidden_size, self.padding_idx
         )
         self.layers = nn.ModuleList(
-            [MoonshotDecoderLayer(config) for _ in range(config.num_hidden_layers)]
+            [MoonshotDecoderLayer(config, prefix=f"{prefix}.layers.{layer_idx}") 
+             for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         # extra 1B audio transformers
         self.mimo_layers = nn.ModuleList(
-            [MoonshotDecoderLayer(config) for _ in range(config.kimia_mimo_layers)]
+            [MoonshotDecoderLayer(config, prefix=f"{prefix}.mimo_layers.{idx}") 
+             for idx in range(config.kimia_mimo_layers)]
         )
         self.mimo_norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.use_whisper_feature = config.use_whisper_feature
         if self.use_whisper_feature:
-            self.vq_adaptor = VQAdaptor(config)
+            self.vq_adaptor = VQAdaptor(config, prefix=f"{prefix}.vq_adaptor")
         self.kimia_media_begin = config.kimia_media_begin
         self.kimia_media_end = config.kimia_media_end
 
@@ -775,39 +764,8 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.embed_tokens = value
-
-    # Copied from transformers.models.bart.modeling_bart.BartDecoder._prepare_decoder_attention_mask
-    def _prepare_decoder_attention_mask(
-        self, attention_mask, input_shape, inputs_embeds, past_key_values_length
-    ):
-        # create causal mask
-        # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-        combined_attention_mask = None
-        if input_shape[-1] > 1:
-            combined_attention_mask = _make_causal_mask(
-                input_shape,
-                inputs_embeds.dtype,
-                device=inputs_embeds.device,
-                past_key_values_length=past_key_values_length,
-            )
-
-        if attention_mask is not None:
-            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            expanded_attn_mask = _expand_mask(
-                attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]
-            ).to(inputs_embeds.device)
-            combined_attention_mask = (
-                expanded_attn_mask
-                if combined_attention_mask is None
-                else expanded_attn_mask + combined_attention_mask
-            )
-
-        return combined_attention_mask
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
 
     def forward(
         self,
@@ -870,8 +828,8 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
 
         if inputs_embeds is None:
             # shape: batch, seq_len, hidden_size
-            input_ids = input_ids.to(torch.cuda.current_device())
-            text_input_ids = text_input_ids.to(torch.cuda.current_device())
+            input_ids = input_ids.to(self.embed_tokens.weight.device)
+            text_input_ids = text_input_ids.to(self.embed_tokens.weight.device)
             audio_emb = self.embed_tokens(input_ids)
             if self.use_whisper_feature and whisper_input_feature is not None:
                 if not isinstance(whisper_input_feature, list):
@@ -885,7 +843,7 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
                 whisper_dtype = whisper_input_feature[0].dtype
                 expanded_whisper = (
                     torch.zeros(audio_emb.shape[1], whisper_input_dim)
-                    .to(torch.cuda.current_device())
+                    .to(self.embed_tokens.weight.device)
                     .to(whisper_dtype)
                 )
                 for (seg_idx, start_idx), (_, end_idx) in zip(
@@ -904,15 +862,15 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
                 whisper_emb = self.vq_adaptor(
                     expanded_whisper.transpose(0, 1)
                 ).transpose(0, 1)
-                is_continuous_mask = is_continuous_mask.to(torch.cuda.current_device())
-                whisper_emb = whisper_emb.to(torch.cuda.current_device())
+                is_continuous_mask = is_continuous_mask.to(self.embed_tokens.weight.device)
+                whisper_emb = whisper_emb.to(self.embed_tokens.weight.device)
                 whisper_emb = whisper_emb * is_continuous_mask[:, :, None]
 
                 encoder_input_addwith_discrete_token = (
                     audio_emb + whisper_emb
                 ) * torch.sqrt(
                     torch.tensor(
-                        2.0, dtype=whisper_emb.dtype, device=torch.cuda.current_device()
+                        2.0, dtype=whisper_emb.dtype, device=self.embed_tokens.weight.device
                     )
                 )
                 audio_emb = (
@@ -1022,33 +980,20 @@ class KimiAudioModel(Qwen2PreTrainedModel):
     _tied_weights_keys = ["lm_head.weight", "mimo_output.weight"]
     config_class = KimiAudioConfig
 
-    def __init__(self, config):
-        super().__init__(config)
-        self.model = MoonshotKimiaModel(config)
+    def __init__(self, config, prefix: str = ""):
+        super().__init__()
+        self.model = MoonshotKimiaModel(config, prefix=f"{prefix}.model")
         self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.mimo_output = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = ReplicatedLinear(config.hidden_size, config.vocab_size, 
+                                        bias=False, prefix=f"{prefix}.lm_head")
+        self.mimo_output = ReplicatedLinear(config.hidden_size, config.vocab_size, 
+                                            bias=False, prefix=f"{prefix}.mimo_output")
 
         # Initialize weights and apply final processing
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.model.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.model.embed_tokens = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,
@@ -1118,45 +1063,125 @@ class KimiAudioModel(Qwen2PreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+    
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(
+            self.maybe_remap_mistral(name, loaded_weight)
+            for name, loaded_weight in weights)
+
+
+@dataclass
+class ExtraTokens:
+    msg_end: int
+    user_msg_start: int
+    assistant_msg_start: int
+
+    media_begin: int
+    media_end: int
+
+    kimia_text_blank: int
+    kimia_text_eos: int
+
+    kimia_user_msg_start: int
+    kimia_assistant_msg_start: int
+
+    kimia_speech_ct_id: int
+    kimia_speech_ctd_id: int
+
+    pad: int
+
+
+def instantiate_extra_tokens(tokenizer):
+    if hasattr(tokenizer, "special_tokens"):
+        map_fn = lambda x: tokenizer.special_tokens[x]
+    elif hasattr(tokenizer, "convert_tokens_to_ids"):
+        map_fn = lambda x: tokenizer.convert_tokens_to_ids(x)
+    else:
+        raise ValueError(f"Invalid tokenizer type: {type(tokenizer)}")
+    return ExtraTokens(
+        msg_end=map_fn("<|im_msg_end|>"),  # 0
+        user_msg_start=map_fn("<|im_user_msg_start|>"),  # 1
+        assistant_msg_start=map_fn("<|im_assistant_msg_start|>"),  # 2
+        media_begin=map_fn("<|im_media_begin|>"),  # 13
+        media_end=map_fn("<|im_media_end|>"),  # 15
+        kimia_text_blank=map_fn("<|im_kimia_text_blank|>"),  # 18
+        kimia_text_eos=map_fn("<|im_kimia_text_eos|>"),  # 19
+        kimia_user_msg_start=map_fn("<|im_kimia_user_msg_start|>"),  # 22
+        kimia_assistant_msg_start=map_fn("<|im_kimia_assistant_msg_start|>"),  # 23
+        kimia_speech_ct_id=map_fn("<|im_kimia_speech_ct_id|>"),  # 27
+        kimia_speech_ctd_id=map_fn("<|im_kimia_speech_ctd_id|>"),  # 28
+        pad=tokenizer.pad_id,
+    )
 
 
 # === Audio Inputs === #
 class KimiAudioInputs(TypedDict):
-    whisper_input_feature: torch.Tensor
+    whisper_input_feature: List[torch.Tensor]
     """Shape: `(num_audios, seq_len, feature_dim)`"""
     
     is_continuous_mask: torch.Tensor
     """Shape: `(num_audios, seq_len)`"""
 
+    text_input_ids: Optional[torch.Tensor]
+
 
 # === Processing Info === #
 class KimiAudioProcessingInfo(BaseProcessingInfo):
     
-    def get_hf_config(self):
+    def get_hf_config(self) -> KimiAudioConfig:
         return self.ctx.get_hf_config(KimiAudioConfig)
     
-    def get_hf_processor(
-        self,
-        *,
-        # Ignored in initialization
-        sampling_rate: Optional[int] = None,
-        **kwargs: object,
-    ) -> KimiAudioProcessor:
-        return self.ctx.get_hf_processor(KimiAudioProcessor, **kwargs)
-
-    def get_feature_extractor(
-        self,
-        *,
-        # Ignored in initialization
-        sampling_rate: Optional[int] = None,
-    ) -> WhisperFeatureExtractor:
-        hf_processor = self.get_hf_processor(sampling_rate=sampling_rate)
-        feature_extractor = hf_processor.feature_extractor  # type: ignore
-        assert isinstance(feature_extractor, WhisperFeatureExtractor)
-        return feature_extractor
+    def get_tokenizer(self) -> AutoTokenizer:
+        return super().get_tokenizer()
     
+    def get_hf_processor(self, **kwargs: object) -> WhisperEncoder:
+        hf_config = self.get_hf_config()
+        mel_batch_size = hf_config.get("mel_batch_size", 20)
+        return self.ctx.get_hf_processor(**kwargs, mel_batch_size=mel_batch_size)
+    
+    def get_eod_ids(self) -> List[int]:
+        extra_tokens = instantiate_extra_tokens(self.get_audio_tokenizer())
+        return [extra_tokens.msg_end, extra_tokens.media_end]
+    
+    def get_special_tokens(self) -> Tuple[int]:
+        hf_config = self.get_hf_config()
+        model_config = hf_config.model_config
+        kimia_text_audiodelaytokens = model_config.kimia_mimo_audiodelaytokens
+        kimia_token_offset = model_config.kimia_token_offset
+        return kimia_text_audiodelaytokens, kimia_token_offset
+
+    def get_audio_tokenizer(self) -> Any:
+        from kimia_infer.audio.tokenizer import Glm4Tokenizer
+        audio_tokenizer = Glm4Tokenizer("THUDM/glm-4-voice-tokenizer")
+        return audio_tokenizer.to(torch.cuda.current_device())
+    
+    def get_feature_extractor(self) -> WhisperEncoder:
+        from transformers import WhisperModel
+        whisper_model_path = os.path.join(
+            self.ctx.model_config.model_path, 
+            "whisper-large-v3"
+        )
+        
+        if os.path.exists(whisper_model_path):
+            return WhisperEncoder(whisper_model_path)
+        else:
+            return WhisperEncoder("openai/whisper-large-v3")
+
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        # no limits on count of audio
         return {"audio": None}
+    
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        """每个音频项最多产生多少tokens"""
+        # 基于whisper特征长度估算
+        # 通常30秒音频 -> ~750 tokens
+        return {"audio": 750}
 
 
 # === Dummy Inputs Builder === #
@@ -1165,16 +1190,27 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_audios = mm_counts.get("audio", 0)
         
-        # Use Kimi-Audio's media tokens
-        media_begin_token = "<|im_media_begin|>"
-        media_end_token = "<|im_media_end|>"
+        tokenizer = self.info.get_tokenizer()
+        config = self.info.get_hf_config()
         
-        # Create dummy text with media markers
+        # 使用Kimi-Audio的特殊tokens
+        # 从config中获取特殊token ids
+        media_begin = tokenizer.decode([config.kimia_media_begin])
+        media_end = tokenizer.decode([config.kimia_media_end])
+        media_pad = tokenizer.decode([config.kimia_media_pad])
+        
+        # 构建dummy文本
         dummy_segments = []
         for i in range(num_audios):
-            dummy_segments.append(f"{media_begin_token}audio_{i}{media_end_token}")
+            # 模拟音频占位符
+            # media_begin + 一些padding + media_end
+            audio_placeholder = f"{media_begin}{media_pad * 100}{media_end}"
+            dummy_segments.append(audio_placeholder)
         
-        return " ".join(dummy_segments)
+        # 添加一些文本提示
+        if num_audios > 0:
+            return "Please transcribe the following audio: " + " ".join(dummy_segments)
+        return "Hello, how can I help you?"
     
     def get_dummy_mm_data(
         self,
@@ -1183,21 +1219,60 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         
-        # Create dummy audio data
-        # Kimi-Audio uses different audio dimensions than Qwen2-Audio
-        audio_len = 3000  # Dummy length
+        # 创建dummy音频数据
+        # Whisper需要16kHz采样率的音频
+        audio_duration = 3.0  # 3秒dummy音频
+        sample_rate = 16000
+        audio_len = int(audio_duration * sample_rate)
         
         return {
-            "audio": self._get_dummy_audios(length=audio_len, num_audios=num_audios)
+            "audio": self._get_dummy_audios(
+                length=audio_len, 
+                num_audios=num_audios
+            )
         }
 
 
 # === Multi-Modal Processor === #
 class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingInfo]):
+
+    @property
+    def whisper_processor(self):
+        """延迟加载Whisper处理器"""
+        if self._whisper_processor is None:
+            self._whisper_processor = self.info.get_whisper_processor()
+        return self._whisper_processor
+    
+    @property
+    def audio_tokenizer(self):
+        """延迟加载音频分词器"""
+        if self._audio_tokenizer is None:
+            self._audio_tokenizer = self.info.get_audio_tokenizer()
+        return self._audio_tokenizer
     
     def _get_data_parser(self) -> MultiModalDataParser:
-        # Use standard audio sampling rate
         return MultiModalDataParser(target_sr=16000)
+    
+    def _process_audio_to_features(
+        self,
+        audio_data: np.ndarray,
+        sampling_rate: int = 16000
+    ) -> torch.Tensor:
+        """将音频转换为Whisper特征"""
+        # 使用Whisper处理器提取特征
+        inputs = self.whisper_processor(
+            audio_data,
+            sampling_rate=sampling_rate,
+            return_tensors="pt"
+        )
+        
+        # 获取mel特征
+        mel_features = inputs.input_features
+        
+        # 这里需要通过Whisper编码器获取特征
+        # 在实际实现中，这会调用WhisperEncoder
+        # 返回shape: (1, seq_len, feature_dim)
+        return mel_features
     
     def _call_hf_processor(
         self,
@@ -1206,21 +1281,55 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
         mm_kwargs: Mapping[str, Any],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # For now, create a simple BatchFeature
-        # In a real implementation, you'd process the audio here
-        tokenizer = self.info.get_tokenizer()
-        prompt_ids = tokenizer.encode(prompt)
+        if not mm_data.get("audios", []):
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), return_tensors="pt")
         
-        return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+        feature_extractor = self.info.get_feature_extractor()
+        mm_kwargs = dict(
+            **mm_kwargs,
+            Sampling_rate=feature_extractor.sampling_rate,
+        )
+        return super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
+    
+    def _create_continuous_mask(
+        self, 
+        input_ids: torch.Tensor,
+        config: KimiAudioConfig
+    ) -> torch.Tensor:
+        """创建标记音频位置的mask"""
+        # 找到media_begin和media_end之间的位置
+        mask = torch.zeros_like(input_ids, dtype=torch.bool)
+        
+        media_begin_indices = (input_ids == config.kimia_media_begin).nonzero(as_tuple=True)[0]
+        media_end_indices = (input_ids == config.kimia_media_end).nonzero(as_tuple=True)[0]
+        
+        for begin, end in zip(media_begin_indices, media_end_indices):
+            mask[begin+1:end] = True
+        
+        return mask.unsqueeze(0)  # Add batch dimension
     
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        audio_nums = hf_inputs.get("audio", {}).get("nums", [])
+        if audio_nums > self.info.get_supported_mm_limits():
+            raise ValueError(
+                f"Audio count {audio_nums} exceeds the supported limit "
+                f"{self.info.get_supported_mm_limits()}"
+            )
         return dict(
             whisper_input_feature=MultiModalFieldConfig.batched("audio"),
             is_continuous_mask=MultiModalFieldConfig.batched("audio"),
+            text_input_ids=MultiModalFieldConfig.batched("audio"),
         )
     
     def _get_prompt_updates(
@@ -1229,38 +1338,42 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
-        
-        # Kimi-Audio specific tokens
-        media_begin_token = "<|kimia_media_begin|>"
-        media_end_token = "<|kimia_media_end|>"
-        
-        # Get token IDs (these would need to be in the tokenizer vocab)
-        try:
-            media_begin_id = vocab[media_begin_token]
-            media_end_id = vocab[media_end_token]
-        except KeyError:
-            # Fallback to dummy IDs if tokens don't exist
-            media_begin_id = vocab.get("<|audio_bos|>", 151661)
-            media_end_id = vocab.get("<|audio_eos|>", 151663)
+
+        # 获取特殊token
+        media_begin_token = tokenizer.decode([vocab.kimia_media_begin])
+        media_pad_token = tokenizer.decode([vocab.kimia_media_pad])
+        media_end_token = tokenizer.decode([vocab.kimia_media_end])
         
         def get_replacement_kimi_audio(item_idx: int):
-            # This would calculate the actual number of audio tokens needed
-            num_features = 100  # Placeholder - calculate from audio length
+            # 获取这个音频的特征长度
+            whisper_features = out_mm_kwargs.get("whisper_input_feature", [])
+            if item_idx < len(whisper_features):
+                feature_len = whisper_features[item_idx].shape[1]
+            else:
+                feature_len = 100  # 默认长度
             
-            # Create token sequence for this audio segment
-            audio_tokens = [media_begin_id] * num_features + [media_end_id]
+            # 创建替换序列
+            # media_begin + feature_len个media_pad + media_end
+            replacement_ids = (
+                [vocab.kimia_media_begin] + 
+                [vocab.kimia_media_pad] * feature_len + 
+                [vocab.kimia_media_end]
+            )
             
             return PromptUpdateDetails.select_token_id(
-                audio_tokens,
-                embed_token_id=media_begin_id,  # Use media_begin as embed token
+                replacement_ids,
+                # 使用media_pad作为embedding token
+                embed_token_id=vocab.kimia_media_pad,
             )
         
+        # 查找prompt中的音频占位符并替换
         return [
             PromptReplacement(
                 modality="audio",
-                target=media_begin_token,
+                target=f"{media_begin_token}.*?{media_end_token}",  # 正则匹配
                 replacement=get_replacement_kimi_audio,
             )
         ]
@@ -1272,18 +1385,19 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
     info=KimiAudioProcessingInfo,
     dummy_inputs=KimiAudioDummyInputsBuilder
 )
-class MoonshotKimiaForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+class MoonshotKimiaForCausalLM(nn.Module, SupportsMultiModal):
     
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("audio"):
-            return f"Audio {i}: <|kimia_media_begin|><|kimia_media_end|>"
+            return "<|im_media_begin|><|im_media_end|>"
         
         raise ValueError("Only audio modality is supported")
     
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        config: KimiAudioConfig = model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         
@@ -1291,23 +1405,29 @@ class MoonshotKimiaForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
         
-        # Initialize Kimi-Audio's custom Whisper adapter
-        self.whisper_adapter = WhisperEncoder()
+        self.audio_encoder = WhisperEncoder(
+            config.audio_config,
+            prefix=maybe_prefix(prefix, "audio_encoder")
+        )
+    
+        self.model = KimiAudioModel(config, prefix=maybe_prefix(prefix, "model"))
         
-        # Initialize VQ Adaptor for feature projection
-        self.vq_adaptor = VQAdaptor(config)
+        self.language_model = self.model.model
+        self.lm_head = self.model.lm_head
+        self.mimo_output = self.model.mimo_output
         
-        # Initialize the base language model (Qwen2.5-7B)
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config,  # This should be the text config part
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["KimiAudioModel"],
+        self.unpadded_vocab_size = config.vocab_size
+        self.vocab_size = config.vocab_size
+        
+        logit_scale = getattr(config, "logit_scale", 1.0)
+        self.logits_processor = LogitsProcessor(
+            self.unpadded_vocab_size,
+            self.vocab_size,
+            logit_scale
         )
         
-        self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors
-        )
+        self.kimia_media_begin = config.kimia_media_begin
+        self.kimia_media_end = config.kimia_media_end
     
     def _validate_and_reshape_mm_tensor(self, mm_input: object, name: str) -> torch.Tensor:
         if not isinstance(mm_input, (torch.Tensor, list)):
@@ -1442,8 +1562,11 @@ class MoonshotKimiaForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        **kwargs: object,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states, sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata, **kwargs)
+        return logits
     
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
