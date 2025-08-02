@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
+    VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
@@ -125,6 +126,7 @@ if TYPE_CHECKING:
     VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = False
+    VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
@@ -212,7 +214,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Target device of vLLM, supporting [cuda (by default),
     # rocm, neuron, cpu]
     "VLLM_TARGET_DEVICE":
-    lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
+    lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda").lower(),
 
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
@@ -497,6 +499,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
                  ),
+
+    # If the env var is set, it uses a Ray Communicator wrapping
+    # vLLM's pipeline parallelism communicator to interact with Ray's
+    # Compiled Graph. Otherwise, it uses Ray's NCCL communicator.
+    # This flag is ignored if VLLM_USE_RAY_COMPILED_DAG is not set.
+    "VLLM_USE_RAY_WRAPPED_PP_COMM":
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_WRAPPED_PP_COMM", "1"))),
 
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
@@ -901,6 +910,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
+
+    # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
+    # JIT all the required kernels before model execution so there is no
+    # JIT'ing in the hot-path. However, this warmup increases the engine
+    # startup time by a couple of minutes.
+    # Set `VLLM_SKIP_DEEP_GEMM_WARMUP` to disable the warmup.
+    "VLLM_SKIP_DEEP_GEMM_WARMUP":
+    lambda: bool(int(os.getenv("VLLM_SKIP_DEEP_GEMM_WARMUP", "0"))),
 
     # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP8":
