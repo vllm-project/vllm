@@ -44,6 +44,8 @@ class MultiModalBudget:
         self.max_model_len = max_model_len
         self.max_num_reqs = max_num_reqs
 
+        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config)
+
         max_items_per_prompt_by_modality = dict[str, int]()
         max_items_per_seq_by_modality = dict[str, int]()
 
@@ -61,8 +63,6 @@ class MultiModalBudget:
 
         self.max_items_per_prompt_by_modality = max_items_per_prompt_by_modality
         self.max_items_per_seq_by_modality = max_items_per_seq_by_modality
-
-        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config)
 
     def get_modality_with_max_tokens_per_seq(self) -> tuple[str, int]:
         max_tokens_per_seq_by_modality = self.max_items_per_seq_by_modality
