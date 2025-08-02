@@ -69,32 +69,42 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
 
 namespace vllm {
 
-// Grid: (num_layers, num_pairs)
+// Grid: (layer_or_pair_idx, num_pairs)
 template <typename scalar_t>
-__global__ void copy_blocks_kernel(int64_t* key_cache_ptrs,
-                                   int64_t* value_cache_ptrs,
-                                   const int64_t* __restrict__ block_mapping,
-                                   const int numel_per_block) {
-  const int layer_idx = blockIdx.x;
+__global__ void unified_copy_blocks_kernel(
+    int64_t* src_key_cache_ptrs, int64_t* src_value_cache_ptrs,
+    int64_t* dst_key_cache_ptrs, int64_t* dst_value_cache_ptrs,
+    const int64_t* __restrict__ block_mapping, const int numel_per_block) {
+  const int layer_or_pair_idx = blockIdx.x;
   const int pair_idx = blockIdx.y;
 
-  scalar_t* key_cache = reinterpret_cast<scalar_t*>(key_cache_ptrs[layer_idx]);
-  scalar_t* value_cache =
-      reinterpret_cast<scalar_t*>(value_cache_ptrs[layer_idx]);
+  scalar_t* src_key_cache =
+      reinterpret_cast<scalar_t*>(src_key_cache_ptrs[layer_or_pair_idx]);
+  scalar_t* src_value_cache =
+      reinterpret_cast<scalar_t*>(src_value_cache_ptrs[layer_or_pair_idx]);
+  scalar_t* dst_key_cache =
+      reinterpret_cast<scalar_t*>(dst_key_cache_ptrs[layer_or_pair_idx]);
+  scalar_t* dst_value_cache =
+      reinterpret_cast<scalar_t*>(dst_value_cache_ptrs[layer_or_pair_idx]);
+
   int64_t src_block_number = block_mapping[2 * pair_idx];
   int64_t dst_block_number = block_mapping[2 * pair_idx + 1];
 
   const int64_t src_block_offset = src_block_number * numel_per_block;
   const int64_t dst_block_offset = dst_block_number * numel_per_block;
+
+  // Copy key cache from source to destination
   for (int i = threadIdx.x; i < numel_per_block; i += blockDim.x) {
     int64_t src_offset = src_block_offset + i;
     int64_t dst_offset = dst_block_offset + i;
-    key_cache[dst_offset] = key_cache[src_offset];
+    dst_key_cache[dst_offset] = src_key_cache[src_offset];
   }
+
+  // Copy value cache from source to destination
   for (int i = threadIdx.x; i < numel_per_block; i += blockDim.x) {
     int64_t src_offset = src_block_offset + i;
     int64_t dst_offset = dst_block_offset + i;
-    value_cache[dst_offset] = value_cache[src_offset];
+    dst_value_cache[dst_offset] = src_value_cache[src_offset];
   }
 }
 
@@ -118,6 +128,78 @@ __global__ void copy_blocks_mla_kernel(
 
 }  // namespace vllm
 
+// Unified implementation function for both copy_blocks and
+// copy_blocks_between_caches
+void copy_blocks_impl(std::vector<torch::Tensor> const& src_key_caches,
+                      std::vector<torch::Tensor> const& src_value_caches,
+                      std::vector<torch::Tensor> const& dst_key_caches,
+                      std::vector<torch::Tensor> const& dst_value_caches,
+                      const torch::Tensor& block_mapping) {
+  int num_src_dst_pairs = src_key_caches.size();
+  TORCH_CHECK(num_src_dst_pairs == src_value_caches.size());
+  TORCH_CHECK(num_src_dst_pairs == dst_key_caches.size());
+  TORCH_CHECK(num_src_dst_pairs == dst_value_caches.size());
+
+  if (num_src_dst_pairs == 0) {
+    return;
+  }
+
+  torch::Device cache_device = src_key_caches[0].device();
+  TORCH_CHECK(cache_device.is_cuda());
+
+  // Create arrays of pointers to the source and destination key and value
+  // caches
+  int64_t src_key_cache_ptrs[num_src_dst_pairs];
+  int64_t src_value_cache_ptrs[num_src_dst_pairs];
+  int64_t dst_key_cache_ptrs[num_src_dst_pairs];
+  int64_t dst_value_cache_ptrs[num_src_dst_pairs];
+
+  for (int pair_idx = 0; pair_idx < num_src_dst_pairs; ++pair_idx) {
+    src_key_cache_ptrs[pair_idx] =
+        reinterpret_cast<int64_t>(src_key_caches[pair_idx].data_ptr());
+    src_value_cache_ptrs[pair_idx] =
+        reinterpret_cast<int64_t>(src_value_caches[pair_idx].data_ptr());
+    dst_key_cache_ptrs[pair_idx] =
+        reinterpret_cast<int64_t>(dst_key_caches[pair_idx].data_ptr());
+    dst_value_cache_ptrs[pair_idx] =
+        reinterpret_cast<int64_t>(dst_value_caches[pair_idx].data_ptr());
+  }
+
+  // block_mapping is a 2D tensor with shape (num_pairs, 2).
+  int num_pairs = block_mapping.size(0);
+
+  // Move the data structures to the GPU
+  torch::Tensor src_key_cache_ptrs_tensor =
+      torch::from_blob(src_key_cache_ptrs, {num_src_dst_pairs}, torch::kInt64)
+          .to(cache_device);
+  torch::Tensor src_value_cache_ptrs_tensor =
+      torch::from_blob(src_value_cache_ptrs, {num_src_dst_pairs}, torch::kInt64)
+          .to(cache_device);
+  torch::Tensor dst_key_cache_ptrs_tensor =
+      torch::from_blob(dst_key_cache_ptrs, {num_src_dst_pairs}, torch::kInt64)
+          .to(cache_device);
+  torch::Tensor dst_value_cache_ptrs_tensor =
+      torch::from_blob(dst_value_cache_ptrs, {num_src_dst_pairs}, torch::kInt64)
+          .to(cache_device);
+
+  // Launch the kernel
+  const int numel_per_block = src_key_caches[0][0].numel();
+  dim3 grid(num_src_dst_pairs, num_pairs);
+  dim3 block(std::min(1024, numel_per_block));
+  const at::cuda::OptionalCUDAGuard device_guard(cache_device);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  VLLM_DISPATCH_FLOATING_AND_BYTE_TYPES(
+      src_key_caches[0].scalar_type(), "unified_copy_blocks_kernel", ([&] {
+        vllm::unified_copy_blocks_kernel<scalar_t><<<grid, block, 0, stream>>>(
+            src_key_cache_ptrs_tensor.data_ptr<int64_t>(),
+            src_value_cache_ptrs_tensor.data_ptr<int64_t>(),
+            dst_key_cache_ptrs_tensor.data_ptr<int64_t>(),
+            dst_value_cache_ptrs_tensor.data_ptr<int64_t>(),
+            block_mapping.data_ptr<int64_t>(), numel_per_block);
+      }));
+}
+
 // Note: the key_caches and value_caches vectors are constant but
 // not the Tensors they contain. The vectors need to be const refs
 // in order to satisfy pytorch's C++ operator registration code.
@@ -129,45 +211,23 @@ void copy_blocks(std::vector<torch::Tensor> const& key_caches,
   if (num_layers == 0) {
     return;
   }
-  torch::Device cache_device = key_caches[0].device();
-  TORCH_CHECK(cache_device.is_cuda());
 
-  // Create data structures for the kernel.
-  // Create an array of pointers to the key and value caches.
-  int64_t key_cache_ptrs[num_layers];
-  int64_t value_cache_ptrs[num_layers];
-  for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-    key_cache_ptrs[layer_idx] =
-        reinterpret_cast<int64_t>(key_caches[layer_idx].data_ptr());
-    value_cache_ptrs[layer_idx] =
-        reinterpret_cast<int64_t>(value_caches[layer_idx].data_ptr());
-  }
+  // Call the unified implementation with the same caches for both source and
+  // destination
+  copy_blocks_impl(key_caches, value_caches, key_caches, value_caches,
+                   block_mapping);
+}
 
-  // block_mapping is a 2D tensor with shape (num_pairs, 2).
-  int num_pairs = block_mapping.size(0);
-
-  // Move the data structures to the GPU.
-  // NOTE: This synchronizes the CPU and GPU.
-  torch::Tensor key_cache_ptrs_tensor =
-      torch::from_blob(key_cache_ptrs, {num_layers}, torch::kInt64)
-          .to(cache_device);
-  torch::Tensor value_cache_ptrs_tensor =
-      torch::from_blob(value_cache_ptrs, {num_layers}, torch::kInt64)
-          .to(cache_device);
-
-  // Launch the kernel.
-  const int numel_per_block = key_caches[0][0].numel();
-  dim3 grid(num_layers, num_pairs);
-  dim3 block(std::min(1024, numel_per_block));
-  const at::cuda::OptionalCUDAGuard device_guard(cache_device);
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_AND_BYTE_TYPES(
-      key_caches[0].scalar_type(), "copy_blocks_kernel", ([&] {
-        vllm::copy_blocks_kernel<scalar_t><<<grid, block, 0, stream>>>(
-            key_cache_ptrs_tensor.data_ptr<int64_t>(),
-            value_cache_ptrs_tensor.data_ptr<int64_t>(),
-            block_mapping.data_ptr<int64_t>(), numel_per_block);
-      }));
+// Function to copy blocks between different layers
+void copy_blocks_between_layers(
+    std::vector<torch::Tensor> const& src_key_caches,
+    std::vector<torch::Tensor> const& src_value_caches,
+    std::vector<torch::Tensor> const& dst_key_caches,
+    std::vector<torch::Tensor> const& dst_value_caches,
+    const torch::Tensor& block_mapping) {
+  // Call the unified implementation with separate source and destination caches
+  copy_blocks_impl(src_key_caches, src_value_caches, dst_key_caches,
+                   dst_value_caches, block_mapping);
 }
 
 // copy blocks kernel for MLA (assumes a joint KV-cache)

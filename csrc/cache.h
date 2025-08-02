@@ -15,6 +15,13 @@ void copy_blocks(std::vector<torch::Tensor> const& key_caches,
                  std::vector<torch::Tensor> const& value_caches,
                  const torch::Tensor& block_mapping);
 
+void copy_blocks_between_layers(
+    std::vector<torch::Tensor> const& src_key_caches,
+    std::vector<torch::Tensor> const& src_value_caches,
+    std::vector<torch::Tensor> const& dst_key_caches,
+    std::vector<torch::Tensor> const& dst_value_caches,
+    const torch::Tensor& block_mapping);
+
 void copy_blocks_mla(std::vector<torch::Tensor> const& kv_caches,
                      const torch::Tensor& block_mapping);
 
