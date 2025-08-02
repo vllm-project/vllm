@@ -185,27 +185,16 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "-f", "--filter", action="append", type=str, help="input filter string for json file names"
-    )
-    parser.add_argument(
         "-r", "--result", type=str, default="results", help="input filter string for json file names"
     )
     args = parser.parse_args()
-    filters = args.filter
     result = args.result
     if os.path.exists(result) is False:
         print("results folder doesn't exit  : ", result)
         exit(0)
     results_folder = Path(result)
-    print("filter out json file names with : ", filters)
     # collect results
     for test_file in results_folder.glob("*.json"):
-        if filters:
-            if not all(str(f) in str(test_file) for f in filters):
-                # the test_file is not in the existed filters
-                print("Bypass ",str(test_file))
-                continue
-
         with open(test_file) as f:
             raw_result = json.loads(f.read())
 
@@ -228,7 +217,6 @@ if __name__ == "__main__":
 
             for index, arg in enumerate(parse_args):
                 if arg in out["client_command"]["args"]:
-                    print(out["client_command"]["args"][arg])
                     raw_result.update({col_mapping[index]: arg})
             # Add Server, Client command
             raw_result.update(command)
@@ -364,12 +352,8 @@ if __name__ == "__main__":
     )
 
     # document the result
-    postfix = ''
-    if filters:
-        postfix = '-' + '_'.join(filters)
-
-    md_file = "benchmark_results" + postfix +  ".md"
-    json_file = "benchmark_results" + postfix + ".json"
+    md_file = "benchmark_results.md"
+    json_file = "benchmark_results.json"
     with open(results_folder / md_file, "w") as f:
         results = read_markdown(
             "../.buildkite/nightly-benchmarks/"
