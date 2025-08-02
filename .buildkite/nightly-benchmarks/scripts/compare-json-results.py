@@ -49,7 +49,7 @@ if __name__ == "__main__":
         "--debug", action="store_true", help="show all information for debugging"
     )
     parser.add_argument(
-        "--plot", action="store_true", help="plot perf diagrams"
+        "--plot", action=argparse.BooleanOptionalAction, default=True, help="plot perf diagrams or not --no-plot --plot"
     )
     args = parser.parse_args()
     files = args.file
@@ -66,6 +66,8 @@ if __name__ == "__main__":
     ]
     debug = args.debug
     plot = args.plot
+    # For Plot feature, assign y axis from one of info_cols
+    y_axis_index = 4
     with open("perf_comparison.html", "w") as text_file:
         for i in range(len(data_cols_to_compare)):
             output_df, raw_data_cols = compare_data_columns(
@@ -77,26 +79,29 @@ if __name__ == "__main__":
                 debug=debug,
             )
 
+            # For Plot feature, insert y axis from one of info_cols
+            raw_data_cols.insert(0, info_cols[y_axis_index])
 
-            print(output_df)
-            html = output_df.to_html()
-            text_file.write(html_msgs_for_data_cols[i])
-            text_file.write(html)
+            output_df_sorted = output_df.sort_values(by=info_cols[0-3])
+            output_groups = output_df_sorted.groupby(info_cols[0-3])
+            for name, group in output_groups:
+                print(group)
+                html = group.to_html()
+                text_file.write( html_msgs_for_data_cols[i])
+                text_file.write(html)
 
-            if plot is True:
-                import pandas as pd
-                import plotly.express as px
-
-                raw_data_cols.insert(0, info_cols[1])
-                df = output_df[raw_data_cols]
-                df_sorted = df.sort_values(by=info_cols[1])
-                print(df_sorted)
-                # Melt DataFrame for plotting
-                df_melted = df_sorted.melt(id_vars=info_cols[1], var_name="Configuration", value_name=data_cols_to_compare[i])
-                title = data_cols_to_compare[i] + " vs " + info_cols[1]
-                # Create Plotly line chart
-                fig = px.line(df_melted, x=info_cols[1], y=data_cols_to_compare[i], color="Configuration",
-                    title=title, markers=True)
-                # Export to HTML
-                text_file.write(fig.to_html(full_html=True, include_plotlyjs='cdn'))
+                if plot is True:
+                    import pandas as pd
+                    import plotly.express as px
+                    df = group[raw_data_cols]
+                    df_sorted = df.sort_values(by=info_cols[y_axis_index])
+                    print(df_sorted)
+                    # Melt DataFrame for plotting
+                    df_melted = df_sorted.melt(id_vars=info_cols[y_axis_index], var_name="Configuration", value_name=data_cols_to_compare[i])
+                    title = data_cols_to_compare[i] + " vs " + info_cols[y_axis_index]
+                    # Create Plotly line chart
+                    fig = px.line(df_melted, x=info_cols[y_axis_index], y=data_cols_to_compare[i], color="Configuration",
+                        title=title, markers=True)
+                    # Export to HTML
+                    text_file.write(fig.to_html(full_html=True, include_plotlyjs='cdn'))
 
