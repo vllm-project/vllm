@@ -507,10 +507,9 @@ class DeepseekForCausalLMWithAdditionalHeads(DeepseekForCausalLM):
                 "hidden_dim": 4096
             },
             {
-                "name": "simple_classifier",
-                "location": "/path/to/simple_head.safetensors",
-                "num_hidden_layers": 0,
-                "hidden_dim": 4096  # Not used when num_hidden_layers == 0
+                "name": "violence",
+                "location": "/path/to/violence_head.safetensors",
+                "num_hidden_layers": 0
             }
         ]
     """
