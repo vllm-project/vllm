@@ -809,11 +809,11 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": 1}
 
-    def get_image_processor(self) -> Glm4vImageProcessor:
-        return self.get_hf_processor().image_processor
+    def get_image_processor(self, **kwargs: object) -> Glm4vImageProcessor:
+        return self.get_hf_processor(**kwargs).image_processor
 
-    def get_video_processor(self) -> Glm4vVideoProcessor:
-        return self.get_hf_processor().video_processor
+    def get_video_processor(self, **kwargs: object) -> Glm4vVideoProcessor:
+        return self.get_hf_processor(**kwargs).video_processor
 
     def _get_vision_info(
         self,
@@ -937,7 +937,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
                               total_frames: int) -> list[int]:
         video_processor = self.get_video_processor()
 
-        video_fps = metadata.get("fps", 2.0)
+        video_fps = metadata.get("fps", video_processor.fps)
         meta_frames = metadata.get("total_num_frames", total_frames)
         max_frame_idx = meta_frames - 1
         duration = metadata.get("duration",
@@ -1120,11 +1120,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     video_placeholder,
                 )
 
-                grid_t = len(video_outputs["video_grid_thw"])
-                _, grid_h, grid_w = video_outputs["video_grid_thw"][0]
-                grid_thw = torch.tensor([[grid_t, grid_h, grid_w]])
-
-                video_grid_thw_lst.append(grid_thw)
+                video_grid_thw_lst.append(video_outputs["video_grid_thw"])
                 pixel_values_videos_lst.append(
                     video_outputs["pixel_values_videos"])
             video_outputs = dict(

@@ -2756,6 +2756,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.vllm_config,
             self.device,
         )
+
         return attn_backend_i, attn_metadata_builder_i
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
