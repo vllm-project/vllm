@@ -132,6 +132,15 @@ class MultiConnector(KVConnectorBase_V1):
 
         return finished_sending or None, finished_recving or None
 
+    def get_finished_loading(
+            self, scheduler_output: "SchedulerOutput") -> dict[str, int]:
+        finished_loading_dict: dict[str, int] = {}
+        for c in self._connectors:
+            loading_dict = c.get_finished_loading(scheduler_output)
+            # Each request will only be assigned to one connector.
+            finished_loading_dict.update(loading_dict or {})
+        return finished_loading_dict
+
     # ==============================
     # Scheduler-side methods
     # ==============================

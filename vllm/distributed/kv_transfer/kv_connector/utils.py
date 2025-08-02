@@ -6,6 +6,7 @@ KV cache helper for store.
 from collections import defaultdict
 from collections.abc import Sequence
 from concurrent.futures import CancelledError, Future
+from dataclasses import dataclass
 from typing import Optional, cast
 
 import torch
@@ -116,6 +117,12 @@ def get_kv_connector_cache_layout():
     return "NHD"
 
 
+@dataclass
+class RequestTrackingData:
+    n_remaining_workers: int
+    min_num_loading_tokens: int
+
+
 class KVOutputAggregator:
     """Utility class to aggregate the output of all workers into a single 
     output corresponding to Rank 0 for scheduler."""
@@ -125,11 +132,15 @@ class KVOutputAggregator:
         # [req_id -> n_remaining_workers]
         self._recv_remaining_count = defaultdict[str, int](lambda: world_size)
         self._send_remaining_count = defaultdict[str, int](lambda: world_size)
+        # req_id -> [n_remaining_workers, min_num_loading_tokens]
+        self._recv_loading_tokens_tracking = defaultdict[
+            str,
+            RequestTrackingData](lambda: RequestTrackingData(world_size, -1))
 
     def aggregate(self,
                   outputs: list[ModelRunnerOutput],
                   output_rank: int = 0) -> ModelRunnerOutput:
-        # aggregate finished_sending, finished_recving from all workers
+        # aggregate finished_sending/recving/loading_dict from all workers
 
         def update_finished_set(req_ids: Optional[set[str]],
                                 remaining_count_dict: dict[str, int],
@@ -140,25 +151,50 @@ class KVOutputAggregator:
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
 
+        def update_finished_load_dict(
+                worker_results: dict[str, int],
+                request_tracking: dict[str, RequestTrackingData],
+                finished_requests: dict[str, int]):
+            for req_id, num_actual_load_tokens in (worker_results
+                                                   or {}).items():
+                request_tracking[req_id].n_remaining_workers -= 1
+
+                if (request_tracking[req_id].min_num_loading_tokens == -1
+                        or num_actual_load_tokens
+                        < request_tracking[req_id].min_num_loading_tokens):
+                    request_tracking[
+                        req_id].min_num_loading_tokens = num_actual_load_tokens
+
+                if (request_tracking[req_id].n_remaining_workers == 0
+                        and request_tracking[req_id].min_num_loading_tokens
+                        is not None):
+                    finished_requests[req_id] = request_tracking[
+                        req_id].min_num_loading_tokens
+                    del request_tracking[req_id]
+
         finished_sending = set[str]()
         finished_recving = set[str]()
+        finished_loading_dict: dict[str, int] = {}
         for output in outputs:
             update_finished_set(output.finished_sending,
                                 self._send_remaining_count, finished_sending)
             update_finished_set(output.finished_recving,
                                 self._recv_remaining_count, finished_recving)
+            update_finished_load_dict(output.finished_loading_dict,
+                                      self._recv_loading_tokens_tracking,
+                                      finished_loading_dict)
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
 
-        # set the aggregated finished_sending / finished_recving
-        # if output.finished_sending/recving is not empty, but the other ranks
-        # still have unfinished send/recv, we want to set the aggregated
-        # finished_sending/recving to None until all ranks have finished
-        # send/recv
+        # set the aggregated finished_sending/finished_recving/
+        # finished_loading_dict if output.finished_sending/recving/loading_dict
+        # is not empty, but the otherranks still have unfinished send/recv, we
+        # want to set the aggregated finished_sending/recving/loading_dict
+        # to None until all ranks have finished send/recv
         output.finished_sending = finished_sending if finished_sending else None
         output.finished_recving = finished_recving if finished_recving else None
-
+        output.finished_loading_dict = finished_loading_dict or None
         return output
 
     def async_aggregate(self,

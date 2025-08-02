@@ -28,6 +28,9 @@ The class provides the following primitives:
 
         get_finished() - called with ids of finished requests, returns
             ids of requests that have completed async sending/recving.
+        get_finished_loading() - called with scheduler outputs, returns
+            a dictionary that the keys are request IDs and the values are
+            the actual number of tokens loaded from the remote KV cache
 """
 
 import enum
@@ -218,6 +221,23 @@ class KVConnectorBase_V1(ABC):
             call to this method (this call or a prior one).
         """
         return None, None
+
+    def get_finished_loading(
+            self, scheduler_output: "SchedulerOutput") -> dict[str, int]:
+        """
+        Retrieves the actual number of tokens loaded for requests that have
+        completed the asynchronous loading process from the remote KV cache.
+
+        This function is used by the scheduler process (via the Executors)
+        to track the progress of requests and determine which requests have
+        successfully finished loading their KV cache data.
+
+        Returns:
+            A dictionary where the keys are request IDs and the values are the
+            corresponding number of tokens that have been successfully loaded
+            for each request.
+        """
+        return {}
 
     # ==============================
     # Scheduler-side methods
