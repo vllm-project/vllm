@@ -277,6 +277,17 @@ def is_encoder_decoder(config: PretrainedConfig) -> bool:
     return getattr(config, "is_encoder_decoder", False)
 
 
+def is_interleaved(config: PretrainedConfig) -> bool:
+    """
+    Detect if the model with this config is used with interleaved attention.
+    """
+    text_config = config.get_text_config()
+    if layer_types := getattr(text_config, "layer_types", None):
+        interleaved_types = {"full_attention", "sliding_attention"}
+        return interleaved_types.issubset(layer_types)
+    return False
+
+
 def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     """Remap config attributes to match the expected names."""
     for old_attr, new_attr in _CONFIG_ATTRS_MAPPING.items():
@@ -422,6 +433,18 @@ def get_config(
             config_dict["max_position_embeddings"] = max_position_embeddings
 
         config = adapt_config_dict(config_dict)
+
+        # Mistral configs may define sliding_window as list[int]. Convert it
+        # to int and add the layer_types list[str] to make it HF compatible
+        if ((sliding_window := getattr(config, "sliding_window", None))
+                and isinstance(sliding_window, list)):
+            pattern_repeats = config.num_hidden_layers // len(sliding_window)
+            layer_types = sliding_window * pattern_repeats
+            config.layer_types = [
+                "full_attention" if layer_type is None else "sliding_window"
+                for layer_type in layer_types
+            ]
+            config.sliding_window = next(filter(None, sliding_window), None)
     else:
         supported_formats = [
             fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
