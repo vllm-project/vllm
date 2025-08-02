@@ -315,14 +315,14 @@ class CoreEngineActorManager:
             # For now, each DP rank can only be assigned to one node
             # TODO(rui): support allocating a single DP rank
             # to multiple nodes
-            available_engine_count = int(node_resources["GPU"]) // world_size
+            available_engine_count = int(node_resources[current_platform.ray_device_key]) // world_size
             if node_ip == dp_master_ip:
                 assert available_engine_count >= local_engine_count, (
                     "Not enough resources to allocate DP ranks "
                     f"on DP master node {node_ip}")
                 for i in range(local_engine_count):
                     bundles = [{
-                        "GPU": 1.0,
+                        current_platform.ray_device_key: 1.0,
                         "node:" + dp_master_ip: 0.001
                     }] * world_size + [{
                         "CPU": 1.0
@@ -338,7 +338,7 @@ class CoreEngineActorManager:
                 for i in range(available_engine_count):
                     if len(placement_groups) == num_pg_to_create:
                         break
-                    bundles = [{"GPU": 1.0}] * world_size + [{"CPU": 1.0}]
+                    bundles = [{current_platform.ray_device_key: 1.0}] * world_size + [{"CPU": 1.0}]
                     pg = ray.util.placement_group(
                         name=f"dp_rank_{len(placement_groups)}",
                         strategy="STRICT_PACK",
