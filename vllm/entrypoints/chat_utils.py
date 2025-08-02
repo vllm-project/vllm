@@ -529,7 +529,6 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._tokenizer = tokenizer
 
         self._items_by_modality = defaultdict[str, list[_T]](list)
-        self._mm_processor = self.mm_registry.create_processor(model_config)
 
     @property
     def model_config(self) -> ModelConfig:
@@ -549,6 +548,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def mm_registry(self):
         return MULTIMODAL_REGISTRY
 
+    @cached_property
+    def mm_processor(self):
+        return self.mm_registry.create_processor(self.model_config)
+
     def add(self, modality: ModalityStr, item: _T) -> Optional[str]:
         """
         Add a multi-modal item to the current prompt and returns the
@@ -557,7 +560,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         input_modality = modality.replace("_embeds", "")
         num_items = len(self._items_by_modality[modality]) + 1
 
-        self._mm_processor.validate_num_items(input_modality, num_items)
+        self.mm_processor.validate_num_items(input_modality, num_items)
 
         self._items_by_modality[modality].append(item)
 
