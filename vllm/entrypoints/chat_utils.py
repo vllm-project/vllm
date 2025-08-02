@@ -559,19 +559,13 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         input_modality = modality.replace("_embeds", "")
 
         mm_processor = mm_registry.create_processor(model_config)
-        allowed_counts = mm_processor.info.get_allowed_mm_limits()
-        allowed_count = allowed_counts.get(input_modality, 0)
+        num_items = len(self._items_by_modality[modality]) + 1
 
-        current_count = len(self._items_by_modality[modality]) + 1
-        if current_count > allowed_count:
-            raise ValueError(
-                f"At most {allowed_count} {modality}(s) may be provided in "
-                "one request. You can set `--limit-mm-per-prompt` to "
-                "increase this limit if the model supports it.")
+        mm_processor.validate_num_items(input_modality, num_items)
 
         self._items_by_modality[modality].append(item)
 
-        return model_cls.get_placeholder_str(modality, current_count)
+        return model_cls.get_placeholder_str(modality, num_items)
 
     @abstractmethod
     def create_parser(self) -> "BaseMultiModalContentParser":
