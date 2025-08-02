@@ -3,7 +3,6 @@
 
 from contextlib import nullcontext
 from typing import Optional, cast
-from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -957,15 +956,14 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
     )
 
     processor = MULTIMODAL_REGISTRY.create_processor(model_config)
-    profiler = MultiModalProfiler(processor)
+    processor._supported_mm_limits = {"image": num_supported}
 
-    mock_supported_mm_limits = MagicMock(return_value={"image": num_supported})
-    processor.info.get_supported_mm_limits = mock_supported_mm_limits
+    profiler = MultiModalProfiler(processor)
 
     if is_valid:
         exc_ctx = nullcontext()
     else:
-        exc_ctx = pytest.raises(ValueError, match="The model only supports")
+        exc_ctx = pytest.raises(ValueError, match="At most")
 
     with exc_ctx:
         profiler.get_decoder_dummy_data(
@@ -1002,7 +1000,7 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
     if is_valid:
         exc_ctx = nullcontext()
     else:
-        exc_ctx = pytest.raises(ValueError, match=f"passed {num_images} image")
+        exc_ctx = pytest.raises(ValueError, match="At most")
 
     with exc_ctx:
         processor.apply(
