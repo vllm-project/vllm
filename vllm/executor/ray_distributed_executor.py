@@ -608,6 +608,21 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
             forward_dag = MultiOutputNode(outputs)
 
+        if envs.VLLM_USE_RAY_WRAPPED_PP_COMM:
+            from ray.experimental.channel.accelerator_context import (
+                register_accelerator_context)
+
+            from vllm.distributed.device_communicators.ray_communicator import (
+                RayPPCommunicator)
+            register_accelerator_context(torch_module_name="cuda",
+                                         communicator_cls=RayPPCommunicator)
+            logger.info("Using RayPPCommunicator "
+                        "(which wraps vLLM _PP GroupCoordinator) "
+                        "for Ray Compiled Graph communication.")
+        else:
+            logger.info("Using Ray's NCCL communicator for "
+                        "Ray Compiled Graph communication.")
+
         return forward_dag.experimental_compile(
             enable_asyncio=enable_asyncio,
             _overlap_gpu_communication=envs.
