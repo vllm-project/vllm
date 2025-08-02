@@ -20,4 +20,3 @@ void cutlass_scaled_mm_sm120(torch::Tensor& c, torch::Tensor const& a,
 }
 
 #endif
-
