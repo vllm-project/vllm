@@ -120,6 +120,7 @@ async def forward_request(url, data, request_id):
 
 
 @app.route("/v1/completions", methods=["POST"])
+@app.route("/v1/chat/completions", methods=["POST"])
 async def handle_request():
     try:
         original_request_data = await request.get_json()
@@ -127,6 +128,8 @@ async def handle_request():
         prefill_request = original_request_data.copy()
         # change max_tokens = 1 to let it only do prefill
         prefill_request["max_tokens"] = 1
+        if "max_completion_tokens" in prefill_request:
+            prefill_request["max_completion_tokens"] = 1
 
         global count
         global prefill_instances
@@ -157,13 +160,13 @@ async def handle_request():
 
         # finish prefill
         async for _ in forward_request(
-            f"http://{prefill_addr}/v1/completions", prefill_request, request_id
+            f"http://{prefill_addr}{request.path}", prefill_request, request_id
         ):
             continue
 
         # return decode
         generator = forward_request(
-            f"http://{decode_addr}/v1/completions", original_request_data, request_id
+            f"http://{decode_addr}{request.path}", original_request_data, request_id
         )
         response = await make_response(generator)
         response.timeout = None

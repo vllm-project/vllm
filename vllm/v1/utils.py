@@ -154,6 +154,7 @@ class APIServerProcessManager:
             client_config = {
                 "input_address": in_addr,
                 "output_address": out_addr,
+                "client_count": num_servers,
                 "client_index": i
             }
             if stats_update_address is not None:
@@ -318,8 +319,6 @@ def report_usage_stats(
             # Feature flags
             "enable_lora":
             bool(vllm_config.lora_config),
-            "enable_prompt_adapter":
-            bool(vllm_config.prompt_adapter_config),
             "enable_prefix_caching":
             vllm_config.cache_config.enable_prefix_caching,
             "enforce_eager":
