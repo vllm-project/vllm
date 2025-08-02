@@ -38,6 +38,7 @@ class Dense(nn.Module):
             bias=bias,
             params_dtype=params_dtype or torch.float32,
             prefix=prefix,
+            return_bias=False,
         )
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
