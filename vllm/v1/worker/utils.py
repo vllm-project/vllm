@@ -62,6 +62,8 @@ class MultiModalBudget:
         self.max_items_per_prompt_by_modality = max_items_per_prompt_by_modality
         self.max_items_per_seq_by_modality = max_items_per_seq_by_modality
 
+        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config)
+
     def get_modality_with_max_tokens_per_seq(self) -> tuple[str, int]:
         max_tokens_per_seq_by_modality = self.max_items_per_seq_by_modality
         modality, max_tokens = max(max_tokens_per_seq_by_modality.items(),
@@ -89,9 +91,7 @@ class MultiModalBudget:
 
         # Check how many items of this modality can be supported by
         # the decoder budget.
-        mm_limits = self.mm_registry.get_mm_limits_per_prompt(
-            self.model_config)
-        mm_limit = mm_limits[modality]
+        mm_limit = self.mm_limits[modality]
 
         max_mm_items_per_prompt = max(
             1,
