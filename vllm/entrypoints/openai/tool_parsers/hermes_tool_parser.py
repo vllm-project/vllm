@@ -83,12 +83,20 @@ class Hermes2ProToolParser(ToolParser):
                 function_call_tuples = (
                     self.tool_call_regex.findall(model_output))
 
-                # load the JSON, and then use it to build the Function and
-                # Tool Call
-                raw_function_calls = [
-                    json.loads(match[0] if match[0] else match[1])
-                    for match in function_call_tuples
-                ]
+                # Load the JSON and use it to build the Function and Tool Call.
+                # This handles malformed model outputs that contain multiple
+                # fused tool_call blocks.
+                # Workaround: split on <tool_call> and remove stray "⚗"
+                # separators occasionally present between blocks.
+                # See issue #21840 for context.
+                raw_function_calls = []
+                fragments = (fragment.strip().replace("⚗", "")
+                             for match in function_call_tuples
+                             for fragment in (
+                                 match[0] or match[1]).split("<tool_call>")
+                             if fragment.strip())
+                raw_function_calls = [json.loads(f) for f in fragments]
+
                 tool_calls = [
                     ToolCall(
                         type="function",
