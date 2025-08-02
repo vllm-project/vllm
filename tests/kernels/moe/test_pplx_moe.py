@@ -406,8 +406,8 @@ def _pplx_prepare_finalize(
             group_name = None
         else:
             group_ranks = list(range(pgi.world_size))
-            cpu_group = torch.distributed.new_group(group_ranks,
-                                                    backend="gloo")
+            cpu_group = torch.distributed.new_group(
+                group_ranks, backend=torch.distributed.Backend.GLOO)
             group_name = cpu_group.group_name
 
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
@@ -628,8 +628,8 @@ def _pplx_moe(
             group_name = None
         else:
             group_ranks = list(range(pgi.world_size))
-            cpu_group = torch.distributed.new_group(group_ranks,
-                                                    backend="gloo")
+            cpu_group = torch.distributed.new_group(
+                group_ranks, backend=torch.distributed.Backend.GLOO)
             group_name = cpu_group.group_name
 
         m, k = a.shape

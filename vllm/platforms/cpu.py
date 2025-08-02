@@ -68,7 +68,7 @@ class CpuPlatform(Platform):
     device_name: str = "cpu"
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
-    dist_backend: str = "gloo"
+    dist_backend: str = torch.distributed.Backend.GLOO
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:

@@ -15,7 +15,7 @@ from vllm.distributed.device_communicators.custom_all_reduce import (  # noqa
     CustomAllreduce)
 
 # create a cpu process group for communicating metadata (ipc handle)
-dist.init_process_group(backend="gloo")
+dist.init_process_group(backend=dist.Backend.GLOO)
 rank = local_rank = dist.get_rank()
 world_size = dist.get_world_size()
 

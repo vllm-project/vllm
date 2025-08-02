@@ -130,7 +130,7 @@ def xpu_platform_plugin() -> Optional[str]:
         import intel_extension_for_pytorch  # noqa: F401
         import torch
         if supports_xccl():
-            dist_backend = "xccl"
+            dist_backend = torch.distributed.Backend.XCCL
         else:
             dist_backend = "ccl"
             import oneccl_bindings_for_pytorch  # noqa: F401

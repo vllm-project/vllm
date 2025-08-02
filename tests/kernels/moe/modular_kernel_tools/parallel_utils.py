@@ -43,7 +43,7 @@ def _set_vllm_config(vllm_config: VllmConfig, world_size: int, rank: int,
             rank=rank,
             distributed_init_method=f"file://{temp_file}",
             local_rank=local_rank,
-            backend="nccl",
+            backend=torch.distributed.Backend.NCCL,
         )
 
         initialize_model_parallel(
@@ -52,8 +52,8 @@ def _set_vllm_config(vllm_config: VllmConfig, world_size: int, rank: int,
             pipeline_model_parallel_size=vllm_config.parallel_config.
             pipeline_parallel_size,
         )
-        cpu_group = torch.distributed.new_group(list(range(world_size)),
-                                                backend="gloo")
+        cpu_group = torch.distributed.new_group(
+            list(range(world_size)), backend=torch.distributed.Backend.GLOO)
     return cpu_group
 
 
@@ -74,7 +74,8 @@ def _worker_parallel_launch(
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     torch.distributed.init_process_group(
-        backend="cpu:gloo,cuda:nccl",
+        backend=f"cpu:{torch.distributed.Backend.GLOO},"
+        f"cuda:{torch.distributed.Backend.NCCL}",
         init_method=init_method,
         rank=rank,
         world_size=world_size,
