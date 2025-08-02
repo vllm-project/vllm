@@ -148,17 +148,21 @@ class Ernie4_5_MoeMoE(nn.Module):
                                      bias=False,
                                      quant_config=None,
                                      prefix=f"{prefix}.gate")
+        self.gate.e_score_correction_bias = nn.Parameter(
+            torch.empty(config.moe_num_experts))
 
-        self.experts = FusedMoE(num_experts=config.moe_num_experts,
-                                top_k=config.moe_k,
-                                hidden_size=config.hidden_size,
-                                intermediate_size=config.moe_intermediate_size,
-                                reduce_results=False,
-                                renormalize=True,
-                                quant_config=quant_config,
-                                prefix=f"{prefix}.experts",
-                                enable_eplb=self.enable_eplb,
-                                num_redundant_experts=self.n_redundant_experts)
+        self.experts = FusedMoE(
+            num_experts=config.moe_num_experts,
+            top_k=config.moe_k,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            reduce_results=False,
+            renormalize=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts)
 
         if self.has_shared_experts:
             intermediate_size = (config.moe_intermediate_size *
