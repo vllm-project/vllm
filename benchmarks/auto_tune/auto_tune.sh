@@ -60,7 +60,6 @@ start_server() {
     pkill -f vllm
 
     VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 VLLM_TORCH_PROFILER_DIR=$profile_dir vllm serve $MODEL \
-        --disable-log-requests \
         --port 8004 \
         --gpu-memory-utilization $gpu_memory_utilization \
         --max-num-seqs $max_num_seqs \
