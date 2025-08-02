@@ -28,7 +28,6 @@ class MultiModalBudget:
         max_model_len: int,
         max_num_reqs: int,
     ) -> None:
-
         super().__init__()
 
         self.model_config = model_config
