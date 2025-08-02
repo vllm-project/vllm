@@ -500,6 +500,10 @@ class Ernie4_5_MoeModel(nn.Module):
             if "mtp" in name:
                 continue
 
+            if "e_score_correction_bias" in name:
+                name = name.replace("moe_statics", "gate")
+                loaded_weight = loaded_weight.squeeze(0)
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
