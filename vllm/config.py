@@ -377,7 +377,7 @@ class ModelConfig:
     max_logprobs: int = 20
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
-    OpenAI Chat Completions API."""
+    OpenAI Chat Completions API. -1 means no cap."""
     logprobs_mode: LogprobsMode = "raw_logprobs"
     """Indicates the content returned in the logprobs and prompt_logprobs.
     Supported mode:
@@ -2066,7 +2066,7 @@ class ParallelConfig:
     and when data_parallel_size > 0. Enables running an AsyncLLM
     and API server on a "per-node" basis where vLLM load balances
     between local data parallel ranks, but an external LB balances
-    between vLLM nodes/replicas. Set explicitly in conjunction with 
+    between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
