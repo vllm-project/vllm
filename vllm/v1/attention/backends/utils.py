@@ -167,6 +167,10 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention.
     attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.NEVER
+    # Does this backend/builder reorder the batch?
+    # If not, set this to None. Otherwise set it to the query
+    # length that will be pulled into the front of the batch.
+    reorder_batch_threshold: ClassVar[Optional[int]] = None
 
     @abstractmethod
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
@@ -219,14 +223,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         use_local_attention: bool,
         num_sms: int,
     ) -> bool:
-        return False
-
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        """
-        This method can reorder the batch if desired by the backend.
-        :return: Has the batch been reordered (default False).
-        """
         return False
 
 
