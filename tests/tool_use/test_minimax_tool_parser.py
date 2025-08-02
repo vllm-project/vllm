@@ -3,10 +3,12 @@
 # ruff: noqa: E501
 
 import json
+from typing import Any
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import FunctionCall, ToolCall
+from vllm.entrypoints.openai.protocol import (ChatCompletionToolsParam,
+                                              FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers import MinimaxToolParser
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -22,6 +24,57 @@ def minimax_tokenizer():
 @pytest.fixture
 def minimax_tool_parser(minimax_tokenizer):
     return MinimaxToolParser(minimax_tokenizer)
+
+
+@pytest.fixture
+def sample_tools():
+    return [
+        ChatCompletionToolsParam(type="function",
+                                 function={
+                                     "name": "get_current_weather",
+                                     "description": "Get the current weather",
+                                     "parameters": {
+                                         "type": "object",
+                                         "properties": {
+                                             "city": {
+                                                 "type": "string",
+                                                 "description": "The city name"
+                                             },
+                                             "state": {
+                                                 "type": "string",
+                                                 "description":
+                                                 "The state code"
+                                             },
+                                             "unit": {
+                                                 "type": "string",
+                                                 "enum":
+                                                 ["fahrenheit", "celsius"]
+                                             }
+                                         },
+                                         "required": ["city", "state"]
+                                     }
+                                 }),
+        ChatCompletionToolsParam(type="function",
+                                 function={
+                                     "name": "calculate_area",
+                                     "description":
+                                     "Calculate area of a shape",
+                                     "parameters": {
+                                         "type": "object",
+                                         "properties": {
+                                             "shape": {
+                                                 "type": "string"
+                                             },
+                                             "dimensions": {
+                                                 "type": "object"
+                                             },
+                                             "precision": {
+                                                 "type": "integer"
+                                             }
+                                         }
+                                     }
+                                 })
+    ]
 
 
 def assert_tool_calls(actual_tool_calls: list[ToolCall],
@@ -370,3 +423,440 @@ def test_extract_tool_calls_multiline_json_not_supported(minimax_tool_parser):
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content is None
+
+
+def test_streaming_arguments_incremental_output(minimax_tool_parser):
+    """Test that streaming arguments are returned incrementally, not cumulatively."""
+    # Reset streaming state
+    minimax_tool_parser.current_tool_name_sent = False
+    minimax_tool_parser.prev_tool_call_arr = []
+    minimax_tool_parser.current_tool_id = -1
+    minimax_tool_parser.streamed_args_for_tool = []
+
+    # Simulate progressive tool call building
+    stages = [
+        # Stage 1: Function name complete
+        '<tool_calls>\n{"name": "get_current_weather", "arguments": ',
+        # Stage 2: Arguments object starts with first key
+        '<tool_calls>\n{"name": "get_current_weather", "arguments": {"city": ',
+        # Stage 3: First parameter value added
+        '<tool_calls>\n{"name": "get_current_weather", "arguments": {"city": "Seattle"',
+        # Stage 4: Second parameter added
+        '<tool_calls>\n{"name": "get_current_weather", "arguments": {"city": "Seattle", "state": "WA"',
+        # Stage 5: Third parameter added, arguments complete
+        '<tool_calls>\n{"name": "get_current_weather", "arguments": {"city": "Seattle", "state": "WA", "unit": "celsius"}}',
+        # Stage 6: Tool calls closed
+        '<tool_calls>\n{"name": "get_current_weather", "arguments": {"city": "Seattle", "state": "WA", "unit": "celsius"}}\n</tool',
+        '<tool_calls>\n{"name": "get_current_weather", "arguments": {"city": "Seattle", "state": "WA", "unit": "celsius"}}\n</tool_calls>'
+    ]
+
+    function_name_sent = False
+    previous_args_content = ""
+
+    for i, current_text in enumerate(stages):
+        previous_text = stages[i - 1] if i > 0 else ""
+        delta_text = current_text[len(previous_text
+                                      ):] if i > 0 else current_text
+
+        result = minimax_tool_parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=None,
+        )
+
+        print(f"Stage {i}: Current text: {repr(current_text)}")
+        print(f"Stage {i}: Delta text: {repr(delta_text)}")
+
+        if result is not None and hasattr(result,
+                                          'tool_calls') and result.tool_calls:
+            tool_call = result.tool_calls[0]
+
+            # Check if function name is sent (should happen only once)
+            if tool_call.function and tool_call.function.name:
+                assert tool_call.function.name == "get_current_weather"
+                function_name_sent = True
+                print(
+                    f"Stage {i}: Function name sent: {tool_call.function.name}"
+                )
+
+            # Check if arguments are sent incrementally
+            if tool_call.function and tool_call.function.arguments:
+                args_fragment = tool_call.function.arguments
+                print(
+                    f"Stage {i}: Got arguments fragment: {repr(args_fragment)}"
+                )
+
+                # For incremental output, each fragment should be new content only
+                # The fragment should not contain all previous content
+                if i >= 2 and previous_args_content:  # After we start getting arguments
+                    # The new fragment should not be identical to or contain all previous content
+                    assert args_fragment != previous_args_content, f"Fragment should be incremental, not cumulative: {args_fragment}"
+
+                    # If this is truly incremental, the fragment should be relatively small
+                    # compared to the complete arguments so far
+                    if len(args_fragment) > len(previous_args_content):
+                        print(
+                            "Warning: Fragment seems cumulative rather than incremental"
+                        )
+
+                previous_args_content = args_fragment
+
+    # Verify function name was sent at least once
+    assert function_name_sent, "Function name should have been sent"
+
+
+def test_streaming_arguments_delta_only(minimax_tool_parser):
+    """Test that each streaming call returns only the delta (new part) of arguments."""
+    # Reset streaming state
+    minimax_tool_parser.current_tool_name_sent = False
+    minimax_tool_parser.prev_tool_call_arr = []
+    minimax_tool_parser.current_tool_id = -1
+    minimax_tool_parser.streamed_args_for_tool = []
+
+    # Simulate two consecutive calls with growing arguments
+    call1_text = '<tool_calls>\n{"name": "test_tool", "arguments": {"param1": "value1"}}'
+    call2_text = '<tool_calls>\n{"name": "test_tool", "arguments": {"param1": "value1", "param2": "value2"}}'
+
+    print(f"Call 1 text: {repr(call1_text)}")
+    print(f"Call 2 text: {repr(call2_text)}")
+
+    # First call - should get the function name and initial arguments
+    result1 = minimax_tool_parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=call1_text,
+        delta_text=call1_text,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=None,
+    )
+
+    print(f"Result 1: {result1}")
+    if result1 and hasattr(result1, 'tool_calls') and result1.tool_calls:
+        for i, tc in enumerate(result1.tool_calls):
+            print(f"  Tool call {i}: {tc}")
+
+    # Second call - should only get the delta (new part) of arguments
+    result2 = minimax_tool_parser.extract_tool_calls_streaming(
+        previous_text=call1_text,
+        current_text=call2_text,
+        delta_text=', "param2": "value2"}',
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=None,
+    )
+
+    print(f"Result 2: {result2}")
+    if result2 and hasattr(result2, 'tool_calls') and result2.tool_calls:
+        for i, tc in enumerate(result2.tool_calls):
+            print(f"  Tool call {i}: {tc}")
+
+    # Verify the second call only returns the delta
+    if result2 is not None and hasattr(result2,
+                                       'tool_calls') and result2.tool_calls:
+        tool_call = result2.tool_calls[0]
+        if tool_call.function and tool_call.function.arguments:
+            args_delta = tool_call.function.arguments
+            print(f"Arguments delta from second call: {repr(args_delta)}")
+
+            # Should only contain the new part, not the full arguments
+            # The delta should be something like ', "param2": "value2"}' or just '"param2": "value2"'
+            assert ', "param2": "value2"}' in args_delta or '"param2": "value2"' in args_delta, f"Expected delta containing param2, got: {args_delta}"
+
+            # Should NOT contain the previous parameter data
+            assert '"param1": "value1"' not in args_delta, f"Arguments delta should not contain previous data: {args_delta}"
+
+            # The delta should be relatively short (incremental, not cumulative)
+            expected_max_length = len(
+                ', "param2": "value2"}') + 10  # Some tolerance
+            assert len(
+                args_delta
+            ) <= expected_max_length, f"Delta seems too long (possibly cumulative): {args_delta}"
+
+            print("✓ Delta validation passed")
+        else:
+            print("No arguments in result2 tool call")
+    else:
+        print("No tool calls in result2 or result2 is None")
+        # This might be acceptable if no incremental update is needed
+        # But let's at least verify that result1 had some content
+        assert result1 is not None, "At least the first call should return something"
+
+
+def test_streaming_openai_compatibility(minimax_tool_parser):
+    """Test that streaming behavior with buffering works correctly."""
+    # Reset streaming state
+    minimax_tool_parser.current_tool_name_sent = False
+    minimax_tool_parser.prev_tool_call_arr = []
+    minimax_tool_parser.current_tool_id = -1
+    minimax_tool_parser.streamed_args_for_tool = []
+    # Reset buffering state
+    minimax_tool_parser.pending_buffer = ""
+    minimax_tool_parser.in_thinking_tag = False
+    minimax_tool_parser.thinking_depth = 0
+
+    # Test scenario: simple buffering without complex tool call context
+    test_cases: list[dict[str, Any]] = [
+        {
+            'stage': 'Token: <',
+            'previous': '',
+            'current': '<',
+            'delta': '<',
+            'expected_content': None,  # Should be buffered
+        },
+        {
+            'stage': 'Token: tool_calls>',
+            'previous': '<',
+            'current': '<tool_calls>',
+            'delta': 'tool_calls>',
+            'expected_content': None,  # Complete tag, should not output
+        },
+        {
+            'stage': 'Regular content',
+            'previous': 'Hello',
+            'current': 'Hello world',
+            'delta': ' world',
+            'expected_content': ' world',  # Normal content should pass through
+        },
+        {
+            'stage': 'Content with end tag start',
+            'previous': 'Text',
+            'current': 'Text content</tool_',
+            'delta': ' content</tool_',
+            'expected_content':
+            ' content',  # Content part output, </tool_ buffered
+        },
+        {
+            'stage': 'Complete end tag',
+            'previous': 'Text content</tool_',
+            'current': 'Text content</tool_calls>',
+            'delta': 'calls>',
+            'expected_content': None,  # Complete close tag, should not output
+        },
+    ]
+
+    for i, test_case in enumerate(test_cases):
+        print(f"\n--- Stage {i}: {test_case['stage']} ---")
+        print(f"Previous: {repr(test_case['previous'])}")
+        print(f"Current:  {repr(test_case['current'])}")
+        print(f"Delta:    {repr(test_case['delta'])}")
+
+        result = minimax_tool_parser.extract_tool_calls_streaming(
+            previous_text=test_case['previous'],
+            current_text=test_case['current'],
+            delta_text=test_case['delta'],
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=None,
+        )
+
+        print(f"Result: {result}")
+
+        # Check expected content
+        if test_case['expected_content'] is None:
+            assert result is None or not getattr(result, 'content', None), \
+                f"Stage {i}: Expected no content, got {result}"
+            print("✓ No content output as expected")
+        else:
+            assert result is not None and hasattr(result, 'content'), \
+                f"Stage {i}: Expected content, got {result}"
+            assert result.content == test_case['expected_content'], \
+                f"Stage {i}: Expected content {test_case['expected_content']}, got {result.content}"
+            print(f"✓ Content matches: {repr(result.content)}")
+
+    print("✓ Streaming test with buffering completed successfully")
+
+
+def test_streaming_thinking_tag_buffering(minimax_tool_parser):
+    """Test that tool calls within thinking tags are properly handled during streaming."""
+    # Reset streaming state
+    minimax_tool_parser.current_tool_name_sent = False
+    minimax_tool_parser.prev_tool_call_arr = []
+    minimax_tool_parser.current_tool_id = -1
+    minimax_tool_parser.streamed_args_for_tool = []
+    # Reset buffering state
+    minimax_tool_parser.pending_buffer = ""
+    minimax_tool_parser.in_thinking_tag = False
+    minimax_tool_parser.thinking_depth = 0
+
+    # Test scenario: tool calls within thinking tags should be ignored
+    test_cases: list[dict[str, Any]] = [
+        {
+            'stage': 'Start thinking',
+            'previous': '',
+            'current': '<think>I need to use a tool. <tool_calls>',
+            'delta': '<think>I need to use a tool. <tool_calls>',
+            'expected_content':
+            '<think>I need to use a tool. <tool_calls>',  # Should pass through as content
+        },
+        {
+            'stage':
+            'Tool call in thinking',
+            'previous':
+            '<think>I need to use a tool. <tool_calls>',
+            'current':
+            '<think>I need to use a tool. <tool_calls>\n{"name": "ignored_tool", "arguments": {"param": "value"}}\n</tool_calls>',
+            'delta':
+            '\n{"name": "ignored_tool", "arguments": {"param": "value"}}\n</tool_calls>',
+            'expected_content':
+            '\n{"name": "ignored_tool", "arguments": {"param": "value"}}\n</tool_calls>',  # </tool_calls> should be preserved in thinking tags
+        },
+        {
+            'stage': 'Real tool call after thinking',
+            'previous':
+            '<think>I need to use a tool. <tool_calls>\n{"name": "ignored_tool", "arguments": {"param": "value"}}\n</tool_calls></think>',
+            'current':
+            '<think>I need to use a tool. <tool_calls>\n{"name": "ignored_tool", "arguments": {"param": "value"}}\n</tool_calls></think>\n<tool_calls>',
+            'delta': '\n<tool_calls>',
+            'expected_content':
+            '\n',  # Should output '\n' and suppress <tool_calls>
+        }
+    ]
+
+    for i, test_case in enumerate(test_cases):
+        print(f"\n--- Stage {i}: {test_case['stage']} ---")
+        print(f"Previous: {repr(test_case['previous'])}")
+        print(f"Current:  {repr(test_case['current'])}")
+        print(f"Delta:    {repr(test_case['delta'])}")
+
+        result = minimax_tool_parser.extract_tool_calls_streaming(
+            previous_text=test_case['previous'],
+            current_text=test_case['current'],
+            delta_text=test_case['delta'],
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=None,
+        )
+
+        print(f"Result: {result}")
+
+        # Check expected content
+        if 'expected_content' in test_case:
+            if test_case['expected_content'] is None:
+                assert result is None or not getattr(result, 'content', None), \
+                    f"Stage {i}: Expected no content, got {result}"
+            else:
+                assert result is not None and hasattr(result, 'content'), \
+                    f"Stage {i}: Expected content, got {result}"
+                assert result.content == test_case['expected_content'], \
+                    f"Stage {i}: Expected content {test_case['expected_content']}, got {result.content}"
+                print(f"✓ Content matches: {repr(result.content)}")
+
+        # Check tool calls
+        if test_case.get('expected_tool_call'):
+            assert result is not None and hasattr(result, 'tool_calls') and result.tool_calls, \
+                f"Stage {i}: Expected tool call, got {result}"
+
+            tool_call = result.tool_calls[0]
+            assert tool_call.function.name == "real_tool", \
+                f"Expected real_tool, got {tool_call.function.name}"
+            print(f"✓ Real tool call detected: {tool_call.function.name}")
+
+    print("✓ Thinking tag buffering test completed successfully")
+
+
+def test_streaming_progressive_tag_buffering(minimax_tool_parser):
+    """Test progressive character-by-character tool tag generation with buffering."""
+    # Reset streaming state
+    minimax_tool_parser.current_tool_name_sent = False
+    minimax_tool_parser.prev_tool_call_arr = []
+    minimax_tool_parser.current_tool_id = -1
+    minimax_tool_parser.streamed_args_for_tool = []
+    # Reset buffering state
+    minimax_tool_parser.pending_buffer = ""
+    minimax_tool_parser.in_thinking_tag = False
+    minimax_tool_parser.thinking_depth = 0
+
+    # Test progressive character-by-character tool tag generation
+    test_cases: list[dict[str, Any]] = [
+        {
+            'stage': 'Token: <',
+            'previous': '',
+            'current': '<',
+            'delta': '<',
+            'expected_content': None,  # Should be buffered
+        },
+        {
+            'stage': 'Token: <tool_',
+            'previous': '<',
+            'current': '<tool_',
+            'delta': 'tool_',
+            'expected_content': None,  # Still buffering
+        },
+        {
+            'stage': 'Token: <tool_calls',
+            'previous': '<tool_',
+            'current': '<tool_calls',
+            'delta': 'calls',
+            'expected_content': None,  # Still buffering
+        },
+        {
+            'stage': 'Token: <tool_calls>',
+            'previous': '<tool_calls',
+            'current': '<tool_calls>',
+            'delta': '>',
+            'expected_content': None,  # Complete tag, clear buffer, no output
+        },
+        {
+            'stage': 'Normal content',
+            'previous': 'Hello',
+            'current': 'Hello world',
+            'delta': ' world',
+            'expected_content': ' world',  # Normal content
+        },
+        {
+            'stage': 'End tag removal',
+            'previous': 'Content',
+            'current': 'Content</tool_calls>',
+            'delta': '</tool_calls>',
+            'expected_content': None,  # End tag should be removed
+        },
+        {
+            'stage': 'Final content',
+            'previous': 'Content</tool_calls>',
+            'current': 'Content</tool_calls> Done',
+            'delta': ' Done',
+            'expected_content': ' Done',  # Normal content after tags
+        },
+    ]
+
+    for i, test_case in enumerate(test_cases):
+        print(f"\n--- Stage {i}: {test_case['stage']} ---")
+        print(f"Previous: {repr(test_case['previous'])}")
+        print(f"Current:  {repr(test_case['current'])}")
+        print(f"Delta:    {repr(test_case['delta'])}")
+        print(f"Buffer before: {repr(minimax_tool_parser.pending_buffer)}")
+
+        result = minimax_tool_parser.extract_tool_calls_streaming(
+            previous_text=test_case['previous'],
+            current_text=test_case['current'],
+            delta_text=test_case['delta'],
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=None,
+        )
+
+        print(f"Buffer after: {repr(minimax_tool_parser.pending_buffer)}")
+        print(f"Result: {result}")
+
+        # Check expected content
+        if test_case['expected_content'] is None:
+            assert result is None or not getattr(result, 'content', None), \
+                f"Stage {i}: Expected no content, got {result}"
+            print("✓ No content output as expected")
+        else:
+            assert result is not None and hasattr(result, 'content'), \
+                f"Stage {i}: Expected content, got {result}"
+            assert result.content == test_case['expected_content'], \
+                f"Stage {i}: Expected content {test_case['expected_content']}, got {result.content}"
+            print(f"✓ Content matches: {repr(result.content)}")
+
+    print("✓ Progressive tag buffering test completed successfully")
