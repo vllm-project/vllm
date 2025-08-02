@@ -106,12 +106,53 @@ from vllm.utils import (Device, FlexibleArgumentParser, decorate_logs,
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
+from fastapi import APIRouter, Request, HTTPException
+from uuid import uuid4
+from .schemas import AnthropicMessagesRequest, AnthropicMessagesResponse
+
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: set[asyncio.Task] = set()
+
+router = APIRouter()
+
+@router.post("/v1/messages")
+async def anthropic_messages(request: Request):
+    body = await request.json()
+    # Validate Anthropic headers and fields
+    api_key = request.headers.get("x-api-key")
+    version = request.headers.get("anthropic-version")
+    if not api_key or not version:
+        raise HTTPException(status_code=400, detail="Missing required Anthropic headers.")
+
+    # Convert messages to prompt
+    prompt = convert_messages_to_prompt(body["messages"])
+
+    # Call existing vLLM generation logic
+    llm_response = await vllm_generate(
+        model=body["model"],
+        prompt=prompt,
+        max_tokens=body.get("max_tokens", 1024)
+    )
+
+    # Return response in Anthropic format
+    output = {
+        "id": f"msg_{uuid4().hex[:24]}",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": llm_response["text"]}],
+        "model": body["model"],
+        "stop_reason": llm_response.get("stop_reason", "end_turn"),
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": llm_response["prompt_tokens"],
+            "output_tokens": llm_response["completion_tokens"],
+        }
+    }
+    return output
 
 
 @asynccontextmanager
