@@ -57,6 +57,7 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
+    from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
     from transformers.configuration_utils import PretrainedConfig
 
@@ -74,6 +75,7 @@ if TYPE_CHECKING:
 else:
     DataclassInstance = Any
     PlacementGroup = Any
+    RuntimeEnv = Any
     PretrainedConfig = Any
     ExecutorBase = Any
     QuantizationConfig = Any
@@ -2111,6 +2113,9 @@ class ParallelConfig:
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
+
+    ray_runtime_env: Optional["RuntimeEnv"] = None
+    """Ray runtime environment to pass to distributed workers."""
 
     placement_group: Optional["PlacementGroup"] = None
     """ray distributed model workers placement group."""
