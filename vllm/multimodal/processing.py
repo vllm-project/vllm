@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import json
 import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -1156,6 +1155,18 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         self.data_parser = self._get_data_parser()
 
+        # Avoid unnecessary recomputation
+        self._supported_mm_limits = self.info.get_supported_mm_limits()
+        self._allowed_mm_limits = self.info.get_allowed_mm_limits()
+
+    @property
+    def supported_mm_limits(self):
+        return self._supported_mm_limits
+
+    @property
+    def allowed_mm_limits(self):
+        return self._allowed_mm_limits
+
     def __call__(
         self,
         prompt: str,
@@ -1176,6 +1187,28 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         return MultiModalDataParser()
 
+    def validate_num_items(
+        self,
+        modality: str,
+        num_items: int,
+    ) -> None:
+        supported_limit = self.supported_mm_limits.get(modality, 0)
+        allowed_limit = self.allowed_mm_limits.get(modality, 0)
+
+        if supported_limit is None:
+            supported_limit = allowed_limit
+
+        limit = min(supported_limit, allowed_limit)
+
+        if num_items > limit:
+            msg = (f"At most {limit} {modality}(s) may be provided in "
+                   "one prompt.")
+
+            if num_items <= supported_limit:
+                msg += " Set `--limit-mm-per-prompt` to increase this limit."
+
+            raise ValueError(msg)
+
     def _to_mm_items(
         self,
         mm_data: MultiModalDataDict,
@@ -1188,26 +1221,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
-        supported_mm_limits = self.info.get_supported_mm_limits()
-        allowed_mm_limits = self.info.get_allowed_mm_limits()
 
         for modality, items in mm_items.items():
-            supported_limit = supported_mm_limits.get(modality, 0)
-            allowed_limit = allowed_mm_limits.get(modality, 0)
-            num_items = len(items)
-
-            if supported_limit is not None and num_items > supported_limit:
-                raise ValueError(
-                    f"The model only supports at most {supported_limit} "
-                    f"{modality} items, but you passed {num_items} "
-                    f"{modality} items in the same prompt.")
-
-            if num_items > allowed_limit:
-                raise ValueError(
-                    "You set or defaulted to "
-                    f"'{json.dumps({modality: allowed_limit})}' in "
-                    f"`--limit-mm-per-prompt`, but passed {num_items} "
-                    f"{modality} items in the same prompt.")
+            self.validate_num_items(modality, len(items))
 
         return mm_items
 
