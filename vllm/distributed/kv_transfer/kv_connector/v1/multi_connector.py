@@ -10,7 +10,8 @@ from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorOutput,
+    KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -52,7 +53,7 @@ class MultiConnector(KVConnectorBase_V1):
             temp_config.kv_transfer_config = KVTransferConfig(
                 **ktc, engine_id=engine_id)
             self._connectors.append(
-                KVConnectorFactory.create_connector_v1(temp_config, role))
+                KVConnectorFactory.create_connector(temp_config, role))
 
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
@@ -105,13 +106,13 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.wait_for_save()
 
-    def get_finished(
-        self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    def get_finished(self, finished_req_ids: set[str]) -> KVConnectorOutput:
         finished_sending: set[str] = set()
         finished_recving: set[str] = set()
         for c in self._connectors:
-            sending, recving = c.get_finished(finished_req_ids)
+            output = c.get_finished(finished_req_ids)
+            sending = output.finished_sending
+            recving = output.finished_recving
             if not recving and not sending:
                 continue
             # Aggregate finished recving request ids.
@@ -130,7 +131,8 @@ class MultiConnector(KVConnectorBase_V1):
                 else:
                     self._extra_async_saves[req_id] = extra_pending - 1
 
-        return finished_sending or None, finished_recving or None
+        return KVConnectorOutput(finished_sending=finished_sending,
+                                 finished_recving=finished_recving)
 
     # ==============================
     # Scheduler-side methods

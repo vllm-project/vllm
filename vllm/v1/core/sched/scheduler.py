@@ -83,7 +83,7 @@ class Scheduler(SchedulerInterface):
             assert len(self.kv_cache_config.kv_cache_groups) == 1, (
                 "Multiple KV cache groups are not currently supported "
                 "with KV connectors")
-            self.connector = KVConnectorFactory.create_connector_v1(
+            self.connector = KVConnectorFactory.create_connector(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
 
         self.kv_event_publisher = EventPublisherFactory.create(
@@ -1139,9 +1139,15 @@ class Scheduler(SchedulerInterface):
             scheduler the request during the next step.
         """
         # KV Connector:: update recv and send status from last step.
-        for req_id in (model_runner_output.finished_recving or ()):
+        kv_connector_finish_output = (
+            model_runner_output.kv_connector_finish_output)
+        finished_recving = (kv_connector_finish_output.finished_recving
+                            if kv_connector_finish_output else set())
+        finished_sending = (kv_connector_finish_output.finished_sending
+                            if kv_connector_finish_output else set())
+        for req_id in finished_recving:
             logger.debug("Finished recving KV transfer for request %s", req_id)
             self.finished_recving_kv_req_ids.add(req_id)
-        for req_id in (model_runner_output.finished_sending or ()):
+        for req_id in finished_sending:
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])

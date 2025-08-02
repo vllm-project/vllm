@@ -63,6 +63,23 @@ class KVConnectorRole(enum.Enum):
     WORKER = 1
 
 
+class KVConnectorOutput:
+    """Output of get_finished() method.
+
+    - finished_sending: request ids that have finished sending KV
+    - finished_recving: request ids that have finished receiving KV
+    """
+
+    def __init__(
+        self,
+        *,
+        finished_sending: set[str],
+        finished_recving: set[str],
+    ):
+        self.finished_sending = finished_sending
+        self.finished_recving = finished_recving
+
+
 class KVConnectorMetadata(ABC):  # noqa: B024
     """
     Abstract Metadata used to communicate between the
@@ -201,9 +218,7 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
-    def get_finished(
-        self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    def get_finished(self, finished_req_ids: set[str]) -> KVConnectorOutput:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens on the worker.
@@ -217,7 +232,8 @@ class KVConnectorBase_V1(ABC):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        return None, None
+        return KVConnectorOutput(finished_sending=set(),
+                                 finished_recving=set())
 
     # ==============================
     # Scheduler-side methods
