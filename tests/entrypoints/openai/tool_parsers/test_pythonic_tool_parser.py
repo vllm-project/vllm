@@ -53,6 +53,11 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
     name="get_weather",
     arguments='{"city": "Martha\'s Vineyard", "metric": "\\"cool units\\""}',
 )
+NEGATIVE_NUMBERS_FUNCTION_OUTPUT = ("add_two_numbers(a=-1,b=2)")
+NEGATIVE_NUMBERS_FUNCTION_CALL = FunctionCall(
+    name="add_two_numbers",
+    arguments='{"a": -1, "b": 2}',
+)
 
 
 @pytest.mark.parametrize("streaming", [True, False])
@@ -111,6 +116,14 @@ TEST_CASES = [
                  f"[{ESCAPED_STRING_FUNCTION_OUTPUT}]",
                  [ESCAPED_STRING_FUNCTION_CALL],
                  id="escaped_string_nonstreaming"),
+    pytest.param(True,
+                 f"[{NEGATIVE_NUMBERS_FUNCTION_OUTPUT}]",
+                 [NEGATIVE_NUMBERS_FUNCTION_CALL],
+                 id="negative_numbers_streaming"),
+    pytest.param(False,
+                 f"[{NEGATIVE_NUMBERS_FUNCTION_OUTPUT}]",
+                 [NEGATIVE_NUMBERS_FUNCTION_CALL],
+                 id="negative_numbers_nonstreaming"),
     pytest.param(True,
                  f"[{SIMPLE_FUNCTION_OUTPUT}, {MORE_TYPES_FUNCTION_OUTPUT}]",
                  [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
