@@ -16,7 +16,8 @@ import regex as re
 import torch
 from PIL.Image import Image
 from transformers import (AutoConfig, AutoTokenizer, BatchFeature,
-                          GenerationConfig, GenerationMixin)
+                          GenerationConfig, GenerationMixin,
+                          SiglipImageProcessor)
 from transformers.video_utils import VideoMetadata
 
 from vllm.sequence import SampleLogprobs
@@ -886,3 +887,30 @@ def tarsier_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         hf_processor.patch_size = vision_encoder_info.get_patch_size()
 
     return hf_model
+
+
+def prepare_siglip_navit_inputs_for_hf(model_id: str,
+                                       assets: "ImageTestAssets", device: str):
+    processor = SiglipImageProcessor.from_pretrained(model_id,
+                                                     trust_remote_code=True)
+    images = [asset.pil_image for asset in assets]
+
+    processed = processor(images=images, return_tensors="pt")
+
+    pixel_values = processed["pixel_values"].to(device=device,
+                                                dtype=torch.float32)
+
+    if "pixel_mask" in processed:
+        pixel_mask = processed["pixel_mask"].to(device=device)
+    else:
+        pixel_mask = (pixel_values != 0.0).any(dim=1)
+
+    patch_size = processor.patch_size
+    patches_subgrid = pixel_mask.unfold(2, patch_size, patch_size).unfold(
+        3, patch_size, patch_size)
+    patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0)
+
+    return {
+        "pixel_values": pixel_values,
+        "patch_attention_mask": patch_attention_mask.bool(),
+    }
