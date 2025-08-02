@@ -199,6 +199,8 @@ async def build_async_engine_client_from_engine_args(
 
         from vllm.v1.engine.async_llm import AsyncLLM
         async_llm: Optional[AsyncLLM] = None
+        client_count = client_config.pop(
+            "client_count") if client_config else 1
         client_index = client_config.pop(
             "client_index") if client_config else 0
         try:
@@ -208,6 +210,7 @@ async def build_async_engine_client_from_engine_args(
                 enable_log_requests=engine_args.enable_log_requests,
                 disable_log_stats=engine_args.disable_log_stats,
                 client_addresses=client_config,
+                client_count=client_count,
                 client_index=client_index)
 
             # Don't keep the dummy data in memory
