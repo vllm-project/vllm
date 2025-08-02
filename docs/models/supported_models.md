@@ -255,7 +255,7 @@ export https_proxy=http://your.proxy.server:port
 https_proxy=http://your.proxy.server:port huggingface-cli download <model_name>
 
 # or use vllm cmd directly
-https_proxy=http://your.proxy.server:port  vllm serve <model_name> --disable-log-requests
+https_proxy=http://your.proxy.server:port  vllm serve <model_name>
 ```
 
 - Set the proxy in Python interpreter:
