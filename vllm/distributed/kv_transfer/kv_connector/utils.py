@@ -142,11 +142,14 @@ class KVOutputAggregator:
 
         finished_sending = set[str]()
         finished_recving = set[str]()
+        invalid_block_ids = set[int]()
         for output in outputs:
             update_finished_set(output.finished_sending,
                                 self._send_remaining_count, finished_sending)
             update_finished_set(output.finished_recving,
                                 self._recv_remaining_count, finished_recving)
+            if output.invalid_block_ids:
+                invalid_block_ids |= output.invalid_block_ids
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -156,8 +159,9 @@ class KVOutputAggregator:
         # still have unfinished send/recv, we want to set the aggregated
         # finished_sending/recving to None until all ranks have finished
         # send/recv
-        output.finished_sending = finished_sending if finished_sending else None
-        output.finished_recving = finished_recving if finished_recving else None
+        output.finished_sending = finished_sending or None
+        output.finished_recving = finished_recving or None
+        output.invalid_block_ids = invalid_block_ids or None
 
         return output
 
