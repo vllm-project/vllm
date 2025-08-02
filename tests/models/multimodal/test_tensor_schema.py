@@ -11,7 +11,7 @@ from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
-from vllm.utils import GiB_bytes
+from vllm.utils import GiB_bytes, set_default_torch_num_threads
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
@@ -159,17 +159,20 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
         if model_info.v0_only:
             m.setenv("VLLM_USE_V1", "0")
 
-        with vllm_runner(
-                model_id,
-                tokenizer_name=model_info.tokenizer,
-                tokenizer_mode=model_info.tokenizer_mode,
-                revision=model_info.revision,
-                trust_remote_code=model_info.trust_remote_code,
-                max_model_len=model_info.max_model_len,
-                load_format="dummy",
-                hf_overrides=hf_overrides,
-                limit_mm_per_prompt=limit_mm_per_prompt,
-        ) as vllm_model:
+        with (
+                set_default_torch_num_threads(1),
+                vllm_runner(
+                    model_id,
+                    tokenizer_name=model_info.tokenizer,
+                    tokenizer_mode=model_info.tokenizer_mode,
+                    revision=model_info.revision,
+                    trust_remote_code=model_info.trust_remote_code,
+                    max_model_len=model_info.max_model_len,
+                    load_format="dummy",
+                    hf_overrides=hf_overrides,
+                    limit_mm_per_prompt=limit_mm_per_prompt,
+                ) as vllm_model,
+        ):
             model_config = vllm_model.llm.llm_engine.model_config
             llm_engine = vllm_model.llm.llm_engine
 
