@@ -56,18 +56,18 @@ class MultiModalBudget:
         for modality, max_tokens in max_tokens_by_modality.items():
             (
                 max_items_per_prompt,
-                max_items_per_req,
+                max_items_per_iter,
             ) = self.get_max_items(modality, max_tokens)
 
             max_items_per_prompt_by_modality[modality] = max_items_per_prompt
-            max_items_per_seq_by_modality[modality] = max_items_per_req
+            max_items_per_seq_by_modality[modality] = max_items_per_iter
 
         self.max_items_per_prompt_by_modality = max_items_per_prompt_by_modality
-        self.max_items_per_seq_by_modality = max_items_per_seq_by_modality
+        self.max_items_per_iter_by_modality = max_items_per_seq_by_modality
 
-    def get_modality_with_max_tokens_per_seq(self) -> tuple[str, int]:
-        max_tokens_per_seq_by_modality = self.max_items_per_seq_by_modality
-        modality, max_tokens = max(max_tokens_per_seq_by_modality.items(),
+    def get_modality_with_max_tokens_per_iter(self) -> tuple[str, int]:
+        max_tokens_per_iter_by_modality = self.max_items_per_iter_by_modality
+        modality, max_tokens = max(max_tokens_per_iter_by_modality.items(),
                                    key=lambda item: item[1])
 
         return modality, max_tokens
@@ -113,12 +113,12 @@ class MultiModalBudget:
 
         max_decoder_items = max_num_reqs * max_items_per_prompt
 
-        max_items_per_req = max(
+        max_items_per_iter = max(
             1,
             min(max_encoder_items, max_decoder_items),
         )
 
-        return max_items_per_prompt, max_items_per_req
+        return max_items_per_prompt, max_items_per_iter
 
 
 def sanity_check_mm_encoder_outputs(

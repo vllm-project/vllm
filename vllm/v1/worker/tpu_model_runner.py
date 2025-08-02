@@ -1310,7 +1310,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         mm_budget = self.mm_budget
         assert mm_budget is not None
 
-        max_items_per_seq_by_modality = mm_budget.max_items_per_seq_by_modality
+        max_items_per_seq_by_modality = mm_budget.max_items_per_iter_by_modality
         max_items_per_prompt_by_modality = mm_budget.max_items_per_prompt_by_modality  # noqa: E501
 
         for mode, max_items_per_seq in max_items_per_seq_by_modality.items():
@@ -1543,10 +1543,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 (
                     dummy_modality,
                     max_tokens,
-                ) = mm_budget.get_modality_with_max_tokens_per_seq()
+                ) = mm_budget.get_modality_with_max_tokens_per_iter()
                 (
                     max_mm_items_per_prompt,
-                    max_mm_items_per_req,
+                    max_mm_items_per_iter,
                 ) = mm_budget.get_max_items(dummy_modality, max_tokens)
 
                 logger.info(
@@ -1554,7 +1554,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "%s tokens, and profiled with %s %s items of the maximum "
                     "feature size.",
                     encoder_budget,
-                    max_mm_items_per_req,
+                    max_mm_items_per_iter,
                     dummy_modality,
                 )
 
@@ -1566,7 +1566,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 batched_dummy_mm_inputs = self._get_mm_decoder_dummy_batch(
                     dummy_modality,
                     dummy_mm_data,
-                    max_mm_items_per_req,
+                    max_mm_items_per_iter,
                 )
 
                 # Run multimodal encoder.
@@ -1585,7 +1585,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 sanity_check_mm_encoder_outputs(
                     dummy_encoder_outputs,
-                    expected_num_items=max_mm_items_per_req,
+                    expected_num_items=max_mm_items_per_iter,
                 )
 
                 # Cache the dummy encoder outputs.
