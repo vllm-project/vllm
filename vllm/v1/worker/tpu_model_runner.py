@@ -1310,7 +1310,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         mm_budget = self.mm_budget
         assert mm_budget is not None
 
-        max_items_per_seq_by_modality = mm_budget.max_items_per_iter_by_modality
+        max_items_per_seq_by_modality = mm_budget.max_items_per_batch_by_modality  # noqa: E501
         max_items_per_prompt_by_modality = mm_budget.max_items_per_prompt_by_modality  # noqa: E501
 
         for mode, max_items_per_seq in max_items_per_seq_by_modality.items():
@@ -1543,10 +1543,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 (
                     dummy_modality,
                     max_tokens,
-                ) = mm_budget.get_modality_with_max_tokens_per_iter()
+                ) = mm_budget.get_modality_with_max_tokens_per_batch()
                 (
                     max_mm_items_per_prompt,
-                    max_mm_items_per_iter,
+                    max_mm_items_per_batch,
                 ) = mm_budget.get_max_items(dummy_modality, max_tokens)
 
                 logger.info(
@@ -1554,7 +1554,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "%s tokens, and profiled with %s %s items of the maximum "
                     "feature size.",
                     encoder_budget,
-                    max_mm_items_per_iter,
+                    max_mm_items_per_batch,
                     dummy_modality,
                 )
 
@@ -1566,7 +1566,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 batched_dummy_mm_inputs = self._get_mm_decoder_dummy_batch(
                     dummy_modality,
                     dummy_mm_data,
-                    max_mm_items_per_iter,
+                    max_mm_items_per_batch,
                 )
 
                 # Run multimodal encoder.
@@ -1585,7 +1585,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 sanity_check_mm_encoder_outputs(
                     dummy_encoder_outputs,
-                    expected_num_items=max_mm_items_per_iter,
+                    expected_num_items=max_mm_items_per_batch,
                 )
 
                 # Cache the dummy encoder outputs.
@@ -1811,13 +1811,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_mm_decoder_dummy_data(
         self,
         modality: str,
-        processor_max_batch_size: int,
+        max_items_per_prompt: int,
     ) -> DummyDecoderData:
         """Dummy data for profiling and precompiling multimodal processor."""
         model_config = self.model_config
         if model_config.get_multimodal_config().is_mm_processing_gpu:
             # Result in the maximum GPU consumption of HF processor
-            mm_counts = {modality: processor_max_batch_size}
+            mm_counts = {modality: max_items_per_prompt}
             disable_cache = True
         else:
             mm_counts = {modality: 1}
@@ -1834,7 +1834,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         modality: str,
         dummy_decoder_data: DummyDecoderData,
-        model_max_batch_size: int,
+        max_items_per_batch: int,
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         dummy_mm_data = dummy_decoder_data.multi_modal_data
@@ -1844,7 +1844,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
 
         batched_dummy_mm_inputs = MultiModalKwargs.batch([dummy_mm_kwargs] *
-                                                         model_max_batch_size)
+                                                         max_items_per_batch)
         return MultiModalKwargs.as_kwargs(
             batched_dummy_mm_inputs,
             device=self.device,
