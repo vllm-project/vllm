@@ -501,12 +501,6 @@ class DeepseekForCausalLMWithAdditionalHeads(DeepseekForCausalLM):
                 "hidden_dim": 4096
             },
             {
-                "name": "scim",
-                "location": "/path/to/scim_head.safetensors",
-                "num_hidden_layers": 1,
-                "hidden_dim": 4096
-            },
-            {
                 "name": "violence",
                 "location": "/path/to/violence_head.safetensors",
                 "num_hidden_layers": 0
@@ -558,11 +552,6 @@ class DeepseekForCausalLMWithAdditionalHeads(DeepseekForCausalLM):
         return nn.Sequential(*layers)
 
     def _load_classification_heads_from_files(self) -> set[str]:
-        """
-        Load the safetensor state dicts for all classification heads from their
-        configured locations. Returns the set of fully qualified parameter names
-        that were loaded (e.g., "classifier_heads.self_harm.0.weight").
-        """
         if self._heads_loaded:
             return set()
 
@@ -587,36 +576,16 @@ class DeepseekForCausalLMWithAdditionalHeads(DeepseekForCausalLM):
         self._heads_loaded = True
         return loaded
 
-    def compute_additional_head(self, hidden_states: torch.FloatTensor) -> torch.Tensor:
-        """
-        Compute all additional binary classification head scores from the final token embedding.
-        All heads are computed in parallel for better performance.
-
-        Args:
-            hidden_states (torch.FloatTensor): all hidden states from the LM, shape (batch, seq_len, hidden_size).
-
-        Returns:
-            torch.Tensor: shape (batch, num_heads) where each column corresponds to a head in self.head_names order.
-        """
-        last_hidden = hidden_states[:, -1, :]
-
+    def compute_additional_head(self, hidden_states: torch.Tensor) -> torch.Tensor:
         head_outputs = []
         for name in self.head_names:
             head = self.classifier_heads[name]
-            logits = head(last_hidden)
+            logits = head(hidden_states)
             head_outputs.append(logits.squeeze(-1))
 
         return torch.stack(head_outputs, dim=1)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """
-        Load weights for both the base model and additional classification heads.
-        Head weights are loaded from safetensor files here (once).
-        """
-        # First load the base model weights
         loaded_params = super().load_weights(weights)
-
-        # Then load the additional head safetensors (only once)
         head_loaded_params = self._load_classification_heads_from_files()
-
         return loaded_params.union(head_loaded_params)
