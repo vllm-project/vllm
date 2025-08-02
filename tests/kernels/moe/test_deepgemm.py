@@ -20,11 +20,6 @@ from vllm.utils.deep_gemm import (calc_diff, is_deep_gemm_supported,
 
 BLOCK_SIZE = [128, 128]
 
-requires_deep_gemm = pytest.mark.skipif(
-    not is_deep_gemm_supported(),
-    reason="Requires deep_gemm kernels",
-)
-
 
 def make_block_quant_fp8_weights(
     e: int,
@@ -152,7 +147,8 @@ NUM_EXPERTS = [32]
 @pytest.mark.parametrize("mnk", MNKs)
 @pytest.mark.parametrize("topk", TOPKS)
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
-@requires_deep_gemm
+@pytest.mark.skipif(not is_deep_gemm_supported(),
+                    reason="Requires deep_gemm kernels")
 def test_deepgemm_vs_triton(mnk, topk, num_experts, monkeypatch):
 
     with monkeypatch.context() as m:
