@@ -212,15 +212,16 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
 
     Y_min, final_state_min = ssd_minimal_discrete(X * dt.unsqueeze(-1), A * dt,
                                                   B, C, chunk_size)
-
-    Y, final_state = mamba_chunk_scan_combined(X,
-                                               dt,
-                                               A,
-                                               B,
-                                               C,
-                                               chunk_size,
-                                               D=None,
-                                               return_final_states=True)
+    Y = torch.empty_like(X)
+    final_state = mamba_chunk_scan_combined(X,
+                                            dt,
+                                            A,
+                                            B,
+                                            C,
+                                            chunk_size,
+                                            D=None,
+                                            return_final_states=True,
+                                            out=Y)
 
     # just test the last in sequence
     torch.testing.assert_close(Y[:, -1], Y_min[:, -1], atol=atol, rtol=rtol)
@@ -292,7 +293,8 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
             _query_start_loc_to_chunk_indices_offsets(
                 cu_seqlens, chunk_size, cu_seqlens[-1])
 
-        Y, new_states = mamba_chunk_scan_combined(
+        Y = torch.empty_like(X)
+        new_states = mamba_chunk_scan_combined(
             X,
             dt,
             A,
@@ -306,6 +308,7 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
             chunk_offsets=chunk_offsets,
             return_varlen_states=True,
             initial_states=states,
+            out=Y,
         )
 
         # just test the last in sequence
