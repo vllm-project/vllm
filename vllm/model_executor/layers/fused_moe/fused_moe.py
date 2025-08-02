@@ -761,8 +761,8 @@ def get_moe_wna16_block_config(config: dict[str,
 
 def should_moe_wna16_use_cuda(num_valid_tokens: int, group_size: int,
                               num_experts: int, bit: int):
-    return bit == 4 and group_size in [32, 64, 128] and \
-        num_valid_tokens / num_experts <= 6
+    return current_platform.is_cuda() and bit == 4 and \
+        group_size in [32, 64, 128] and num_valid_tokens / num_experts <= 6
 
 
 def get_default_config(
