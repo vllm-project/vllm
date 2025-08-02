@@ -17,8 +17,8 @@ import torch.nn as nn
 from tqdm import tqdm
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention import Attention, AttentionType, ChunkedLocalAttention
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.compilation.counter import compilation_counter
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config, update_config)
@@ -2611,6 +2611,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             if size <= self.scheduler_config.max_num_seqs
                         ]
 
+            return attn_groups
+
         for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             if isinstance(kv_cache_spec, AttentionSpec):
@@ -2670,7 +2672,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Check that if any backends reorder batches; that the reordering
         is compatible (e.g., decode threshold is the same)
         """
-        for attn_metadata_builder_i in self.attn_metadata_builders:
+        for group in itertools.chain.from_iterable(self.attn_groups):
+            attn_metadata_builder_i = group.attn_metadata_builder
+
             # check that if any backends reorder batches; that the reordering
             # is compatible (e.g., decode threshold is the same)
             reorder_batch_threshold_i = (
