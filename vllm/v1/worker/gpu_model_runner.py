@@ -338,7 +338,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.reorder_batch_threshold: Optional[int] = None
 
-
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
         Update the order of requests in the batch based on the attention

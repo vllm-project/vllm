@@ -49,7 +49,6 @@ backend_configs = {
                   env_vars={"VLLM_FLASH_ATTN_VERSION": "3"},
                   comp_config={
                       "cudagraph_mode": "FULL",
-                      "cudagraph_separate_routine": False
                   },
                   specific_gpu_arch=(9, 0)),
     # FlashMLA on Hopper
@@ -59,8 +58,7 @@ backend_configs = {
                       "VLLM_ATTENTION_BACKEND": "FLASHMLA",
                   },
                   comp_config={
-                      "cudagraph_mode": "FULL",
-                      "cudagraph_separate_routine": True
+                      "cudagraph_mode": "FULL_AND_PIECEWISE",
                   },
                   specific_gpu_arch=(9, 0)),
     # FA2
@@ -69,7 +67,6 @@ backend_configs = {
                   env_vars={"VLLM_FLASH_ATTN_VERSION": "2"},
                   comp_config={
                       "cudagraph_mode": "FULL",
-                      "cudagraph_separate_routine": True
                   }),
     # Triton Attention
     "TritonAttn":
@@ -77,7 +74,13 @@ backend_configs = {
                   env_vars={"VLLM_ATTENTION_BACKEND": "TRITON_ATTN_VLLM_V1"},
                   comp_config={
                       "cudagraph_mode": "FULL",
-                      "cudagraph_separate_routine": True
+                  }),
+    # FlashInfer
+    "FlashInfer":
+    BackendConfig(name="FlashInfer",
+                  env_vars={"VLLM_ATTENTION_BACKEND": "FLASHINFER"},
+                  comp_config={
+                      "cudagraph_mode": "FULL_AND_PIECEWISE",
                   }),
 }
 

@@ -50,7 +50,6 @@ backend_configs = {
                   env_vars={"VLLM_FLASH_ATTN_VERSION": "3"},
                   comp_config={
                       "cudagraph_mode": "FULL",
-                      "cudagraph_separate_routine": False
                   },
                   specific_gpu_arch=(9, 0)),
     # FlashMLA on Hopper
@@ -60,8 +59,7 @@ backend_configs = {
                       "VLLM_ATTENTION_BACKEND": "FLASHMLA",
                   },
                   comp_config={
-                      "cudagraph_mode": "FULL",
-                      "cudagraph_separate_routine": True
+                      "cudagraph_mode": "FULL_AND_PIECEWISE",
                   },
                   specific_gpu_arch=(9, 0)),
     # FA2
@@ -69,47 +67,48 @@ backend_configs = {
     BackendConfig(name="FA2",
                   env_vars={"VLLM_FLASH_ATTN_VERSION": "2"},
                   comp_config={
-                      "cudagraph_mode": "FULL",
-                      "cudagraph_separate_routine": True
+                      "cudagraph_mode": "FULL_AND_PIECEWISE",
                   }),
     # Triton Attention
     "TritonAttn":
     BackendConfig(name="TritonAttn",
                   env_vars={"VLLM_ATTENTION_BACKEND": "TRITON_ATTN_VLLM_V1"},
                   comp_config={
-                      "cudagraph_mode": "FULL",
-                      "cudagraph_separate_routine": True
+                      "cudagraph_mode": "FULL_AND_PIECEWISE",
+                  }),
+    # FlashInfer
+    "FlashInfer":
+    BackendConfig(name="FlashInfer",
+                  env_vars={"VLLM_ATTENTION_BACKEND": "FLASHINFER"},
+                  comp_config={
+                      "cudagraph_mode": "FULL_AND_PIECEWISE",
                   }),
 }
 
-# test invalid cudagraph_mode and cudagraph_separate_routine combo
-# (backend_name, cudagraph_mode, cudagraph_separate_routine, supported)
+# test attention backend and cudagraph_mode combo
+# (backend_name, cudagraph_mode, supported)
 combo_cases_1 = [
-    ("FA3", "FULL", False, True),
+    ("FA3", "FULL", True),
     # for backend cudagraph support is ALWAYS_UNIFIED,
     # cudagraph_separate_routine would be ignored(overwritten)
-    ("FA3", "FULL", True, True),
-    ("FA3", "PIECEWISE", False, True),
-    ("FA2", "FULL", False, True),
-    ("FA2", "FULL", True, True),
-    ("FA2", "PIECEWISE", False, True),
-    # For backend cudagraph support is pure decode only, the
-    # cudagraph_separate_routine would be ignored(overwritten)
-    # ("FlashInfer", "FULL", False, True),
+    ("FA3", "FULL_AND_PIECEWISE", True),
+    ("FA3", "PIECEWISE", True),
+    ("FA2", "FULL", True),
+    ("FA2", "FULL_AND_PIECEWISE", True),
+    ("FA2", "PIECEWISE", True),
+    # For backend cudagraph support is pure decode only.
+    ("FlashInfer", "FULL", False),
+    ("FlashInfer", "FULL_AND_PIECEWISE", True),
     # No cudagraph is compatible with vllm compilation
-    ("FA2", "NONE", False, True),
-    ("FA3", "NONE", False, True),
-    ("FlashInfer", "NONE", False, True),
-    # cudagraph_separate_routine requires cudagraph_mode to be FULL
-    ("FA2", "PIECEWISE", True, False),
-    ("FlashInfer", "PIECEWISE", True, False),
+    ("FA2", "NONE", True),
+    ("FA3", "NONE", True),
+    ("FlashInfer", "NONE", True),
 ]
 
 
 @pytest.mark.parametrize("combo_case", combo_cases_1)
-def test_cudagraph_mode_and_separate_routine_combo(combo_case):
-    backend_name, cudagraph_mode, cudagraph_separate_routine, supported\
-        = combo_case
+def test_backend_and_cudagraph_mode_combo(combo_case):
+    backend_name, cudagraph_mode, supported = combo_case
     if backend_name == "FlashInfer":
         try:
             import flashinfer  # noqa: F401
@@ -133,8 +132,7 @@ def test_cudagraph_mode_and_separate_routine_combo(combo_case):
                   gpu_memory_utilization=0.45,
                   max_model_len=1024,
                   compilation_config=CompilationConfig(
-                      cudagraph_mode=cudagraph_mode,
-                      cudagraph_separate_routine=cudagraph_separate_routine))
+                      level=3, cudagraph_mode=cudagraph_mode))
         llm.generate(["Hello, my name is"] * 10)
 
     try:
@@ -157,6 +155,11 @@ combo_cases_2 = [
     ("FA2", "PIECEWISE", 0, False),  # no compilation + piecewise cudagraph
     ("FA2", "PIECEWISE", 3,
      True),  # piecewise compilation + piecewise cudagraph
+    ("FA2", "FULL_AND_PIECEWISE", 0,
+     False),  # piecewise cudagraph not supported without piecewise compilation
+    ("FA2", "FULL_AND_PIECEWISE", 3, True),
+    ("FA2", "FULL_DECODE_ONLY", 0, True),
+    ("FA2", "FULL_DECODE_ONLY", 3, True),
     ("FA2", "NONE", 0, True),  # no compilation + no cudagraph
     ("FA2", "NONE", 3, True),  # piecewise compilation + no cudagraph
 ]

@@ -45,34 +45,26 @@ class TestCudagraphDispatcher:
             # Test case 0: Full CG for mixed batches, no separate routine
             {
                 "case_id": 0,
-                "create_mixed_batch_full_cg": True,
                 "cudagraph_mode": "FULL",
                 "piecewise_attn_compilation": False,
-                "cudagraph_separate_routine": False
             },
             # Test case 1: Full CG for uniform batches, piecewise for mixed
             {
                 "case_id": 1,
-                "create_mixed_batch_full_cg": False,
-                "cudagraph_mode": "FULL",
+                "cudagraph_mode": "FULL_AND_PIECEWISE",
                 "piecewise_attn_compilation": True,
-                "cudagraph_separate_routine": True,
             },
             # Test case 2: Full CG for uniform batches, no CG for mixed
             {
                 "case_id": 2,
-                "create_mixed_batch_full_cg": False,
-                "cudagraph_mode": "FULL",
+                "cudagraph_mode": "FULL_DECODE_ONLY",
                 "piecewise_attn_compilation": False,
-                "cudagraph_separate_routine": True
             },
             # Test case 3: Piecewise for all
             {
                 "case_id": 3,
-                "create_mixed_batch_full_cg": False,
                 "cudagraph_mode": "PIECEWISE",
                 "piecewise_attn_compilation": True,
-                "cudagraph_separate_routine": False,
             },
         ])
     def test_dispatcher(self, params):
@@ -80,7 +72,6 @@ class TestCudagraphDispatcher:
         comp_config = CompilationConfig(
             cudagraph_mode=params["cudagraph_mode"],
             cudagraph_capture_sizes=[1, 8],
-            cudagraph_separate_routine=params["cudagraph_separate_routine"],
             is_attention_splitting=params["piecewise_attn_compilation"])
         if params["piecewise_attn_compilation"]:
             comp_config.level = CompilationLevel.PIECEWISE
@@ -90,29 +81,27 @@ class TestCudagraphDispatcher:
         config = _create_vllm_config(comp_config, max_num_seqs=8)
         dispatcher = CudagraphDispatcher(config)
         dispatcher.initialize_cudagraph_keys(
-            create_mixed_batch_full_cg=params["create_mixed_batch_full_cg"],
+            cudagraph_mode=comp_config.cudagraph_mode,
             uniform_decode_query_len=1)
 
         # Verify the key is initialized correctly
-        print(dispatcher.cudagraph_keys[CUDAGraphMode.FULL])
-        if params["piecewise_attn_compilation"]:
+        if params["cudagraph_mode"] in ["FULL_AND_PIECEWISE", "PIECEWISE"]:
             assert len(dispatcher.cudagraph_keys[CUDAGraphMode.PIECEWISE]) == 2
-        if params["cudagraph_mode"] == "FULL":
-            expected_len = 4 if params["create_mixed_batch_full_cg"] and params[
-                "cudagraph_separate_routine"] else 2
         else:
-            expected_len = 0
-        assert len(dispatcher.cudagraph_keys[CUDAGraphMode.FULL]) ==\
-             expected_len
+            assert len(dispatcher.cudagraph_keys[CUDAGraphMode.PIECEWISE]) == 0
+        if params["cudagraph_mode"] not in ["NONE", "PIECEWISE"]:
+            assert len(dispatcher.cudagraph_keys[CUDAGraphMode.FULL]) == 2
+        else:
+            assert len(dispatcher.cudagraph_keys[CUDAGraphMode.FULL]) == 0
 
         # Test dispatch logic
         # 1. non-uniform batch, size in cudagraph size list
         desc_full_exact = BatchDescriptor(num_tokens=8, uniform_decode=False)
         rt_mode, key = dispatcher.dispatch(desc_full_exact)
-        if params["create_mixed_batch_full_cg"]:
+        if params["cudagraph_mode"] == "FULL":
             assert rt_mode == CUDAGraphMode.FULL
             assert key == desc_full_exact
-        elif params["piecewise_attn_compilation"]:
+        elif params["cudagraph_mode"] in ["FULL_AND_PIECEWISE", "PIECEWISE"]:
             assert rt_mode == CUDAGraphMode.PIECEWISE
             assert key == desc_full_exact
         else:
@@ -122,19 +111,14 @@ class TestCudagraphDispatcher:
         desc_uniform_exact = BatchDescriptor(num_tokens=8, uniform_decode=True)
         rt_mode, key = dispatcher.dispatch(desc_uniform_exact)
         if params["cudagraph_mode"] == "FULL":
-            if params["cudagraph_separate_routine"]:
-                assert rt_mode == CUDAGraphMode.FULL
-                assert key == desc_uniform_exact
-            elif params["create_mixed_batch_full_cg"] and not params[
-                    "cudagraph_separate_routine"]:
-                assert rt_mode == CUDAGraphMode.FULL
-                assert key == desc_uniform_exact.non_uniform
-            elif params["piecewise_attn_compilation"]:
-                assert rt_mode == CUDAGraphMode.PIECEWISE
-                assert key == desc_uniform_exact.non_uniform
-            else:
-                raise ValueError(f"Impossible case: {params}")
-        elif params["piecewise_attn_compilation"]:
+            assert rt_mode == CUDAGraphMode.FULL
+            assert key == desc_uniform_exact.non_uniform
+        elif params["cudagraph_mode"] in [
+                "FULL_DECODE_ONLY", "FULL_AND_PIECEWISE"
+        ]:
+            assert rt_mode == CUDAGraphMode.FULL
+            assert key == desc_uniform_exact
+        elif params["cudagraph_mode"] == "PIECEWISE":
             assert rt_mode == CUDAGraphMode.PIECEWISE
             assert key == desc_uniform_exact.non_uniform
         else:
@@ -200,8 +184,6 @@ class TestCUDAGraphWrapper:
 
         # Compare with eager output
         eager_output = self.model(self.input_tensor)
-        print(eager_output)
-        print(output2)
         torch.testing.assert_close(eager_output, output2)
 
     @create_new_process_for_each_test("spawn")
@@ -248,15 +230,14 @@ class TestCUDAGraphWrapper:
 class TestCudagraphIntegration:
 
     def setup_method(self):
-        # FULL mode for both uniform and non-uniform batches
+        # only FULL mode for non-uniform batches
         self.comp_config = CompilationConfig(level=CompilationLevel.PIECEWISE,
                                              cudagraph_mode="FULL",
-                                             cudagraph_separate_routine=True,
                                              cudagraph_capture_sizes=[10, 20])
         self.vllm_config = _create_vllm_config(self.comp_config)
         self.dispatcher = CudagraphDispatcher(self.vllm_config)
         self.dispatcher.initialize_cudagraph_keys(
-            create_mixed_batch_full_cg=True, uniform_decode_query_len=1)
+            self.comp_config.cudagraph_mode, uniform_decode_query_len=1)
 
     def _run_and_monitor_call(self, wrapper, input_tensor, runtime_mode,
                               batch_descriptor):
@@ -301,58 +282,57 @@ class TestCudagraphIntegration:
         model = SimpleMLP().to("cuda")
         full_wrapper = CUDAGraphWrapper(model, self.vllm_config,
                                         CUDAGraphMode.FULL)
-        input_10 = torch.randn(1, 10, device="cuda")
-        input_20 = torch.randn(2, 10, device="cuda")
-        input_30 = torch.randn(3, 10, device="cuda")
+        max_bs = 16
+        persistent_input_buffer = torch.zeros(max_bs, 10, device="cuda")
+        input_1 = persistent_input_buffer[:1]
+        input_2 = persistent_input_buffer[:2]
+        input_3 = persistent_input_buffer[:3]
 
-        desc_10 = BatchDescriptor(num_tokens=1)
-        desc_20 = BatchDescriptor(num_tokens=2)
-        desc_30_unseen = BatchDescriptor(num_tokens=3)
+        desc_1 = BatchDescriptor(num_tokens=1)
+        desc_2 = BatchDescriptor(num_tokens=2)
+        desc_3_unseen = BatchDescriptor(num_tokens=3)
 
         # 0. global warmup
         with set_forward_context(attn_metadata=None,
                                  vllm_config=self.vllm_config,
                                  cudagraph_runtime_mode=CUDAGraphMode.NONE,
                                  batch_descriptor=None):
-            full_wrapper(input_10)
+            full_wrapper(input_1)
 
-        rt_mode, key = self.dispatcher.dispatch(desc_10)
+        rt_mode, key = self.dispatcher.dispatch(desc_1)
         # 1. Capture first shape
-        action = self._run_and_monitor_call(full_wrapper, input_10, rt_mode,
+        action = self._run_and_monitor_call(full_wrapper, input_1, rt_mode,
                                             key)
         assert action == "capture_global"
 
         # 2. Replay first shape
-        action = self._run_and_monitor_call(full_wrapper, input_10, rt_mode,
+        action = self._run_and_monitor_call(full_wrapper, input_1, rt_mode,
                                             key)
         assert action == "replay"
 
-        rt_mode, key = self.dispatcher.dispatch(desc_20)
+        rt_mode, key = self.dispatcher.dispatch(desc_2)
         # 3. Capture second shape
-        action = self._run_and_monitor_call(full_wrapper, input_20, rt_mode,
+        action = self._run_and_monitor_call(full_wrapper, input_2, rt_mode,
                                             key)
         assert action == "capture_global"
 
         # 4. Replay second shape
-        action = self._run_and_monitor_call(full_wrapper, input_20,
-                                            CUDAGraphMode.FULL, desc_20)
+        action = self._run_and_monitor_call(full_wrapper, input_2,
+                                            CUDAGraphMode.FULL, desc_2)
         assert action == "replay"
 
         # 5. Bypass if no key match
-        rt_mode, key = self.dispatcher.dispatch(desc_30_unseen)
+        rt_mode, key = self.dispatcher.dispatch(desc_3_unseen)
         assert rt_mode == CUDAGraphMode.NONE
-        action = self._run_and_monitor_call(full_wrapper, input_30, rt_mode,
+        action = self._run_and_monitor_call(full_wrapper, input_3, rt_mode,
                                             key)
         assert action == "bypass"
 
         # capture unseen shape is not allowed after disable
         set_cudagraph_capturing_enabled(False)
-        rt_mode, key = self.dispatcher.dispatch(desc_30_unseen)
-        assert key != desc_30_unseen.non_uniform
-
         with pytest.raises(RuntimeError):
-            self._run_and_monitor_call(full_wrapper, input_30,
-                                       CUDAGraphMode.FULL, desc_30_unseen)
+            self._run_and_monitor_call(full_wrapper, input_3,
+                                       CUDAGraphMode.FULL, desc_3_unseen)
         set_cudagraph_capturing_enabled(True)
 
     @create_new_process_for_each_test("spawn")
@@ -361,7 +341,7 @@ class TestCudagraphIntegration:
         model = SimpleMLP().to("cuda")
         full_wrapper = CUDAGraphWrapper(model, self.vllm_config,
                                         CUDAGraphMode.FULL)
-        input_10 = torch.randn(1, 10, device="cuda")
+        input_1 = torch.randn(1, 10, device="cuda")
 
         # Setup: Inner model is wrapped with PIECEWISE, outer with FULL
         inner_model = SimpleMLP().to("cuda")
@@ -375,22 +355,22 @@ class TestCudagraphIntegration:
         full_wrapper = CUDAGraphWrapper(outer_model, self.vllm_config,
                                         CUDAGraphMode.FULL)
 
-        desc_10 = BatchDescriptor(num_tokens=10)
+        desc_1 = BatchDescriptor(num_tokens=1)
 
         # 0. global warmup
         with set_forward_context(attn_metadata=None,
                                  vllm_config=self.vllm_config,
                                  cudagraph_runtime_mode=CUDAGraphMode.NONE,
                                  batch_descriptor=None):
-            full_wrapper(input_10)
+            full_wrapper(input_1)
 
         # --- Test runtime mode FULL---
         # Run with FULL mode context. Expect outer wrapper to capture.
         # The inner mock should be called once inside the graph capture.
         outer_model.forward.reset_mock()
         inner_model.forward.reset_mock()
-        action = self._run_and_monitor_call(full_wrapper, input_10,
-                                            CUDAGraphMode.FULL, desc_10)
+        action = self._run_and_monitor_call(full_wrapper, input_1,
+                                            CUDAGraphMode.FULL, desc_1)
         assert action == "capture_global"
         assert outer_model.forward.call_count == 1
         assert inner_model.forward.call_count == 1
@@ -398,8 +378,8 @@ class TestCudagraphIntegration:
         # Run again. Expect outer wrapper to replay.
         # The outer model should NOT be called because the whole graph
         # is replayed.
-        action = self._run_and_monitor_call(full_wrapper, input_10,
-                                            CUDAGraphMode.FULL, desc_10)
+        action = self._run_and_monitor_call(full_wrapper, input_1,
+                                            CUDAGraphMode.FULL, desc_1)
         assert action == "replay"
         assert outer_model.forward.call_count == 1  # No new call
         assert inner_model.forward.call_count == 1
@@ -410,16 +390,16 @@ class TestCudagraphIntegration:
         # Run with PIECEWISE mode context.
         # Expect outer wrapper to bypass and call inner wrapper.
         # Inner wrapper should capture.
-        action = self._run_and_monitor_call(full_wrapper, input_10,
-                                            CUDAGraphMode.PIECEWISE, desc_10)
+        action = self._run_and_monitor_call(full_wrapper, input_1,
+                                            CUDAGraphMode.PIECEWISE, desc_1)
         assert action == "capture_global"
         assert outer_model.forward.call_count == 1
         assert inner_model.forward.call_count == 1
 
         # Run again with PIECEWISE.
         # Outer bypasses, inner replays.
-        action = self._run_and_monitor_call(full_wrapper, input_10,
-                                            CUDAGraphMode.PIECEWISE, desc_10)
+        action = self._run_and_monitor_call(full_wrapper, input_1,
+                                            CUDAGraphMode.PIECEWISE, desc_1)
         assert action == "bypass"
         assert outer_model.forward.call_count == 2
         assert inner_model.forward.call_count == 1
