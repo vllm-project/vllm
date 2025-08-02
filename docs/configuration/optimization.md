@@ -2,6 +2,9 @@
 
 This guide covers optimization strategies and performance tuning for vLLM V1.
 
+!!! tip
+    Running out of memory? Consult [this guide](./conserving_memory.md) on how to conserve memory.
+
 ## Preemption
 
 Due to the auto-regressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
@@ -126,62 +129,68 @@ Data parallelism replicates the entire model across multiple GPU sets and proces
 Data parallelism can be combined with the other parallelism strategies and is set by `data_parallel_size=N`.
 Note that MoE layers will be sharded according to the product of the tensor parallel size and data parallel size.
 
-## Reducing Memory Usage
+## Multi-modal Processing
 
-If you encounter out-of-memory issues, consider these strategies:
+### Processor Cache
 
-### Context Length and Batch Size
+By default, the multi-modal processor cache is enabled to avoid repeatedly calling Hugging Face processors
+on the same multi-modal inputs, which commonly occurs in multi-turn conversations.
 
-You can reduce memory usage by limiting the context length and batch size:
+You can adjust the size of the cache via `VLLM_MM_INPUT_CACHE_GIB` environment variable (default 4 GiB).
+The actual memory usage is double of this value because the cache is mirrored across API and engine core processes.
 
-```python
-from vllm import LLM
-
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    max_model_len=2048,  # Limit context window
-    max_num_seqs=4       # Limit batch size
-)
-```
-
-### Adjust CUDA Graph Compilation
-
-CUDA graph compilation in V1 uses more memory than in V0. You can reduce memory usage by adjusting the compilation level:
+If you do not benefit much from the cache, you can disable it completely via `disable_mm_preprocessor_cache`:
 
 ```python
-from vllm import LLM
-from vllm.config import CompilationConfig, CompilationLevel
-
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    compilation_config=CompilationConfig(
-        level=CompilationLevel.PIECEWISE,
-        cudagraph_capture_sizes=[1, 2, 4, 8]  # Capture fewer batch sizes
-    )
-)
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          disable_mm_preprocessor_cache=True)
 ```
 
-Or, if you are not concerned about latency or overall performance, disable CUDA graph compilation entirely with `enforce_eager=True`:
+### Parallel Processing
+
+You can run input processing in parallel via [API server scale-out](../serving/data_parallel_deployment.md#internal-load-balancing).
+This is useful when input processing (which is run inside the API server)
+becomes a bottleneck compared to model execution (which is run inside engine core).
+
+```console
+# Run 4 API processes and 1 engine core process
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4
+
+# Run 4 API processes and 2 engine core processes
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
+```
+
+!!! note
+    API server scale-out is only available for online inference.
+
+!!! note
+    Multi-modal processor cache is disabled when API server scale-out is enabled
+    because it requires a one-to-one correspondance between API and engine core processes.
+
+### GPU-accelerated Processing
+
+You can speed up input processing by running Hugging Face processors on the GPU.
+To support this, the processor must accept a `device` argument in its call signature.
+As of this writing, the following processors are known to support GPU acceleration:
+
+- Descendants of `BaseImageProcessorFast` (requires `use_fast=True`)
+- Descendants of `BaseVideoProcessor`
+- `WhisperFeatureExtractor`
+
+To run Hugging Face processors on the GPU, you can pass the `device` argument
+(and `use_fast` if needed) via `mm_processor_kwargs`:
 
 ```python
-from vllm import LLM
+# Fast image processor requires use_fast=True
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          mm_processor_kwargs={"use_fast": True, "device": "cuda"})
 
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    enforce_eager=True  # Disable CUDA graph compilation
-)
+# Whisper feature extractor does not require use_fast
+llm = LLM(model="Qwen/Qwen2-Audio-7B-Instruct",
+          mm_processor_kwargs={"device": "cuda"})
 ```
 
-### Multimodal Models
-
-For multi-modal models, you can reduce memory usage by limiting the number of images/videos per request:
-
-```python
-from vllm import LLM
-
-# Accept up to 2 images per prompt
-llm = LLM(
-    model="Qwen/Qwen2.5-VL-3B-Instruct",
-    limit_mm_per_prompt={"image": 2}
-)
-```
+!!! note
+    Multi-modal processor cache is disabled when using GPU multi-modal processing
+    because GPU operations work better with larger batch size, which happens less
+    frequently when the cache is enabled.

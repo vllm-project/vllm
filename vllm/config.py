@@ -3357,6 +3357,13 @@ class MultiModalConfig:
     Enable fully interleaved support for multimodal prompts.
     """
 
+    @property
+    def is_mm_processing_gpu(self) -> bool:
+        if not self.mm_processor_kwargs:
+            return False
+
+        return self.mm_processor_kwargs.get("device", "cpu") != "cpu"
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -3395,6 +3402,15 @@ class MultiModalConfig:
         according to the extra arguments passed during inference.
         """
         kwargs = self.mm_processor_kwargs or {}
+
+        # This is to avoid breaking assumptions in memory profiling
+        init_device = kwargs.get("device", "cpu")
+        inference_device = inference_kwargs.get("device", init_device)
+        if init_device != inference_device:
+            raise ValueError(
+                "You cannot override the device for multi-modal preprocessing "
+                f"at runtime! Found: {init_device=} vs. {inference_device=}")
+
         return kwargs | dict(inference_kwargs)
 
 
