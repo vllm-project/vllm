@@ -251,9 +251,6 @@ class AiterFlashAttentionMetadataBuilder(
         self.aot_sliding_window: Optional[tuple[int, int]] = None
         self.total_tokens: int = 0
 
-    def reorder_batch(self, input_batch, scheduler_output) -> bool:
-        return False
-
     def build_for_cudagraph_capture(
             self, common_attn_metadata: CommonAttentionMetadata):
         self.total_tokens = self.model_config.max_model_len \
