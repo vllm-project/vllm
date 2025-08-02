@@ -51,7 +51,6 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     make_kv_sharing_fast_prefill_attention_metadata,
     make_local_attention_virtual_batches)
-from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
@@ -73,7 +72,7 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import (
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from ..sample.logits_processor import LogitsProcessorManager
-from .utils import (bind_kv_cache, gather_mm_placeholders,
+from .utils import (MultiModalBudget, bind_kv_cache, gather_mm_placeholders,
                     initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
@@ -147,14 +146,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-
-        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
-            model_config=model_config,
-            scheduler_config=scheduler_config,
-            mm_registry=self.mm_registry,
-        )
-        self.max_num_encoder_input_tokens = encoder_compute_budget
-        self.encoder_cache_size = encoder_cache_size
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
@@ -329,6 +320,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.cache_config.kv_sharing_fast_prefill:
             self.kv_sharing_fast_prefill_logits_indices = torch.zeros(
                 self.max_num_tokens, dtype=torch.int32, device=self.device)
+
+        self.mm_budget = (MultiModalBudget(
+            self.model_config,
+            self.scheduler_config,
+            self.mm_registry,
+            max_model_len=self.max_model_len,
+            max_num_reqs=self.max_num_reqs,
+        ) if self.is_multimodal_model else None)
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -605,7 +604,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _dummy_mm_kwargs(self, num_seqs: int) -> BatchedTensorInputs:
         if self.is_multimodal_raw_input_supported:
-            dummy_modality, _ = self._get_modality_with_max_tokens()
+            mm_budget = self.mm_budget
+            assert mm_budget is not None
+
+            dummy_modality, _ = mm_budget \
+                .get_modality_with_max_tokens_per_seq()
+
             return self._get_mm_dummy_batch(dummy_modality, 1, num_seqs)
 
         return {}
@@ -2159,51 +2163,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             yield
             input_ids.fill_(0)
 
-    def _get_modality_with_max_tokens(self):
-        max_tokens_by_modality = self.mm_registry \
-            .get_max_tokens_per_item_by_nonzero_modality(self.model_config)
-        dummy_modality, max_tokens_per_mm_item = max(
-            max_tokens_by_modality.items(), key=lambda item: item[1])
-
-        return dummy_modality, max_tokens_per_mm_item
-
-    def _get_encoder_budget(self) -> int:
-        return min(self.max_num_encoder_input_tokens, self.encoder_cache_size)
-
-    def _get_max_mm_items(
-        self,
-        modality: str,
-        max_tokens_per_mm_item: int,
-    ):
-        # Check how many items of this modality can be supported by
-        # the encoder budget.
-        encoder_budget = self._get_encoder_budget()
-
-        max_encoder_mm_items = encoder_budget // max_tokens_per_mm_item
-
-        # Check how many items of this modality can be supported by
-        # the decoder budget.
-        mm_limits = self.mm_registry.get_mm_limits_per_prompt(
-            self.model_config)
-        mm_limit = mm_limits[modality]
-
-        max_mm_items_per_prompt = max(
-            1,
-            min(mm_limit, self.max_model_len // max_tokens_per_mm_item),
-        )
-
-        # NOTE: We do not consider max_num_batched_tokens on purpose
-        # because the multimodal embeddings can be generated in advance
-        # and chunked prefilled.
-        max_decoder_mm_items = self.max_num_reqs * max_mm_items_per_prompt
-
-        max_mm_items_per_req = max(
-            1,
-            min(max_encoder_mm_items, max_decoder_mm_items),
-        )
-
-        return max_mm_items_per_prompt, max_mm_items_per_req
-
     def _get_mm_dummy_batch(
         self,
         modality: str,
@@ -2502,42 +2461,52 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
-        # TODO: handle encoder-decoder models once we support them.
-        if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
-                and self.encoder_cache_size > 0):
+        if self.is_multimodal_model:
+            mm_budget = self.mm_budget
+            assert mm_budget is not None
 
-            # NOTE: Currently model is profiled with a single non-text
-            # modality with the max possible input tokens even when
-            # it supports multiple.
-            dummy_modality, max_tokens = self._get_modality_with_max_tokens()
-            (
-                max_mm_items_per_prompt,
-                max_mm_items_per_req,
-            ) = self._get_max_mm_items(dummy_modality, max_tokens)
+            # TODO: handle encoder-decoder models once we support them.
+            if (encoder_budget := mm_budget.get_encoder_budget()) > 0:
+                # NOTE: Currently model is profiled with a single non-text
+                # modality with the max possible input tokens even when
+                # it supports multiple.
+                (
+                    dummy_modality,
+                    max_tokens,
+                ) = mm_budget.get_modality_with_max_tokens_per_seq()
+                (
+                    max_mm_items_per_prompt,
+                    max_mm_items_per_req,
+                ) = mm_budget.get_max_items(dummy_modality, max_tokens)
 
-            logger.info(
-                "Encoder cache will be initialized with a budget of %s tokens,"
-                " and profiled with %s %s items of the maximum feature size.",
-                self._get_encoder_budget(),
-                max_mm_items_per_req,
-                dummy_modality,
-            )
+                logger.info(
+                    "Encoder cache will be initialized with a budget of "
+                    "%s tokens, and profiled with %s %s items of the maximum "
+                    "feature size.",
+                    encoder_budget,
+                    max_mm_items_per_req,
+                    dummy_modality,
+                )
 
-            # Create dummy batch of multimodal inputs.
-            batched_dummy_mm_inputs = self._get_mm_dummy_batch(
-                dummy_modality, max_mm_items_per_prompt, max_mm_items_per_req)
+                # Create dummy batch of multimodal inputs.
+                batched_dummy_mm_inputs = self._get_mm_dummy_batch(
+                    dummy_modality,
+                    max_mm_items_per_prompt,
+                    max_mm_items_per_req,
+                )
 
-            # Run multimodal encoder.
-            dummy_encoder_outputs = self.model.get_multimodal_embeddings(
-                **batched_dummy_mm_inputs)
+                # Run multimodal encoder.
+                dummy_encoder_outputs = self.model.get_multimodal_embeddings(
+                    **batched_dummy_mm_inputs)
 
-            sanity_check_mm_encoder_outputs(
-                dummy_encoder_outputs,
-                expected_num_items=max_mm_items_per_req,
-            )
+                sanity_check_mm_encoder_outputs(
+                    dummy_encoder_outputs,
+                    expected_num_items=max_mm_items_per_req,
+                )
 
-            # Cache the dummy encoder outputs.
-            self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
+                # Cache the dummy encoder outputs.
+                self.encoder_cache["tmp"] = dict(
+                    enumerate(dummy_encoder_outputs))
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states \
