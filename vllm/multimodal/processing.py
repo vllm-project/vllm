@@ -1194,14 +1194,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     ) -> None:
         supported_limit = self.supported_mm_limits.get(modality, 0)
         allowed_limit = self.allowed_mm_limits.get(modality, 0)
-        limit = (allowed_limit if supported_limit is None else min(
-            supported_limit, allowed_limit))
+
+        if supported_limit is None:
+            supported_limit = allowed_limit
+
+        limit = min(supported_limit, allowed_limit)
 
         if num_items > limit:
             msg = (f"At most {limit} {modality}(s) may be provided in "
                    "one prompt.")
 
-            if supported_limit is None or num_items <= supported_limit:
+            if num_items <= supported_limit:
                 msg += " Set `--limit-mm-per-prompt` to increase this limit."
 
             raise ValueError(msg)
