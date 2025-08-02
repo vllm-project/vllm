@@ -177,7 +177,7 @@ class TestModel:
                                        })
         assert score_response.status_code == 400
         # Assert just a small fragments of the response
-        assert "Please reduce the length of the input." in \
+        assert "is longer than the maximum model length of" in \
             score_response.text
 
         # Test truncation
