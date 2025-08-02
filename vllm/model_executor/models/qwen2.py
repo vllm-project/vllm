@@ -351,6 +351,8 @@ class Qwen2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
         for layer in self.layers[self.start_layer:self.end_layer]:
+            if layer_idx in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -362,6 +364,8 @@ class Qwen2Model(nn.Module):
                 "residual": residual
             })
         hidden_states, _ = self.norm(hidden_states, residual)
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -495,3 +499,10 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
