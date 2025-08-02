@@ -123,24 +123,29 @@ def test_ngram_correctness(
         cleanup_dist_env_and_memory()
 
 
-@pytest.mark.parametrize(
-    ["model_setup", "mm_enabled"], [
-        (("eagle", "meta-llama/Llama-3.1-8B-Instruct",
-          "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
-        (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
-          "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1), False),
-        pytest.param(
-            ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-             "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
-            False,
-            marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
-        pytest.param(
-            ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-             "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
-            True,
-            marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
-    ],
-    ids=["llama3_eagle", "llama3_eagle3", "llama4_eagle", "llama4_eagle_mm"])
+@pytest.mark.parametrize(["model_setup", "mm_enabled"], [
+    (("eagle", "meta-llama/Llama-3.1-8B-Instruct",
+      "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
+    (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
+      "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1), False),
+    (("eagle3", "tencent/Hunyuan-1.8B-Instruct",
+      "AngelSlim/Hunyuan-1.8B-Instruct_eagle3", 1), False),
+    pytest.param(
+        ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
+        False,
+        marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
+    pytest.param(
+        ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
+        True,
+        marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
+],
+                         ids=[
+                             "llama3_eagle", "llama3_eagle3",
+                             "hunyuan_v1_eagle3", "llama4_eagle",
+                             "llama4_eagle_mm"
+                         ])
 def test_eagle_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,

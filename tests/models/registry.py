@@ -522,7 +522,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                         is_available_online=False),
     "MiMoMTPModel": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
                                     trust_remote_code=True,
-                                    speculative_model="XiaomiMiMo/MiMo-7B-RL")
+                                    speculative_model="XiaomiMiMo/MiMo-7B-RL"),
+    "Eagle3HunYuanDenseV1ForCausalLM": _HfExamplesInfo(
+        "tencent/Hunyuan-1.8B-Instruct",
+        speculative_model="AngelSlim/Hunyuan-1.8B-Instruct_eagle3",
+        tokenizer="tencent/Hunyuan-1.8B-Instruct"),
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
