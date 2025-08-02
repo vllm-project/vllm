@@ -154,6 +154,7 @@ class APIServerProcessManager:
             client_config = {
                 "input_address": in_addr,
                 "output_address": out_addr,
+                "client_count": num_servers,
                 "client_index": i
             }
             if stats_update_address is not None:
