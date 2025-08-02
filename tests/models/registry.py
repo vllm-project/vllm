@@ -377,9 +377,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "GLM4VForCausalLM": _HfExamplesInfo("THUDM/glm-4v-9b",
                                         trust_remote_code=True,
                                         hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
-    "Glm4vForConditionalGeneration": _HfExamplesInfo("THUDM/GLM-4.1V-9B-Thinking", min_transformers_version="4.53"),  # noqa: E501
-    "Glm4MoeForCausalLM": _HfExamplesInfo("THUDM/GLM-4.5",
-                                          min_transformers_version="4.54",
+    "Glm4vForConditionalGeneration": _HfExamplesInfo("THUDM/GLM-4.1V-9B-Thinking"),  # noqa: E501
+    "Glm4MoeForCausalLM": _HfExamplesInfo("zai-org/GLM-4.5",
+                                          min_transformers_version="4.54"),   # noqa: E501
+    "Glm4v_moeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V-Air",
                                           is_available_online=False),   # noqa: E501
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m",
                                       extras={"2b": "h2oai/h2ovl-mississippi-2b"},  # noqa: E501
@@ -515,8 +516,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             is_available_online=False,
                                             speculative_model="openbmb/MiniCPM-2B-sft-bf16",
                                             tokenizer="openbmb/MiniCPM-2B-sft-bf16"),
-    "Glm4MoeMTPModel": _HfExamplesInfo("THUDM/GLM-4.5",
-                                        speculative_model="THUDM/GLM-4.5",
+    "Glm4MoeMTPModel": _HfExamplesInfo("zai-org/GLM-4.5",
+                                        speculative_model="zai-org/GLM-4.5",
                                         min_transformers_version="4.54",
                                         is_available_online=False),
     "MiMoMTPModel": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",

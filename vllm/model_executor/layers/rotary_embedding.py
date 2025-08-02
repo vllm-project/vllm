@@ -1096,7 +1096,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                 audio_feature_lengths=audio_feature_lengths,
                 use_audio_in_video=use_audio_in_video,
             )
-        elif "glm4v" in hf_config.model_type:
+        elif hf_config.model_type in ["glm4v", "glm4v_moe"]:
             return cls._glm4v_get_input_positions_tensor(
                 input_tokens=input_tokens,
                 hf_config=hf_config,
