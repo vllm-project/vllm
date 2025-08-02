@@ -1,5 +1,8 @@
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
+#
+# This Dockerfile uses the mold linker for faster CUDA kernel compilation.
+# The mold linker can significantly speed up linking phases during the build process.
 
 # Please update any changes made here to
 # docs/contributing/dockerfile/dockerfile.md and
@@ -104,6 +107,15 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
+
+# Install mold linker for faster compilation
+ARG MOLD_VERSION=2.40.3
+RUN curl -L https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-x86_64-linux.tar.gz -o mold.tar.gz \
+    && tar -xzf mold.tar.gz \
+    && mv mold-${MOLD_VERSION}-x86_64-linux/bin/mold /usr/local/bin/ \
+    && mv mold-${MOLD_VERSION}-x86_64-linux/lib/mold /usr/local/lib/ \
+    && rm -rf mold.tar.gz mold-${MOLD_VERSION}-x86_64-linux \
+    && mold --version
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -233,7 +245,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && export SCCACHE_IDLE_TIMEOUT=0 \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
-        && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
+        && echo "Building vLLM with mold linker for faster compilation..." \
+        && mold -run python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
         && sccache --show-stats; \
     fi
 
@@ -245,7 +258,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         # Clean any existing CMake artifacts
         rm -rf .deps && \
         mkdir -p .deps && \
-        python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
+        echo "Building vLLM with mold linker for faster compilation..." && \
+        mold -run python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
@@ -405,8 +419,9 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
     pushd flashinfer
         TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
             python3 -m flashinfer.aot
+        echo "Building FlashInfer with mold linker for faster compilation..."
         TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-            uv pip install --system --no-build-isolation --force-reinstall --no-deps .
+            mold -run uv pip install --system --no-build-isolation --force-reinstall --no-deps .
     popd
     rm -rf flashinfer
 BASH
@@ -445,7 +460,8 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
             # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
             rm -rf build dist
             rm -rf *.egg-info
-            python3 setup.py bdist_wheel
+            echo "Building DeepGEMM with mold linker for faster compilation..."
+            mold -run python3 setup.py bdist_wheel
             uv pip install --system dist/*.whl
         popd
         rm -rf deepgemm
