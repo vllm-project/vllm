@@ -217,7 +217,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         # These should've been done in register_kv_caches(), called by
         # gpu_model_runner. Here we just hardcode some dummy values.
         self.slot_size_bytes = 4096
-        self.block_len = self.slot_size_bytes * self.block_size
+        self.block_len = self.slot_size_bytes * self.block_size * 2
         self.num_blocks = 1
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
