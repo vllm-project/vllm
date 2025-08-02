@@ -112,7 +112,8 @@ class KeyeImagePixelInputs(TensorSchema):
         - g: Grid dimensions (3 for t, h, w)
     """
     type: Literal["pixel_values"]
-    pixel_values: Annotated[torch.Tensor, TensorShape("b", "np", 3, "ps", "ps")]
+    pixel_values: Annotated[torch.Tensor,
+                            TensorShape("b", "np", 3, "ps", "ps")]
     image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
@@ -144,7 +145,8 @@ class KeyeVideoPixelInputs(TensorSchema):
         - g: Grid dimensions (3 for t, h, w)
     """
     type: Literal["pixel_values_videos"]
-    pixel_values_videos: Annotated[torch.Tensor, TensorShape("b", "np", 3, "ps", "ps")]
+    pixel_values_videos: Annotated[torch.Tensor,
+                                   TensorShape("b", "np", 3, "ps", "ps")]
     video_grid_thw: Annotated[torch.Tensor, TensorShape("nv", 3)]
 
 
