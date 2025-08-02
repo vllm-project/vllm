@@ -1807,12 +1807,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         # Result in the maximum GPU consumption of HF processor
-        dummy_request_data = self.mm_registry.get_decoder_dummy_data(
+        dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
             seq_len=self.max_num_tokens,
             mm_counts={modality: processor_batch_size},
+            disable_cache=True,
         )
-        dummy_mm_data = dummy_request_data.multi_modal_data
+        dummy_mm_data = dummy_decoder_data.multi_modal_data
 
         # Result in the maximum GPU consumption of the model
         dummy_mm_item = dummy_mm_data.get_item(modality=modality, item_index=0)

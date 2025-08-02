@@ -260,13 +260,16 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
+        *,
+        disable_cache: bool = False,
     ) -> DummyDecoderData:
         """
         Create dummy data for profiling the memory usage of a model.
 
         The model is identified by ``model_config``.
         """
-        processor = self.create_processor(model_config, disable_cache=False)
+        processor = self.create_processor(model_config,
+                                          disable_cache=disable_cache)
         profiler = MultiModalProfiler(processor)
         dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts)
 
@@ -284,13 +287,16 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
+        *,
+        disable_cache: bool = False,
     ) -> DummyEncoderData:
         """
         Create dummy data for profiling the memory usage of a model.
 
         The model is identified by ``model_config``.
         """
-        processor = self.create_processor(model_config, disable_cache=False)
+        processor = self.create_processor(model_config,
+                                          disable_cache=disable_cache)
         profiler = MultiModalProfiler(processor)
         dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts)
 
