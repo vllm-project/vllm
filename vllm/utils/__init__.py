@@ -3311,3 +3311,29 @@ def decorate_logs(process_name: Optional[str] = None) -> None:
     pid = os.getpid()
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
+
+
+def print_logo():
+
+    def color256(index):
+        return f"\033[38;5;{index}m"
+
+    reset = "\033[0m"
+
+    logo = """
+             LL          LL          MMM       MMM 
+             LL          LL          MMMM     MMMM
+         V   LL          LL          MM MM   MM MM
+vvvv  VVVV   LL          LL          MM  MM MM  MM
+vvvv VVVV    LL          LL          MM   MMM   MM
+ vvv VVVV    LL          LL          MM    M    MM
+  vvVVVV     LL          LL          MM         MM
+    VVVV     LLLLLLLLLL  LLLLLLLLL   M           M
+"""
+
+    colored_logo = (logo.replace("v",
+                                 color256(214) + "v" + reset).replace(
+                                     "V",
+                                     color256(33) + "V" + reset))
+
+    print(colored_logo)
