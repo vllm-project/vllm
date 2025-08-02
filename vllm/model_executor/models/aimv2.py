@@ -23,6 +23,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 
+# NOTE: The Aimv2Config used here is defined by Ovis
+# (https://huggingface.co/AIDC-AI/Ovis2-1B/tree/main)
+# It is different from the one inside Transformers library
 class AIMv2SwiGLUFFN(nn.Module):
 
     def __init__(self, config: PretrainedConfig,
