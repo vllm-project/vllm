@@ -171,7 +171,7 @@ class ModernBertLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         attn_outputs = self.attn(hidden_states=self.attn_norm(hidden_states),
                                  position_ids=position_ids)
         hidden_states = hidden_states + attn_outputs
