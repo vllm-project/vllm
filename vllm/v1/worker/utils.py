@@ -31,6 +31,7 @@ class MultiModalBudget:
         super().__init__()
 
         self.model_config = model_config
+        self.scheduler_config = scheduler_config
         self.mm_registry = mm_registry
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
@@ -101,14 +102,20 @@ class MultiModalBudget:
             min(mm_limit, self.max_model_len // max_tokens_per_item),
         )
 
-        # NOTE: We do not consider max_num_batched_tokens on purpose
-        # because the multimodal embeddings can be generated in advance
-        # and chunked prefilled.
-        max_decoder_mm_items = self.max_num_reqs * max_items_per_prompt
+        scheduler_config = self.scheduler_config
+        max_num_reqs = self.max_num_reqs
+
+        if not scheduler_config.enable_chunked_prefill:
+            max_num_reqs = min(
+                max_num_reqs,
+                scheduler_config.max_num_batched_tokens // max_tokens_per_item,
+            )
+
+        max_decoder_items = max_num_reqs * max_items_per_prompt
 
         max_items_per_req = max(
             1,
-            min(max_encoder_items, max_decoder_mm_items),
+            min(max_encoder_items, max_decoder_items),
         )
 
         return max_items_per_prompt, max_items_per_req
