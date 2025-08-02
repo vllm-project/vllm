@@ -7,6 +7,8 @@ from enum import IntEnum
 from itertools import groupby
 from typing import Callable, Optional, TypeVar, Union
 
+from vllm.model_executor.layers.dense import Dense
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -550,24 +552,27 @@ class SimplePooler(Pooler):
     This layer does the following:
     1. Extracts specific tokens or aggregates data based on pooling method.
     2. Normalizes output if specified.
-    3. Returns structured results as `PoolerOutput`.
+    3. Applies dense transformation if specified.
+    4. Returns structured results as `PoolerOutput`.
     """
 
     @classmethod
     def from_config(
         cls,
         pooler_config: ResolvedPoolingConfig,
+        dense_layer: Optional["Dense"] = None,
     ) -> "SimplePooler":
         pooling = PoolingMethod.from_pooling_type(pooler_config.pooling_type)
         head = PoolerHead.from_config(pooler_config)
 
-        return cls(pooling, head)
+        return cls(pooling, head, dense_layer)
 
-    def __init__(self, pooling: PoolingMethod, head: PoolerHead) -> None:
+    def __init__(self, pooling: PoolingMethod, head: PoolerHead, dense_layer: Optional["Dense"] = None) -> None:
         super().__init__()
 
         self.pooling = pooling
         self.head = head
+        self.dense_layer = dense_layer
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return self.pooling.get_supported_tasks()
@@ -582,6 +587,14 @@ class SimplePooler(Pooler):
     ) -> PoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
+        
+        # Apply dense transformation if available
+        if self.dense_layer is not None:
+            if isinstance(pooled_data, torch.Tensor):
+                pooled_data = self.dense_layer(pooled_data)
+            else:
+                pooled_data = [self.dense_layer(data) for data in pooled_data]
+                
         return build_output(pooled_data)
 
 
