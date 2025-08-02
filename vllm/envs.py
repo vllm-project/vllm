@@ -950,7 +950,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
 
-    # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support. Both 
+    # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support. Both
     # require CUDA 10.0 or above.
     # Available options:
     # - "flashinfer_moe_high_throughput":  [default]

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from enum import Enum
 from typing import Any, Callable, Optional, Union
 
 import torch
@@ -43,6 +44,11 @@ logger = init_logger(__name__)
 
 QUANT_ALGOS = ["FP8", "NVFP4"]
 KV_CACHE_QUANT_ALGOS = ["FP8"]
+
+
+class FlashinferMoeBackend(Enum):
+    TENSORRT_LLM = "TensorRT-LLM"
+    CUTLASS = "CUTLASS"
 
 
 class ModelOptFp8Config(QuantizationConfig):
@@ -885,24 +891,26 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.cutlass_nvfp4_supported = _nvfp4.cutlass_supported
         self.allow_flashinfer = _nvfp4.allow_flashinfer
         self.use_marlin = _nvfp4.use_marlin
+        self.flashinfer_moe_backend = None
 
         if self.allow_flashinfer:
             flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
             if flashinfer_moe_backend == "flashinfer_moe_high_throughput":
-                self.flashinfer_moe_backend = "CUTLASS"
-                logger.info_once(
-                    "Using FlashInfer CUTLASS kernels for " \
-                    "ModelOptNvFp4FusedMoE."
-                )
+                self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
+                logger.info_once("Using FlashInfer CUTLASS kernels for "
+                                 "ModelOptNvFp4FusedMoE.")
             elif flashinfer_moe_backend == "flashinfer_moe_low_latency":
-                self.flashinfer_moe_backend = "TensorRT-LLM"
-                logger.info_once(
-                    "Using FlashInfer TensorRT-LLM kernels for " \
-                    "ModelOptNvFp4FusedMoE."
-                )
+                self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
+                logger.info_once("Using FlashInfer TensorRT-LLM kernels for "
+                                 "ModelOptNvFp4FusedMoE.")
             else:
-                raise ValueError(f"Unknown flashinfer moe backend: \
-                        {flashinfer_moe_backend}")
+                allowed_backends = [
+                    "flashinfer_moe_high_throughput",
+                    "flashinfer_moe_low_latency"
+                ]
+                raise ValueError(
+                    f"Unknown flashinfer moe backend: {flashinfer_moe_backend}"
+                    f" expected one of {allowed_backends}")
 
         self.fused_experts = None  # type: ignore
 
@@ -910,11 +918,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self,
         moe_parallel_config: FusedMoEParallelConfig,
     ):
-        if not self.allow_flashinfer or \
-            self.flashinfer_moe_backend == "TensorRT-LLM":
-            return
-        self.fused_experts = build_flashinfer_fp4_cutlass_moe_kernel(
-            moe_parallel_config)
+        if self.allow_flashinfer and \
+            self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            self.fused_experts = build_flashinfer_fp4_cutlass_moe_kernel(
+                moe_parallel_config)
 
     # This method update self.fused_experts
     # only prepare_finalize is not None call select_gemm_impl
@@ -1049,7 +1056,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         return (swizzled_scale.reshape(M, K)
                 if scale_ndim == 2 else swizzled_scale.reshape(B, M, K))
 
-    def prepare_static_weights_for_kernel(
+    def prepare_static_weight_layouts_for_trtllm_moe(
         self,
         gemm1_weights,
         gemm2_weights,
@@ -1059,9 +1066,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         intermediate_size,
         num_experts,
     ):
+        """Prepare quantized weights for kernel (done offline with weights)."""
         from flashinfer import (reorder_rows_for_gated_act_gemm,
                                 shuffle_matrix_a, shuffle_matrix_sf_a)
-        """Prepare quantized weights for kernel (done offline with weights)."""
         epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
 
         # Convert quantized weights to proper formats
@@ -1183,18 +1190,20 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             (1 / layer.w2_input_scale).to(torch.float32), requires_grad=False)
 
         # TensorRT-LLM specific processing
-        if self.allow_flashinfer and self.flashinfer_moe_backend == "TensorRT-LLM":  # noqa: E501
+        if self.allow_flashinfer and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:  # noqa: E501
             # Prepare static weights for TRT-LLM kernel
-            gemm1_weights_fp4_shuffled, \
-                gemm1_scales_fp4_shuffled, \
-                    gemm2_weights_fp4_shuffled, \
-                        gemm2_scales_fp4_shuffled = self.prepare_static_weights_for_kernel(  # noqa: E501
-                            layer.w13_weight, layer.w2_weight,
-                            layer.w13_weight_scale, layer.w2_weight_scale,
-                            layer.w2_weight.size(-2),  # hidden_size
-                            layer.w13_weight.size(-2) // 2,  # intermediate_size
-                            layer.w13_weight.size(0),  # num_experts
-                        )
+            (
+                gemm1_weights_fp4_shuffled, gemm1_scales_fp4_shuffled,
+                gemm2_weights_fp4_shuffled, gemm2_scales_fp4_shuffled
+            ) = self.prepare_static_weight_layouts_for_trtllm_moe(  # noqa: E501
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                layer.w2_weight.size(-2),  # hidden_size
+                layer.w13_weight.size(-2) // 2,  # intermediate_size
+                layer.w13_weight.size(0),  # num_experts
+            )
 
             layer.gemm1_weights_fp4_shuffled = Parameter(
                 gemm1_weights_fp4_shuffled, requires_grad=False)
@@ -1278,7 +1287,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         skip_select_experts = False
         if self.fused_experts is not None and \
-            self.flashinfer_moe_backend == "TensorRT-LLM":
+            self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             skip_select_experts = True
         if not skip_select_experts:
             topk_weights, topk_ids = FusedMoE.select_experts(
@@ -1313,15 +1322,18 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if self.fused_experts is None:
             # If no modular kernel is provided, use cutlass_moe_fp4 or
             # flashinfer low latency kernel for TP case only (no EP).
-            if self.flashinfer_moe_backend == "TensorRT-LLM":
+            if self.allow_flashinfer and \
+               self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 import flashinfer
+
+                from vllm.model_executor.models.llama4 import Llama4MoE
+
                 a1_gscale = layer.w13_input_scale_quant
                 hidden_states_fp4, hidden_states_scale_linear_fp4 = flashinfer.fp4_quantize(  # noqa: E501
                     x,
                     a1_gscale,
                     is_sf_swizzled_layout=False,
                 )
-                from vllm.model_executor.models.llama4 import Llama4MoE
                 use_llama4_routing = custom_routing_function is Llama4MoE.custom_routing_function  # noqa: E501
                 routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
                 if use_llama4_routing:
