@@ -50,7 +50,8 @@ from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     make_kv_sharing_fast_prefill_attention_metadata,
-    make_local_attention_virtual_batches)
+    make_local_attention_virtual_batches,
+    reorder_batch_to_split_decodes_and_prefills)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
@@ -330,6 +331,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.kv_sharing_fast_prefill_logits_indices = torch.zeros(
                 self.max_num_tokens, dtype=torch.int32, device=self.device)
 
+        self.reorder_batch_threshold: Optional[int] = None
+
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
         Update the order of requests in the batch based on the attention
@@ -348,20 +351,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if len(self.kv_cache_config.kv_cache_groups) == 0:
             return
 
-        self.attn_metadata_builders[0].reorder_batch(self.input_batch,
-                                                     scheduler_output)
-
-        # For models with multiple KV cache groups, the groups should agree on
-        # the same order of requests. We ensure this by only allowing the first
-        # group to reorder the batch and asserting that all other groups do not
-        # reorder the batch.
-        # TODO(tdoublep): make this more flexible so that any group can
-        # re-order the batch (not only the first).
-        # TODO(tdoublep): verify this during engine init instead of at runtime
-        for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
-            batch_reordered = self.attn_metadata_builders[i].reorder_batch(
-                self.input_batch, scheduler_output)
-            assert not batch_reordered
+        if self.reorder_batch_threshold is not None:
+            reorder_batch_to_split_decodes_and_prefills(
+                self.input_batch,
+                scheduler_output,
+                decode_threshold=self.reorder_batch_threshold)
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
@@ -2655,6 +2649,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
 
+        # Calculate reorder batch threshold (if neeeded)
+        self.calculate_reorder_batch_threshold()
+
         if len(self.attn_backends) > 0:
             return
 
@@ -2688,6 +2685,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.attn_backends.append(attn_backend)
             self.attn_metadata_builders.append(attn_metadata_builder)
             self.is_encoder_only_model = True
+
+    def calculate_reorder_batch_threshold(self) -> None:
+        """
+        Check that if any backends reorder batches; that the reordering
+        is compatible (e.g., decode threshold is the same)
+        """
+        for attn_metadata_builder_i in self.attn_metadata_builders:
+            # check that if any backends reorder batches; that the reordering
+            # is compatible (e.g., decode threshold is the same)
+            reorder_batch_threshold_i = (
+                attn_metadata_builder_i.reorder_batch_threshold)
+            if reorder_batch_threshold_i is not None:
+                if self.reorder_batch_threshold is not None:
+                    if reorder_batch_threshold_i != \
+                        self.reorder_batch_threshold:
+                        raise ValueError(
+                            f"Attention backend reorders decodes with "
+                            f"threshold {reorder_batch_threshold_i} but other "
+                            f"backend uses threshold "
+                            f"{self.reorder_batch_threshold}")
+                else:
+                    self.reorder_batch_threshold = reorder_batch_threshold_i
 
     def may_reinitialize_input_batch(self,
                                      kv_cache_config: KVCacheConfig) -> None:
