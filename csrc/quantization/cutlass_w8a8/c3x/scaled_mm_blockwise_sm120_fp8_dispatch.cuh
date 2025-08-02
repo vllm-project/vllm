@@ -207,73 +207,12 @@ void cutlass_gemm_blockwise_sm120_fp8_dispatch(torch::Tensor& out,
   int32_t m = a.size(0), n = b.size(1), k = a.size(1), sms;
   cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, a.get_device());
 
-  constexpr int TILE_K = 128;
   // TODO: better heuristics
-  bool swap_ab = (m < 16) || (m % 4 != 0);
-  bool use_tma_epilogue = (m * n) % 4 == 0;
-  if (!swap_ab) {
-    constexpr int TILE_N = 128;
-    int tile_m = 256;
-    if (cuda_utils::ceil_div(n, TILE_N) * cuda_utils::ceil_div(m, 64) <= sms) {
-      tile_m = 64;
-    }
-    else if (cuda_utils::ceil_div(n, TILE_N) * cuda_utils::ceil_div(m, 128) <= sms) {
-      tile_m = 128;
-    }
-    if (tile_m == 64) {
-      if (use_tma_epilogue) {
-        cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
-            OutType, 1, TILE_N, TILE_K, Shape<_64, Int<TILE_N>, Int<TILE_K>>,
-            Shape<_1, _1, _1>, cutlass::epilogue::TmaWarpSpecialized,
-            cutlass::gemm::KernelTmaWarpSpecializedBlockwisePingpongSm120>>(
-            out, a, b, a_scales, b_scales);
-      } else {
-        cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
-            OutType, 1, TILE_N, TILE_K, Shape<_64, Int<TILE_N>, Int<TILE_K>>,
-            Shape<_1, _1, _1>, cutlass::epilogue::TmaWarpSpecialized,
-            cutlass::gemm::KernelTmaWarpSpecializedBlockwisePingpongSm120>>(
-            out, a, b, a_scales, b_scales);
-      }
-    } else if (tile_m == 128) {
-      if (use_tma_epilogue) {
-        cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
-            OutType, 1, TILE_N, TILE_K, Shape<_128, Int<TILE_N>, Int<TILE_K>>,
-            Shape<_1, _1, _1>, cutlass::epilogue::TmaWarpSpecializedCooperative,
-            cutlass::gemm::KernelTmaWarpSpecializedBlockwiseCooperativeSm120>>(
-            out, a, b, a_scales, b_scales);
-      } else {
-        cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
-            OutType, 1, TILE_N, TILE_K, Shape<_128, Int<TILE_N>, Int<TILE_K>>,
-            Shape<_1, _1, _1>, cutlass::epilogue::TmaWarpSpecializedCooperative,
-            cutlass::gemm::KernelTmaWarpSpecializedBlockwiseCooperativeSm120>>(
-            out, a, b, a_scales, b_scales);
-      }
-    } else { // tile_m == 256
-      if (use_tma_epilogue) {
-          cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
-              OutType, 1, TILE_N, TILE_K, Shape<_256, Int<TILE_N>, Int<TILE_K>>,
-            Shape<_2, _1, _1>, cutlass::epilogue::TmaWarpSpecializedCooperative,
-            cutlass::gemm::KernelTmaWarpSpecializedBlockwiseCooperativeSm120>>(
-            out, a, b, a_scales, b_scales);
-      } else {
-          cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
-              OutType, 1, TILE_N, TILE_K, Shape<_256, Int<TILE_N>, Int<TILE_K>>,
-            Shape<_2, _1, _1>, cutlass::epilogue::TmaWarpSpecializedCooperative,
-            cutlass::gemm::KernelTmaWarpSpecializedBlockwiseCooperativeSm120>>(
-            out, a, b, a_scales, b_scales);
-      }
-    }
-  } else {
-    // TODO: Test more tile N configs
-    constexpr int TILE_M = 128;
-    constexpr int TILE_N = 16;
-    // TMA epilogue isn't compatible with Swap A/B
-    cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
-        OutType, TILE_M, 1, TILE_K, Shape<Int<TILE_M>, Int<TILE_N>, Int<TILE_K>>,
-        Shape<_1, _1, _1>, cutlass::epilogue::TmaWarpSpecializedCooperative,
-        cutlass::gemm::KernelTmaWarpSpecializedBlockwiseCooperativeSm120, true>>(
-        out, a, b, a_scales, b_scales);
-  }
+  cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
+      OutType, 1, 128, 128, Shape<_128, Int<128>, Int<128>>,
+      Shape<_1, _1, _1>, cutlass::epilogue::collective::EpilogueScheduleAuto,
+      cutlass::gemm::collective::KernelScheduleAuto>>(
+      out, a, b, a_scales, b_scales);
 }
 
 }  // namespace vllm
