@@ -27,10 +27,8 @@ using namespace cute;
 template <class OutType, int ScaleGranularityM,
           int ScaleGranularityN, int ScaleGranularityK,
           class MmaTileShape, class ClusterShape,
-          class EpilogueScheduler, class MainloopScheduler,
-          bool swap_ab_ = false>
+          class EpilogueScheduler, class MainloopScheduler>
 struct cutlass_3x_gemm_fp8_blockwise {
-  static constexpr bool swap_ab = swap_ab_;
   using ElementAB = cutlass::float_e4m3_t;
 
   using ElementA = ElementAB;
@@ -55,15 +53,11 @@ struct cutlass_3x_gemm_fp8_blockwise {
 
   using ElementAccumulator = float;
   using ElementCompute = float;
-  using ElementBlockScale = float;
+  using ElementBlockScale = float; 
 
-  using ScaleConfig = conditional_t<swap_ab,
-      cutlass::detail::Sm120BlockwiseScaleConfig<
+  using ScaleConfig = cutlass::detail::Sm120BlockwiseScaleConfig<
         ScaleGranularityM, ScaleGranularityN, ScaleGranularityK,
-        cute::UMMA::Major::K, cute::UMMA::Major::MN>,
-      cutlass::detail::Sm120BlockwiseScaleConfig<
-        ScaleGranularityM, ScaleGranularityN, ScaleGranularityK,
-        cute::UMMA::Major::MN, cute::UMMA::Major::K>>;
+        cute::UMMA::Major::MN, cute::UMMA::Major::K>;
 
   // layout_SFA and layout_SFB cannot be swapped since they are deduced.
   using LayoutSFA = decltype(ScaleConfig::deduce_layoutSFA());
@@ -84,32 +78,17 @@ struct cutlass_3x_gemm_fp8_blockwise {
       ElementAccumulator,
       ElementCompute,
       ElementC,
-      conditional_t<swap_ab, LayoutC_Transpose, LayoutC>,
+      LayoutC,
       AlignmentC,
       ElementD,
-      conditional_t<swap_ab, LayoutD_Transpose, LayoutD>,
+      LayoutD,
       AlignmentD,
       EpilogueScheduler,
       DefaultOperation
   >::CollectiveOp;
  
   using StageCountType = cutlass::gemm::collective::StageCountAuto; 
-  using CollectiveMainloop = conditional_t<swap_ab,
-      typename cutlass::gemm::collective::CollectiveBuilder<
-          ArchTag,
-          OperatorClass,
-          ElementB,
-          cute::tuple<LayoutB_Transpose, LayoutSFA>,
-          AlignmentB,
-          ElementA,
-          cute::tuple<LayoutA_Transpose, LayoutSFB>,
-          AlignmentA,
-          ElementAccumulator,
-          MmaTileShape,
-          ClusterShape,
-          cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
-          MainloopScheduler
-      >::CollectiveOp,
+  using CollectiveMainloop = 
       typename cutlass::gemm::collective::CollectiveBuilder<
           ArchTag,
           OperatorClass,
@@ -124,7 +103,7 @@ struct cutlass_3x_gemm_fp8_blockwise {
           ClusterShape,
           cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
           MainloopScheduler
-      >::CollectiveOp>;
+      >::CollectiveOp;
 
   using KernelType = enable_sm120_only<cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue>>;
@@ -137,7 +116,6 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
                                    torch::Tensor const& b,
                                    torch::Tensor const& a_scales,
                                    torch::Tensor const& b_scales) {
-  static constexpr bool swap_ab = Gemm::swap_ab;
   using GemmKernel = typename Gemm::GemmKernel;
   using StrideA = typename Gemm::GemmKernel::StrideA;
   using StrideB = typename Gemm::GemmKernel::StrideB;
@@ -160,13 +138,11 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   b_stride =
       cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(n, k, 1));
   c_stride =
-      cutlass::make_cute_packed_stride(StrideC{}, swap_ab ? cute::make_shape(n, m, 1) : cute::make_shape(m, n, 1));
+      cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(m, n, 1));
 
-  LayoutSFA layout_SFA = swap_ab ? 
-      ScaleConfig::tile_atom_to_shape_SFA(make_shape(n, m, k, 1)) :
+  LayoutSFA layout_SFA = 
       ScaleConfig::tile_atom_to_shape_SFA(make_shape(m, n, k, 1));
-  LayoutSFB layout_SFB = swap_ab ?
-      ScaleConfig::tile_atom_to_shape_SFB(make_shape(n, m, k, 1)) :
+  LayoutSFB layout_SFB = 
       ScaleConfig::tile_atom_to_shape_SFB(make_shape(m, n, k, 1));
 
   auto a_ptr = static_cast<ElementAB*>(a.data_ptr());
@@ -175,21 +151,12 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   auto b_scales_ptr = static_cast<float*>(b_scales.data_ptr());
 
   auto mainloop_args = [&](){
-    // layout_SFA and layout_SFB cannot be swapped since they are deduced.
-    if (swap_ab) {
-      return typename GemmKernel::MainloopArguments{
-          b_ptr,        b_stride,   a_ptr,        a_stride,
-          b_scales_ptr, layout_SFA, a_scales_ptr, layout_SFB
-      };
-    }
-    else {
-      return typename GemmKernel::MainloopArguments{
-          a_ptr,        a_stride,   b_ptr,        b_stride,
-          a_scales_ptr, layout_SFA, b_scales_ptr, layout_SFB
-      };
-    }
+    return typename GemmKernel::MainloopArguments{
+        a_ptr,        a_stride,   b_ptr,        b_stride,
+        a_scales_ptr, layout_SFA, b_scales_ptr, layout_SFB
+    };
   }();
-  auto prob_shape = swap_ab ? cute::make_shape(n, m, k, 1) : cute::make_shape(m, n, k, 1);
+  auto prob_shape = cute::make_shape(m, n, k, 1);
 
   auto c_ptr = static_cast<ElementD*>(out.data_ptr());
   typename GemmKernel::EpilogueArguments epilogue_args{
