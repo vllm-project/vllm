@@ -64,7 +64,7 @@
         }
     },
     {
-        "test_name": "serving_llama8B_tp2pp6_sharegpt",
+        "test_name": "serving_llama8B_tp2pp3_sharegpt",
         "qps_list": [1, 4, 16, "inf"],
         "server_environment_variables": {
             "VLLM_RPC_TIMEOUT": 100000,
