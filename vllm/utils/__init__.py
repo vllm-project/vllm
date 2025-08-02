@@ -3311,12 +3311,12 @@ def print_logo():
 
     logo = """
              LL          LL          MMM       MMM 
-             LL          LL          MMMM     MMMMM
-         V   LL          LL          MM MM   MM MMM
-vvvv  VVVV   LL          LL          MM  MM MM  MMM
-vvvv VVVV    LL          LL          MM   MMM   MMM
- vvv VVVV    LL          LL          MM    M    MMM
-  vvVVVV     LL          LL          MM         MMM
+             LL          LL          MMMM     MMMM
+         V   LL          LL          MM MM   MM MM
+vvvv  VVVV   LL          LL          MM  MM MM  MM
+vvvv VVVV    LL          LL          MM   MMM   MM
+ vvv VVVV    LL          LL          MM    M    MM
+  vvVVVV     LL          LL          MM         MM
     VVVV     LLLLLLLLLL  LLLLLLLLL   M           M
 """
 
