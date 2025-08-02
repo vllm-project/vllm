@@ -3336,4 +3336,17 @@ vvvv VVVV    LL          LL          MM   MMM   MM
                                      "V",
                                      color256(33) + "V" + reset))
 
-    print(colored_logo)
+    if sys.stdout.isatty():
+
+        def color256(index):
+            return f"\033[38;5;{index}m"
+
+        reset = "\033[0m"
+
+        colored_logo = (logo.replace("v",
+                                     color256(214) + "v" + reset).replace(
+                                         "V",
+                                         color256(33) + "V" + reset))
+        print(colored_logo)
+    else:
+        print(logo)
