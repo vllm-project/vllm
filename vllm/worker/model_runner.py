@@ -1001,6 +1001,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.max_batchsize_to_capture = \
             self.vllm_config.compilation_config.max_capture_size
 
+        self.cuda_graph_capture_time = 0.0
         #
         self.graph_runners: List[Dict[Tuple[int, bool], CUDAGraphRunner]] = [
             {} for _ in range(self.parallel_config.pipeline_parallel_size)
@@ -1113,6 +1114,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory
+        self.model_load_time = time_before_load - time_after_load
         logger.info("Model loading took %.4f GiB and %.6f seconds",
                     self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
@@ -1534,10 +1536,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
         elapsed_time = end_time - start_time
+        self.cuda_graph_capture_time = elapsed_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes < 10 seconds.
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
-                    elapsed_time, cuda_graph_size / GiB_bytes)
+                    self.cuda_graph_capture_time, cuda_graph_size / GiB_bytes)
 
     def _update_inputs_to_capture_for_enc_dec_model(self,
                                                     capture_inputs: Dict[str,
