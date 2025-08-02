@@ -76,9 +76,10 @@ class InductorPass(CustomGraphPass):
         for src in srcs:
             if isinstance(src, str):
                 src_str = src
-            elif isinstance(src, types.FunctionType):
+            elif isinstance(src, (types.FunctionType, type)):
                 src_str = inspect.getsource(src)
             else:
+                # object instance
                 src_str = inspect.getsource(src.__class__)
             hasher.update(src_str.encode("utf-8"))
         return hasher.hexdigest()
