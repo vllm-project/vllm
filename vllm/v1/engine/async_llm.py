@@ -57,6 +57,7 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
         stat_loggers: Optional[list[StatLoggerFactory]] = None,
         client_addresses: Optional[dict[str, str]] = None,
+        client_count: int = 1,
         client_index: int = 0,
     ) -> None:
         """
@@ -120,6 +121,7 @@ class AsyncLLM(EngineClient):
             executor_class=executor_class,
             log_stats=self.log_stats,
             client_addresses=client_addresses,
+            client_count=client_count,
             client_index=client_index,
         )
 
@@ -156,6 +158,7 @@ class AsyncLLM(EngineClient):
             enable_log_requests: bool = False,
             disable_log_stats: bool = False,
             client_addresses: Optional[dict[str, str]] = None,
+            client_count: int = 1,
             client_index: int = 0,
             disable_log_requests: bool = True,  # Deprecated, will be removed
     ) -> "AsyncLLM":
@@ -176,6 +179,7 @@ class AsyncLLM(EngineClient):
             log_stats=not disable_log_stats,
             usage_context=usage_context,
             client_addresses=client_addresses,
+            client_count=client_count,
             client_index=client_index,
         )
 
