@@ -82,10 +82,9 @@ if __name__ == "__main__":
             # For Plot feature, insert y axis from one of info_cols
             raw_data_cols.insert(0, info_cols[y_axis_index])
 
-            output_df_sorted = output_df.sort_values(by=info_cols[0-3])
-            output_groups = output_df_sorted.groupby(info_cols[0-3])
+            output_df_sorted = output_df.sort_values(by=info_cols[0])
+            output_groups = output_df_sorted.groupby([info_cols[0],info_cols[1], info_cols[2],info_cols[3]])
             for name, group in output_groups:
-                print(group)
                 html = group.to_html()
                 text_file.write( html_msgs_for_data_cols[i])
                 text_file.write(html)
@@ -95,7 +94,6 @@ if __name__ == "__main__":
                     import plotly.express as px
                     df = group[raw_data_cols]
                     df_sorted = df.sort_values(by=info_cols[y_axis_index])
-                    print(df_sorted)
                     # Melt DataFrame for plotting
                     df_melted = df_sorted.melt(id_vars=info_cols[y_axis_index], var_name="Configuration", value_name=data_cols_to_compare[i])
                     title = data_cols_to_compare[i] + " vs " + info_cols[y_axis_index]
