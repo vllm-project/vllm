@@ -144,9 +144,9 @@ class InputProcessingContext(InputContext):
     def _postprocess_output(
         self,
         output: JSONTree,
-        *,
-        is_gpu: bool,
     ) -> JSONTree:
+        mm_config = self.model_config.get_multimodal_config()
+        is_mm_processing_gpu = mm_config.is_mm_processing_gpu
 
         def _postprocess_one(x: object):
             if isinstance(x, torch.Tensor):
@@ -159,15 +159,15 @@ class InputProcessingContext(InputContext):
                 # CPU tensors.
                 # The dtype of model config is usually lower precision
                 # so we call this last to transfer less data to CPU
-                if is_gpu:
+                if is_mm_processing_gpu:
                     x = x.to(device="cpu", non_blocking=True)
 
             return x
 
         output = json_map_leaves(_postprocess_one, output)
 
-        # GPU -> CPU requires explicit synchronization
-        if is_gpu:
+        # Async GPU -> CPU requires explicit synchronization
+        if is_mm_processing_gpu:
             from vllm.platforms import current_platform
             synchronize = current_platform.synchronize
             if synchronize is not None:
@@ -196,7 +196,6 @@ class InputProcessingContext(InputContext):
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
-        is_gpu = allowed_kwargs.get("device", "cpu") != "cpu"
 
         try:
             output = hf_processor(**data,
@@ -209,7 +208,7 @@ class InputProcessingContext(InputContext):
             raise ValueError(msg) from exc
 
         if isinstance(output, BatchFeature):
-            output_ = self._postprocess_output(output.data, is_gpu=is_gpu)
+            output_ = self._postprocess_output(output.data)
             return BatchFeature(output_)
 
         logger.warning_once(
@@ -219,7 +218,7 @@ class InputProcessingContext(InputContext):
             type(hf_processor).__name__,
         )
 
-        return self._postprocess_output(output, is_gpu=is_gpu)
+        return self._postprocess_output(output)
 
 
 class DummyData(NamedTuple):
