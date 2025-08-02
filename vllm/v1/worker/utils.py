@@ -77,8 +77,11 @@ class MultiModalBudget:
     def get_max_items(
         self,
         modality: str,
-        max_tokens_per_mm_item: int,
+        max_tokens_per_item: int,
     ) -> tuple[int, int]:
+        if max_tokens_per_item == 0:
+            return 0, 0
+
         # Check how many items of this modality can be supported by
         # the encoder budget.
         encoder_budget = self.get_encoder_budget()
@@ -87,28 +90,28 @@ class MultiModalBudget:
         if encoder_budget == 0:
             return 0, 0
 
-        max_encoder_mm_items = encoder_budget // max_tokens_per_mm_item
+        max_encoder_items = encoder_budget // max_tokens_per_item
 
         # Check how many items of this modality can be supported by
         # the decoder budget.
         mm_limit = self.mm_limits[modality]
 
-        max_mm_items_per_prompt = max(
+        max_items_per_prompt = max(
             1,
-            min(mm_limit, self.max_model_len // max_tokens_per_mm_item),
+            min(mm_limit, self.max_model_len // max_tokens_per_item),
         )
 
         # NOTE: We do not consider max_num_batched_tokens on purpose
         # because the multimodal embeddings can be generated in advance
         # and chunked prefilled.
-        max_decoder_mm_items = self.max_num_reqs * max_mm_items_per_prompt
+        max_decoder_mm_items = self.max_num_reqs * max_items_per_prompt
 
-        max_mm_items_per_req = max(
+        max_items_per_req = max(
             1,
-            min(max_encoder_mm_items, max_decoder_mm_items),
+            min(max_encoder_items, max_decoder_mm_items),
         )
 
-        return max_mm_items_per_prompt, max_mm_items_per_req
+        return max_items_per_prompt, max_items_per_req
 
 
 def sanity_check_mm_encoder_outputs(
