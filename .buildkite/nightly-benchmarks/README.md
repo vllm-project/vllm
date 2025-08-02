@@ -104,7 +104,6 @@ We test the throughput by using `vllm bench serve` with request rate = inf to co
             "tensor_parallel_size": 1,
             "swap_space": 16,
             "disable_log_stats": "",
-            "disable_log_requests": "",
             "load_format": "dummy"
         },
         "client_parameters": {
