@@ -21,6 +21,7 @@ from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 
 ARCH_TO_SKIP = {
     "MolmoForCausalLM": "incompatible requirements",
+    "MiniMaxVL01ForConditionalGeneration": "broken model",
 }
 
 
