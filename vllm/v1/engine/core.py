@@ -1036,8 +1036,11 @@ class EngineCoreProc(EngineCore):
                 output.result = UtilityResult(result)
             except BaseException as e:
                 logger.exception("Invocation of %s method failed", method_name)
+                message = str(e)
+                if e.__cause__:
+                    message += f" caused by {e.__cause__}"
                 output.failure_message = (
-                    f"Call to {method_name} method failed: {str(e)}"
+                    f"Call to {method_name} method failed: {message}"
                 )
             self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=output))
