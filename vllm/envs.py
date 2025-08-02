@@ -794,6 +794,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: float(os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")),
     "VLLM_DISABLE_COMPILE_CACHE":
     lambda: bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))),
+    # Controls whether to perform depyf decompilation during compilation
+    # 0 (default): Write placeholder file with comment
+    # 1: Perform actual depyf decompilation
+    "VLLM_COMPILE_DEPYF":
+    lambda: bool(int(os.getenv("VLLM_COMPILE_DEPYF", "0"))),
 
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,

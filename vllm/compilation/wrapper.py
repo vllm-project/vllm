@@ -100,23 +100,36 @@ class TorchCompileWrapperWithCustomDispatcher:
                                            "transformed_code.py")
             if not os.path.exists(decompiled_file):
                 try:
-                    # usually the decompilation will succeed for most models,
-                    # as we guarantee a full-graph compilation in Dynamo.
-                    # but there's no 100% guarantee, since decompliation is
-                    # not a reversible process.
-                    import depyf
-                    src = depyf.decompile(new_code)
+                    # Check if we should perform actual decompilation or write placeholder
+                    if envs.VLLM_COMPILE_DEPYF:
+                        # Perform actual decompilation when VLLM_COMPILE_DEPYF=1
+                        # usually the decompilation will succeed for most models,
+                        # as we guarantee a full-graph compilation in Dynamo.
+                        # but there's no 100% guarantee, since decompliation is
+                        # not a reversible process.
+                        import depyf
+                        src = depyf.decompile(new_code)
 
-                    with open(decompiled_file, "w") as f:
-                        f.write(src)
+                        with open(decompiled_file, "w") as f:
+                            f.write(src)
 
-                    logger.debug("Dynamo transformed code saved to %s",
-                                 decompiled_file)
+                        logger.debug("Dynamo transformed code saved to %s",
+                                     decompiled_file)
+                    else:
+                        # Write placeholder file with comment when VLLM_COMPILE_DEPYF=0 (default)
+                        placeholder_content = "# Please set VLLM_COMPILE_DEPYF=1 to populate this file\n"
+                        with open(decompiled_file, "w") as f:
+                            f.write(placeholder_content)
+                        logger.debug("Placeholder Dynamo transformed code saved to %s. "
+                                     "Set VLLM_COMPILE_DEPYF=1 to perform actual decompilation.",
+                                     decompiled_file)
                 except Exception:
                     pass
 
         if self.vllm_config.compilation_config.use_cudagraph and \
             "update" in new_code.co_names:
+            # For cudagraph error checking, we always perform decompilation regardless of VLLM_COMPILE_DEPYF
+            # because this is a critical error checking mechanism
             import depyf
             src = depyf.decompile(new_code)
             msg = "Assigning / modifying buffers of nn.Module during forward pass is not allowed when using cudagraph inside the compiler because it will cause silent errors. Please use eager mode or fix the code. The following code contains clues about which buffer is being modified (please search for the usage of the function `update`):\n" + src  # noqa
