@@ -419,9 +419,8 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
     pushd flashinfer
         TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
             python3 -m flashinfer.aot
-        echo "Building FlashInfer with mold linker for faster compilation..."
         TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-            mold -run uv pip install --system --no-build-isolation --force-reinstall --no-deps .
+            uv pip install --system --no-build-isolation --force-reinstall --no-deps .
     popd
     rm -rf flashinfer
 BASH
@@ -460,8 +459,7 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
             # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
             rm -rf build dist
             rm -rf *.egg-info
-            echo "Building DeepGEMM with mold linker for faster compilation..."
-            mold -run python3 setup.py bdist_wheel
+            python3 setup.py bdist_wheel
             uv pip install --system dist/*.whl
         popd
         rm -rf deepgemm
