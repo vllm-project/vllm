@@ -1304,6 +1304,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         xm.mark_step()  # Captures metadata updates
 
     def _precompile_mm_encoder(self) -> None:
+        if not self.is_multimodal_model:
+            return
+
         # Pre-compile MM encoder for all supported data modalities.
         hf_config = self.vllm_config.model_config.hf_config
 
