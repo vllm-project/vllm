@@ -7,19 +7,22 @@ import enum
 import hashlib
 import inspect
 import json
+import os
 import textwrap
 import uuid
 import warnings
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
                          replace)
 from functools import cached_property
 from importlib.util import find_spec
+from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args)
 
+import model_signing
 import regex as re
 import torch
 from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
@@ -272,6 +275,163 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
     return next(f for f in fields(cls) if f.name == name).init
 
 
+VerificationMethod = Literal["sigstore", "certificate", "key"]
+
+
+@config
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+class SignatureVerificationConfig:
+    """Signature verification configuration."""
+
+    verification_method: Optional[VerificationMethod] = None
+    """The signature verification method to use."""
+    signature: str = "model.sig"
+    """Path to the signature file. If only a filename is given, then a file
+    with this name is expected to hold the signature in the model's
+    directory."""
+    ignore_paths: Optional[Iterable[str]] = None
+    """File paths to ignore when verifying."""
+    ignore_git_paths: bool = True
+    """Ignore git-related files when verifying."""
+    identity: str = ""
+    """The email identity that signed with the 'sigstore' method."""
+    identity_provider: str = ""
+    """The email identity provider that was used when signing with the
+    'sigstore' method."""
+    use_staging: bool = False
+    """Use the Sigstore staging server."""
+    certificate_chain: Optional[str] = None
+    """The certificate chain needed for verifying with method 'certificate'."""
+    log_fingerprints: bool = False
+    """Whether to log certificate fingerprints when using the 'certificate'
+    method."""
+    public_key: Optional[str] = None
+    """Public key required for signature verification when using the 'key'
+    method."""
+    _verification_done: bool = False
+    """Set to True once signature verification was done."""
+
+    def signature_verification_requested(self) -> bool:
+        """Check whether signature verification was requested."""
+        return self.verification_method is not None
+
+    def signature_verification_needed(self) -> bool:
+        """Check whether signature verification is requested but has
+        not been done yet."""
+        return self.signature_verification_requested() and \
+               not self._verification_done
+
+    def _verify_sigstore(
+        self,
+        model_path: Path,
+        signature: Path,
+        ignore_paths: Iterable[Path],
+        ignore_git_paths: bool,
+        identity: str,
+        identity_provider: str,
+        use_staging: bool,
+    ) -> None:
+        """Verify using Sigstore"""
+        try:
+            model_signing.verifying.Config().use_sigstore_verifier(
+                identity=identity,
+                oidc_issuer=identity_provider,
+                use_staging=use_staging,
+            ).set_hashing_config(
+                model_signing.hashing.Config().set_ignored_paths(
+                    paths=list(ignore_paths) + [signature],
+                    ignore_git_paths=ignore_git_paths,
+                )).verify(model_path, signature)
+        except Exception as err:
+            logger.error("Verification failed with error: %s", err)
+            raise ValueError("Sigstore verification failed") from err
+
+    def _verify_certificate(
+        self,
+        model_path: Path,
+        signature: Path,
+        ignore_paths: Iterable[Path],
+        ignore_git_paths: bool,
+        certificate_chain: Iterable[Path],
+        log_fingerprints: bool,
+    ) -> None:
+        """Verify using a certificate chain"""
+        try:
+            model_signing.verifying.Config().use_certificate_verifier(
+                certificate_chain=certificate_chain,
+                log_fingerprints=log_fingerprints,
+            ).set_hashing_config(
+                model_signing.hashing.Config().set_ignored_paths(
+                    paths=list(ignore_paths) + [signature],
+                    ignore_git_paths=ignore_git_paths,
+                )).verify(model_path, signature)
+        except Exception as err:
+            logger.error("Verification failed with error: %s", err)
+            raise ValueError("Signature verification with certificate failed") \
+               from err
+
+    def _verify_private_key(
+        self,
+        model_path: Path,
+        signature: Path,
+        ignore_paths: Iterable[Path],
+        ignore_git_paths: bool,
+        public_key: Path,
+    ) -> None:
+        """Verify using a public key (paired with a private one)."""
+        try:
+            model_signing.verifying.Config().use_elliptic_key_verifier(
+                public_key=public_key, ).set_hashing_config(
+                    model_signing.hashing.Config().set_ignored_paths(
+                        paths=list(ignore_paths) + [signature],
+                        ignore_git_paths=ignore_git_paths,
+                    )).verify(model_path, signature)
+        except Exception as err:
+            logger.error("Verification failed with error: %s", err)
+            raise ValueError("Signature verification with public key failed ") \
+             from err
+
+    def verify_signature(self, model: str) -> None:
+        """Verify the signature of a model."""
+        if self.ignore_paths is None:
+            self.ignore_paths = []
+
+        if os.path.basename(self.signature) == self.signature:
+            signature = Path(model) / self.signature
+        else:
+            signature = Path(self.signature)
+
+        if self.verification_method == "sigstore":
+            self._verify_sigstore(Path(model), signature,
+                                  [Path(f) for f in self.ignore_paths],
+                                  self.ignore_git_paths, self.identity,
+                                  self.identity_provider, self.use_staging)
+        elif self.verification_method == "certificate":
+            cert_chain = []
+            if isinstance(self.certificate_chain, str):
+                cert_chain = [self.certificate_chain]
+
+            self._verify_certificate(Path(model), signature,
+                                     [Path(f) for f in self.ignore_paths],
+                                     self.ignore_git_paths,
+                                     [Path(f) for f in cert_chain],
+                                     self.log_fingerprints)
+        elif self.verification_method == "key":
+            if not self.public_key:
+                raise ValueError("Missing public key")
+
+            self._verify_private_key(Path(model), signature,
+                                     [Path(f) for f in self.ignore_paths],
+                                     self.ignore_git_paths,
+                                     Path(self.public_key))
+        else:
+            raise NotImplementedError(
+                "Unsupported signature verification method "
+                f"'{self.verification_method}'")
+        logger.info("Signature verification succeeded")
+        self._verification_done = True
+
+
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal["raw_logprobs", "raw_logits", "processed_logprobs",
@@ -484,6 +644,9 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    signature_verification_config: \
+        Optional[SignatureVerificationConfig] = None
+    """The model's signature verification configuration."""
 
     def compute_hash(self) -> str:
         """
