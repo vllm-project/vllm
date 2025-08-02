@@ -3315,3 +3315,32 @@ def decorate_logs(process_name: Optional[str] = None) -> None:
     pid = os.getpid()
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
+
+def print_logo():
+    from colorama import Style, init
+
+    init()
+
+    def rgb(r, g, b):
+        return f"\033[38;2;{r};{g};{b}m"
+
+    reset = "\033[0m"
+
+    logo = """
+             LL          LL          MMM       MMM 
+             LL          LL          MMMM     MMMMM
+         V   LL          LL          MM MM   MM MMM
+vvvv  VVVV   LL          LL          MM  MM MM  MMM
+vvvv VVVV    LL          LL          MM   MMM   MMM
+ vvv VVVV    LL          LL          MM    M    MMM
+  vvVVVV     LL          LL          MM         MMM
+    VVVV     LLLLLLLLLL  LLLLLLLLL   M           M
+"""
+
+    colored_logo = (
+        logo.replace("v", rgb(255, 187, 29) + "v" + reset)
+            .replace("V", rgb(256, 169, 255) + "V" + reset)     
+    )
+
+    print(colored_logo + Style.RESET_ALL)
+
