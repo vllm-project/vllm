@@ -488,9 +488,10 @@ class DeepseekForCausalLM(nn.Module, SupportsPP):
 
 class DeepseekForCausalLMWithAdditionalHeads(DeepseekForCausalLM):
     """
-    Extends DeepseekForCausalLM to add multiple binary classification heads, computed via
-    a dedicated `compute_additional_head` method using the last token embedding.
-    
+    Extends DeepseekForCausalLM to add multiple binary classification heads.
+    The additional heads' weights (safetensors) are deferred and loaded during
+    `load_weights` so that construction has no side effects.
+
     Example score_heads_config:
         [
             {
@@ -507,52 +508,80 @@ class DeepseekForCausalLMWithAdditionalHeads(DeepseekForCausalLM):
             }
         ]
     """
-    
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", score_heads_config: Optional[list] = None):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        
+
         self.classifier_heads = nn.ModuleDict()
         self.head_names = []
         if score_heads_config is None or len(score_heads_config) == 0:
             raise ValueError("score_heads_config is required")
-        
+        self.score_heads_config = score_heads_config
+
         for head_config in score_heads_config:
             head_name = head_config["name"]
-            tensor_path = head_config["location"]
             num_layers = head_config["num_layers"]
             head_hidden_size = head_config["head_hidden_size"]
-            
+
             head = self._build_classification_head(head_hidden_size, num_layers)
-            state_dict = load_safetensor(tensor_path)
-            try:
-                head.load_state_dict(state_dict)
-            except RuntimeError as e:
-                raise RuntimeError(f"Failed to load state dict for head '{head_name}': {e}")
             self.classifier_heads[head_name] = head
             self.head_names.append(head_name)
+
+        # Flag to avoid re-loading head weights multiple times
+        self._heads_loaded = False
 
     def _build_classification_head(self, head_hidden_size: int, num_layers: int) -> nn.Sequential:
         """Build a binary classification head with the specified number of layers."""
         layers = []
         token_hidden_size = self.config.hidden_size
-        
+
         if num_layers == 1:
             layers = [nn.Linear(token_hidden_size, 1), nn.Sigmoid()]
         else:
             # First layer: token_hidden_size -> head_hidden_size
             layers.append(nn.Linear(token_hidden_size, head_hidden_size))
             layers.append(nn.ReLU())
-            
+
             # Middle layers: head_hidden_size -> head_hidden_size
             for _ in range(num_layers - 2):
                 layers.append(nn.Linear(head_hidden_size, head_hidden_size))
                 layers.append(nn.ReLU())
-            
+
             # Final layer: head_hidden_size -> 1
             layers.append(nn.Linear(head_hidden_size, 1))
             layers.append(nn.Sigmoid())
-        
+
         return nn.Sequential(*layers)
+
+    def _load_classification_heads_from_files(self) -> set[str]:
+        """
+        Load the safetensor state dicts for all classification heads from their
+        configured locations. Returns the set of fully qualified parameter names
+        that were loaded (e.g., "classifier_heads.self_harm.0.weight").
+        """
+        if self._heads_loaded:
+            return set()
+
+        loaded = set()
+        for head_config in self.score_heads_config:
+            head_name = head_config["name"]
+            tensor_path = head_config["location"]
+
+            if head_name not in self.classifier_heads:
+                continue  # should not happen, but skip defensively
+
+            head = self.classifier_heads[head_name]
+            try:
+                state_dict = load_safetensor(tensor_path)
+                head.load_state_dict(state_dict)
+            except RuntimeError as e:
+                raise RuntimeError(f"Failed to load state dict for head '{head_name}': {e}")
+            # Record loaded parameter names
+            for param_name in head.state_dict().keys():
+                loaded.add(f"classifier_heads.{head_name}.{param_name}")
+
+        self._heads_loaded = True
+        return loaded
 
     def compute_additional_head(self, hidden_states: torch.FloatTensor) -> torch.Tensor:
         """
@@ -566,21 +595,24 @@ class DeepseekForCausalLMWithAdditionalHeads(DeepseekForCausalLM):
             torch.Tensor: shape (batch, num_heads) where each column corresponds to a head in self.head_names order.
         """
         last_hidden = hidden_states[:, -1, :]
-        
+
         head_outputs = []
         for name in self.head_names:
             head = self.classifier_heads[name]
             logits = head(last_hidden)
             head_outputs.append(logits.squeeze(-1))
-        
+
         return torch.stack(head_outputs, dim=1)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """
         Load weights for both the base model and additional classification heads.
+        Head weights are loaded from safetensor files here (once).
         """
         # First load the base model weights
         loaded_params = super().load_weights(weights)
-        
-        # Additional heads are loaded during initialization, so no additional loading needed here
-        return loaded_params
+
+        # Then load the additional head safetensors (only once)
+        head_loaded_params = self._load_classification_heads_from_files()
+
+        return loaded_params.union(head_loaded_params)
