@@ -91,7 +91,6 @@ def flash_mla_with_kvcache(
     out, softmax_lse = torch.ops._flashmla_C.fwd_kvcache_mla(
         q,
         k_cache,
-        None,
         head_dim_v,
         cache_seqlens,
         block_table,
