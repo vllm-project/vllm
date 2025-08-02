@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 import requests
+import torch
 import torch.nn.functional as F
 from torch import tensor
 
@@ -220,3 +221,43 @@ class TestModel:
             assert score_data.keys() == invocation_data.keys()
             assert score_data["score"] == pytest.approx(
                 invocation_data["score"], rel=0.01)
+
+    def test_activation(self, server: RemoteOpenAIServer, model: dict[str,
+                                                                      Any]):
+
+        def get_outputs(activation):
+            text_1 = "What is the capital of France?"
+            text_2 = "The capital of France is Paris."
+            response = requests.post(server.url_for("score"),
+                                     json={
+                                         "model": model["name"],
+                                         "text_1": text_1,
+                                         "text_2": text_2,
+                                         "activation": activation
+                                     })
+            if response.status_code != 200:
+                return response
+
+            outputs = response.json()
+            return torch.tensor([x['score'] for x in outputs["data"]])
+
+        if model["is_cross_encoder"]:
+
+            default = get_outputs(activation=None)
+            w_activation = get_outputs(activation=True)
+            wo_activation = get_outputs(activation=False)
+
+            assert torch.allclose(default, w_activation,
+                                  atol=1e-2), "Default should use activation."
+            assert not torch.allclose(
+                w_activation, wo_activation,
+                atol=1e-2), "wo_activation should not use activation."
+            assert torch.allclose(
+                F.sigmoid(wo_activation), w_activation, atol=1e-2
+            ), "w_activation should be close to activation(wo_activation)."
+        else:
+            get_outputs(activation=None)
+
+            # The activation parameter only works for the is_cross_encoder model
+            response = get_outputs(activation=True)
+            assert response.status_code == 400
