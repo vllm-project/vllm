@@ -28,7 +28,6 @@ if [[ $1 == "prefiller" ]]; then
         CUDA_VISIBLE_DEVICES=0 \
         vllm serve $MODEL \
         --port 8100 \
-        --disable-log-requests \
         --enforce-eager \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}'
@@ -46,7 +45,6 @@ elif [[ $1 == "decoder" ]]; then
         CUDA_VISIBLE_DEVICES=1 \
         vllm serve $MODEL \
         --port 8200 \
-        --disable-log-requests \
         --enforce-eager \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1"}}'
