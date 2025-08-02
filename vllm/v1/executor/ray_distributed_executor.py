@@ -43,6 +43,8 @@ class FutureWrapper(Future):
 class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
     """Ray distributed executor using Ray Compiled Graphs."""
 
+    supports_pp: bool = True
+
     def _init_executor(self) -> None:
         super()._init_executor()
 
