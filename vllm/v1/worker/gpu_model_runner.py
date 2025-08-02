@@ -1444,7 +1444,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # is simpler/introduces less overhead.
             additional_heads_output_data: Union[torch.Tensor, list[dict[
                 str, float]]] = self.model.compute_additional_head(
-                    hidden_states, additional_heads_extra_inputs)
+                    sample_hidden_states, additional_heads_extra_inputs)
 
             if isinstance(additional_heads_output_data, torch.Tensor):
                 additional_heads_output_data = \
