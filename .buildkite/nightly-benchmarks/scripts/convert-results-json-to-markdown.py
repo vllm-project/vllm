@@ -52,6 +52,7 @@ serving_column_mapping = {
     "output_len": "Output Len",
     "gpu_type": "GPU",
     "completed": "# of req.",
+    "qps": "qps",
     "max_concurrency": "# of max concurrency.",
     "request_throughput": "Tput (req/s)",
     "total_token_throughput": "Total Token Tput (tok/s)",
@@ -212,8 +213,8 @@ if __name__ == "__main__":
             out: Dict[str, Any] = {
                 "client_command": parse_client_command(command["client_command"])
             }
-            parse_args = ["--dataset-name", "--random-input-len", "--random-output-len"]
-            col_mapping = ["dataset_name", "input_len", "output_len"]
+            parse_args = ["--dataset-name", "--random-input-len", "--random-output-len", "--request-rate"]
+            col_mapping = ["dataset_name", "input_len", "output_len", "qps"]
 
             for index, arg in enumerate(parse_args):
                 if arg in out["client_command"]["args"]:

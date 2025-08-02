@@ -15,11 +15,15 @@ def compare_data_columns(
     for file in files:
         data_df = pd.read_json(file)
         serving_df = data_df.dropna(subset=[drop_column], ignore_index=True)
-        if debug is True or not frames:
-            serving_df = serving_df.rename(columns={name_column: file + "_name"})
-            frames.append(serving_df[file + "_name"])
+        # Show all info columns in the first couple columns
+        if not frames:
             for col in info_cols:
                 frames.append(serving_df[col])
+        # only show test name under debug mode
+        if debug is True:
+            serving_df = serving_df.rename(columns={name_column: file + "_name"})
+            frames.append(serving_df[file + "_name"])
+
         file = "/".join(file.split("/")[:-1])
         serving_df = serving_df.rename(columns={data_column: file})
         frames.append(serving_df[file])
@@ -53,7 +57,7 @@ if __name__ == "__main__":
 
     drop_column = "P99"
     name_column = "Test name"
-    info_cols = ["Model", "# of max concurrency."]
+    info_cols = ["Model", "Dataset Name", "Input Len", "Output Len", "# of max concurrency.", "qps"]
     data_cols_to_compare = ["Output Tput (tok/s)", "Median TTFT (ms)", "Median"]
     html_msgs_for_data_cols = [
         "Compare Output Tokens /n",
