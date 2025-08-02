@@ -17,6 +17,12 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
             finished_recving=finished_recving,
         )
 
+    def __repr__(self):
+        return (
+            f"DummyModelRunnerOutput("
+            f"finished_sending={self.kv_connector_output.finished_sending},"
+            f"finished_recving={self.kv_connector_output.finished_recving})")
+
 
 def test_aggregate_workers_output():
     aggregator = KVOutputAggregator(world_size=2)
