@@ -181,7 +181,7 @@ class RocmPlatform(Platform):
                 # Note: AITER FA is only supported for Qwen-VL models.
                 # TODO: Add support for other VL models in their model class.
                 return _Backend.ROCM_AITER_FA
-            elif on_mi3xx():
+            if on_gfx9():
                 return _Backend.FLASH_ATTN
         return _Backend.TORCH_SDPA
 

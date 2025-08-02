@@ -256,7 +256,7 @@ class Qwen2_5_VisionAttention(nn.Module):
             raise RuntimeError(
                 f"Qwen2.5-VL does not support {self.attn_backend} backend now."
             )
-        self.flash_attn_backend = self.attn_backend in {
+        self.is_flash_attn_backend = self.attn_backend in {
             _Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA
         }
 
@@ -305,15 +305,13 @@ class Qwen2_5_VisionAttention(nn.Module):
             q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
             k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
 
-        if self.flash_attn_backend:
+        if self.is_flash_attn_backend:
             # from vllm_flash_attn.flash_attn_interface import (
             #   flash_attn_varlen_func)
             if self.attn_backend == _Backend.ROCM_AITER_FA:
                 from aiter import flash_attn_varlen_func
-                dropout_p = float(0)
             else:
                 from flash_attn import flash_attn_varlen_func
-                dropout_p = 0
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
@@ -324,7 +322,7 @@ class Qwen2_5_VisionAttention(nn.Module):
                                             cu_seqlens_k=cu_seqlens,
                                             max_seqlen_q=max_seqlen,
                                             max_seqlen_k=max_seqlen,
-                                            dropout_p=dropout_p,
+                                            dropout_p=0.0,
                                             causal=False)
 
             context_layer = rearrange(output,
