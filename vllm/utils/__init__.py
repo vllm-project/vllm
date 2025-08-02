@@ -72,6 +72,7 @@ from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
+from vllm.ray.lazy_utils import is_in_ray_actor
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -1672,8 +1673,9 @@ class FlexibleArgumentParser(ArgumentParser):
                 # Special case warning because the warning below won't trigger
                 # if –-disable-log-requests because its value is default.
                 logger.warning_once(
-                    "argument '--disable-log-requests' is deprecated. This "
-                    "will be removed in v0.12.0.")
+                    "argument '--disable-log-requests' is deprecated and "
+                    "replaced with '--enable-log-requests'. This will be "
+                    "removed in v0.12.0.")
             namespace, args = super().parse_known_args(args, namespace)
             for action in FlexibleArgumentParser._deprecated:
                 if (hasattr(namespace, dest := action.dest)
@@ -2794,6 +2796,9 @@ def make_zmq_socket(
     if linger is not None:
         socket.setsockopt(zmq.LINGER, linger)
 
+    if socket_type == zmq.XPUB:
+        socket.setsockopt(zmq.XPUB_VERBOSE, True)
+
     # Determine if the path is a TCP socket with an IPv6 address.
     # Enable IPv6 on the zmq socket if so.
     scheme, host, _ = split_zmq_path(path)
@@ -2830,17 +2835,6 @@ def zmq_socket_ctx(
 
     finally:
         ctx.destroy(linger=linger)
-
-
-def is_in_ray_actor():
-    """Check if we are in a Ray actor."""
-
-    try:
-        import ray
-        return (ray.is_initialized()
-                and ray.get_runtime_context().get_actor_id() is not None)
-    except ImportError:
-        return False
 
 
 def _maybe_force_spawn():
