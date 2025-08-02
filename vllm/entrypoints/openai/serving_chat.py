@@ -814,9 +814,13 @@ class OpenAIServingChat(OpenAIServing):
 
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
-                    # wasn't ready to send a token, then
-                    #   get the next token without streaming a chunk
-                    if delta_message is None:
+                    # wasn't ready to send a token), then get the next token
+                    # without streaming a chunk, except for the last chunk
+                    # that carries relevant finish_reason information.
+                    if (delta_message is None
+                            and output.finish_reason is not None):
+                        delta_message = DeltaMessage()
+                    elif delta_message is None:
                         continue
 
                     if output.finish_reason is None:
