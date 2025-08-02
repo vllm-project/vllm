@@ -202,7 +202,18 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
             yield a, b
             a = b
 
-    cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+    try:
+        cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+    except (OSError, KeyError):
+        # inspect.getsource() may fail for Python 3.13+
+        # Try alternative approach using inspect.findsource()
+        try:
+            lines, _ = inspect.findsource(cls)
+            source = ''.join(lines)
+            cls_node = ast.parse(textwrap.dedent(source)).body[0]
+        except (OSError, TypeError):
+            # If all else fails, return empty dict
+            return {}
 
     if not isinstance(cls_node, ast.ClassDef):
         raise TypeError("Given object was not a class.")
