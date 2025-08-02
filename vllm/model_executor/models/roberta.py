@@ -14,13 +14,18 @@ from vllm.model_executor.layers.pooler import (ClassifierPooler, CLSPool,
                                                DispatchPooler, Pooler)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.models.bert import BertEmbeddingModel, BertModel
+from vllm.model_executor.models.bert import (BertEmbeddingModel,
+                                             BertMMTokenIdsMixin, BertModel,
+                                             TokenTypeInputBuilder,
+                                             TokenTypeMultiModalProcessor,
+                                             TokenTypeProcessingInfo)
 from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
                                               maybe_prefix)
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
-from .interfaces import SupportsCrossEncoding, SupportsV0Only
+from .interfaces import SupportsCrossEncoding
 
 
 class RobertaEmbedding(nn.Module):
@@ -51,24 +56,41 @@ class RobertaEmbedding(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        apply_layer_norm: bool = True,
     ) -> torch.Tensor:
-        input_shape = input_ids.size()
-        inputs_embeds = self.word_embeddings(input_ids)
 
-        # Position embeddings.
-        position_embeddings = self.position_embeddings(position_ids)
-        if token_type_ids is None:
-            token_type_ids = torch.zeros(input_shape,
+        # forward was called directly without going
+        # throught the multi-modal flow
+        if input_ids is not None and position_ids is not None \
+            and inputs_embeds is None and token_type_ids is None:
+            token_type_ids = torch.zeros(input_ids.size(),
                                          dtype=torch.long,
-                                         device=inputs_embeds.device)
+                                         device=input_ids.device)
 
-        token_type_embeddings = self.token_type_embeddings(token_type_ids)
-        embeddings = inputs_embeds + token_type_embeddings + position_embeddings
-        embeddings = self.LayerNorm(embeddings)
-        return embeddings
+        tensors_to_add: list[torch.Tensor] = []
+
+        if inputs_embeds is not None:
+            tensors_to_add.append(inputs_embeds)
+
+        if token_type_ids is not None:
+            tensors_to_add.append(self.token_type_embeddings(token_type_ids))
+
+        if position_ids is not None:
+            tensors_to_add.append(self.position_embeddings(position_ids))
+
+        if input_ids is not None:
+            tensors_to_add.append(self.word_embeddings(input_ids))
+
+        embeds = torch.stack(tensors_to_add, dim=0).sum(dim=0)
+
+        if apply_layer_norm:
+            return self.LayerNorm(embeds)
+        else:
+            return embeds
 
 
 # Adapted from transformers
@@ -153,8 +175,11 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         return loader.load_weights(weights_list, mapper=mapper)
 
 
-class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
-                                       SupportsV0Only):
+@MULTIMODAL_REGISTRY.register_processor(TokenTypeMultiModalProcessor,
+                                        info=TokenTypeProcessingInfo,
+                                        dummy_inputs=TokenTypeInputBuilder)
+class RobertaForSequenceClassification(nn.Module, BertMMTokenIdsMixin,
+                                       SupportsCrossEncoding):
     """A model that uses Roberta to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -210,6 +235,13 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
                     vllm_config.model_config),
             ),
         })
+        self.input_ids: Optional[torch.Tensor] = None
+
+    def maybe_store_input_ids(self, input_ids: torch.Tensor):
+        self.input_ids = input_ids
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.roberta
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
@@ -223,6 +255,8 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
         inputs_embeds: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if input_ids is None:
+            input_ids = self.input_ids
         replace_roberta_positions(input_ids=input_ids,
                                   position_ids=positions,
                                   padding_idx=self.padding_idx)
