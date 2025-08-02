@@ -2811,22 +2811,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.attn_metadata_builders.append(attn_metadata_builder)
                 self.is_encoder_only_model = True
 
-        min_cg_support = AttentionCGSupport.ALWAYS
-        min_cg_builder_name = self.attn_metadata_builders[0].__class__.__name__
-        for builder in self.attn_metadata_builders:
-            if builder.cudagraph_support.value < min_cg_support.value:
-                min_cg_support = builder.cudagraph_support
-                min_cg_builder_name = builder.__class__.__name__
+        if len(self.attn_metadata_builders) > 0:
+            min_cg_support = AttentionCGSupport.ALWAYS
+            min_cg_builder_name = self.attn_metadata_builders[0].\
+                __class__.__name__
+            for builder in self.attn_metadata_builders:
+                if builder.cudagraph_support.value < min_cg_support.value:
+                    min_cg_support = builder.cudagraph_support
+                    min_cg_builder_name = builder.__class__.__name__
 
-        if self.cudagraph_mode == CUDAGraphMode.FULL \
-            and min_cg_support != AttentionCGSupport.ALWAYS:
-            error_msg = "CUDAGraphMode.FULL is not supported " +\
-                f"with {min_cg_builder_name} backend"
-            if min_cg_support == AttentionCGSupport.NEVER:
-                error_msg += " please try cudagraph_mode=PIECEWISE"
-            else:
-                error_msg += " please try cudagraph_mode=FULL_PIECEWISE"
-            raise ValueError(error_msg)
+            if self.cudagraph_mode == CUDAGraphMode.FULL \
+                and min_cg_support != AttentionCGSupport.ALWAYS:
+                error_msg = "CUDAGraphMode.FULL is not supported " +\
+                    f"with {min_cg_builder_name} backend"
+                if min_cg_support == AttentionCGSupport.NEVER:
+                    error_msg += " please try cudagraph_mode=PIECEWISE"
+                else:
+                    error_msg += " please try cudagraph_mode=FULL_AND_PIECEWISE"
+                raise ValueError(error_msg)
 
         # Trigger cudagraph dispatching keys initialization here (after
         # initializing attn backends).

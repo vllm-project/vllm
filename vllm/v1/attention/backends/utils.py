@@ -71,16 +71,16 @@ class AttentionCGSupport(enum.Enum):
     Here we do not consider the cascade attention, as currently
     it is never cudagraph supported."""
 
-    NEVER = 0
-    """NO cudagraph support"""
-    ALWAYS = 1
+    ALWAYS = 3
     """Cudagraph always supported; supports mixed-prefill-decode"""
-    UNIFORM_SINGLE_TOKEN_DECODE = 2
-    """Cudagraph supported for batches the only contain query_len==1 decodes"""
-    UNIFORM_BATCH = 3
+    UNIFORM_BATCH = 2
     """Cudagraph supported for batches the only contain query lengths that are
     the same, this can be used for spec-decode 
         i.e. "decodes" are 1 + num_speculative_tokens"""
+    UNIFORM_SINGLE_TOKEN_DECODE = 1
+    """Cudagraph supported for batches the only contain query_len==1 decodes"""
+    NEVER = 0
+    """NO cudagraph support"""
 
 
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
