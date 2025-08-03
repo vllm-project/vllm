@@ -1425,10 +1425,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_scheduled_tokens_np: np.ndarray,
         kv_connector_output: Optional[KVConnectorOutput],
     ) -> ModelRunnerOutput:
-        assert self.input_batch.num_reqs == len(
-            self.input_batch.pooling_params), (
-                "Either all or none of the requests in"
-                " a batch must be pooling request")
+        assert self.input_batch.num_reqs ==\
+            len(self.input_batch.pooling_params), \
+        "Either all or none of the requests in" \
+        " a batch must be pooling request"
 
         extracted_hidden_states = list(
             torch.split(hidden_states[:num_scheduled_tokens],
@@ -1676,8 +1676,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
         logprobs_tensors = sampler_output.logprobs_tensors
-        logprobs_lists = (logprobs_tensors.tolists()
-                          if logprobs_tensors is not None else None)
+        logprobs_lists = logprobs_tensors.tolists() \
+            if logprobs_tensors is not None else None
 
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
@@ -2597,10 +2597,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 f"Unknown KV cache spec type: {type(kv_cache_spec)}")
 
         attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
-            kv_cache_spec,
-            layer_names,
-            self.vllm_config,
-            self.device,
+            kv_cache_spec=kv_cache_spec,
+            layer_names=layer_names,
+            vllm_config=self.vllm_config,
+            device=self.device,
         )
 
         if self.full_cuda_graph:

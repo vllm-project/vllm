@@ -167,9 +167,8 @@ class MambaMixer(MambaBase, CustomOp):
 
         if envs.VLLM_USE_V1:
             if attn_metadata is not None:
-                if isinstance(attn_metadata, dict):
-                    attn_metadata = attn_metadata[self.prefix]
-
+                assert isinstance(attn_metadata, dict)
+                attn_metadata = attn_metadata[self.prefix]
                 mamba1_metadata = attn_metadata
                 assert isinstance(mamba1_metadata, Mamba1AttentionMetadata)
                 query_start_loc = mamba1_metadata.query_start_loc
