@@ -570,7 +570,7 @@ class DeepseekForCausalLMWithAdditionalHeads(DeepseekForCausalLM):
             try:
                 state_dict = load_safetensor(tensor_path)
                 head.load_state_dict(state_dict)
-            except RuntimeError as e:
+            except Exception as e:
                 raise RuntimeError(f"Failed to load state dict for head '{head_name}': {e}")
             # Record loaded parameter names
             for param_name in head.state_dict().keys():
