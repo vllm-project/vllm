@@ -20,8 +20,8 @@ __global__ void rms_norm_kernel(
     const scalar_t* __restrict__ weight,  // [hidden_size]
     const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
-  // Assumes hidden_size <= 1024, enforced via launch config
-  __shared__ float s_input[1024];
+  // Dynamic shared memory allocation for input values
+  extern __shared__ float s_input[];
 
   float variance = 0.0f;
   int row_offset = blockIdx.x * input_stride;
@@ -162,8 +162,12 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   dim3 block(std::min(hidden_size, 1024));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  // Calculate shared memory size for dynamic allocation
+  size_t shared_mem_bytes = hidden_size * sizeof(float);
+
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
-    vllm::rms_norm_kernel<scalar_t><<<grid, block, 0, stream>>>(
+    vllm::rms_norm_kernel<scalar_t><<<grid, block, shared_mem_bytes, stream>>>(
         out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), input_stride,
         weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);
   });
