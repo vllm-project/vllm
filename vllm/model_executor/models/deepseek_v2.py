@@ -30,6 +30,7 @@ from typing import Any, Optional, Union
 import torch
 from torch import nn
 from transformers import PretrainedConfig
+from safetensors.torch import load_file as load_safetensor
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -933,3 +934,118 @@ def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
             if weight_name.startswith(f"model.layers.{layer_idx+i}."):
                 return layer_idx + i
     return None
+
+
+class DeepseekForCausalLMWithAdditionalHeads(DeepseekV3ForCausalLM):
+    """
+    Extends DeepseekV3ForCausalLM to add multiple binary classification heads.
+    The additional heads' weights (safetensors) are deferred and loaded during
+    `load_weights` so that construction has no side effects.
+
+    The additional_heads_config should be provided in vllm_config.additional_config["additional_heads_config"].
+    
+    Example additional_heads_config:
+        [
+            {
+                "name": "self_harm",
+                "location": "/path/to/self_harm_head.safetensors",
+                "num_hidden_layers": 2,
+                "hidden_dim": 4096
+            },
+            {
+                "name": "violence",
+                "location": "/path/to/violence_head.safetensors",
+                "num_hidden_layers": 0
+            }
+        ]
+    """
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        self.classifier_heads = nn.ModuleDict()
+        self.head_names = []
+        
+        # Extract additional_heads_config from additional_config
+        if not isinstance(vllm_config.additional_config, dict):
+            raise ValueError("additional_config must be a dictionary")
+        
+        additional_heads_config = vllm_config.additional_config.get("additional_heads_config")
+        if additional_heads_config is None or len(additional_heads_config) == 0:
+            raise ValueError("additional_heads_config is required in additional_config")
+        self.additional_heads_config = additional_heads_config
+
+        for head_config in self.additional_heads_config:
+            head_name = head_config["name"]
+            num_hidden_layers = head_config["num_hidden_layers"]
+            hidden_dim = head_config.get("hidden_dim")
+            self.classifier_heads[head_name] = self._build_classification_head(num_hidden_layers, hidden_dim)
+            self.head_names.append(head_name)
+
+        # Flag to avoid re-loading head weights multiple times
+        self._heads_loaded = False
+
+    def _build_classification_head(self, num_hidden_layers: int, hidden_dim: Optional[int]) -> nn.Sequential:
+        """Build a binary classification head with the specified number of hidden layers."""
+        token_hidden_size = self.config.hidden_size
+
+        if num_hidden_layers == 0:
+            return nn.Sequential(nn.Linear(token_hidden_size, 1), nn.Sigmoid())
+        
+        assert hidden_dim is not None, "hidden_dim is required for num_hidden_layers > 0"
+        if num_hidden_layers == 1:
+            return nn.Sequential(
+                nn.Linear(token_hidden_size, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1),
+                nn.Sigmoid()
+            )
+        # Multiple hidden layers
+        layers = []
+        layers.append(nn.Linear(token_hidden_size, hidden_dim))
+        layers.append(nn.ReLU())
+        for _ in range(num_hidden_layers - 2):
+            layers.append(nn.Linear(hidden_dim, hidden_dim))
+            layers.append(nn.ReLU())
+        layers.append(nn.Linear(hidden_dim, 1))
+        layers.append(nn.Sigmoid())
+        return nn.Sequential(*layers)
+
+    def _load_classification_heads_from_files(self) -> set[str]:
+        if self._heads_loaded:
+            return set()
+
+        loaded = set()
+        for head_config in self.additional_heads_config:
+            head_name = head_config["name"]
+            tensor_path = head_config["location"]
+
+            if head_name not in self.classifier_heads:
+                continue  # should not happen, but skip defensively
+
+            head = self.classifier_heads[head_name]
+            try:
+                state_dict = load_safetensor(tensor_path)
+                head.load_state_dict(state_dict)
+            except Exception as e:
+                raise RuntimeError(f"Failed to load state dict for head '{head_name}': {e}")
+            # Record loaded parameter names
+            for param_name in head.state_dict().keys():
+                loaded.add(f"classifier_heads.{head_name}.{param_name}")
+
+        self._heads_loaded = True
+        return loaded
+
+    def compute_additional_head(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        head_outputs = []
+        for name in self.head_names:
+            head = self.classifier_heads[name]
+            logits = head(hidden_states)
+            head_outputs.append(logits.squeeze(-1))
+
+        return torch.stack(head_outputs, dim=1)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loaded_params = super().load_weights(weights)
+        head_loaded_params = self._load_classification_heads_from_files()
+        return loaded_params.union(head_loaded_params)
