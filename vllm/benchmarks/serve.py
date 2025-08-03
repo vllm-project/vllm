@@ -34,12 +34,12 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (SampleRequest, add_dataset_parser,
                                       get_samples)
-from vllm.benchmarks.endpoint_request_func import (ASYNC_REQUEST_FUNCS,
-                                                   OPENAI_COMPATIBLE_BACKENDS,
-                                                   RequestFuncInput,
-                                                   RequestFuncOutput)
-from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
-                                   write_to_json)
+from vllm.benchmarks.lib.endpoint_request_func import (
+    ASYNC_REQUEST_FUNCS, OPENAI_COMPATIBLE_BACKENDS, RequestFuncInput,
+    RequestFuncOutput)
+from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
+from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
+                                       write_to_json)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
@@ -331,6 +331,7 @@ async def benchmark(
     ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
     ramp_up_start_rps: Optional[int] = None,
     ramp_up_end_rps: Optional[int] = None,
+    ready_check_timeout_sec: int = 600,
 ):
     if endpoint_type in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -359,7 +360,8 @@ async def benchmark(
         extra_body=extra_body,
     )
 
-    test_output = await request_func(request_func_input=test_input)
+    test_output = await wait_for_endpoint(
+        request_func, test_input, timeout_seconds=ready_check_timeout_sec)
     if not test_output.success:
         raise ValueError(
             "Initial test run failed - Please make sure benchmark arguments "
@@ -907,6 +909,13 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="The ending request rate for ramp-up (RPS). "
         "Needs to be specified when --ramp-up-strategy is used.",
     )
+    parser.add_argument(
+        "--ready-check-timeout-sec",
+        type=int,
+        default=600,
+        help="Maximum time to wait for the endpoint to become ready "
+        "in seconds (default: 600 seconds / 10 minutes).",
+    )
 
 
 def main(args: argparse.Namespace):
@@ -1012,6 +1021,7 @@ def main(args: argparse.Namespace):
             ramp_up_strategy=args.ramp_up_strategy,
             ramp_up_start_rps=args.ramp_up_start_rps,
             ramp_up_end_rps=args.ramp_up_end_rps,
+            ready_check_timeout_sec=args.ready_check_timeout_sec,
         ))
 
     # Save config and results to json
