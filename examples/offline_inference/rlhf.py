@@ -126,7 +126,7 @@ for name, p in train_model.named_parameters():
 
 # Synchronize the updated weights to the inference engine.
 for name, p in train_model.named_parameters():
-    dtype_name = str(p.dtype).split(".")[1]
+    dtype_name = str(p.dtype).split(".")[-1]
     handle = llm.collective_rpc.remote(
         "update_weight", args=(name, dtype_name, p.shape)
     )
