@@ -385,6 +385,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Glm4v_moeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V-Air",
                                           is_available_online=False),   # noqa: E501
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m",
+                                      trust_remote_code=True,
                                       extras={"2b": "h2oai/h2ovl-mississippi-2b"},  # noqa: E501
                                       max_transformers_version="4.48",  # noqa: E501
                                       transformers_version_reason="HF model is not compatible."),  # noqa: E501
@@ -434,6 +435,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                               trust_remote_code=True),
     "Llama_Nemotron_Nano_VL" : _HfExamplesInfo("nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1", # noqa: E501
                                                      trust_remote_code=True),
+    "Ovis": _HfExamplesInfo("AIDC-AI/Ovis2-1B", trust_remote_code=True,
+                            extras={"1.6-llama": "AIDC-AI/Ovis1.6-Llama3.2-3B",
+                                    "1.6-gemma": "AIDC-AI/Ovis1.6-Gemma2-9B"}),  # noqa: E501
     "PaliGemmaForConditionalGeneration": _HfExamplesInfo("google/paligemma-3b-mix-224",  # noqa: E501
                                                          extras={"v2": "google/paligemma2-3b-ft-docci-448"}),  # noqa: E501
     "Phi3VForCausalLM": _HfExamplesInfo("microsoft/Phi-3-vision-128k-instruct",
@@ -441,9 +445,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                         max_transformers_version="4.48",
                                         transformers_version_reason="Use of deprecated imports which have been removed.",  # noqa: E501
                                         extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"}),  # noqa: E501
-    "Ovis": _HfExamplesInfo("AIDC-AI/Ovis2-1B", trust_remote_code=True,
-                            extras={"1.6-llama": "AIDC-AI/Ovis1.6-Llama3.2-3B",
-                                    "1.6-gemma": "AIDC-AI/Ovis1.6-Gemma2-9B"}),  # noqa: E501
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
                                         trust_remote_code=True),
     "Phi4MultimodalForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",  # noqa: E501
