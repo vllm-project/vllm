@@ -64,25 +64,22 @@ class NeuronWorker(LocalOrDistributedWorkerBase):
         assert (self.lora_config
                 is None), ("LoRA is not supported for TransformersNeuronX "
                            "framework.")
-        from vllm.worker.multi_step_neuron_model_runner import (
-            MultiStepNeuronModelRunner)
         if self.speculative_config is not None:
-            return MultiStepNeuronModelRunner(vllm_config=vllm_config)
-        else:
-            return NeuronModelRunner(vllm_config=vllm_config)
+            raise NotImplementedError(
+                "Speculative decoding requires multi-step support, which has "
+                "been removed.")
+        return NeuronModelRunner(vllm_config=vllm_config)
 
     def get_neuronx_distributed_model_runner(self, vllm_config):
-        from vllm.worker.multi_step_neuronx_distributed_model_runner import (
-            MultiStepNeuronxDistributedModelRunner)
         from vllm.worker.neuronx_distributed_model_runner import (
             NeuronxDistributedModelRunner)
         if self.speculative_config is not None:
             assert (self.lora_config
                     is None), "LoRA is not supported for Speculative Decoding"
-            return MultiStepNeuronxDistributedModelRunner(
-                vllm_config=vllm_config)
-        else:
-            return NeuronxDistributedModelRunner(vllm_config=vllm_config)
+            raise NotImplementedError(
+                "Speculative decoding requires multi-step support, which has "
+                "been removed.")
+        return NeuronxDistributedModelRunner(vllm_config=vllm_config)
 
     def init_device(self) -> None:
         self.init_distributed_environment()

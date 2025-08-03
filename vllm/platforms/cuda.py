@@ -123,14 +123,9 @@ class CudaPlatformBase(Platform):
 
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
-                if envs.VLLM_USE_V1:
-                    raise NotImplementedError(
-                        "Multi-step scheduling is not supported (and not "
-                        "needed) on vLLM V1. Please launch without "
-                        "--num-scheduler-steps.")
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.worker.multi_step_worker.MultiStepWorker"
+                raise NotImplementedError(
+                    "Multi-step scheduling has been removed. "
+                    "Please launch without --num-scheduler-steps.")
             elif vllm_config.speculative_config:
                 if not envs.VLLM_USE_V1:
                     raise NotImplementedError(

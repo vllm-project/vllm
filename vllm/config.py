@@ -2468,9 +2468,6 @@ class SchedulerConfig:
     num_scheduler_steps: int = 1
     """Maximum number of forward steps per scheduler call."""
 
-    multi_step_stream_outputs: bool = True
-    """If False, then multi-step will stream outputs at the end of all steps"""
-
     send_delta_data: bool = False
     """Private API. If used, scheduler sends delta data to
     workers instead of an entire data. It should be enabled only
@@ -2643,11 +2640,10 @@ class SchedulerConfig:
                 f"({self.num_lookahead_slots}) must be greater than or "
                 "equal to 0.")
 
-        if self.num_scheduler_steps < 1:
+        if self.num_scheduler_steps != 1:
             raise ValueError(
-                "num_scheduler_steps "
-                f"({self.num_scheduler_steps}) must be greater than or "
-                "equal to 1.")
+                "Multi-step scheduling has been removed; "
+                "num_scheduler_steps must be 1.")
 
         if self.max_num_partial_prefills < 1:
             raise ValueError(
@@ -5031,7 +5027,6 @@ class VllmConfig:
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "
             f"num_scheduler_steps={self.scheduler_config.num_scheduler_steps}, "
-            f"multi_step_stream_outputs={self.scheduler_config.multi_step_stream_outputs}, "  # noqa
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "

@@ -79,19 +79,12 @@ class OutputData(NamedTuple):
     seq_group_metadata_list: List[SequenceGroupMetadata]
     scheduler_outputs: SchedulerOutputs
     is_async: bool
-    is_last_step: bool
-    # Indicates if this output is from the first step of the
-    # multi-step. When multi-step is disabled, this is always
-    # set to True.
-    # is_first_step_output is invalid when `outputs` has
-    # outputs from multiple steps.
-    is_first_step_output: Optional[bool]
     skip: List[int]
 
 
 class SchedulerContext:
 
-    def __init__(self, multi_step_stream_outputs: bool = False):
+    def __init__(self) -> None:
         self.output_queue: Deque[OutputData] = deque()
         self.request_outputs: List[Union[RequestOutput,
                                          PoolingRequestOutput]] = []
@@ -99,20 +92,14 @@ class SchedulerContext:
             List[SequenceGroupMetadata]] = None
         self.scheduler_outputs: Optional[SchedulerOutputs] = None
 
-        self.multi_step_stream_outputs: bool = multi_step_stream_outputs
-
     def append_output(self, outputs: List[SamplerOutput],
                       seq_group_metadata_list: List[SequenceGroupMetadata],
-                      scheduler_outputs: SchedulerOutputs, is_async: bool,
-                      is_last_step: bool,
-                      is_first_step_output: Optional[bool]):
+                      scheduler_outputs: SchedulerOutputs, is_async: bool):
         self.output_queue.append(
             OutputData(outputs=outputs,
                        seq_group_metadata_list=seq_group_metadata_list,
                        scheduler_outputs=scheduler_outputs,
                        is_async=is_async,
-                       is_last_step=is_last_step,
-                       is_first_step_output=is_first_step_output,
                        skip=[]))
 
 
@@ -303,8 +290,7 @@ class LLMEngine:
         ]
 
         self.scheduler_contexts = [
-            SchedulerContext(multi_step_stream_outputs=self.scheduler_config.
-                             multi_step_stream_outputs)
+            SchedulerContext()
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
 
@@ -867,45 +853,6 @@ class LLMEngine:
 
         return
 
-    def _update_num_computed_tokens_for_multi_step_prefill(
-            self, seq_group: SequenceGroup,
-            seq_group_meta: SequenceGroupMetadata,
-            is_first_step_output: Optional[bool]):
-        """
-        This function updates num_computed_tokens for prompt sequences
-        when Multi-Step is enabled.
-
-        seq_group: SequenceGroup to update the num_computed_tokens for.
-        seq_group_meta: Metadata of the given SequenceGroup.
-        is_first_step_output: Optional[bool] -
-            When available, is_first_step_output indicates if the appended
-            output token is the output of the first-step in multi-step.
-            A value of None indicates that outputs from all steps in
-            in multi-step are submitted in a single burst.
-        """
-
-        assert self.scheduler_config.is_multi_step
-
-        if not seq_group_meta.is_prompt:
-            # num_computed_token updates for multi-step decodes happen after
-            # the tokens are appended to the sequence.
-            return
-
-        do_update: bool = False
-        if self.scheduler_config.chunked_prefill_enabled:
-            # In multi-step + chunked-prefill case, the prompt sequences
-            # that are scheduled are fully processed in the first step.
-            do_update = is_first_step_output is None or is_first_step_output
-        else:
-            # Normal multi-step decoding case. In this case prompt-sequences
-            # are actually single-stepped. Always update in this case.
-            assert seq_group.state.num_steps == 1
-            do_update = True
-
-        if do_update:
-            seq_group.update_num_computed_tokens(
-                seq_group_meta.token_chunk_size)
-
     def _process_model_outputs(self,
                                ctx: SchedulerContext,
                                request_id: Optional[str] = None) -> None:
@@ -926,10 +873,9 @@ class LLMEngine:
             # When we process only one request, no pop is required
             # (since later we will process all of the rest)
             (outputs, seq_group_metadata_list, scheduler_outputs, is_async,
-             is_last_step, is_first_step_output, skip) = ctx.output_queue[0]
+             skip) = ctx.output_queue[0]
         else:
             (outputs, seq_group_metadata_list, scheduler_outputs, is_async,
-             is_last_step, is_first_step_output,
              skip) = ctx.output_queue.popleft()
 
         # Sanity check
@@ -960,9 +906,6 @@ class LLMEngine:
                     num_seq_groups=len(seq_group_metadata_list) - num_prefills)
                 outputs_by_sequence_group = [p.outputs for p in prefills
                                              ] + outputs_by_sequence_group
-            # We have outputs for multiple steps submitted in a single burst,
-            # so invalidate is_first_step_output.
-            is_first_step_output = None
         else:
             outputs_by_sequence_group = outputs
 
@@ -1005,13 +948,8 @@ class LLMEngine:
                 output = [outputs_by_sequence_group[0][i]]
 
             if not is_async:
-                if self.scheduler_config.is_multi_step:
-                    # Updates happen only if the sequence is prefill
-                    self._update_num_computed_tokens_for_multi_step_prefill(
-                        seq_group, seq_group_meta, is_first_step_output)
-                else:
-                    seq_group.update_num_computed_tokens(
-                        seq_group_meta.token_chunk_size or 0)
+                seq_group.update_num_computed_tokens(
+                    seq_group_meta.token_chunk_size or 0)
 
             if outputs:
                 for o in outputs:
@@ -1073,15 +1011,6 @@ class LLMEngine:
             for scheduler in self.scheduler:
                 scheduler.free_finished_seq_groups()
 
-        # For multi-step without streaming, don't create outputs each iteration
-        if not is_last_step and not ctx.multi_step_stream_outputs:
-            # Immediately process request outputs here (if callback is given)
-            if (finished_now
-                    and self.process_request_outputs_callback is not None):
-                self.process_request_outputs_callback(ctx.request_outputs)
-                ctx.request_outputs.clear()
-            return
-
         # Create the outputs
         for i in indices:
             if i in skip or i in finished_before or i in finished_now:
@@ -1099,14 +1028,6 @@ class LLMEngine:
                 use_cache=self.use_cached_outputs)
             if request_output:
                 ctx.request_outputs.append(request_output)
-
-        # For multi-step with streaming, create outputs each iteration
-        if not is_last_step and ctx.multi_step_stream_outputs:
-            # Immediately process request outputs here (if callback is given)
-            if self.process_request_outputs_callback is not None:
-                self.process_request_outputs_callback(ctx.request_outputs)
-                ctx.request_outputs.clear()
-            return
 
         for seq_group in scheduler_outputs.ignored_seq_groups:
             params = seq_group.sampling_params
@@ -1156,16 +1077,10 @@ class LLMEngine:
             if seq_group.is_finished():
                 continue
 
-            if self.scheduler_config.is_multi_step:
-                # Updates happen only if the sequence is prefill
-                self._update_num_computed_tokens_for_multi_step_prefill(
-                    seq_group, seq_group_metadata,
-                    seq_group.state.num_steps == 1)
-            else:
-                token_chunk_size = (seq_group_metadata.token_chunk_size
-                                    if seq_group_metadata.token_chunk_size
-                                    is not None else 0)
-                seq_group.update_num_computed_tokens(token_chunk_size)
+            token_chunk_size = (seq_group_metadata.token_chunk_size
+                                if seq_group_metadata.token_chunk_size
+                                is not None else 0)
+            seq_group.update_num_computed_tokens(token_chunk_size)
 
             if seq_group_metadata.do_sample:
                 assert len(sequence_group_outputs.samples) == 1, (
@@ -1366,19 +1281,11 @@ class LLMEngine:
             if self.scheduler_config.is_multi_step:
                 self.cached_scheduler_outputs[0] = SchedulerOutputState()
 
-            # is_first_step_output is True only when the num_steps of all
-            # the sequences are 1. When the num_steps > 1,
-            # multi_step_model_runner does the first-step output append.
-            is_first_step_output: bool = False if not seq_group_metadata_list \
-                else seq_group_metadata_list[0].state.num_steps == 1
-
             # Add results to the output_queue
             ctx.append_output(outputs=outputs,
                               seq_group_metadata_list=seq_group_metadata_list,
                               scheduler_outputs=scheduler_outputs,
-                              is_async=allow_async_output_proc,
-                              is_last_step=True,
-                              is_first_step_output=is_first_step_output)
+                              is_async=allow_async_output_proc)
 
             if outputs and allow_async_output_proc:
                 assert len(outputs) == 1, (
