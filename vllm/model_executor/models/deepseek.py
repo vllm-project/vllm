@@ -493,7 +493,9 @@ class DeepseekForCausalLMWithAdditionalHeads(DeepseekForCausalLM):
     The additional heads' weights (safetensors) are deferred and loaded during
     `load_weights` so that construction has no side effects.
 
-    Example score_heads_config:
+    The additional_heads_config should be provided in vllm_config.additional_config["additional_heads_config"].
+    
+    Example additional_heads_config:
         [
             {
                 "name": "self_harm",
@@ -509,16 +511,22 @@ class DeepseekForCausalLMWithAdditionalHeads(DeepseekForCausalLM):
         ]
     """
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", score_heads_config: Optional[list] = None):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         self.classifier_heads = nn.ModuleDict()
         self.head_names = []
-        if score_heads_config is None or len(score_heads_config) == 0:
-            raise ValueError("score_heads_config is required")
-        self.score_heads_config = score_heads_config
+        
+        # Extract additional_heads_config from additional_config
+        if not isinstance(vllm_config.additional_config, dict):
+            raise ValueError("additional_config must be a dictionary")
+        
+        additional_heads_config = vllm_config.additional_config.get("additional_heads_config")
+        if additional_heads_config is None or len(additional_heads_config) == 0:
+            raise ValueError("additional_heads_config is required in additional_config")
+        self.additional_heads_config = additional_heads_config
 
-        for head_config in score_heads_config:
+        for head_config in self.additional_heads_config:
             head_name = head_config["name"]
             num_hidden_layers = head_config["num_hidden_layers"]
             hidden_dim = head_config.get("hidden_dim")
@@ -559,7 +567,7 @@ class DeepseekForCausalLMWithAdditionalHeads(DeepseekForCausalLM):
             return set()
 
         loaded = set()
-        for head_config in self.score_heads_config:
+        for head_config in self.additional_heads_config:
             head_name = head_config["name"]
             tensor_path = head_config["location"]
 
