@@ -145,7 +145,7 @@ class NemotronHMambaDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             ssm_state_size=config.ssm_state_size,
             conv_kernel_size=config.conv_kernel,
-            intermediate_size=config.expand * config.hidden_size,
+            intermediate_size=config.mamba_num_heads * config.mamba_head_dim,
             use_conv_bias=config.use_conv_bias,
             use_bias=config.use_bias,
             n_groups=config.n_groups,
@@ -480,7 +480,7 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
-        intermediate_size = hf_config.expand * hf_config.hidden_size
+        intermediate_size = hf_config.mamba_num_heads * hf_config.mamba_head_dim
 
         return get_mamba_state_shape(
             intermediate_size=intermediate_size,
