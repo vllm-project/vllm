@@ -13,7 +13,6 @@ import torch.distributed
 import torch.nn as nn
 from tqdm import tqdm
 
-from vllm.compilation.nano_manager import prepare_nano_split
 import vllm.envs as envs
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import AttentionBackend
@@ -28,7 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
     prepare_communication_buffer_for_model)
-from vllm.forward_context import (DPMetadata, ForwardContext, get_forward_context, override_forward_context,
+from vllm.forward_context import (DPMetadata, get_forward_context,
                                   set_forward_context)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaBase
@@ -221,7 +220,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config.compilation_config.level
             == CompilationLevel.PIECEWISE
             and self.vllm_config.compilation_config.use_cudagraph
-            and not self.model_config.enforce_eager)
+            and not self.model_config.enforce_eager
+            and not self.model_config.enable_nano_split)
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
         # self.cudagraph_batch_sizes sorts in ascending order.
@@ -792,12 +792,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 spec_decode_common_attn_metadata)
     
     def _prepare_nano_split(self, scheduler_output: "SchedulerOutput"):
-        from vllm.utils.nanoinfer import get_context_hooks
-        prepare_nano_split(
-            batch_size=len(self.input_batch.req_ids),
-            num_tokens=[scheduler_output.num_scheduled_tokens[rid] for rid in self.input_batch.req_ids],
-            cached_seqlens=self.input_batch.num_computed_tokens_cpu[:len(self.input_batch.req_ids)].tolist(),
-            get_hooks_fn=get_context_hooks,
+        from vllm.utils.nano_split import prepare_nano_split_and_set_hooks
+        prepare_nano_split_and_set_hooks(
             gpu_model_runner=self,
             scheduler_output=scheduler_output,
         )

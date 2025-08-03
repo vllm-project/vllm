@@ -14,7 +14,6 @@ import torch
 import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
-from vllm.compilation.nano_utils import tag_graph
 import vllm.envs as envs
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger

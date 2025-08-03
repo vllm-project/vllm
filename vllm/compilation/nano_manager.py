@@ -39,6 +39,7 @@ class NanoSplitManager:
             dev=torch.device(f"cuda:{torch.cuda.current_device()}"),
             sm_counts=[112]
         )[0]
+        self.hook: Optional[Callable[[NanoOpInfo], ContextManager[None]]] = None
 
         # Initialize the base graph
         tag_graph(self.graph_module, {
@@ -189,12 +190,12 @@ class NanoSplitManager:
         batch_size: int,
         num_tokens: List[int],
         cached_seqlens: List[int],
-        get_hooks_fn: Callable[..., Callable[[NanoOpInfo], ContextManager[None]]],
-        *args,
-        **kwargs,
-    ) -> None:
+    ) -> NanoSplitConfig:
         self.cached_config = get_split_config(batch_size, num_tokens, cached_seqlens)
-        self.hook = get_hooks_fn(self.cached_config, *args, **kwargs)
+        return self.cached_config
+    
+    def set_hooks(self, op_hook: Callable[[NanoOpInfo], ContextManager[None]]):
+        self.hook = op_hook
 
 
 _split_manager = None
@@ -211,13 +212,16 @@ def prepare_nano_split(
     batch_size: int,
     num_tokens: List[int],
     cached_seqlens: List[int],
-    get_hooks_fn: Callable[..., Callable[[NanoOpInfo], ContextManager[None]]],
-    *args,
-    **kwargs,
-) -> None:
+) -> NanoSplitConfig:
     global _split_manager
     if _split_manager is None:
         raise ValueError("Split manager not initialized")
-    _split_manager.prepare(
-        batch_size, num_tokens, cached_seqlens, get_hooks_fn, *args, **kwargs
+    return _split_manager.prepare(
+        batch_size, num_tokens, cached_seqlens
     )
+
+def set_op_hook(op_hook: Callable[[NanoOpInfo], ContextManager[None]]):
+    global _split_manager
+    if _split_manager is None:
+        raise ValueError("Split manager not initialized")
+    _split_manager.set_hooks(op_hook)

@@ -424,6 +424,7 @@ class EngineArgs:
         get_field(ModelConfig, "override_generation_config")
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str = ModelConfig.override_attention_dtype
+    enable_nano_split: bool = ModelConfig.enable_nano_split
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
 
@@ -540,7 +541,8 @@ class EngineArgs:
                                  **model_kwargs["model_impl"])
         model_group.add_argument("--override-attention-dtype",
                                  **model_kwargs["override_attention_dtype"])
-
+        model_group.add_argument("--enable-nano-split",
+                                 **model_kwargs["enable_nano_split"])
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
         load_group = parser.add_argument_group(
@@ -933,6 +935,7 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
+            enable_nano_split=self.enable_nano_split,
         )
 
     def validate_tensorizer_args(self):
