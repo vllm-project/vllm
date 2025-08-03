@@ -803,6 +803,9 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         video_features = self.multi_modal_projector(video_features)
         # Get stride from config
         stride = getattr(self.config, "spatial_pool_stride", 2)
+        if stride <= 0:
+            raise ValueError(
+                f"spatial_pool_stride must be positive, but got {stride}")
         video_features = self.apply_pooling(video_features, stride=stride)
         return video_features
 
