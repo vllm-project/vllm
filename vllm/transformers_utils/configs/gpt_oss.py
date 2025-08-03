@@ -4,7 +4,7 @@ from transformers import PretrainedConfig
 
 
 class GptOssConfig(PretrainedConfig):
-    model_type = "openai_moe"
+    model_type = "gpt_oss"
 
     def __init__(self,
                  num_hidden_layers: int = 36,
