@@ -28,6 +28,9 @@ def main():
     parser.add_argument(
         "--simulate-failure", action="store_true", help="Simulate KV load failure."
     )
+    parser.add_argument(
+        "--async-load", action="store_true", help="Simulate async KV load"
+    )
     args = parser.parse_args()
 
     if args.simulate_failure:
@@ -36,10 +39,15 @@ def main():
             kv_role="kv_both",
             kv_connector_extra_config={
                 "shared_storage_path": "local_storage",
+                "async_load": args.async_load,
             },
             kv_connector_module_path="rogue_shared_storage_connector",
         )
-        out_file = "decode_recovered_output.txt"
+        out_file = (
+            "async_decode_recovered_output.txt"
+            if args.async_load
+            else "sync_decode_recovered_output.txt"
+        )
     else:
         ktc = KVTransferConfig(
             kv_connector="SharedStorageConnector",
