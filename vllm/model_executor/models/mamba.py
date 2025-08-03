@@ -266,7 +266,8 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
             tp_world_size=parallel_config.tensor_parallel_size,
             intermediate_size=hf_config.intermediate_size,
             state_size=hf_config.state_size,
-            conv_kernel=hf_config.conv_kernel)
+            conv_kernel=hf_config.conv_kernel,
+            use_v1=envs.VLLM_USE_V1)
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         return self.mamba_cache.copy_inputs_before_cuda_graphs(

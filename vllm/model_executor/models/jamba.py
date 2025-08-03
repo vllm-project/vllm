@@ -554,6 +554,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             intermediate_size=hf_config.mamba_expand * hidden_size,
             state_size=hf_config.mamba_d_state,
             conv_kernel=hf_config.mamba_d_conv,
+            use_v1=envs.VLLM_USE_V1,
         )
 
     def compute_logits(

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm import envs
 from vllm.distributed import divide
 
 
@@ -13,6 +12,7 @@ class MambaStateShapeCalculator:
         intermediate_size: int,
         state_size: int,
         conv_kernel: int,
+        use_v1: bool = True,
     ) -> tuple[tuple[int, int], tuple[int, int]]:
         conv_state_shape = (divide(intermediate_size,
                                    tp_world_size), conv_kernel - 1)
@@ -20,9 +20,11 @@ class MambaStateShapeCalculator:
         temporal_state_shape = (divide(intermediate_size,
                                        tp_world_size), state_size)
 
-        if envs.VLLM_USE_V1:
-            return (conv_state_shape[1],
-                    conv_state_shape[0]), temporal_state_shape
+        # In V0, the conv_state shape was swapped during allocation in
+        # MambaCacheManager, but in V1 it needs to be determined here at the
+        # calculation level
+        if use_v1:
+            conv_state_shape = conv_state_shape[1], conv_state_shape[0]
 
         return conv_state_shape, temporal_state_shape
 
