@@ -125,9 +125,8 @@ class Glm4MoE(nn.Module):
                                      quant_config=None,
                                      prefix=f"{prefix}.gate")
 
-        # noaux_tc is not set in transformers new config now
-        self.gate.e_score_correction_bias = (nn.Parameter(
-            torch.empty(config.n_routed_experts)))
+        self.gate.e_score_correction_bias = nn.Parameter(
+            torch.empty(config.n_routed_experts, dtype=torch.float32))
 
         # Load balancing settings.
         vllm_config = get_current_vllm_config()
