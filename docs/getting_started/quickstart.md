@@ -99,7 +99,10 @@ for output in outputs:
 ```
 
 !!! note
-    The generate method does not automatically apply the corresponding model's chat template to the input prompt, as this method is designed to align with OpenAI's `completions` interface rather than the `chat/completions` interface. Therefore, if you are using an Instruct model or Chat model, you should manually apply the corresponding chat template to ensure the expected behavior. Alternatively, you can use the LLM.chat method and pass properly formatted data.
+    The `llm.generate` method does not automatically apply the model's chat template to the input prompt. Therefore, if you are using an Instruct model or Chat model, you should manually apply the corresponding chat template to ensure the expected behavior. Alternatively, you can use the `llm.chat` method and pass a list of messages which have the same format as those passed to OpenAI's `client.chat.completions`:
+``
+
+For quickstart, there is no need to provide much explanation.
 
     ```python
     # Using tokenizer to apply chat template
