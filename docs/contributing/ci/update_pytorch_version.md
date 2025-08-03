@@ -141,7 +141,7 @@ uv pip install --system \
 ### causal-conv1d
 
 ```bash
-uv pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
+uv pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
 ```
 
 ## Update all the different vLLM platforms

@@ -25,9 +25,6 @@ SSM_MODELS = [
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    # NOTE: Running Plamo2 in transformers implementation requires to install
-    # causal-conv1d package, which is not listed as a test dependency as it's
-    # not compatible with pip-compile.
     "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
     "hmellor/tiny-random-BambaForCausalLM",
