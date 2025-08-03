@@ -2,7 +2,6 @@ import contextlib
 import copy
 import torch
 from typing import Callable, ContextManager, List, Optional
-from flashinfer.green_ctx import split_device_green_ctx_by_sm_count
 
 from vllm.compilation.nano_utils import (
     NanoOpInfo,
@@ -33,12 +32,8 @@ class NanoSplitManager:
 
         # Runtime preparation
         self.cached_config: Optional[NanoSplitConfig] = None
-        self.comm_stream: Optional[torch.Stream] = None
-        self.comp_stream: Optional[torch.Stream] = None
-        self.comp_stream, self.comm_stream = split_device_green_ctx_by_sm_count(
-            dev=torch.device(f"cuda:{torch.cuda.current_device()}"),
-            sm_counts=[112]
-        )[0]
+        self.comm_stream = torch.cuda.Stream()
+        self.comp_stream = torch.cuda.Stream()
         self.hook: Optional[Callable[[NanoOpInfo], ContextManager[None]]] = None
 
         # Initialize the base graph
@@ -201,7 +196,7 @@ class NanoSplitManager:
 _split_manager = None
 
 
-def init_split_manager_and_get_callable(graph_module: torch.fx.GraphModule) -> Callable:
+def get_callable(graph_module: torch.fx.GraphModule) -> Callable:
     global _split_manager
     if _split_manager is None:
         _split_manager = NanoSplitManager(graph_module)
