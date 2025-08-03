@@ -1078,6 +1078,35 @@ class Scheduler(SchedulerInterface):
         total_requests_to_reschedule = 0
         total_tokens_to_reschedule = 0
 
+        # --- Handle async KV loads (WAITING_FOR_REMOTE_KVS) ---
+        async_load_reqs = (
+            req for req in self.waiting
+            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS)
+        (affected_requests, num_tokens_to_reschedule,
+         marked_invalid_block_ids) = (
+             self._update_requests_with_invalid_blocks(async_load_reqs,
+                                                       invalid_block_ids))
+
+        total_requests_to_reschedule += len(affected_requests)
+        total_tokens_to_reschedule += num_tokens_to_reschedule
+
+        for request in affected_requests:
+            if request.num_computed_tokens:
+                # Cache any valid computed tokens.
+                self.kv_cache_manager.cache_blocks(request,
+                                                   request.num_computed_tokens)
+            else:
+                # No valid computed tokens, release allocated blocks.
+                # There may be a local cache hit on retry.
+                self.kv_cache_manager.free(request)
+
+            request.status = RequestStatus.WAITING
+
+        # Remove async loaded invalid blocks already handled,
+        # as they cannot be shared with running requests.
+        invalid_block_ids.difference_update(marked_invalid_block_ids)
+
+        # --- Handle sync KV loads (running requests) ---
         affected_requests, num_tokens_to_reschedule, _ = (
             self._update_requests_with_invalid_blocks(self.running,
                                                       invalid_block_ids))
