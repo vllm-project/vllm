@@ -367,7 +367,6 @@ class BertWithRopeBlock(nn.Module):
         return hidden_states
 
 
-@support_torch_compile
 class BertWithRopeEncoder(nn.Module):
 
     def __init__(self,
@@ -401,6 +400,7 @@ class BertWithRopeEncoder(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class BertWithRope(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
