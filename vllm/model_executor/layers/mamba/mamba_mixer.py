@@ -274,19 +274,18 @@ class MambaMixer(MambaBase, CustomOp):
                 query_start_loc=query_start_loc)
         else:
             scan_outputs = torch.empty_like(hidden_states.transpose(0, 1))
-            selective_state_update(
-                ssm_state,
-                hidden_states.transpose(0, 1),
-                discrete_time_step.transpose(0, 1),
-                self.A,
-                B,
-                C,
-                self.D,
-                gate.transpose(0, 1),
-                time_proj_bias,
-                dt_softplus=True,
-                state_batch_indices=state_indices_tensor,
-                out=scan_outputs)
+            selective_state_update(ssm_state,
+                                   hidden_states.transpose(0, 1),
+                                   discrete_time_step.transpose(0, 1),
+                                   self.A,
+                                   B,
+                                   C,
+                                   self.D,
+                                   gate.transpose(0, 1),
+                                   time_proj_bias,
+                                   dt_softplus=True,
+                                   state_batch_indices=state_indices_tensor,
+                                   out=scan_outputs)
             scan_outputs = scan_outputs.transpose(0, 1)
 
         # 4. Final linear projection
