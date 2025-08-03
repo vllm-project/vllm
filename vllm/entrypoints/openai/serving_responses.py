@@ -471,5 +471,5 @@ class OpenAIServingResponses(OpenAIServing):
                      "`store=False` in Responses API or set "
                      "`VLLM_ENABLE_RESPONSES_API_STORE=1` in the env var when "
                      "starting the vLLM server."),
-            status_code=HTTPStatus.NOT_IMPLEMENTED,
+            status_code=HTTPStatus.BAD_REQUEST,
         )
