@@ -17,7 +17,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -188,8 +188,10 @@ def create_model_runner_output(
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=None,
-        finished_sending=finished_sending,
-        finished_recving=finished_recving,
+        kv_connector_output=KVConnectorOutput(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
+        ),
     )
 
 
