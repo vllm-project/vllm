@@ -936,7 +936,7 @@ def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
     return None
 
 
-class DeepseekForCausalLMWithAdditionalHeads(DeepseekV3ForCausalLM):
+class DeepseekV3ForCausalLMWithAdditionalHeads(DeepseekV3ForCausalLM):
     """
     Extends DeepseekV3ForCausalLM to add multiple binary classification heads.
     The additional heads' weights (safetensors) are deferred and loaded during
