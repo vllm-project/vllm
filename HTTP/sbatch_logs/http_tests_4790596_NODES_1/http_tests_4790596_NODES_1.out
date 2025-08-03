@@ -1,0 +1,161 @@
+INFO 08-02 20:41:27 [__init__.py:253] Automatically detected platform cuda.
+INFO 08-02 20:41:27 [__init__.py:253] Automatically detected platform cuda.
+INFO 08-02 20:41:27 [__init__.py:253] Automatically detected platform cuda.
+INFO 08-02 20:41:28 [__init__.py:253] Automatically detected platform cuda.
+INFO 08-02 20:41:34 [config.py:852] This model supports multiple tasks: {'reward', 'generate', 'embed', 'classify'}. Defaulting to 'generate'.
+INFO 08-02 20:41:34 [config.py:1500] Using max model len 32768
+INFO 08-02 20:41:34 [config.py:852] This model supports multiple tasks: {'embed', 'classify', 'reward', 'generate'}. Defaulting to 'generate'.
+INFO 08-02 20:41:34 [config.py:1500] Using max model len 32768
+INFO 08-02 20:41:34 [config.py:852] This model supports multiple tasks: {'reward', 'embed', 'classify', 'generate'}. Defaulting to 'generate'.
+INFO 08-02 20:41:34 [config.py:1500] Using max model len 32768
+INFO 08-02 20:41:34 [config.py:852] This model supports multiple tasks: {'classify', 'generate', 'embed', 'reward'}. Defaulting to 'generate'.
+INFO 08-02 20:41:34 [config.py:1500] Using max model len 32768
+INFO 08-02 20:41:34 [config.py:2043] Disabling V1 multiprocessing for external launcher.
+INFO 08-02 20:41:34 [config.py:2341] Chunked prefill is enabled with max_num_batched_tokens=16384.
+INFO 08-02 20:41:34 [config.py:2043] Disabling V1 multiprocessing for external launcher.
+INFO 08-02 20:41:34 [config.py:2341] Chunked prefill is enabled with max_num_batched_tokens=16384.
+INFO 08-02 20:41:34 [config.py:2043] Disabling V1 multiprocessing for external launcher.
+INFO 08-02 20:41:34 [config.py:2341] Chunked prefill is enabled with max_num_batched_tokens=16384.
+INFO 08-02 20:41:34 [config.py:2043] Disabling V1 multiprocessing for external launcher.
+INFO 08-02 20:41:34 [config.py:2341] Chunked prefill is enabled with max_num_batched_tokens=16384.
+LLMEngine init v1
+INFO 08-02 20:41:36 [core.py:69] Initializing a V1 LLM engine (v0.1.dev7641+g15cd200) with config: model='meta-llama/Llama-3.1-8B', speculative_config=None, tokenizer='meta-llama/Llama-3.1-8B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config={}, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=32768, download_dir=None, load_format=auto, tensor_parallel_size=4, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto,  device_config=cuda, decoding_config=DecodingConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_backend=''), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=1, served_model_name=meta-llama/Llama-3.1-8B, num_scheduler_steps=1, multi_step_stream_outputs=True,enable_prefix_caching=True, chunked_prefill_enabled=True,use_async_output_proc=True, pooler_config=None, compilation_config={"level":3,"debug_dump_path":"","cache_dir":"","backend":"","custom_ops":[],"splitting_ops":["vllm.unified_attention","vllm.unified_attention_with_output"],"use_inductor":true,"compile_sizes":[],"inductor_compile_config":{"enable_auto_functionalized_v2":false},"inductor_passes":{},"use_cudagraph":true,"cudagraph_num_of_warmups":1,"cudagraph_capture_sizes":[512,504,496,488,480,472,464,456,448,440,432,424,416,408,400,392,384,376,368,360,352,344,336,328,320,312,304,296,288,280,272,264,256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"cudagraph_copy_inputs":false,"full_cuda_graph":false,"max_capture_size":512,"local_cache_dir":null}
+LLMEngine init v1
+INFO 08-02 20:41:36 [core.py:69] Initializing a V1 LLM engine (v0.1.dev7641+g15cd200) with config: model='meta-llama/Llama-3.1-8B', speculative_config=None, tokenizer='meta-llama/Llama-3.1-8B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config={}, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=32768, download_dir=None, load_format=auto, tensor_parallel_size=4, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto,  device_config=cuda, decoding_config=DecodingConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_backend=''), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=1, served_model_name=meta-llama/Llama-3.1-8B, num_scheduler_steps=1, multi_step_stream_outputs=True,enable_prefix_caching=True, chunked_prefill_enabled=True,use_async_output_proc=True, pooler_config=None, compilation_config={"level":3,"debug_dump_path":"","cache_dir":"","backend":"","custom_ops":[],"splitting_ops":["vllm.unified_attention","vllm.unified_attention_with_output"],"use_inductor":true,"compile_sizes":[],"inductor_compile_config":{"enable_auto_functionalized_v2":false},"inductor_passes":{},"use_cudagraph":true,"cudagraph_num_of_warmups":1,"cudagraph_capture_sizes":[512,504,496,488,480,472,464,456,448,440,432,424,416,408,400,392,384,376,368,360,352,344,336,328,320,312,304,296,288,280,272,264,256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"cudagraph_copy_inputs":false,"full_cuda_graph":false,"max_capture_size":512,"local_cache_dir":null}
+LLMEngine init v1
+INFO 08-02 20:41:36 [core.py:69] Initializing a V1 LLM engine (v0.1.dev7641+g15cd200) with config: model='meta-llama/Llama-3.1-8B', speculative_config=None, tokenizer='meta-llama/Llama-3.1-8B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config={}, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=32768, download_dir=None, load_format=auto, tensor_parallel_size=4, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto,  device_config=cuda, decoding_config=DecodingConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_backend=''), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=1, served_model_name=meta-llama/Llama-3.1-8B, num_scheduler_steps=1, multi_step_stream_outputs=True,enable_prefix_caching=True, chunked_prefill_enabled=True,use_async_output_proc=True, pooler_config=None, compilation_config={"level":3,"debug_dump_path":"","cache_dir":"","backend":"","custom_ops":[],"splitting_ops":["vllm.unified_attention","vllm.unified_attention_with_output"],"use_inductor":true,"compile_sizes":[],"inductor_compile_config":{"enable_auto_functionalized_v2":false},"inductor_passes":{},"use_cudagraph":true,"cudagraph_num_of_warmups":1,"cudagraph_capture_sizes":[512,504,496,488,480,472,464,456,448,440,432,424,416,408,400,392,384,376,368,360,352,344,336,328,320,312,304,296,288,280,272,264,256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"cudagraph_copy_inputs":false,"full_cuda_graph":false,"max_capture_size":512,"local_cache_dir":null}
+LLMEngine init v1
+INFO 08-02 20:41:36 [core.py:69] Initializing a V1 LLM engine (v0.1.dev7641+g15cd200) with config: model='meta-llama/Llama-3.1-8B', speculative_config=None, tokenizer='meta-llama/Llama-3.1-8B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config={}, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=32768, download_dir=None, load_format=auto, tensor_parallel_size=4, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto,  device_config=cuda, decoding_config=DecodingConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_backend=''), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=1, served_model_name=meta-llama/Llama-3.1-8B, num_scheduler_steps=1, multi_step_stream_outputs=True,enable_prefix_caching=True, chunked_prefill_enabled=True,use_async_output_proc=True, pooler_config=None, compilation_config={"level":3,"debug_dump_path":"","cache_dir":"","backend":"","custom_ops":[],"splitting_ops":["vllm.unified_attention","vllm.unified_attention_with_output"],"use_inductor":true,"compile_sizes":[],"inductor_compile_config":{"enable_auto_functionalized_v2":false},"inductor_passes":{},"use_cudagraph":true,"cudagraph_num_of_warmups":1,"cudagraph_capture_sizes":[512,504,496,488,480,472,464,456,448,440,432,424,416,408,400,392,384,376,368,360,352,344,336,328,320,312,304,296,288,280,272,264,256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"cudagraph_copy_inputs":false,"full_cuda_graph":false,"max_capture_size":512,"local_cache_dir":null}
+INFO 08-02 20:41:42 [__init__.py:1344] Found nccl from library libnccl.so.2
+INFO 08-02 20:41:42 [__init__.py:1344] Found nccl from library libnccl.so.2
+INFO 08-02 20:41:42 [__init__.py:1344] Found nccl from library libnccl.so.2
+INFO 08-02 20:41:42 [__init__.py:1344] Found nccl from library libnccl.so.2
+INFO 08-02 20:41:42 [pynccl.py:70] vLLM is using nccl==2.26.2
+INFO 08-02 20:41:42 [pynccl.py:70] vLLM is using nccl==2.26.2
+INFO 08-02 20:41:42 [pynccl.py:70] vLLM is using nccl==2.26.2
+INFO 08-02 20:41:42 [pynccl.py:70] vLLM is using nccl==2.26.2
+INFO 08-02 20:41:45 [custom_all_reduce_utils.py:208] generating GPU P2P access cache in /home/user/.cache/vllm/gpu_p2p_access_cache_for_0,1,2,3,4,5,6,7.json
+INFO 08-02 20:42:33 [custom_all_reduce_utils.py:246] reading GPU P2P access cache from /home/user/.cache/vllm/gpu_p2p_access_cache_for_0,1,2,3,4,5,6,7.json
+INFO 08-02 20:42:33 [custom_all_reduce_utils.py:246] reading GPU P2P access cache from /home/user/.cache/vllm/gpu_p2p_access_cache_for_0,1,2,3,4,5,6,7.json
+INFO 08-02 20:42:33 [custom_all_reduce_utils.py:246] reading GPU P2P access cache from /home/user/.cache/vllm/gpu_p2p_access_cache_for_0,1,2,3,4,5,6,7.json
+INFO 08-02 20:42:33 [custom_all_reduce_utils.py:246] reading GPU P2P access cache from /home/user/.cache/vllm/gpu_p2p_access_cache_for_0,1,2,3,4,5,6,7.json
+INFO 08-02 20:42:33 [shm_broadcast.py:289] vLLM message queue communication handle: Handle(local_reader_ranks=[1, 2, 3], buffer_handle=(3, 4194304, 6, 'psm_1fd238e1'), local_subscribe_addr='ipc:///tmp/6cbb6acc-534d-48c7-a09a-dcb99c16fa0c', remote_subscribe_addr=None, remote_addr_ipv6=False)
+INFO 08-02 20:42:33 [parallel_state.py:1161] rank 1 in world size 4 is assigned as DP rank 0, PP rank 0, TP rank 1, EP rank 1
+INFO 08-02 20:42:33 [parallel_state.py:1161] rank 0 in world size 4 is assigned as DP rank 0, PP rank 0, TP rank 0, EP rank 0
+INFO 08-02 20:42:33 [parallel_state.py:1161] rank 3 in world size 4 is assigned as DP rank 0, PP rank 0, TP rank 3, EP rank 3
+INFO 08-02 20:42:33 [parallel_state.py:1161] rank 2 in world size 4 is assigned as DP rank 0, PP rank 0, TP rank 2, EP rank 2
+Worker Rank 0 (PID: 1293621) - Parallel Groups:
+Rank 0: Tensor Parallel: [0, 1, 2, 3]
+Rank 0: Pipeline Parallel: [0]
+Rank 0: Data Parallel: [0]
+Rank 0: Token Parallel: Not initialized
+GPUWorker init
+WARNING 08-02 20:42:33 [topk_topp_sampler.py:59] FlashInfer is not available. Falling back to the PyTorch-native implementation of top-p & top-k sampling. For the best performance, please install FlashInfer.
+Worker Rank 3 (PID: 1293624) - Parallel Groups:
+Rank 3: Tensor Parallel: [0, 1, 2, 3]
+Rank 3: Pipeline Parallel: [3]
+Rank 3: Data Parallel: [3]
+Rank 3: Token Parallel: Not initialized
+GPUWorker init
+WARNING 08-02 20:42:33 [topk_topp_sampler.py:59] FlashInfer is not available. Falling back to the PyTorch-native implementation of top-p & top-k sampling. For the best performance, please install FlashInfer.
+Worker Rank 1 (PID: 1293622) - Parallel Groups:
+Rank 1: Tensor Parallel: [0, 1, 2, 3]
+Rank 1: Pipeline Parallel: [1]
+Rank 1: Data Parallel: [1]
+Rank 1: Token Parallel: Not initialized
+GPUWorker init
+WARNING 08-02 20:42:33 [topk_topp_sampler.py:59] FlashInfer is not available. Falling back to the PyTorch-native implementation of top-p & top-k sampling. For the best performance, please install FlashInfer.
+Worker Rank 2 (PID: 1293623) - Parallel Groups:
+Rank 2: Tensor Parallel: [0, 1, 2, 3]
+Rank 2: Pipeline Parallel: [2]
+Rank 2: Data Parallel: [2]
+Rank 2: Token Parallel: Not initialized
+GPUWorker init
+WARNING 08-02 20:42:33 [topk_topp_sampler.py:59] FlashInfer is not available. Falling back to the PyTorch-native implementation of top-p & top-k sampling. For the best performance, please install FlashInfer.
+INFO 08-02 20:42:33 [gpu_model_runner.py:1732] Starting to load model meta-llama/Llama-3.1-8B...
+INFO 08-02 20:42:33 [gpu_model_runner.py:1732] Starting to load model meta-llama/Llama-3.1-8B...
+INFO 08-02 20:42:33 [gpu_model_runner.py:1732] Starting to load model meta-llama/Llama-3.1-8B...
+INFO 08-02 20:42:33 [gpu_model_runner.py:1732] Starting to load model meta-llama/Llama-3.1-8B...
+INFO 08-02 20:42:33 [gpu_model_runner.py:1737] Loading model from scratch...
+INFO 08-02 20:42:33 [gpu_model_runner.py:1737] Loading model from scratch...
+INFO 08-02 20:42:33 [gpu_model_runner.py:1737] Loading model from scratch...
+INFO 08-02 20:42:33 [gpu_model_runner.py:1737] Loading model from scratch...
+INFO 08-02 20:42:33 [cuda.py:295] Using Flash Attention backend on V1 engine.
+INFO 08-02 20:42:33 [cuda.py:295] Using Flash Attention backend on V1 engine.
+INFO 08-02 20:42:33 [cuda.py:295] Using Flash Attention backend on V1 engine.
+INFO 08-02 20:42:33 [cuda.py:295] Using Flash Attention backend on V1 engine.
+INFO 08-02 20:42:33 [weight_utils.py:296] Using model weights format ['*.safetensors']
+INFO 08-02 20:42:33 [weight_utils.py:296] Using model weights format ['*.safetensors']
+INFO 08-02 20:42:33 [weight_utils.py:296] Using model weights format ['*.safetensors']
+INFO 08-02 20:42:34 [weight_utils.py:296] Using model weights format ['*.safetensors']
+INFO 08-02 20:42:40 [default_loader.py:272] Loading weights took 5.22 seconds
+INFO 08-02 20:42:40 [default_loader.py:272] Loading weights took 5.99 seconds
+INFO 08-02 20:42:40 [default_loader.py:272] Loading weights took 5.55 seconds
+INFO 08-02 20:42:40 [default_loader.py:272] Loading weights took 5.30 seconds
+INFO 08-02 20:42:40 [gpu_model_runner.py:1763] Model loading took 3.7711 GiB and 6.758649 seconds
+INFO 08-02 20:42:40 [gpu_model_runner.py:1763] Model loading took 3.7711 GiB and 6.772516 seconds
+INFO 08-02 20:42:40 [gpu_model_runner.py:1763] Model loading took 3.7711 GiB and 6.736918 seconds
+INFO 08-02 20:42:40 [gpu_model_runner.py:1763] Model loading took 3.7711 GiB and 7.128273 seconds
+INFO 08-02 20:42:45 [backends.py:529] Using cache directory: /home/user/.cache/vllm/torch_compile_cache/02b60e9fa0/rank_3_0/backbone for vLLM's torch.compile
+INFO 08-02 20:42:45 [backends.py:540] Dynamo bytecode transform time: 4.38 s
+INFO 08-02 20:42:45 [backends.py:529] Using cache directory: /home/user/.cache/vllm/torch_compile_cache/02b60e9fa0/rank_1_0/backbone for vLLM's torch.compile
+INFO 08-02 20:42:45 [backends.py:540] Dynamo bytecode transform time: 4.43 s
+INFO 08-02 20:42:45 [backends.py:529] Using cache directory: /home/user/.cache/vllm/torch_compile_cache/02b60e9fa0/rank_0_0/backbone for vLLM's torch.compile
+INFO 08-02 20:42:45 [backends.py:540] Dynamo bytecode transform time: 4.42 s
+INFO 08-02 20:42:45 [backends.py:529] Using cache directory: /home/user/.cache/vllm/torch_compile_cache/02b60e9fa0/rank_2_0/backbone for vLLM's torch.compile
+INFO 08-02 20:42:45 [backends.py:540] Dynamo bytecode transform time: 4.41 s
+INFO 08-02 20:42:47 [backends.py:193] Cache the graph for dynamic shape for later use
+INFO 08-02 20:42:47 [backends.py:193] Cache the graph for dynamic shape for later use
+INFO 08-02 20:42:47 [backends.py:193] Cache the graph for dynamic shape for later use
+INFO 08-02 20:42:47 [backends.py:193] Cache the graph for dynamic shape for later use
+INFO 08-02 20:43:03 [backends.py:214] Compiling a graph for dynamic shape takes 17.64 s
+INFO 08-02 20:43:03 [backends.py:214] Compiling a graph for dynamic shape takes 18.09 s
+INFO 08-02 20:43:03 [backends.py:214] Compiling a graph for dynamic shape takes 18.12 s
+INFO 08-02 20:43:03 [backends.py:214] Compiling a graph for dynamic shape takes 18.18 s
+INFO 08-02 20:43:09 [monitor.py:34] torch.compile takes 22.54 s in total
+INFO 08-02 20:43:09 [monitor.py:34] torch.compile takes 22.61 s in total
+INFO 08-02 20:43:09 [monitor.py:34] torch.compile takes 22.06 s in total
+INFO 08-02 20:43:09 [monitor.py:34] torch.compile takes 22.47 s in total
+INFO 08-02 20:43:11 [gpu_worker.py:318] Available KV cache memory: 60.30 GiB
+INFO 08-02 20:43:11 [gpu_worker.py:318] Available KV cache memory: 60.77 GiB
+INFO 08-02 20:43:11 [gpu_worker.py:318] Available KV cache memory: 60.40 GiB
+INFO 08-02 20:43:11 [gpu_worker.py:318] Available KV cache memory: 60.30 GiB
+INFO 08-02 20:43:12 [kv_cache_utils.py:716] GPU KV cache size: 1,976,032 tokens
+INFO 08-02 20:43:12 [kv_cache_utils.py:720] Maximum concurrency for 32,768 tokens per request: 60.30x
+INFO 08-02 20:43:12 [kv_cache_utils.py:716] GPU KV cache size: 1,976,032 tokens
+INFO 08-02 20:43:12 [kv_cache_utils.py:716] GPU KV cache size: 1,976,032 tokens
+INFO 08-02 20:43:12 [kv_cache_utils.py:720] Maximum concurrency for 32,768 tokens per request: 60.30x
+INFO 08-02 20:43:12 [kv_cache_utils.py:720] Maximum concurrency for 32,768 tokens per request: 60.30x
+INFO 08-02 20:43:12 [kv_cache_utils.py:716] GPU KV cache size: 1,976,032 tokens
+INFO 08-02 20:43:12 [kv_cache_utils.py:720] Maximum concurrency for 32,768 tokens per request: 60.30x
+INFO 08-02 20:43:32 [custom_all_reduce.py:196] Registering 4355 cuda graph addresses
+INFO 08-02 20:43:37 [custom_all_reduce.py:196] Registering 4355 cuda graph addresses
+INFO 08-02 20:43:37 [custom_all_reduce.py:196] Registering 4355 cuda graph addresses
+INFO 08-02 20:43:37 [custom_all_reduce.py:196] Registering 4355 cuda graph addresses
+INFO 08-02 20:43:37 [gpu_model_runner.py:2291] Graph capturing finished in 26 secs, took 0.60 GiB
+INFO 08-02 20:43:37 [gpu_model_runner.py:2291] Graph capturing finished in 26 secs, took 0.60 GiB
+INFO 08-02 20:43:37 [gpu_model_runner.py:2291] Graph capturing finished in 26 secs, took 0.60 GiB
+INFO 08-02 20:43:37 [gpu_model_runner.py:2291] Graph capturing finished in 26 secs, took 0.60 GiB
+INFO 08-02 20:43:37 [core.py:172] init engine (profile, create kv cache, warmup model) took 57.17 seconds
+INFO 08-02 20:43:37 [core.py:172] init engine (profile, create kv cache, warmup model) took 57.18 seconds
+INFO 08-02 20:43:37 [core.py:172] init engine (profile, create kv cache, warmup model) took 56.83 seconds
+INFO 08-02 20:43:37 [core.py:172] init engine (profile, create kv cache, warmup model) took 57.19 seconds
+LLM initialized with tensor_parallel_size=4, pipeline_parallel_size=1, data_parallel_size=1, token_parallel_size=1
+--------------------------------------------------
+Prompt: 'Hello, my name is'
+Generated text: ' Hilary and I have been a full time Licensed Massage Therapist since 199'
+
+--------------------------------------------------
+Prompt: 'The president of the United States is'
+Generated text: ' a leader of the free world. His actions and statements have a direct impact on'
+
+--------------------------------------------------
+Prompt: 'The capital of France is'
+Generated text: ' the largest city in the country and a major European metropolis. It is also'
+
+--------------------------------------------------
+Prompt: 'The future of AI is'
+Generated text: ' not as smart as you think\nAI is a clever word. It conjures'
+
+--------------------------------------------------
+NCCL version 2.26.2+cuda12.2

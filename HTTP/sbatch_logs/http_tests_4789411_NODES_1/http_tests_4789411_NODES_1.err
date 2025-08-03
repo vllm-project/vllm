@@ -1,0 +1,161 @@
+[rank5]: Traceback (most recent call last):
+[rank5]:   File "/mounted_ws/HTTP/test_http.py", line 85, in <module>
+[rank5]:     main()
+[rank5]:   File "/mounted_ws/HTTP/test_http.py", line 58, in main
+[rank5]:     llm = LLM(
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/entrypoints/llm.py", line 275, in __init__
+[rank5]:     self.llm_engine = LLMEngine.from_engine_args(
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/engine/llm_engine.py", line 501, in from_engine_args
+[rank5]:     return engine_cls.from_vllm_config(
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/llm_engine.py", line 124, in from_vllm_config
+[rank5]:     return cls(vllm_config=vllm_config,
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/llm_engine.py", line 101, in __init__
+[rank5]:     self.engine_core = EngineCoreClient.make_client(
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/core_client.py", line 77, in make_client
+[rank5]:     return InprocClient(vllm_config, executor_class, log_stats)
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/core_client.py", line 230, in __init__
+[rank5]:     self.engine_core = EngineCore(*args, **kwargs)
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/core.py", line 75, in __init__
+[rank5]:     self.model_executor = executor_class(vllm_config)
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/executor/executor_base.py", line 53, in __init__
+[rank5]:     self._init_executor()
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/executor/uniproc_executor.py", line 119, in _init_executor
+[rank5]:     self.collective_rpc("init_device")
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/executor/uniproc_executor.py", line 57, in collective_rpc
+[rank5]:     answer = run_method(self.driver_worker, method, args, kwargs)
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/utils/__init__.py", line 2943, in run_method
+[rank5]:     return func(*args, **kwargs)
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/worker/worker_base.py", line 606, in init_device
+[rank5]:     self.worker.init_device()  # type: ignore
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/worker/gpu_worker.py", line 239, in init_device
+[rank5]:     init_worker_distributed_environment(self.vllm_config, self.rank,
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/worker/gpu_worker.py", line 490, in init_worker_distributed_environment
+[rank5]:     init_distributed_environment(parallel_config.world_size, rank,
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/distributed/parallel_state.py", line 991, in init_distributed_environment
+[rank5]:     _WORLD = init_world_group(ranks, local_rank, backend)
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/distributed/parallel_state.py", line 817, in init_world_group
+[rank5]:     return GroupCoordinator(
+[rank5]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/distributed/parallel_state.py", line 236, in __init__
+[rank5]:     assert self.cpu_group is not None
+[rank5]: AssertionError
+[rank4]: Traceback (most recent call last):
+[rank4]:   File "/mounted_ws/HTTP/test_http.py", line 85, in <module>
+[rank4]:     main()
+[rank4]:   File "/mounted_ws/HTTP/test_http.py", line 58, in main
+[rank4]:     llm = LLM(
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/entrypoints/llm.py", line 275, in __init__
+[rank4]:     self.llm_engine = LLMEngine.from_engine_args(
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/engine/llm_engine.py", line 501, in from_engine_args
+[rank4]:     return engine_cls.from_vllm_config(
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/llm_engine.py", line 124, in from_vllm_config
+[rank4]:     return cls(vllm_config=vllm_config,
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/llm_engine.py", line 101, in __init__
+[rank4]:     self.engine_core = EngineCoreClient.make_client(
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/core_client.py", line 77, in make_client
+[rank4]:     return InprocClient(vllm_config, executor_class, log_stats)
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/core_client.py", line 230, in __init__
+[rank4]:     self.engine_core = EngineCore(*args, **kwargs)
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/core.py", line 75, in __init__
+[rank4]:     self.model_executor = executor_class(vllm_config)
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/executor/executor_base.py", line 53, in __init__
+[rank4]:     self._init_executor()
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/executor/uniproc_executor.py", line 119, in _init_executor
+[rank4]:     self.collective_rpc("init_device")
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/executor/uniproc_executor.py", line 57, in collective_rpc
+[rank4]:     answer = run_method(self.driver_worker, method, args, kwargs)
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/utils/__init__.py", line 2943, in run_method
+[rank4]:     return func(*args, **kwargs)
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/worker/worker_base.py", line 606, in init_device
+[rank4]:     self.worker.init_device()  # type: ignore
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/worker/gpu_worker.py", line 239, in init_device
+[rank4]:     init_worker_distributed_environment(self.vllm_config, self.rank,
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/worker/gpu_worker.py", line 490, in init_worker_distributed_environment
+[rank4]:     init_distributed_environment(parallel_config.world_size, rank,
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/distributed/parallel_state.py", line 991, in init_distributed_environment
+[rank4]:     _WORLD = init_world_group(ranks, local_rank, backend)
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/distributed/parallel_state.py", line 817, in init_world_group
+[rank4]:     return GroupCoordinator(
+[rank4]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/distributed/parallel_state.py", line 236, in __init__
+[rank4]:     assert self.cpu_group is not None
+[rank4]: AssertionError
+[rank7]: Traceback (most recent call last):
+[rank7]:   File "/mounted_ws/HTTP/test_http.py", line 85, in <module>
+[rank7]:     main()
+[rank7]:   File "/mounted_ws/HTTP/test_http.py", line 58, in main
+[rank7]:     llm = LLM(
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/entrypoints/llm.py", line 275, in __init__
+[rank7]:     self.llm_engine = LLMEngine.from_engine_args(
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/engine/llm_engine.py", line 501, in from_engine_args
+[rank7]:     return engine_cls.from_vllm_config(
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/llm_engine.py", line 124, in from_vllm_config
+[rank7]:     return cls(vllm_config=vllm_config,
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/llm_engine.py", line 101, in __init__
+[rank7]:     self.engine_core = EngineCoreClient.make_client(
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/core_client.py", line 77, in make_client
+[rank7]:     return InprocClient(vllm_config, executor_class, log_stats)
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/core_client.py", line 230, in __init__
+[rank7]:     self.engine_core = EngineCore(*args, **kwargs)
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/core.py", line 75, in __init__
+[rank7]:     self.model_executor = executor_class(vllm_config)
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/executor/executor_base.py", line 53, in __init__
+[rank7]:     self._init_executor()
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/executor/uniproc_executor.py", line 119, in _init_executor
+[rank7]:     self.collective_rpc("init_device")
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/executor/uniproc_executor.py", line 57, in collective_rpc
+[rank7]:     answer = run_method(self.driver_worker, method, args, kwargs)
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/utils/__init__.py", line 2943, in run_method
+[rank7]:     return func(*args, **kwargs)
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/worker/worker_base.py", line 606, in init_device
+[rank7]:     self.worker.init_device()  # type: ignore
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/worker/gpu_worker.py", line 239, in init_device
+[rank7]:     init_worker_distributed_environment(self.vllm_config, self.rank,
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/worker/gpu_worker.py", line 490, in init_worker_distributed_environment
+[rank7]:     init_distributed_environment(parallel_config.world_size, rank,
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/distributed/parallel_state.py", line 991, in init_distributed_environment
+[rank7]:     _WORLD = init_world_group(ranks, local_rank, backend)
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/distributed/parallel_state.py", line 817, in init_world_group
+[rank7]:     return GroupCoordinator(
+[rank7]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/distributed/parallel_state.py", line 236, in __init__
+[rank7]:     assert self.cpu_group is not None
+[rank7]: AssertionError
+[rank6]: Traceback (most recent call last):
+[rank6]:   File "/mounted_ws/HTTP/test_http.py", line 85, in <module>
+[rank6]:     main()
+[rank6]:   File "/mounted_ws/HTTP/test_http.py", line 58, in main
+[rank6]:     llm = LLM(
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/entrypoints/llm.py", line 275, in __init__
+[rank6]:     self.llm_engine = LLMEngine.from_engine_args(
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/engine/llm_engine.py", line 501, in from_engine_args
+[rank6]:     return engine_cls.from_vllm_config(
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/llm_engine.py", line 124, in from_vllm_config
+[rank6]:     return cls(vllm_config=vllm_config,
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/llm_engine.py", line 101, in __init__
+[rank6]:     self.engine_core = EngineCoreClient.make_client(
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/core_client.py", line 77, in make_client
+[rank6]:     return InprocClient(vllm_config, executor_class, log_stats)
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/core_client.py", line 230, in __init__
+[rank6]:     self.engine_core = EngineCore(*args, **kwargs)
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/engine/core.py", line 75, in __init__
+[rank6]:     self.model_executor = executor_class(vllm_config)
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/executor/executor_base.py", line 53, in __init__
+[rank6]:     self._init_executor()
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/executor/uniproc_executor.py", line 119, in _init_executor
+[rank6]:     self.collective_rpc("init_device")
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/executor/uniproc_executor.py", line 57, in collective_rpc
+[rank6]:     answer = run_method(self.driver_worker, method, args, kwargs)
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/utils/__init__.py", line 2943, in run_method
+[rank6]:     return func(*args, **kwargs)
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/worker/worker_base.py", line 606, in init_device
+[rank6]:     self.worker.init_device()  # type: ignore
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/worker/gpu_worker.py", line 239, in init_device
+[rank6]:     init_worker_distributed_environment(self.vllm_config, self.rank,
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/v1/worker/gpu_worker.py", line 490, in init_worker_distributed_environment
+[rank6]:     init_distributed_environment(parallel_config.world_size, rank,
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/distributed/parallel_state.py", line 991, in init_distributed_environment
+[rank6]:     _WORLD = init_world_group(ranks, local_rank, backend)
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/distributed/parallel_state.py", line 817, in init_world_group
+[rank6]:     return GroupCoordinator(
+[rank6]:   File "/home/sshrestha/workspace/vllm-distributed/vllm/distributed/parallel_state.py", line 236, in __init__
+[rank6]:     assert self.cpu_group is not None
+[rank6]: AssertionError
+Aug 02 19:50:22.428772 675088 slurmstepd   0x15555186c640: error: *** STEP 4789411.0 ON cw-dfw-h100-002-300-026 CANCELLED AT 2025-08-02T19:50:22 ***

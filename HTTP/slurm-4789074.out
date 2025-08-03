@@ -1,0 +1,15 @@
+Allocated nodes: 2
+srun: error: cw-dfw-h100-002-133-026: task 15: Exited with exit code 1
+srun: Terminating StepId=4789074.0
+srun: error: cw-dfw-h100-002-133-026: task 11: Exited with exit code 1
+srun: error: cw-dfw-h100-001-309-012: task 2: Terminated
+srun: error: cw-dfw-h100-002-133-026: task 10: Terminated
+srun: error: cw-dfw-h100-002-133-026: tasks 9,12: Terminated
+srun: error: cw-dfw-h100-001-309-012: tasks 3,6: Terminated
+srun: error: cw-dfw-h100-002-133-026: tasks 8,14: Terminated
+srun: error: cw-dfw-h100-001-309-012: task 7: Terminated
+srun: error: cw-dfw-h100-001-309-012: tasks 1,4: Terminated
+srun: error: cw-dfw-h100-001-309-012: task 5: Terminated
+srun: error: cw-dfw-h100-002-133-026: task 13: Terminated
+srun: error: cw-dfw-h100-001-309-012: task 0: Terminated
+srun: Force Terminated StepId=4789074.0

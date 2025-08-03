@@ -1042,6 +1042,9 @@ def initialize_model_parallel(
                   config.parallel_config.enable_token_parallel and
                   config.parallel_config.token_parallel_size > 1)
     
+    # enable_tknp = (config is not None and 
+    #               config.parallel_config.token_parallel_size > 1)
+
     if enable_tknp:
         data_parallel_size = 1  # Force DP size to 1 for token parallelism
         token_parallel_size = config.parallel_config.token_parallel_size
