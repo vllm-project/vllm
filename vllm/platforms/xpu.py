@@ -30,7 +30,7 @@ class XPUPlatform(Platform):
     # see https://github.com/ray-project/ray/blob/6a5eb5865eeb9ccf058a79b44f107e327e360673/python/ray/_private/accelerators/intel_gpu.py#L20 # noqa: E501
     ray_device_key: str = "GPU"
     dist_backend: str = "ccl"  # ccl | xccl
-    device_control_env_var: str = "ONEAPI_DEVICE_SELECTOR"
+    device_control_env_var: str = "ZE_AFFINITY_MASK"
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
@@ -44,6 +44,13 @@ class XPUPlatform(Platform):
             raise ValueError("XPU backend only supports V1.")
         logger.info("Using Flash Attention backend on V1 engine.")
         return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.xpu.set_device(device)
 
     @classmethod
     def get_device_capability(
@@ -60,7 +67,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
+        return "vllm.lora.punica_wrapper.punica_xpu.PunicaWrapperXPU"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -78,13 +85,14 @@ class XPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
         # in V1(or with ipex chunked prefill) block_size is 64
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 64
 
         # FIXME: Temporarily forcing eager mode
         # remove after t.compile support stabilizes.
-        if (envs.VLLM_USE_V1 and vllm_config.model_config is not None
+        if (envs.VLLM_USE_V1 and model_config is not None
                 and not vllm_config.model_config.enforce_eager):
             from vllm.config import CompilationLevel
             vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION  # noqa: E501
@@ -92,8 +100,7 @@ class XPUPlatform(Platform):
         # Instances created using VllmConfig() typically have model_config as
         # None by default. The modification involves adding a check to prevent
         # potential null exceptions check and update model config.
-        if vllm_config.model_config is not None:
-            model_config = vllm_config.model_config
+        if model_config is not None:
             if model_config.dtype == torch.bfloat16:
                 bf16_supported = cls.device_support_bf16()
                 if not bf16_supported:
@@ -103,9 +110,6 @@ class XPUPlatform(Platform):
                     "CUDA graph is not supported on XPU, fallback to the eager "
                     "mode.")
                 model_config.enforce_eager = True
-
-        if vllm_config.device_config is not None:
-            assert vllm_config.device_config.device_type == "xpu"
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
@@ -124,15 +128,17 @@ class XPUPlatform(Platform):
                 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
                 logger.warning(
                     "Please use spawn as start method if you want to use mp.")
-        elif parallel_config.distributed_executor_backend != "ray" and \
-                parallel_config.distributed_executor_backend != "uni":
+        elif (parallel_config.distributed_executor_backend != "ray"
+              and parallel_config.distributed_executor_backend != "uni"
+              and parallel_config.distributed_executor_backend
+              != "external_launcher"):
             logger.warning(
                 "%s is not supported on XPU, fallback to ray distributed"
                 " executor backend.",
                 parallel_config.distributed_executor_backend)
             parallel_config.distributed_executor_backend = "ray"
 
-        if vllm_config.model_config and vllm_config.model_config.use_mla:
+        if model_config and model_config.use_mla:
             logger.info(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled.")
