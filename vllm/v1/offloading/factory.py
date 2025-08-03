@@ -51,3 +51,6 @@ class OffloadingSpecFactory:
 
 
 # Register various specs here.
+OffloadingSpecFactory.register_spec("CPUOffloadingSpec",
+                                    "vllm.v1.offloading.cpu",
+                                    "CPUOffloadingSpec")
