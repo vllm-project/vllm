@@ -801,7 +801,9 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             strategy=self.config.vision_feature_select_strategy,
         )
         video_features = self.multi_modal_projector(video_features)
-        video_features = self.apply_pooling(video_features)
+        # Get stride from config
+        stride = getattr(self.config, "spatial_pool_stride", 2)
+        video_features = self.apply_pooling(video_features, stride=stride)
         return video_features
 
     def _process_video_pixels(self, inputs: LlavaOnevisionVideoPixelInputs):
@@ -853,12 +855,28 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_features = image_features.view(batch_frames, height, width, -1)
         image_features = image_features.permute(0, 3, 1, 2)
 
-        # TODO support other pooling types config
+        # Get pooling mode from config, default to bilinear for compatibility
+        pooling_mode = getattr(self.config, "spatial_pool_mode", "bilinear")
         height, width = image_features.shape[2:]
         scaled_shape = [math.ceil(height / stride), math.ceil(width / stride)]
-        image_feature = nn.functional.interpolate(image_features,
-                                                  size=scaled_shape,
-                                                  mode='bilinear')
+
+        if pooling_mode == "bilinear":
+            image_feature = nn.functional.interpolate(image_features,
+                                                      size=scaled_shape,
+                                                      mode='bilinear')
+        elif pooling_mode == "average":
+            # Use adaptive average pooling to achieve the target shape
+            image_feature = nn.functional.adaptive_avg_pool2d(
+                image_features, output_size=scaled_shape)
+        elif pooling_mode == "max":
+            # Use adaptive max pooling to achieve the target shape
+            image_feature = nn.functional.adaptive_max_pool2d(
+                image_features, output_size=scaled_shape)
+        else:
+            raise ValueError(
+                f"Unknown pooling mode: {pooling_mode}. "
+                f"Expected one of: ['bilinear', 'average', 'max']")
+
         image_feature = image_feature.permute(0, 2, 3, 1)
         image_feature = image_feature.view(batch_frames, -1, dim)
         return image_feature
