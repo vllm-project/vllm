@@ -45,7 +45,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import is_blackwell_deep_gemm_e8m0_used
+from vllm.utils.deep_gemm import (is_blackwell_deep_gemm_e8m0_used,
+                                  is_deep_gemm_supported)
 from vllm.utils.flashinfer import has_flashinfer_moe
 
 if TYPE_CHECKING:
@@ -505,8 +506,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             elif not self.block_quant:
                 logger.warning_once("Model is not block quantized. Not using "
                                     "DeepGemm kernels")
-            elif (current_platform.is_cuda()
-                  and current_platform.has_device_capability(90)):
+            elif (is_deep_gemm_supported()):
                 logger.info_once("Using DeepGemm kernels for Fp8MoEMethod.")
                 self.allow_deep_gemm = True
             else:
