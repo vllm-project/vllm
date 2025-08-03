@@ -151,6 +151,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
+    VLLM_PRINT_LOGO: bool = True
 
 
 def get_default_cache_root():
@@ -1056,6 +1057,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE":
     lambda: bool(int(os.getenv(\
             "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE", "0"))),
+
+    # If set, print vllm logo when init engine core
+    "VLLM_PRINT_LOGO":
+    lambda: bool(int(os.getenv("VLLM_PRINT_LOGO", "1"))),
 }
 
 # --8<-- [end:env-vars-definition]

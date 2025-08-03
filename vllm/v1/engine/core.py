@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional, TypeVar, Union
 import msgspec
 import zmq
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.logger import init_logger
@@ -24,7 +25,7 @@ from vllm.lora.request import LoRARequest
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import (decorate_logs, make_zmq_socket,
+from vllm.utils import (decorate_logs, make_zmq_socket, print_logo,
                         resolve_obj_by_qualname, set_process_title)
 from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
@@ -70,6 +71,9 @@ class EngineCore:
         self.vllm_config = vllm_config
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
+
+        if envs.VLLM_PRINT_LOGO:
+            print_logo()
 
         self.log_stats = log_stats
 

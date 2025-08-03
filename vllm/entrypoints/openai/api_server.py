@@ -102,7 +102,7 @@ from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, FlexibleArgumentParser, decorate_logs,
                         get_open_zmq_ipc_path, is_valid_ipv6_address,
-                        print_logo, set_ulimit)
+                        set_ulimit)
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -1772,8 +1772,6 @@ def validate_api_server_args(args):
 def setup_server(args):
     """Validate API server args, set up signal handler, create socket
     ready to serve."""
-
-    print_logo()
 
     logger.info("vLLM API server version %s", VLLM_VERSION)
     log_non_default_args(args)
