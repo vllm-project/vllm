@@ -80,6 +80,8 @@ class _HfExamplesInfo:
         self,
         *,
         on_fail: Literal["error", "skip"],
+        check_min_version: bool = True,
+        check_max_version: bool = True,
     ) -> None:
         """
         If the installed transformers version does not meet the requirements,
@@ -96,9 +98,11 @@ class _HfExamplesInfo:
         msg = f"`transformers=={current_version}` installed, but `transformers"
         # Only check the base version for the min/max version, otherwise preview
         # models cannot be run because `x.yy.0.dev0`<`x.yy.0`
-        if min_version and Version(cur_base_version) < Version(min_version):
+        if (check_min_version and min_version
+                and Version(cur_base_version) < Version(min_version)):
             msg += f">={min_version}` is required to run this model."
-        elif max_version and Version(cur_base_version) > Version(max_version):
+        elif (check_max_version and max_version
+              and Version(cur_base_version) > Version(max_version)):
             msg += f"<={max_version}` is required to run this model."
         else:
             return
@@ -185,6 +189,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                           min_transformers_version="4.53"),
     "GlmForCausalLM": _HfExamplesInfo("THUDM/glm-4-9b-chat-hf"),
     "Glm4ForCausalLM": _HfExamplesInfo("THUDM/GLM-4-9B-0414"),
+    "Glm4MoeForCausalLM": _HfExamplesInfo("zai-org/GLM-4.5",
+                                          min_transformers_version="4.54"),   # noqa: E501
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2",
                                        {"alias": "gpt2"}),
     "GPTBigCodeForCausalLM": _HfExamplesInfo("bigcode/starcoder",
@@ -378,8 +384,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                         trust_remote_code=True,
                                         hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
     "Glm4vForConditionalGeneration": _HfExamplesInfo("THUDM/GLM-4.1V-9B-Thinking"),  # noqa: E501
-    "Glm4MoeForCausalLM": _HfExamplesInfo("zai-org/GLM-4.5",
-                                          min_transformers_version="4.54"),   # noqa: E501
     "Glm4v_moeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V-Air",
                                           is_available_online=False),   # noqa: E501
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m",
