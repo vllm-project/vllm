@@ -2,7 +2,7 @@
 
 1. Install OpenTelemetry packages:
 
-    ```console
+    ```bash
     pip install \
       'opentelemetry-sdk>=1.26.0,<1.27.0' \
       'opentelemetry-api>=1.26.0,<1.27.0' \
@@ -12,7 +12,7 @@
 
 1. Start Jaeger in a docker container:
 
-    ```console
+    ```bash
     # From: https://www.jaegertracing.io/docs/1.57/getting-started/
     docker run --rm --name jaeger \
         -e COLLECTOR_ZIPKIN_HOST_PORT=:9411 \
@@ -31,14 +31,14 @@
 
 1. In a new shell, export Jaeger IP:
 
-    ```console
+    ```bash
     export JAEGER_IP=$(docker inspect   --format '{{ .NetworkSettings.IPAddress }}' jaeger)
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=grpc://$JAEGER_IP:4317
     ```
 
     Then set vLLM's service name for OpenTelemetry, enable insecure connections to Jaeger and run vLLM:
 
-    ```console
+    ```bash
     export OTEL_SERVICE_NAME="vllm-server"
     export OTEL_EXPORTER_OTLP_TRACES_INSECURE=true
     vllm serve facebook/opt-125m --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
@@ -46,7 +46,7 @@
 
 1. In a new shell, send requests with trace context from a dummy client
 
-    ```console
+    ```bash
     export JAEGER_IP=$(docker inspect --format '{{ .NetworkSettings.IPAddress }}' jaeger)
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=grpc://$JAEGER_IP:4317
     export OTEL_EXPORTER_OTLP_TRACES_INSECURE=true
@@ -67,7 +67,7 @@
 OpenTelemetry supports either `grpc` or `http/protobuf` as the transport protocol for trace data in the exporter.
 By default, `grpc` is used. To set `http/protobuf` as the protocol, configure the `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` environment variable as follows:
 
-```console
+```bash
 export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://$JAEGER_IP:4318/v1/traces
 vllm serve facebook/opt-125m --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
@@ -79,13 +79,13 @@ OpenTelemetry allows automatic instrumentation of FastAPI.
 
 1. Install the instrumentation library
 
-    ```console
+    ```bash
     pip install opentelemetry-instrumentation-fastapi
     ```
 
 1. Run vLLM with `opentelemetry-instrument`
 
-    ```console
+    ```bash
     opentelemetry-instrument vllm serve facebook/opt-125m
     ```
 

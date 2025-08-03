@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
@@ -85,22 +86,12 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2AudioConfig)
 
-    def get_hf_processor(
-        self,
-        *,
-        # Ignored in initialization
-        sampling_rate: Optional[int] = None,
-        **kwargs: object,
-    ) -> Qwen2AudioProcessor:
+    def get_hf_processor(self, **kwargs: object) -> Qwen2AudioProcessor:
         return self.ctx.get_hf_processor(Qwen2AudioProcessor, **kwargs)
 
-    def get_feature_extractor(
-        self,
-        *,
-        # Ignored in initialization
-        sampling_rate: Optional[int] = None,
-    ) -> WhisperFeatureExtractor:
-        hf_processor = self.get_hf_processor(sampling_rate=sampling_rate)
+    def get_feature_extractor(self,
+                              **kwargs: object) -> WhisperFeatureExtractor:
+        hf_processor = self.get_hf_processor(**kwargs)
         feature_extractor = hf_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
@@ -149,6 +140,7 @@ class Qwen2AudioMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, Any],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # NOTE - we rename audios -> audio in mm data because transformers has
         # deprecated audios for the qwen2audio processor and will remove
@@ -173,6 +165,7 @@ class Qwen2AudioMultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
     def _get_mm_fields_config(
@@ -247,6 +240,13 @@ class Qwen2AudioMultiModalProcessor(
     dummy_inputs=Qwen2AudioDummyInputsBuilder)
 class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsPP):
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("audio"):
+            return f"Audio {i}: <|audio_bos|><|AUDIO|><|audio_eos|>"
+
+        raise ValueError("Only audio modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -349,11 +349,11 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
-            return None
+            return []
         masked_audio_features = self._process_audio_input(audio_input)
         return masked_audio_features
 
@@ -363,7 +363,8 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 self.config.audio_token_index)

@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 import torch
 
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
-
-
-def cdiv(a, b):
-    return (a + b - 1) // b
+from vllm.utils import cdiv
 
 
 @pytest.mark.parametrize("B", [3, 5])

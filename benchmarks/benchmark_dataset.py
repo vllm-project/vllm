@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This module defines a framework for sampling benchmark requests from various
 datasets. Each dataset subclass of BenchmarkDataset must implement sample
@@ -9,9 +10,6 @@ generation. Supported dataset types include:
   - BurstGPT
   - HuggingFace
   - VisionArena
-
-TODO: Implement CustomDataset to parse a JSON file and convert its contents into
-SampleRequest instances, similar to the approach used in ShareGPT.
 """
 
 import base64
@@ -326,6 +324,9 @@ class RandomDataset(BenchmarkDataset):
         input_low = int(real_input_len * (1 - range_ratio))
         input_high = int(real_input_len * (1 + range_ratio))
         output_low = int(output_len * (1 - range_ratio))
+        # Ensure the lower bound for output length is at least 1 to prevent
+        # sampling 0 tokens, which can cause request failures.
+        output_low = max(output_low, 1)
         output_high = int(output_len * (1 + range_ratio))
 
         # Add logging for debugging
@@ -351,11 +352,12 @@ class RandomDataset(BenchmarkDataset):
             # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
             # To avoid uncontrolled change of the prompt length,
             # the encoded sequence is truncated before being decode again.
+            total_input_len = prefix_len + int(input_lens[i])
             re_encoded_sequence = tokenizer.encode(prompt, add_special_tokens=False)[
-                : input_lens[i]
+                :total_input_len
             ]
             prompt = tokenizer.decode(re_encoded_sequence)
-            total_input_len = prefix_len + int(input_lens[i])
+            total_input_len = len(re_encoded_sequence)
             requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -440,6 +442,97 @@ class ShareGPTDataset(BenchmarkDataset):
             )
         self.maybe_oversample_requests(samples, num_requests)
         return samples
+
+
+# -----------------------------------------------------------------------------
+# Custom Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class CustomDataset(BenchmarkDataset):
+    """
+    Implements the Custom dataset.  Loads data from a JSONL file and generates
+    sample requests based on conversation turns. E.g.,
+    ```
+    {"prompt": "What is the capital of India?"}
+    {"prompt": "What is the capital of Iran?"}
+    {"prompt": "What is the capital of China?"}
+    ```
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.load_data()
+
+    def load_data(self) -> None:
+        if self.dataset_path is None:
+            raise ValueError("dataset_path must be provided for loading data.")
+
+        # self.data will be a list of dictionaries
+        # e.g., [{"prompt": "What is the capital of India?"}, ...]
+        # This will be the standardized format which load_data()
+        # has to convert into depending on the filetype of dataset_path.
+        # sample() will assume this standardized format of self.data
+        self.data = []
+
+        # Load the JSONL file
+        if self.dataset_path.endswith(".jsonl"):
+            jsonl_data = pd.read_json(path_or_buf=self.dataset_path, lines=True)
+
+            # check if the JSONL file has a 'prompt' column
+            if "prompt" not in jsonl_data.columns:
+                raise ValueError("JSONL file must contain a 'prompt' column.")
+
+            # Convert each row to a dictionary and append to self.data
+            # This will convert the DataFrame to a list of dictionaries
+            # where each dictionary corresponds to a row in the DataFrame.
+            # This is the standardized format we want for self.data
+            for _, row in jsonl_data.iterrows():
+                self.data.append(row.to_dict())
+        else:
+            raise NotImplementedError(
+                "Only JSONL format is supported for CustomDataset."
+            )
+
+        random.seed(self.random_seed)
+        random.shuffle(self.data)
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        lora_path: Optional[str] = None,
+        max_loras: Optional[int] = None,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        skip_chat_template: bool = False,
+        **kwargs,
+    ) -> list:
+        sampled_requests = []
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item["prompt"]
+
+            # apply template
+            if not skip_chat_template:
+                prompt = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                )
+            )
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+
+        return sampled_requests
 
 
 # -----------------------------------------------------------------------------
@@ -611,6 +704,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         self,
         dataset_path: str,
         dataset_split: str,
+        no_stream: bool = False,
         dataset_subset: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -618,6 +712,7 @@ class HuggingFaceDataset(BenchmarkDataset):
 
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
+        self.load_stream = not no_stream
         self.load_data()
 
     def load_data(self) -> None:
@@ -626,7 +721,7 @@ class HuggingFaceDataset(BenchmarkDataset):
             self.dataset_path,
             name=self.dataset_subset,
             split=self.dataset_split,
-            streaming=True,
+            streaming=self.load_stream,
         )
         self.data = self.data.shuffle(seed=self.random_seed)
 
@@ -776,7 +871,15 @@ class InstructCoderDataset(HuggingFaceDataset):
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
-            prompt = f"{item['instruction']}:\n{item['input']}"
+            prompt = f"{item['input']}\n\n{item['instruction']} Just output \
+            the code, do not include any explanation."
+
+            # apply template
+            prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                add_generation_prompt=True,
+                tokenize=False,
+            )
             prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
                 SampleRequest(

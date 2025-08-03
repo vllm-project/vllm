@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
@@ -7,11 +8,9 @@ from typing import (Final, Literal, Optional, Protocol, TypedDict, TypeVar,
 
 import torch
 import torch.nn as nn
-from packaging.version import Version
 from transformers import (BatchFeature, CLIPVisionConfig, LlavaConfig,
                           PixtralVisionConfig, PretrainedConfig,
                           SiglipVisionConfig)
-from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.models.llava import LlavaProcessor
 from transformers.models.pixtral import PixtralProcessor
 
@@ -39,8 +38,9 @@ from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix,
+                    merge_multimodal_embeddings)
 from .vision import get_vision_encoder_info
 
 
@@ -294,38 +294,25 @@ class PixtralHFMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         pixel_values = processed_outputs.get("pixel_values")
         if pixel_values is not None:
-            # Before/after https://github.com/huggingface/transformers/pull/35122
-            if Version(TRANSFORMERS_VERSION) <= Version("4.48.3"):
-                images = mm_data["images"]
-                assert isinstance(images, list)
+            # Avoid padding since we need the output for each image to be
+            # independent of other images for the cache to work correctly
+            image_sizes = processed_outputs["image_sizes"]
+            assert len(pixel_values) == len(image_sizes)
 
-                # Original output: (1, num_images, C, H, W)
-                # New output: (num_images, C, H, W)
-                assert (isinstance(pixel_values, list)
-                        and len(pixel_values) == 1)
-                assert (isinstance(pixel_values[0], list)
-                        and len(pixel_values[0]) == len(images))
-
-                processed_outputs["pixel_values"] = pixel_values[0]
-            else:
-                # Avoid padding since we need the output for each image to be
-                # independent of other images for the cache to work correctly
-                image_sizes = processed_outputs["image_sizes"]
-                assert len(pixel_values) == len(image_sizes)
-
-                processed_outputs["pixel_values"] = [
-                    p[:, :h, :w]
-                    for p, (h, w) in zip(pixel_values, image_sizes)
-                ]
+            processed_outputs["pixel_values"] = [
+                p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
+            ]
 
         return processed_outputs
 
@@ -498,6 +485,22 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         "gate_up_proj": ["gate_proj", "up_proj"]
     }
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # mapping for new names in checkpoint saved after transformers v4.52
+            "model.language_model.": "language_model.model.",
+            "model.vision_tower.": "vision_tower.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
+            "lm_head.": "language_model.lm_head.",
+        })
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
@@ -658,11 +661,11 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
 
         return self._process_image_input(image_input)
 
@@ -672,7 +675,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
@@ -753,7 +757,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class MantisProcessingInfo(LlavaProcessingInfo):
@@ -763,17 +767,10 @@ class MantisProcessingInfo(LlavaProcessingInfo):
         vision_info = self.get_vision_encoder_info()
 
         kwargs.setdefault("patch_size", vision_info.get_patch_size())
-
-        if Version(TRANSFORMERS_VERSION) < Version("4.48"):
-            # BUG: num_additional_image_tokens = 0 but treated as 1,
-            # so we set vision_feature_select_strategy to None to offset this
-            kwargs.setdefault("vision_feature_select_strategy", None)
-        else:
-            # FIXED: https://github.com/huggingface/transformers/pull/33424/files#diff-6a37acc21efcadaae622b079b2712a131131448ff64262bd219aa346aeec38faL150
-            kwargs.setdefault(
-                "vision_feature_select_strategy",
-                hf_config.vision_feature_select_strategy,
-            )
+        kwargs.setdefault(
+            "vision_feature_select_strategy",
+            hf_config.vision_feature_select_strategy,
+        )
 
         return self.ctx.get_hf_processor(LlavaProcessor, **kwargs)
 
@@ -785,6 +782,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Optional[Mapping[str, object]] = None,
         return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         hf_config = self.info.get_hf_config()
@@ -797,7 +795,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         )
 
         result = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
-                               return_mm_hashes)
+                               tokenization_kwargs, return_mm_hashes)
 
         mm_items = self._to_mm_items(mm_data)
         mm_item_counts = mm_items.get_all_counts()

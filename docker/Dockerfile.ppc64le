@@ -1,10 +1,41 @@
 ARG BASE_UBI_IMAGE_TAG=9.5-1741850109
 
 ###############################################################
+# Stage to build openblas
+###############################################################
+
+FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS openblas-builder
+
+ARG MAX_JOBS
+ARG OPENBLAS_VERSION=0.3.29
+RUN microdnf install -y dnf && dnf install -y gcc-toolset-13 make wget unzip \
+    && source /opt/rh/gcc-toolset-13/enable \
+    && wget https://github.com/OpenMathLib/OpenBLAS/releases/download/v$OPENBLAS_VERSION/OpenBLAS-$OPENBLAS_VERSION.zip \
+    && unzip OpenBLAS-$OPENBLAS_VERSION.zip \
+    && cd OpenBLAS-$OPENBLAS_VERSION \
+    &&  make -j${MAX_JOBS} TARGET=POWER9 BINARY=64 USE_OPENMP=1 USE_THREAD=1 NUM_THREADS=120 DYNAMIC_ARCH=1 INTERFACE64=0 \
+    && cd /tmp && touch control
+
+
+###############################################################
+# base stage with dependencies coming from centos mirrors
+###############################################################
+FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS centos-deps-builder
+RUN  microdnf install -y dnf && \ 
+     dnf install -y https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-gpg-keys-9.0-24.el9.noarch.rpm \
+        https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-stream-repos-9.0-24.el9.noarch.rpm \
+        https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
+        dnf config-manager --set-enabled crb
+
+RUN dnf install -y openjpeg2-devel lcms2-devel tcl-devel tk-devel fribidi-devel && \
+    dnf remove -y centos-gpg-keys-9.0-24.el9.noarch centos-stream-repos-9.0-24.el9.noarch 
+
+
+###############################################################
 # base stage with basic dependencies
 ###############################################################
 
-FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS base-builder
+FROM centos-deps-builder AS base-builder
 
 ARG PYTHON_VERSION=3.12
 ARG OPENBLAS_VERSION=0.3.29
@@ -20,24 +51,26 @@ ENV UV_LINK_MODE=copy
 # Note: A symlink for libatomic.so is created for gcc-13 (linker fails to find libatomic otherwise - reqd. for sentencepiece)
 # Note: A dummy file 'control' is created in /tmp/ to artificially create dependencies between stages when building stages in parallel
 #       when `--jobs=<N>` is passed with podman build command
-RUN microdnf install -y openssl-devel dnf \
-    && dnf install -y  https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm \
-    && dnf config-manager --set-enabled codeready-builder-for-rhel-9-ppc64le-rpms \
+
+COPY --from=openblas-builder /tmp/control /dev/null
+
+RUN --mount=type=bind,from=openblas-builder,source=/OpenBLAS-$OPENBLAS_VERSION/,target=/openblas/,rw \
+    dnf install -y openssl-devel \
     && dnf install -y \
-       git tar gcc-toolset-13 automake libtool numactl-devel lapack-devel \
+       git tar gcc-toolset-13 automake libtool \
        pkgconfig xsimd zeromq-devel kmod findutils protobuf* \
-       libtiff-devel libjpeg-devel openjpeg2-devel zlib-devel \
-       freetype-devel lcms2-devel libwebp-devel tcl-devel tk-devel \
-       harfbuzz-devel fribidi-devel libraqm-devel libimagequant-devel libxcb-devel \
+       libtiff-devel libjpeg-devel zlib-devel freetype-devel libwebp-devel \
+       harfbuzz-devel libraqm-devel libimagequant-devel libxcb-devel \
        python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip \
     && dnf clean all \
+    && PREFIX=/usr/local make -C /openblas install \
     && ln -sf /usr/lib64/libatomic.so.1 /usr/lib64/libatomic.so \
     && python${PYTHON_VERSION} -m venv ${VIRTUAL_ENV} \
     && python -m pip install -U pip uv \
     && uv pip install wheel build "setuptools<70" setuptools_scm setuptools_rust meson-python 'cmake<4' ninja cython scikit_build_core scikit_build \
-    && curl -sL https://ftp2.osuosl.org/pub/ppc64el/openblas/latest/Openblas_${OPENBLAS_VERSION}_ppc64le.tar.gz | tar xvf - -C /usr/local \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
     && cd /tmp && touch control
+
 
 ###############################################################
 # Stage to build torch family
@@ -48,6 +81,8 @@ FROM base-builder AS torch-builder
 ARG MAX_JOBS
 ARG TORCH_VERSION=2.6.0
 ARG _GLIBCXX_USE_CXX11_ABI=1
+ARG OPENBLAS_VERSION=0.3.29
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     source /opt/rh/gcc-toolset-13/enable &&  \
     git clone --recursive https://github.com/pytorch/pytorch.git -b v${TORCH_VERSION} && \
@@ -109,7 +144,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         .. && \
     make install -j ${MAX_JOBS:-$(nproc)} && \
     cd ../../python/ && \
-    uv pip install -v -r requirements-wheel-build.txt && \
+    uv pip install -v -r requirements-build.txt && uv pip install numpy==2.1.3 && \
+    pip show numpy && ls -lrt /opt/vllm/lib/python3.12/site-packages/numpy && \
     PYARROW_PARALLEL=${PYARROW_PARALLEL:-$(nproc)} \
     python setup.py build_ext \
     --build-type=release --bundle-arrow-cpp \
@@ -132,46 +168,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     cd opencv-python && \
     sed -i -E -e 's/"setuptools.+",/"setuptools",/g' pyproject.toml && \
     cd opencv && git cherry-pick --no-commit $OPENCV_PATCH && cd .. && \
+    uv pip install scikit-build && \    
     python -m build --wheel --installer=uv --outdir /opencvwheels/
-
-###############################################################
-# Stage to build vllm - this stage builds and installs
-# vllm, tensorizer and vllm-tgis-adapter and builds uv cache
-# for transitive dependencies - eg. grpcio
-###############################################################
-
-FROM base-builder AS vllmcache-builder
-
-COPY --from=torch-builder /tmp/control /dev/null
-COPY --from=arrow-builder /tmp/control /dev/null
-COPY --from=cv-builder /tmp/control /dev/null
-
-ARG VLLM_TARGET_DEVICE=cpu
-ARG GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
-
-# this step installs vllm and populates uv cache
-# with all the transitive dependencies
-RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-13/enable && \
-    git clone https://github.com/huggingface/xet-core.git && cd xet-core/hf_xet/ && \
-    uv pip install maturin && \
-    uv build --wheel --out-dir /hf_wheels/
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=torch-builder,source=/torchwheels/,target=/torchwheels/,ro \
-    --mount=type=bind,from=arrow-builder,source=/arrowwheels/,target=/arrowwheels/,ro \
-    --mount=type=bind,from=cv-builder,source=/opencvwheels/,target=/opencvwheels/,ro \
-    --mount=type=bind,src=.,dst=/src/,rw \
-    source /opt/rh/gcc-toolset-13/enable && \
-    uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl && \
-    sed -i -e 's/.*torch.*//g' /src/pyproject.toml /src/requirements/*.txt && \
-    uv pip install pandas pythran pybind11 /hf_wheels/*.whl && \
-    # sentencepiece.pc is in some pkgconfig inside uv cache
-    export PKG_CONFIG_PATH=$(find / -type d -name "pkgconfig" 2>/dev/null | tr '\n' ':') && \
-    uv pip install -r /src/requirements/common.txt -r /src/requirements/cpu.txt -r /src/requirements/build.txt --no-build-isolation && \
-    cd /src/ && \
-    uv build --wheel --out-dir /vllmwheel/ --no-build-isolation && \
-    uv pip install /vllmwheel/*.whl
-
 
 ###############################################################
 # Stage to build numactl
@@ -187,6 +185,49 @@ RUN git clone --recursive https://github.com/numactl/numactl.git -b v${NUMACTL_V
     && cd numactl \
     && autoreconf -i && ./configure \
     && make -j ${MAX_JOBS:-$(nproc)}
+
+
+###############################################################
+# Stage to build vllm - this stage builds and installs
+# vllm, tensorizer and vllm-tgis-adapter and builds uv cache
+# for transitive dependencies - eg. grpcio
+###############################################################
+
+FROM base-builder AS vllmcache-builder
+
+COPY --from=torch-builder /tmp/control /dev/null
+COPY --from=arrow-builder /tmp/control /dev/null
+COPY --from=cv-builder /tmp/control /dev/null
+COPY --from=numa-builder /tmp/control /dev/null
+
+ARG VLLM_TARGET_DEVICE=cpu
+ARG GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
+
+# this step installs vllm and populates uv cache
+# with all the transitive dependencies
+RUN --mount=type=cache,target=/root/.cache/uv \
+    source /opt/rh/gcc-toolset-13/enable && \
+    git clone https://github.com/huggingface/xet-core.git && cd xet-core/hf_xet/ && \
+    uv pip install maturin && \
+    uv build --wheel --out-dir /hf_wheels/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=torch-builder,source=/torchwheels/,target=/torchwheels/,ro \
+    --mount=type=bind,from=arrow-builder,source=/arrowwheels/,target=/arrowwheels/,ro \
+    --mount=type=bind,from=cv-builder,source=/opencvwheels/,target=/opencvwheels/,ro \
+    --mount=type=bind,from=numa-builder,source=/numactl/,target=/numactl/,rw \
+    --mount=type=bind,src=.,dst=/src/,rw \
+    source /opt/rh/gcc-toolset-13/enable && \
+    uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl && \
+    sed -i -e 's/.*torch.*//g' /src/pyproject.toml /src/requirements/*.txt && \
+    uv pip install pandas pythran pybind11 /hf_wheels/*.whl && \
+    make -C /numactl install && \
+    # sentencepiece.pc is in some pkgconfig inside uv cache
+    export PKG_CONFIG_PATH=$(find / -type d -name "pkgconfig" 2>/dev/null | tr '\n' ':') && \
+    uv pip install -r /src/requirements/common.txt -r /src/requirements/cpu.txt -r /src/requirements/build.txt --no-build-isolation && \
+    cd /src/ && \
+    uv build --wheel --out-dir /vllmwheel/ --no-build-isolation && \
+    uv pip install /vllmwheel/*.whl
+
 
 ###############################################################
 # Stage to build lapack
@@ -217,6 +258,7 @@ ENV PATH=${VIRTUAL_ENV}/bin:$PATH
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig/
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib
 ENV UV_LINK_MODE=copy
+ENV OMP_NUM_THREADS=16
 
 # create artificial dependencies between stages for independent stages to build in parallel
 COPY --from=torch-builder /tmp/control /dev/null
@@ -225,11 +267,13 @@ COPY --from=cv-builder /tmp/control /dev/null
 COPY --from=vllmcache-builder /tmp/control /dev/null
 COPY --from=numa-builder /tmp/control /dev/null
 COPY --from=lapack-builder /tmp/control /dev/null
+COPY --from=openblas-builder /tmp/control /dev/null
 
 # install gcc-11, python, openblas, numactl, lapack
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=numa-builder,source=/numactl/,target=/numactl/,rw \
     --mount=type=bind,from=lapack-builder,source=/lapack/,target=/lapack/,rw \
+    --mount=type=bind,from=openblas-builder,source=/OpenBLAS-$OPENBLAS_VERSION/,target=/openblas/,rw \
     rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
     microdnf install --nodocs -y \
     tar findutils openssl \
@@ -241,8 +285,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && microdnf clean all \
     && python${PYTHON_VERSION} -m venv ${VIRTUAL_ENV} \
     && python -m pip install -U pip uv --no-cache \
-    && curl -sL https://ftp2.osuosl.org/pub/ppc64el/openblas/latest/Openblas_${OPENBLAS_VERSION}_ppc64le.tar.gz | tar xvf - -C /usr/local \
     && make -C /numactl install \
+    && PREFIX=/usr/local make -C /openblas install \
     && uv pip install 'cmake<4' \
     && cmake --install /lapack/build \
     && uv pip uninstall cmake

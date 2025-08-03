@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -54,13 +56,11 @@ class LlamaModel(nn.Module):
             speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
 
-        # if PP disabled then draft will share embed with target
-        if get_pp_group().world_size > 1:
-            self.embed_tokens = VocabParallelEmbedding(
-                self.config.vocab_size,
-                self.config.hidden_size,
-                prefix=maybe_prefix(prefix, "embed_tokens"),
-            )
+        self.embed_tokens = VocabParallelEmbedding(
+            self.config.vocab_size,
+            self.config.hidden_size,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
+        )
 
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
@@ -149,7 +149,12 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if inputs_embeds is not None:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support multimodal inputs yet."
+            )
         return self.model(input_ids, positions, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
@@ -163,4 +168,4 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
             if "lm_head" not in name:
                 name = "model." + name
             model_weights[name] = loaded_weight
-        return loader.load_weights(model_weights.items())
+        loader.load_weights(model_weights.items())

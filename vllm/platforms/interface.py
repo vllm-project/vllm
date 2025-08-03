@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
 import os
 import platform
 import random
+import sys
 from datetime import timedelta
 from platform import uname
 from typing import TYPE_CHECKING, NamedTuple, Optional, Union
@@ -44,24 +46,28 @@ class _Backend(enum.Enum):
     ROCM_FLASH = enum.auto()
     ROCM_AITER_MLA = enum.auto()  # Supported by V1
     ROCM_AITER_MLA_VLLM_V1 = enum.auto()
+    ROCM_AITER_FA = enum.auto()  # used for ViT attn backend
     TORCH_SDPA = enum.auto()
     FLASHINFER = enum.auto()
+    FLASHINFER_VLLM_V1 = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
+    TRITON_MLA_VLLM_V1 = enum.auto()
+    FLASHMLA_VLLM_V1 = enum.auto()
     FLASHMLA = enum.auto()  # Supported by V1
-    HPU_ATTN = enum.auto()
+    CUTLASS_MLA = enum.auto()
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
-    BLOCK_SPARSE_FLASH_ATTN = enum.auto()
     DUAL_CHUNK_FLASH_ATTN = enum.auto()
+    DIFFERENTIAL_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
+    FLEX_ATTENTION = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
     CUDA = enum.auto()
     ROCM = enum.auto()
     TPU = enum.auto()
-    HPU = enum.auto()
     XPU = enum.auto()
     CPU = enum.auto()
     NEURON = enum.auto()
@@ -122,6 +128,9 @@ class Platform:
     # compilation strategy.
     simple_compile_backend: str = "inductor"
 
+    # The backend used for distributed communication.
+    dist_backend: str = ""
+
     supported_quantization: list[str] = []
 
     additional_env_vars: list[str] = []
@@ -143,9 +152,6 @@ class Platform:
     def is_tpu(self) -> bool:
         return self._enum == PlatformEnum.TPU
 
-    def is_hpu(self) -> bool:
-        return self._enum == PlatformEnum.HPU
-
     def is_xpu(self) -> bool:
         return self._enum == PlatformEnum.XPU
 
@@ -158,6 +164,9 @@ class Platform:
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
 
+    def get_max_output_tokens(self, prompt_len: int) -> int:
+        return sys.maxsize
+
     def is_cuda_alike(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
@@ -167,21 +176,20 @@ class Platform:
 
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
-        if cls.device_control_env_var in os.environ:
+        # Treat empty device control env var as unset. This is a valid
+        # configuration in Ray setups where the engine is launched in
+        # a CPU-only placement group located on a GPU node.
+        if cls.device_control_env_var in os.environ and os.environ[
+                cls.device_control_env_var] != "":
             device_ids = os.environ[cls.device_control_env_var].split(",")
-            if device_ids == [""]:
-                msg = (f"{cls.device_control_env_var} is set to empty string, "
-                       "which means current platform support is disabled. If "
-                       "you are using ray, please unset the environment "
-                       f"variable `{cls.device_control_env_var}` inside the "
-                       "worker/actor. Check "
-                       "https://github.com/vllm-project/vllm/issues/8402 for "
-                       "more information.")
-                raise RuntimeError(msg)
             physical_device_id = device_ids[device_id]
             return int(physical_device_id)
         else:
             return device_id
+
+    @classmethod
+    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
+        return _Backend.TORCH_SDPA
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
@@ -222,6 +230,30 @@ class Platform:
             return current_capability >= capability
 
         return current_capability.to_int() >= capability
+
+    @classmethod
+    def is_device_capability(
+        cls,
+        capability: Union[tuple[int, int], int],
+        device_id: int = 0,
+    ) -> bool:
+        """
+        Test whether this platform has exactly the specified device capability.
+
+        The `capability` argument can either be:
+
+        - A tuple `(major, minor)`.
+        - An integer `<major><minor>`. (See
+        [`DeviceCapability.to_int`][vllm.platforms.interface.DeviceCapability.to_int])
+        """
+        current_capability = cls.get_device_capability(device_id=device_id)
+        if current_capability is None:
+            return False
+
+        if isinstance(capability, tuple):
+            return current_capability == capability
+
+        return current_capability.to_int() == capability
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -267,6 +299,13 @@ class Platform:
             random.seed(seed)
             np.random.seed(seed)
             torch.manual_seed(seed)
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        raise NotImplementedError
 
     @classmethod
     def pre_register_and_update(cls,
@@ -450,6 +489,13 @@ class Platform:
         return False
 
     @classmethod
+    def default_v1(cls, model_config: ModelConfig) -> bool:
+        """
+        Returns whether the current platform supports v1 by default.
+        """
+        return cls.supports_v1(model_config)
+
+    @classmethod
     def use_custom_allreduce(cls) -> bool:
         """
         Returns if custom allreduce is supported on the current platform
@@ -501,6 +547,13 @@ class Platform:
         Init platform-specific torch distributed process group.
         """
         raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+        """
+        Returns if the kv_cache_dtype is supported by the current platform.
+        """
+        return False
 
 
 class UnspecifiedPlatform(Platform):

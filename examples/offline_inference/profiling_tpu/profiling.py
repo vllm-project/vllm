@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
 import dataclasses
@@ -69,7 +70,7 @@ def main(args: argparse.Namespace):
     return
 
 
-if __name__ == "__main__":
+def parse_args():
     parser = FlexibleArgumentParser(
         description="Benchmark the latency of processing a single batch of "
         "requests till completion."
@@ -101,5 +102,9 @@ if __name__ == "__main__":
     )
 
     parser = EngineArgs.add_cli_args(parser)
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(args)

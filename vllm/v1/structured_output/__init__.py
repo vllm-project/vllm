@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import multiprocessing
@@ -39,35 +40,40 @@ class StructuredOutputManager:
         self._grammar_bitmask: Optional[torch.Tensor] = None
         self._full_mask = torch.tensor(-1, dtype=torch.int32)
 
-        # The default max_workers if not specified is the number of CPUs * 5,
-        # which is way too high since these tasks are CPU-bound, not I/O bound.
-        # We also know we would never dominate CPU usage with just grammar
-        # compilation, so we set it to half the number of CPUs.
-        max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
-        self.executor = ThreadPoolExecutor(max_workers=max_workers)
-        self.tokenizer = init_tokenizer_from_configs(
-            model_config=self.vllm_config.model_config,
-            scheduler_config=self.vllm_config.scheduler_config,
-            lora_config=self.vllm_config.lora_config,
-        ).get_lora_tokenizer(None)
-        reasoning_backend = vllm_config.decoding_config.reasoning_backend
-        if reasoning_backend:
-            reasoner_cls = ReasoningParserManager.get_reasoning_parser(
-                reasoning_backend)
-            self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
+        if not self.vllm_config.model_config.skip_tokenizer_init:
+            # The default max_workers if not specified is the number of
+            # CPUs * 5, which is way too high since these tasks are CPU-bound,
+            # not I/O bound. We also know we would never dominate CPU usage
+            # with just grammar compilation, so we set it to half the number
+            # of CPUs.
+            max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
+            self.executor = ThreadPoolExecutor(max_workers=max_workers)
+            self.tokenizer = init_tokenizer_from_configs(
+                model_config=self.vllm_config.model_config,
+                scheduler_config=self.vllm_config.scheduler_config,
+                lora_config=self.vllm_config.lora_config,
+            ).get_lora_tokenizer(None)
+            reasoning_backend = \
+                    self.vllm_config.decoding_config.reasoning_backend
+            if reasoning_backend:
+                reasoner_cls = ReasoningParserManager.get_reasoning_parser(
+                    reasoning_backend)
+                self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
     def grammar_init(self, request: Request) -> None:
         if request.structured_output_request is None:
             return
 
         if TYPE_CHECKING:
-            assert request.sampling_params.guided_decoding is not None
+            assert request.sampling_params is not None and \
+                request.sampling_params.guided_decoding is not None
 
         # Initialize the backend the first time it is needed.
         #
         # NOTE: We only support a single backend. We do NOT support different
         # backends on a per-request basis in V1 (for now, anyway...).
         if self.backend is None:
+            assert request.sampling_params is not None
             backend = request.sampling_params.guided_decoding.backend
             vocab_size = self.vllm_config.model_config.get_vocab_size()
             if backend == "xgrammar":
@@ -78,6 +84,15 @@ class StructuredOutputManager:
                 )
             elif backend == "guidance":
                 self.backend = GuidanceBackend(
+                    self.vllm_config,
+                    tokenizer=self.tokenizer,
+                    vocab_size=vocab_size,
+                )
+            elif backend == "outlines":
+                from vllm.v1.structured_output.backend_outlines import (
+                    OutlinesBackend)
+
+                self.backend = OutlinesBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
@@ -149,31 +164,37 @@ class StructuredOutputManager:
         # NOTE: This outer loop can likely be parallelized to improve
         # performance of bitmask generation for large batches.
         for req_id, _ in ordered_seq:
-            request = requests[req_id].structured_output_request
-            if TYPE_CHECKING:
-                assert request is not None
-                assert request.grammar is not None
+            request = requests[req_id]
+            structured_output_request = request.structured_output_request
 
-            apply_bitmask = (
-                request.reasoning_ended if self.reasoner is not None else True
-            )  # noqa: E501
+            if TYPE_CHECKING:
+                assert structured_output_request is not None
+                assert structured_output_request.grammar is not None
+            apply_bitmask: bool = True
+            if self.reasoner is not None:
+                if structured_output_request.reasoning_ended is None:
+                    structured_output_request.reasoning_ended = \
+                        self.reasoner.is_reasoning_end(request.prompt_token_ids)
+                apply_bitmask = structured_output_request.reasoning_ended
 
             state_advancements = 0
             req_tokens = scheduled_spec_decode_tokens.get(req_id, []) + [None]
             for i, token in enumerate(req_tokens):
-                if apply_bitmask and not request.grammar.is_terminated():
-                    request.grammar.fill_bitmask(bitmask_tensor,
-                                                 cumulative_index)
+                if apply_bitmask and not \
+                    structured_output_request.grammar.is_terminated():
+                    structured_output_request.grammar.fill_bitmask(
+                        bitmask_tensor, cumulative_index)
                     if token is not None:
                         # In order to generate the correct bitmask for each
                         # position in the speculative sequence, we advance
                         # the FSM state for each speculative token and rollback
                         # to restore the previous state when we are finished.
-                        assert request.grammar.accept_tokens(req_id, [token])
+                        assert structured_output_request.grammar.accept_tokens(
+                            req_id, [token])
                         state_advancements += 1
                 cumulative_index += 1
             if state_advancements > 0:
-                request.grammar.rollback(state_advancements)
+                structured_output_request.grammar.rollback(state_advancements)
 
         if cumulative_index < bitmask_tensor.shape[0]:
             bitmask_tensor = bitmask_tensor[:cumulative_index]

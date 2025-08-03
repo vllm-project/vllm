@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
@@ -8,18 +9,15 @@ from .mteb_utils import mteb_test_embed_models
 MODELS = [
     EmbedModelInfo("nomic-ai/nomic-embed-text-v1",
                    architecture="NomicBertModel",
-                   dtype="float32",
                    enable_test=True),
     EmbedModelInfo("nomic-ai/nomic-embed-text-v1.5",
                    architecture="NomicBertModel",
-                   dtype="float32",
                    enable_test=False),
     EmbedModelInfo("nomic-ai/CodeRankEmbed",
                    architecture="NomicBertModel",
                    enable_test=False),
     EmbedModelInfo("nomic-ai/nomic-embed-text-v2-moe",
                    architecture="NomicBertModel",
-                   dtype="float32",
                    enable_test=True)
 ]
 

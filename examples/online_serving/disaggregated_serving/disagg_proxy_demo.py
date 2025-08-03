@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This file provides a disaggregated prefilling proxy demo to demonstrate an
 example usage of XpYd disaggregated prefilling.
@@ -292,6 +293,8 @@ class Proxy:
             # add params to request
             kv_prepare_request = request.copy()
             kv_prepare_request["max_tokens"] = 1
+            if "max_completion_tokens" in kv_prepare_request:
+                kv_prepare_request["max_completion_tokens"] = 1
 
             # prefill stage
             prefill_instance = self.schedule(self.prefill_cycler)
