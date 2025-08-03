@@ -46,6 +46,27 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
 
+# Try to import the extended interfaces from tpu_commons.
+# If it fails, create dummy protocols to ensure vllm remains
+# functional for users without tpu_commons installed.
+# This try ... import ... block will be removed once DI is officially added.
+try:
+    from tpu_commons.interfaces.engine import IEngineCore, IEngineProcess
+except ImportError:
+    # This is a standard pattern for handling optional dependencies.
+    # The linter complains about a potential redefinition, but this is a
+    # false positive. The `try...except` block guarantees that only one
+    # definition is ever executed at runtime. We suppress the warning
+    # because this code is correct and necessary for backward compatibility.
+    from typing import Protocol
+
+    class IEngineCore(Protocol):  # type: ignore[no-redef]
+        pass
+
+    class IEngineProcess(Protocol):  # type: ignore[no-redef]
+        pass
+
+
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_S = 2.5
@@ -54,7 +75,7 @@ HANDSHAKE_TIMEOUT_MINS = 5
 _R = TypeVar('_R')  # Return type for collective_rpc
 
 
-class EngineCore:
+class EngineCore(IEngineCore):
     """Inner loop of vLLM's Engine."""
 
     def __init__(self,
@@ -427,7 +448,7 @@ class EngineCore:
         return req, request.current_wave
 
 
-class EngineCoreProc(EngineCore):
+class EngineCoreProc(EngineCore, IEngineProcess):
     """ZMQ-wrapper for running EngineCore in background process."""
 
     ENGINE_CORE_DEAD = b'ENGINE_CORE_DEAD'
@@ -692,6 +713,8 @@ class EngineCoreProc(EngineCore):
                 decorate_logs()
                 engine_core = EngineCoreProc(*args, **kwargs)
 
+            assert engine_core is not None, (
+                "EngineCoreProc must be initialized before running.")
             engine_core.run_busy_loop()
 
         except SystemExit:

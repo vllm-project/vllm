@@ -37,8 +37,24 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
 
+# Try to import the extended interface from tpu_commons.
+# If it fails, create a dummy protocol to ensure vllm remains
+# functional for users without tpu_commons installed.
+# This try ... import ... block will be removed once DI is officially added.
+try:
+    from tpu_commons.interfaces.scheduler import IScheduler
+except ImportError:
+    # This is a standard pattern for handling optional dependencies.
+    # The linter complains about a potential redefinition of `IScheduler`,
+    # but this is a false positive. The `try...except` block guarantees
+    # that only one of the two definitions is ever executed at runtime.
+    # We suppress the warning because this code is correct and necessary
+    # for backward compatibility.
+    class IScheduler:  # type: ignore[no-redef]
+        pass
 
-class Scheduler(SchedulerInterface):
+
+class Scheduler(IScheduler, SchedulerInterface):
 
     def __init__(
         self,
