@@ -2465,12 +2465,6 @@ class SchedulerConfig:
     (e.g., beam search), recomputation is not currently supported. In
     such a case, we use swapping instead."""
 
-    num_scheduler_steps: int = 1
-    """Maximum number of forward steps per scheduler call."""
-
-    multi_step_stream_outputs: bool = True
-    """If False, then multi-step will stream outputs at the end of all steps"""
-
     send_delta_data: bool = False
     """Private API. If used, scheduler sends delta data to
     workers instead of an entire data. It should be enabled only
@@ -2543,16 +2537,7 @@ class SchedulerConfig:
 
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
-                if self.num_scheduler_steps > 1:
-                    # Multi-step Chunked-Prefill doesn't allow prompt-chunking
-                    # for now. Have max_num_batched_tokens set to max_model_len
-                    # so we don't reject sequences on account of a short
-                    # max_num_batched_tokens.
-                    self.max_num_batched_tokens = max(
-                        self.max_model_len, DEFAULT_MAX_NUM_BATCHED_TOKENS)
-                else:
-                    self.max_num_batched_tokens = (
-                        DEFAULT_MAX_NUM_BATCHED_TOKENS)
+                self.max_num_batched_tokens = DEFAULT_MAX_NUM_BATCHED_TOKENS
             else:
                 # If max_model_len is too short, use
                 # DEFAULT_MAX_NUM_BATCHED_TOKENS as the default value
@@ -2643,12 +2628,6 @@ class SchedulerConfig:
                 f"({self.num_lookahead_slots}) must be greater than or "
                 "equal to 0.")
 
-        if self.num_scheduler_steps < 1:
-            raise ValueError(
-                "num_scheduler_steps "
-                f"({self.num_scheduler_steps}) must be greater than or "
-                "equal to 1.")
-
         if self.max_num_partial_prefills < 1:
             raise ValueError(
                 f"max_num_partial_prefills ({self.max_num_partial_prefills}) "
@@ -2673,10 +2652,6 @@ class SchedulerConfig:
                 f"max_num_partial_prefills ({self.max_num_partial_prefills}).")
 
         return self
-
-    @property
-    def is_multi_step(self) -> bool:
-        return self.num_scheduler_steps > 1
 
 
 Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu"]
@@ -5030,8 +5005,6 @@ class VllmConfig:
             f"observability_config={self.observability_config!r}, "
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "
-            f"num_scheduler_steps={self.scheduler_config.num_scheduler_steps}, "
-            f"multi_step_stream_outputs={self.scheduler_config.multi_step_stream_outputs}, "  # noqa
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
