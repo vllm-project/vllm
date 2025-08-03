@@ -233,10 +233,9 @@ def test_structured_output(
             max_tokens=1000,
             guided_decoding=GuidedDecodingParams(grammar=sample_sql_ebnf))
         outputs = llm.generate(
-            prompts=(
-                "Generate a sql statement that selects col_1 from "
-                "table_1 where it is equal to 1. Make the response as short as "
-                "possible."),
+            ("Generate a sql statement that selects col_1 from "
+             "table_1 where it is equal to 1. Make the response as short as "
+             "possible."),
             sampling_params=sampling_params,
             use_tqdm=True,
         )
@@ -267,10 +266,9 @@ def test_structured_output(
             max_tokens=1000,
             guided_decoding=GuidedDecodingParams(grammar=sample_sql_lark))
         outputs = llm.generate(
-            prompts=(
-                "Generate a sql statement that selects col_1 from "
-                "table_1 where it is equal to 1. Make the response as short as "
-                "possible."),
+            ("Generate a sql statement that selects col_1 from "
+             "table_1 where it is equal to 1. Make the response as short as "
+             "possible."),
             sampling_params=sampling_params,
             use_tqdm=True,
         )
@@ -307,7 +305,6 @@ def test_structured_output(
             guided_decoding=GuidedDecodingParams(grammar="not a grammar"))
         with pytest.raises(ValueError, match="Failed to convert the grammar "):
             llm.generate(
-                prompts=
                 ("Generate a sql statement that selects col_1 from "
                  "table_1 where it is equal to 1. Make the response as short "
                  "as possible."),
@@ -350,10 +347,9 @@ def test_structured_output(
         top_p=0.95,
         guided_decoding=GuidedDecodingParams(choice=sample_guided_choice))
 
-    prompt = ("The best language for type-safe systems programming is "
-              "(Make the response as short as possible.) ")
     outputs = llm.generate(
-        prompt,
+        ("The best language for type-safe systems programming is "
+         "(Make the response as short as possible.) "),
         sampling_params=sampling_params,
         use_tqdm=True,
     )
@@ -377,11 +373,10 @@ def test_structured_output(
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(json=json_schema))
 
-    prompt = ("Generate a JSON with the brand, model and car_type of the most "
-              "iconic car from the 90's. Make the response as short as "
-              "possible.")
     outputs = llm.generate(
-        prompt,
+        ("Generate a JSON with the brand, model and car_type of the most "
+         "iconic car from the 90's. Make the response as short as "
+         "possible."),
         sampling_params=sampling_params,
         use_tqdm=True,
     )
@@ -422,10 +417,9 @@ def test_structured_output(
         max_tokens=4096,
         guided_decoding=GuidedDecodingParams(json=json_schema))
 
-    prompt = ("Generate a description of a frog using 50 characters. "
-              "Make the response as short as possible.")
     outputs = llm.generate(
-        prompt,
+        ("Generate a description of a frog using 50 characters. "
+         "Make the response as short as possible."),
         sampling_params=sampling_params,
         use_tqdm=True,
     )
@@ -512,7 +506,7 @@ Make the response as short as possible.
 """
 
         # Change this once other backends support structural_tag
-        outputs = llm.generate(prompts=prompt,
+        outputs = llm.generate(prompt,
                                sampling_params=sampling_params,
                                use_tqdm=True)
         assert outputs is not None
