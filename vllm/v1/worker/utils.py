@@ -48,7 +48,7 @@ class MultiModalBudget:
         self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config)
 
         max_items_per_prompt_by_modality = dict[str, int]()
-        max_items_per_seq_by_modality = dict[str, int]()
+        max_items_per_batch_by_modality = dict[str, int]()
 
         max_tokens_by_modality = mm_registry \
             .get_max_tokens_per_item_by_nonzero_modality(model_config)
@@ -60,14 +60,15 @@ class MultiModalBudget:
             ) = self.get_max_items(modality, max_tokens)
 
             max_items_per_prompt_by_modality[modality] = max_items_per_prompt
-            max_items_per_seq_by_modality[modality] = max_items_per_batch
+            max_items_per_batch_by_modality[modality] = max_items_per_batch
 
+        self.max_tokens_by_modality = max_tokens_by_modality
         self.max_items_per_prompt_by_modality = max_items_per_prompt_by_modality
-        self.max_items_per_batch_by_modality = max_items_per_seq_by_modality
+        self.max_items_per_batch_by_modality = max_items_per_batch_by_modality
 
-    def get_modality_with_max_tokens_per_batch(self) -> tuple[str, int]:
-        max_tokens_per_batch_by_modality = self.max_items_per_batch_by_modality
-        modality, max_tokens = max(max_tokens_per_batch_by_modality.items(),
+    def get_modality_with_max_tokens(self) -> tuple[str, int]:
+        max_tokens_by_modality = self.max_tokens_by_modality
+        modality, max_tokens = max(max_tokens_by_modality.items(),
                                    key=lambda item: item[1])
 
         return modality, max_tokens

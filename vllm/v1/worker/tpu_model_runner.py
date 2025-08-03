@@ -1546,7 +1546,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 (
                     dummy_modality,
                     max_tokens,
-                ) = mm_budget.get_modality_with_max_tokens_per_batch()
+                ) = mm_budget.get_modality_with_max_tokens()
                 (
                     max_mm_items_per_prompt,
                     max_mm_items_per_batch,
