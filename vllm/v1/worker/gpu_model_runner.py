@@ -1106,15 +1106,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += arange
 
-        # TODO: Optimize the CPU -> GPU copy.
-        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
-            self.device, non_blocking=True)
-        logits_indices = torch.from_numpy(logits_indices).to(self.device,
-                                                             non_blocking=True)
-        target_logits_indices = torch.from_numpy(target_logits_indices).to(
-            self.device, non_blocking=True)
-        bonus_logits_indices = torch.from_numpy(bonus_logits_indices).to(
-            self.device, non_blocking=True)
+        cu_num_draft_tokens = torch.tensor(cu_num_draft_tokens,
+                                           dtype=torch.int32,
+                                           device=self.device)
+        logits_indices = torch.tensor(logits_indices,
+                                      dtype=torch.int32,
+                                      device=self.device)
+        target_logits_indices = torch.tensor(target_logits_indices,
+                                             dtype=torch.int32,
+                                             device=self.device)
+        bonus_logits_indices = torch.tensor(bonus_logits_indices,
+                                            dtype=torch.int32,
+                                            device=self.device)
 
         # Compute the draft token ids.
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
