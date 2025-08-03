@@ -35,8 +35,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType
 
-from .interfaces import (HasInnerState, IsHybrid, SupportsLoRA, SupportsPP,
-                         SupportsV0Only)
+from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -446,9 +445,8 @@ class JambaModel(nn.Module):
         return loaded_params
 
 
-# TODO: Remove SupportsV0Only once v1 is fully supported
 class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
-                       IsHybrid, SupportsV0Only):
+                       IsHybrid):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={
         ".self_attn.": ".",
         ".A_log": ".A"
