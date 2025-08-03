@@ -1066,7 +1066,8 @@ class DPEngineCoreProc(EngineCoreProc):
         old_dp_size = parallel_config.data_parallel_size
         parallel_config.data_parallel_size = \
             reconfig_request.new_data_parallel_size
-        if reconfig_request.new_data_parallel_rank != -1:
+        if reconfig_request.new_data_parallel_rank != \
+            ReconfigureRankType.KEEP_CURRENT_RANK:
             parallel_config.data_parallel_rank = \
                 reconfig_request.new_data_parallel_rank
         # local rank specifies device visibility, it should not be changed
@@ -1076,7 +1077,8 @@ class DPEngineCoreProc(EngineCoreProc):
             reconfig_request.new_data_parallel_master_ip
         parallel_config.data_parallel_master_port = \
             reconfig_request.new_data_parallel_master_port
-        if reconfig_request.new_data_parallel_rank != -2:
+        if reconfig_request.new_data_parallel_rank != \
+            ReconfigureRankType.SHUTDOWN_CURRENT_RANK:
             self.dp_rank = parallel_config.data_parallel_rank
             self.dp_group = parallel_config.stateless_init_dp_group()
         reconfig_request.new_data_parallel_master_port = \
@@ -1094,7 +1096,7 @@ class DPEngineCoreProc(EngineCoreProc):
             # CUDA graph is not used
             self.model_executor.collective_rpc("compile_or_warm_up_model")
         if reconfig_request.new_data_parallel_rank == \
-        ReconfigureRankType.SHUTDOWN_CURRENT_RANK:
+            ReconfigureRankType.SHUTDOWN_CURRENT_RANK:
             self.shutdown()
             logger.info("DPEngineCoreProc %s shutdown", self.dp_rank)
         else:
