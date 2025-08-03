@@ -534,6 +534,8 @@ class DeepseekForCausalLMWithAdditionalHeads(DeepseekForCausalLM):
 
         if num_hidden_layers == 0:
             return nn.Sequential(nn.Linear(token_hidden_size, 1), nn.Sigmoid())
+        
+        assert hidden_dim is not None, "hidden_dim is required for num_hidden_layers > 0"
         if num_hidden_layers == 1:
             return nn.Sequential(
                 nn.Linear(token_hidden_size, hidden_dim),
