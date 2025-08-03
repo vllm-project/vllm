@@ -12,7 +12,6 @@
 
 namespace vllm {
 
-// TODO(woosuk): Further optimize this kernel.
 template <typename scalar_t>
 __global__ void rms_norm_kernel(
     scalar_t* __restrict__ out,          // [..., hidden_size]
@@ -21,10 +20,15 @@ __global__ void rms_norm_kernel(
     const scalar_t* __restrict__ weight,  // [hidden_size]
     const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
+  // Assumes hidden_size <= 1024, enforced via launch config
+  __shared__ float s_input[1024];
+
   float variance = 0.0f;
+  int row_offset = blockIdx.x * input_stride;
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    const float x = (float)input[blockIdx.x * input_stride + idx];
+    float x = (float)input[row_offset + idx];
+    s_input[idx] = x;
     variance += x * x;
   }
 
@@ -38,7 +42,7 @@ __global__ void rms_norm_kernel(
   __syncthreads();
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)input[blockIdx.x * input_stride + idx];
+    float x = s_input[idx];
     out[blockIdx.x * hidden_size + idx] =
         ((scalar_t)(x * s_variance)) * weight[idx];
   }
