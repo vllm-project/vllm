@@ -54,6 +54,7 @@ HF_UNSUPPORTED_MODELS = [
 
 V1_SUPPORTED_MODELS = [
     "state-spaces/mamba-130m-hf",
+    "ai21labs/Jamba-tiny-dev",
     "mistralai/Mamba-Codestral-7B-v0.1",
     "ibm-ai-platform/Bamba-9B-v1",
     "Zyphra/Zamba2-1.2B-instruct",
@@ -102,8 +103,8 @@ def test_models(
         with monkeypatch.context() as m:
             m.setenv("VLLM_USE_V1", "1")
             if model in HYBRID_MODELS:
+                # required due to reorder_batch behaviour
                 m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
-            if model in SSM_MODELS:
                 # Set to True until support in CUDA Graphs
                 enforce_eager = True
 
@@ -377,7 +378,6 @@ def test_distributed_correctness(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    # Set enforce_eager=True until support in CUDA Graphs
     with vllm_runner(model, tensor_parallel_size=1,
                      max_num_seqs=2) as vllm_model:
         vllm_outputs_tp_1 = vllm_model.generate_greedy_logprobs(
