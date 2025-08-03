@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from functools import partial
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -16,7 +18,6 @@ from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from ...conftest import VllmRunner
-from ...utils import fork_new_process_for_each_test
 from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 
 ARCH_TO_SKIP = {
@@ -50,9 +51,53 @@ def create_batched_mm_kwargs(
     return mm_kwargs
 
 
+# Avoid OOM and reduce initialization time by only using 1 layer
+def hf_overrides(hf_config: PretrainedConfig,
+                 exist_overrides: dict[str, Any]) -> PretrainedConfig:
+    hf_config.update(exist_overrides)
+    text_config = hf_config.get_text_config()
+    # Ensure at least 2 expert per group
+    # Since `grouped_topk` assumes top-2
+    n_group = getattr(text_config, 'n_group', None)
+    num_experts = n_group * 2 if n_group is not None else 2
+    # we use three layers for Gemma-3n to check
+    # both normal layer and kv_shared_layer
+    text_config.update({
+        "num_layers": 1,
+        "num_hidden_layers": 1,
+        "num_experts": num_experts,
+        "num_experts_per_tok": 2,
+        "num_local_experts": num_experts,
+        # Otherwise there will not be any expert layers
+        "first_k_dense_replace": 0,
+        # To avoid OOM on DeepSeek-V3
+        "n_routed_experts": num_experts,
+        # For Gemma-3n
+        "num_kv_shared_layers": 1,
+    })
+    if hasattr(hf_config, "vision_config"):
+        hf_config.vision_config.update({
+            "num_layers": 1,
+            "num_hidden_layers": 1,
+        })
+    # e.g.: ibm-granite/granite-speech-3.3-2b
+    if hasattr(hf_config, "encoder_config"):
+        hf_config.encoder_config.update({
+            "num_layers": 1,
+            "num_hidden_layers": 1,
+        })
+    # e.g.: Qwen/Qwen2-Audio-7B-Instruct
+    if hasattr(hf_config, "audio_config"):
+        hf_config.audio_config.update({
+            "num_layers": 1,
+            "num_hidden_layers": 1,
+            "encoder_layers": 1,
+        })
+    return hf_config
+
+
 @pytest.mark.core_model
 @pytest.mark.parametrize("model_arch", list(_MULTIMODAL_EXAMPLE_MODELS.keys()))
-@fork_new_process_for_each_test
 def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
                              monkeypatch):
     if model_arch in ARCH_TO_SKIP:
@@ -63,50 +108,8 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
 
     model_id = model_info.default
 
-    # Avoid OOM and reduce initialization time by only using 1 layer
-    def hf_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
-        hf_config.update(model_info.hf_overrides)
-        text_config = hf_config.get_text_config()
-        # Ensure at least 2 expert per group
-        # Since `grouped_topk` assumes top-2
-        n_group = getattr(text_config, 'n_group', None)
-        num_experts = n_group * 2 if n_group is not None else 2
-        # we use three layers for Gemma-3n to check
-        # both normal layer and kv_shared_layer
-        text_config.update({
-            "num_layers": 1,
-            "num_hidden_layers": 1,
-            "num_experts": num_experts,
-            "num_experts_per_tok": 2,
-            "num_local_experts": num_experts,
-            # Otherwise there will not be any expert layers
-            "first_k_dense_replace": 0,
-            # To avoid OOM on DeepSeek-V3
-            "n_routed_experts": num_experts,
-            # For Gemma-3n
-            "num_kv_shared_layers": 1,
-        })
-        if hasattr(hf_config, "vision_config"):
-            hf_config.vision_config.update({
-                "num_layers": 1,
-                "num_hidden_layers": 1,
-            })
-        # e.g.: ibm-granite/granite-speech-3.3-2b
-        if hasattr(hf_config, "encoder_config"):
-            hf_config.encoder_config.update({
-                "num_layers": 1,
-                "num_hidden_layers": 1,
-            })
-
-        # e.g.: Qwen/Qwen2-Audio-7B-Instruct
-        if hasattr(hf_config, "audio_config"):
-            hf_config.audio_config.update({
-                "num_layers": 1,
-                "num_hidden_layers": 1,
-                "encoder_layers": 1,
-            })
-
-        return hf_config
+    hf_overrides_fn = partial(hf_overrides,
+                              exist_overrides=model_info.hf_overrides)
 
     model_config = ModelConfig(
         model_id,
@@ -169,8 +172,9 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
                     trust_remote_code=model_info.trust_remote_code,
                     max_model_len=model_info.max_model_len,
                     load_format="dummy",
-                    hf_overrides=hf_overrides,
+                    hf_overrides=hf_overrides_fn,
                     limit_mm_per_prompt=limit_mm_per_prompt,
+                    enforce_eager=True,
                 ) as vllm_model,
         ):
             model_config = vllm_model.llm.llm_engine.model_config
