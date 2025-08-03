@@ -105,6 +105,8 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
 
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip",
+                                          check_max_version=False)
 
     model_id = model_info.default
 
