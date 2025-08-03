@@ -73,12 +73,17 @@ def test_basic_lifecycle():
     # (2b): forward(): request finishes recv.
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     model_runner_output.finished_recving = [request_id]
+    model_runner_output.finished_loading_dict = {
+        request_id: BLOCK_SIZE * NUM_EXTERNAL_FULL_BLOCKS
+    }
 
     # (2c): update_from_output():
     engine_core_outputs = scheduler.update_from_output(scheduler_output,
                                                        model_runner_output)
     assert len(scheduler.waiting) == 1
     assert (request_id in scheduler.finished_recving_kv_req_ids)
+    assert scheduler.finished_loading_dict[
+        request_id] == BLOCK_SIZE * NUM_EXTERNAL_FULL_BLOCKS
 
     # STEP (3):
     # (3a): schedule(): this should actually schedule.
@@ -188,7 +193,10 @@ def test_interleaved_lifecycle():
 
     model_runner_output = create_model_runner_output(
         [request_local_a, request_local_b],
-        finished_recving=[request_remote.request_id])
+        finished_recving=[request_remote.request_id],
+        finished_loading_dict={
+            request_remote.request_id: BLOCK_SIZE * NUM_EXTERNAL_FULL_BLOCKS
+        })
     scheduler.update_from_output(scheduler_output, model_runner_output)
 
     # STEP 5: RECVed KVs are sent to ModelRunner.
@@ -310,9 +318,12 @@ def test_full_block_prompt():
     scheduler_output = scheduler.schedule()
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     model_runner_output.finished_recving = [request_id]
+    model_runner_output.finished_loading_dict = {request_id: NUM_TOKENS}
+
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.waiting) == 1
     assert (request_id in scheduler.finished_recving_kv_req_ids)
+    assert scheduler.finished_loading_dict[request_id] == NUM_TOKENS
 
     # # STEP (3): Run as usual.
     scheduler_output = scheduler.schedule()
@@ -386,7 +397,11 @@ def test_cannot_schedule_after_recv():
     # Step 3: finish recving (5 blocks in use)
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(
-        reqs=[request_normal], finished_recving=[request_remote.request_id])
+        reqs=[request_normal],
+        finished_recving=[request_remote.request_id],
+        finished_loading_dict={
+            request_remote.request_id: BLOCK_SIZE * NUM_PROMPT_BLOCKS
+        })
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 1
