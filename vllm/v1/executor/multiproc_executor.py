@@ -41,6 +41,8 @@ logger = init_logger(__name__)
 
 class MultiprocExecutor(Executor):
 
+    supports_pp: bool = True
+
     def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
         # and ensure workers will be terminated.
