@@ -659,9 +659,28 @@ class EngineCoreProc(EngineCore):
 
         engine_core: Optional[EngineCoreProc] = None
         try:
+            try:
+                from tpu_commons.core.core_tpu import DisaggEngineCoreProc
+                from tpu_commons.core.disagg_utils import is_disagg_enabled
+            except ImportError:
+                is_disagg_enabled = lambda: False
+                DisaggEngineCoreProc = None
+
             parallel_config: ParallelConfig = kwargs[
                 "vllm_config"].parallel_config
-            if parallel_config.data_parallel_size > 1 or dp_rank > 0:
+            if is_disagg_enabled():
+                if parallel_config.data_parallel_size > 1 or dp_rank > 0:
+                    raise NotImplementedError(
+                        "The current disaggregated engine implementation does "
+                        "not support data parallelism.")
+
+                set_process_title("DisaggEngineCore")
+                decorate_logs()
+                engine_core = DisaggEngineCoreProc(*args,
+                                                   dp_rank=dp_rank,
+                                                   local_dp_rank=local_dp_rank,
+                                                   **kwargs)
+            elif parallel_config.data_parallel_size > 1 or dp_rank > 0:
                 set_process_title("DPEngineCore", str(dp_rank))
                 decorate_logs()
                 # Set data parallel rank for this engine process.
