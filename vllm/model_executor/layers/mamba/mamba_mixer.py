@@ -175,7 +175,7 @@ class MambaMixer(MambaBase, CustomOp):
                 query_start_loc = mamba1_metadata.query_start_loc
                 state_indices_tensor = mamba1_metadata.state_indices_tensor
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                conv_state = self_kv_cache[0]
+                conv_state = self_kv_cache[0].transpose(-1, -2)
                 ssm_state = self_kv_cache[1]
                 has_initial_state = mamba1_metadata.has_initial_states
                 context_lens_tensor = mamba1_metadata.context_lens_tensor

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from vllm import envs
 from vllm.distributed import divide
 
 
@@ -18,6 +19,11 @@ class MambaStateShapeCalculator:
 
         temporal_state_shape = (divide(intermediate_size,
                                        tp_world_size), state_size)
+
+        if envs.VLLM_USE_V1:
+            return (conv_state_shape[1],
+                    conv_state_shape[0]), temporal_state_shape
+
         return conv_state_shape, temporal_state_shape
 
     @classmethod
@@ -34,8 +40,8 @@ class MambaStateShapeCalculator:
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
-        n_groups = (n_groups +
-                    cls.extra_groups_for_head_shards(n_groups, tp_world_size))
+        n_groups = n_groups + cls.extra_groups_for_head_shards(
+            n_groups, tp_world_size)
         # heads and n_groups are TP-ed
         conv_dim = intermediate_size + 2 * n_groups * state_size
 
