@@ -39,7 +39,9 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
+import msgspec
 import torch
+from pydantic_core import core_schema
 
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -72,6 +74,39 @@ class KVConnectorRole(enum.Enum):
     WORKER = 1
 
 
+class KVConnectorHandshakeMetadata(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        # required for @cached_property.
+        dict=True):
+    """
+    Metadata optionally used for out of band connector handshake between
+    P/D workers.
+    """
+    connector_type: str = "base"
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, _source_type: Any, _handler: Callable[[Any],
+                                                   core_schema.CoreSchema]
+    ) -> core_schema.CoreSchema:
+        """bridge msgspec.Struct with pydantic for schema generation"""
+        return core_schema.no_info_after_validator_function(
+            cls, core_schema.dict_schema())
+
+
+class KVConnectorTransferMetadata(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        dict=True):
+    """
+    Wrapper for transfer handshake metadata sent between engine and utils.
+    """
+    tensor_parallel_rank: int
+    data_parallel_rank: int
+    content: Optional[dict]
+
+
 class KVConnectorMetadata(ABC):  # noqa: B024
     """
     Abstract Metadata used to communicate between the
@@ -89,6 +124,10 @@ class KVConnectorBase_V1(ABC):
         self._connector_metadata: Optional[KVConnectorMetadata] = None
         self._vllm_config = vllm_config
         self._role = role
+        # Optional handshake metadata used for connector init between
+        # workers. This is not used by default, just used for connections
+        # that need to be initialized out of band.
+        self._handshake_metadata: Optional[KVConnectorHandshakeMetadata] = None
 
     @property
     def role(self) -> KVConnectorRole:

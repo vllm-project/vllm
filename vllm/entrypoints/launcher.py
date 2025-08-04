@@ -15,6 +15,8 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.constants import (H11_MAX_HEADER_COUNT_DEFAULT,
                                         H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT)
 from vllm.entrypoints.ssl import SSLCertRefresher
+from vllm.entrypoints.ssl import SSLConfig
+from vllm.entrypoints.ssl import SSLCertRefresher
 from vllm.logger import init_logger
 from vllm.utils import find_process_using_port
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -51,6 +53,11 @@ async def serve_http(app: FastAPI,
         h11_max_incomplete_event_size = H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT
     if h11_max_header_count is None:
         h11_max_header_count = H11_MAX_HEADER_COUNT_DEFAULT
+
+    # add SSL configuration to uvicorn kwargs
+    if ssl_config:
+        uvicorn_kwargs.update(ssl_config.to_uvicorn_kwargs())
+
 
     config = uvicorn.Config(app, **uvicorn_kwargs)
     # Set header limits

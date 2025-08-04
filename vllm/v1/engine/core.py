@@ -96,6 +96,11 @@ class EngineCore:
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
 
+        # Collect and store KV connector xfer metadata from workers
+        # (after KV cache registration)
+        self.xfer_handshake_metadata = (
+            self.model_executor.get_kv_connector_handshake_metadata())
+
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
@@ -209,7 +214,7 @@ class EngineCore:
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
-        return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
+        return (num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config)
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_executor.supported_tasks
@@ -615,14 +620,32 @@ class EngineCoreProc(EngineCore):
             # external LB case for our colocated front-end to use (coordinator
             # only runs with rank 0).
             dp_stats_address = self.frontend_stats_publish_address
-            handshake_socket.send(
-                msgspec.msgpack.encode({
-                    "status": "READY",
-                    "local": local_client,
-                    "headless": headless,
-                    "num_gpu_blocks": num_gpu_blocks,
-                    "dp_stats_address": dp_stats_address,
-                }))
+
+            handshake_msg = {
+                "status": "READY",
+                "local": local_client,
+                "headless": headless,
+                "num_gpu_blocks": num_gpu_blocks,
+                "dp_stats_address": dp_stats_address,
+            }
+
+            # Include KV connector metadata if available
+            if hasattr(self, 'xfer_handshake_metadata'
+                       ) and self.xfer_handshake_metadata:
+                # self.xfer_handshake_metadata is list of dicts from workers
+                # Each dict already has structure {dp_rank: {tp_rank: metadata}}
+                # Merge all worker dicts into a single dict
+                content: dict[int, dict[int, dict[int, Any]]] = {}
+                for worker_dict in self.xfer_handshake_metadata:
+                    if worker_dict is not None:
+                        # Deep merge nested dictionaries instead of overwrite
+                        for dp_rank, tp_dict in worker_dict.items():
+                            if dp_rank not in content:
+                                content[dp_rank] = {}
+                            content[dp_rank].update(tp_dict)
+                handshake_msg["xfer_handshake_metadata"] = content
+
+            handshake_socket.send(msgspec.msgpack.encode(handshake_msg))
 
     @staticmethod
     def startup_handshake(
