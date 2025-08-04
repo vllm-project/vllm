@@ -10,7 +10,7 @@ from vllm.assets.image import ImageAsset
 from vllm.config import KVTransferConfig
 from vllm.multimodal.utils import encode_image_base64
 
-MODEL_NAME = "Qwen/Qwen2.5-VL-3B-Instruct"
+MODEL_NAME = "RedHatAI/Qwen2.5-VL-3B-Instruct-quantized.w8a8"
 
 SAMPLING_PARAMS = SamplingParams(temperature=0.0, top_k=1, max_tokens=128)
 
@@ -130,6 +130,8 @@ def test_shared_storage_connector_hashes(tmp_path):
         model=MODEL_NAME,
         max_model_len=8192,
         max_num_seqs=1,
+        gpu_memory_utilization=0.4,
+        enforce_eager=True,
         kv_transfer_config=kv_transfer_config,
         limit_mm_per_prompt={"image": 2},
     )
