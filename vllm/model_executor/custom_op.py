@@ -15,7 +15,7 @@ logger = init_logger(__name__)
 
 @lru_cache(maxsize=1)
 def get_cached_compilation_config():
-    """Cache compilation config to avoid repeated calls to get_current_vllm_config()"""
+    """Cache config to avoid repeated calls to get_current_vllm_config()"""
     return get_current_vllm_config().compilation_config
 
 
