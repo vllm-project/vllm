@@ -1110,10 +1110,10 @@ class LLM:
             pooling_params = PoolingParams()
 
         if isinstance(pooling_params, PoolingParams):
-            pooling_params.verify(pooling_task, model_config=model_config)
+            pooling_params.verify(pooling_task, model_config)
         else:
             for pooling_param in pooling_params:
-                pooling_param.verify(pooling_task, model_config=model_config)
+                pooling_param.verify(pooling_task, model_config)
 
         if tokenization_kwargs is None:
             tokenization_kwargs = dict[str, Any]()
@@ -1328,7 +1328,7 @@ class LLM:
             pooling_params = PoolingParams(task="score")
 
         model_config = self.llm_engine.model_config
-        pooling_params.verify("score", model_config=model_config)
+        pooling_params.verify("score", model_config)
 
         tokenization_kwargs: dict[str, Any] = {}
 
