@@ -55,7 +55,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
     # These env vars are worker-specific, therefore are NOT copied
     # from the driver to the workers
     WORKER_SPECIFIC_ENV_VARS = {
-        "VLLM_HOST_IP", "VLLM_HOST_PORT", "LOCAL_RANK", "CUDA_VISIBLE_DEVICES"
+        "VLLM_HOST_IP", "VLLM_HOST_PORT", "LOCAL_RANK",
+        current_platform.device_control_env_var
     }
 
     # These non-vLLM env vars are copied from the driver to workers
