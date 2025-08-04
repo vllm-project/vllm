@@ -533,14 +533,16 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         Apply the model's tensor parallelization plan.
         Currently only supports linear layers.
         """
-        if not self.model.supports_tp_plan:
-            if self.tp_size <= 1:
-                return
+        tp_plan = getattr(self.model.config, "base_model_tp_plan", {})
 
+        if not tp_plan and self.tp_size > 1:
             raise ValueError(
                 f"{type(self.model)} does not support tensor parallel yet!")
 
-        tp_plan = self.model._tp_plan
+        # Some weight loaders expect linear layers to inherit from vLLM's
+        # LinearBase class, so we set a default style which causes any
+        # unspecified linear layers to be replaced with ReplicatedLinear
+        tp_plan[".*"] = "replicated"
 
         def _tensor_parallel(module: nn.Module, prefix: str = ""):
             for child_name, child_module in module.named_children():
@@ -552,6 +554,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                             child_module, style, self.quant_config)
                         setattr(module, child_name, new_module)
                         log_replacement(qual_name, child_module, new_module)
+                        break
                 else:
                     _tensor_parallel(child_module, prefix=qual_name)
 
