@@ -173,6 +173,7 @@ class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
         if pooler_config.step_tag_id is None:
             pooler_config.step_tag_id = 151651
 
+
 class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
