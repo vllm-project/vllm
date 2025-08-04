@@ -109,11 +109,11 @@ def create_common_attn_metadata(
 
 def get_attention_backend(backend_name: _Backend):
     """Set up attention backend classes for testing.
-    
+
     Args:
         backend_name: Name of the backend ("flash_attn", "flashinfer", etc.)
         vllm_config: VllmConfig instance
-        
+
     Returns:
         Tuple of (backend_builder_class, backend_impl_class)
     """
@@ -126,6 +126,8 @@ def get_attention_backend(backend_name: _Backend):
         "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",
         _Backend.TRITON_ATTN_VLLM_V1:
         "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
+        _Backend.TREE_ATTN:
+        "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",
     }
 
     if backend_name not in backend_map:

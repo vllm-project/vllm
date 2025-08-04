@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ast
+from dataclasses import replace
 from typing import Optional
 
 import numpy as np
@@ -17,6 +19,8 @@ from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
+                                                  TreeAttentionMetadataBuilder)
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -74,17 +78,51 @@ class EagleProposer:
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=device)
-        # We need +1 here because the arange is used to set query_start_loc,
-        # which has one more element than batch_size.
-        self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs +
-                                   1,
-                                   device=device,
-                                   dtype=torch.int32)
+
+        max_batch_size = vllm_config.scheduler_config.max_num_seqs
+        self.arange = torch.arange(
+            # We need +1 here because the arange is used to set query_start_loc,
+            # which has one more element than batch_size.
+            max_batch_size + 1,
+            device=device,
+            dtype=torch.int32,
+        )
 
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=device)
+
+        # Parse the speculative token tree.
+        spec_token_tree = self.speculative_config.speculative_token_tree
+        self.tree_choices: list[tuple[int,
+                                      ...]] = ast.literal_eval(spec_token_tree)
+        tree_depth = len(self.tree_choices[-1])
+        # Precompute per-level properties of the tree.
+        num_drafts_per_level = [0] * tree_depth
+        for node in self.tree_choices:
+            num_drafts_per_level[len(node) - 1] += 1
+        self.cu_drafts_per_level = [num_drafts_per_level[0]]
+        self.child_drafts_per_level = [num_drafts_per_level[0]]
+        for level in range(1, tree_depth):
+            self.cu_drafts_per_level.append(self.cu_drafts_per_level[-1] +
+                                            num_drafts_per_level[level])
+            self.child_drafts_per_level.append(num_drafts_per_level[level] //
+                                               num_drafts_per_level[level - 1])
+        # Find the first level where the tree branches off into one or more
+        # children.
+        self.first_branching_level = None
+        for level in range(tree_depth):
+            if self.cu_drafts_per_level[level] > level + 1:
+                self.first_branching_level = level
+                break
+        # Precompute draft position offsets in flattened tree.
+        self.tree_draft_pos_offsets = torch.arange(
+            1,
+            len(self.tree_choices) + 1,
+            device=device,
+            dtype=torch.int32,
+        ).repeat(max_batch_size, 1)
 
     def propose(
         self,
@@ -120,11 +158,9 @@ class EagleProposer:
         assert self.runner is not None
 
         # FIXME: need to consider multiple kv_cache_groups
-        attn_metadata = self.runner.attn_metadata_builders[0].build(
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
-            fast_build=True,
-        )
+        attn_metadata = self.runner.attn_metadata_builders[
+            0].build_for_drafting(common_attn_metadata=common_attn_metadata,
+                                  draft_index=0)
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -167,6 +203,22 @@ class EagleProposer:
                 last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
+        positions = target_positions[last_token_indices]
+        hidden_states = hidden_states[last_token_indices]
+        if self.first_branching_level == 0:
+            # Branching has occurred at the root level. Draft using tree
+            # attention.
+            draft_token_ids_list = self.propose_tree(
+                tree_root_level=0,
+                batch_size=batch_size,
+                logits=logits,
+                positions=positions,
+                hidden_states=hidden_states,
+                common_attn_metadata=common_attn_metadata,
+            )
+            # [batch_size, num_tree_tokens]
+            return torch.cat(draft_token_ids_list, dim=1)
+
         draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
@@ -178,16 +230,15 @@ class EagleProposer:
         # one layer. Adapt this code to support multiple layers once
         # there's a multi-layer MTP module.
 
-        # Currently FlashAttention is the only backend that supports
-        # multi-token eagle spec decode. This is because the code below
+        # Currently, only FlashAttention and TreeAttention support multi-token
+        # eagle spec decode. This is because the code below
         # makes assumptions about attn_metadata attributes available.
-        assert isinstance(attn_metadata, FlashAttentionMetadata)
+        assert isinstance(attn_metadata,
+                          (FlashAttentionMetadata, TreeAttentionMetadata))
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
-        positions = target_positions[last_token_indices]
-        hidden_states = hidden_states[last_token_indices]
         if self.use_cuda_graph and \
             batch_size <= self.cudagraph_batch_sizes[-1]:
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
@@ -196,7 +247,7 @@ class EagleProposer:
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
-        for _ in range(self.num_speculative_tokens - 1):
+        for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
@@ -265,13 +316,195 @@ class EagleProposer:
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
 
-            # TODO(wenlong): get more than one token for tree attention
+            if self.first_branching_level == token_index + 1:
+                # Branching has occurred. The remaining tokens are drafted
+                # using tree attention.
+                draft_token_ids_list += self.propose_tree(
+                    tree_root_level=token_index + 1,
+                    batch_size=batch_size,
+                    logits=logits,
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    common_attn_metadata=common_attn_metadata,
+                )
+                # [batch_size, num_tree_tokens]
+                return torch.cat(draft_token_ids_list, dim=1)
+
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
+
+    def propose_tree(
+        self,
+        tree_root_level: int,
+        batch_size: int,
+        # [num_tokens, vocab_size]
+        logits: torch.Tensor,
+        # [num_tokens]
+        positions: torch.Tensor,
+        # [num_tokens, hidden_size]
+        hidden_states: torch.Tensor,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> list[torch.Tensor]:
+        tree_attn_metadata_builder = self.runner.attn_metadata_builders[0]
+        assert isinstance(tree_attn_metadata_builder,
+                          TreeAttentionMetadataBuilder)
+
+        total_num_drafts = self.cu_drafts_per_level[tree_root_level]
+        level_num_drafts = total_num_drafts
+        # Sample a draft token for each child at the tree root level.
+        num_children = self.child_drafts_per_level[tree_root_level]
+        if num_children == 1:
+            draft_token_ids = logits.argmax(dim=-1).view(batch_size, -1)
+        else:
+            draft_token_ids = torch.topk(logits, num_children,
+                                         dim=-1).indices.view(batch_size, -1)
+        draft_token_ids_list = [draft_token_ids]
+        draft_hidden_states = hidden_states.view(batch_size, 1, -1)
+
+        # Initialize empty tensors for concatenation with the level outputs.
+        tree_input_ids = torch.empty(0,
+                                     device=self.input_ids.device,
+                                     dtype=self.input_ids.dtype)
+        tree_positions = torch.empty(0,
+                                     device=self.positions.device,
+                                     dtype=self.positions.dtype)
+        tree_hidden_states = torch.empty(0,
+                                         device=self.hidden_states.device,
+                                         dtype=self.hidden_states.dtype)
+        # Precompute the draft token positions.
+        flattened_draft_positions = (
+            positions.view(batch_size, -1) +
+            self.tree_draft_pos_offsets[:batch_size, :])
+        tree_depth = len(self.cu_drafts_per_level)
+        for level in range(tree_root_level, tree_depth - 1):
+            # Get draft positions for RoPE.
+            draft_positions = positions + (level + 1)
+            exceeds_max_model_len = (positions +
+                                     total_num_drafts) >= self.max_model_len
+            # Mask out the position ids that exceed the max model length.
+            # Otherwise, we may get out-of-range error in RoPE.
+            clamped_draft_positions = torch.where(
+                exceeds_max_model_len,
+                0,
+                draft_positions,
+            )
+            if level_num_drafts > 1:
+                # Repeat the positions for each draft at this level.
+                draft_positions = clamped_draft_positions.repeat_interleave(
+                    level_num_drafts).reshape(batch_size, -1)
+
+            if num_children > 1:
+                # Repeat draft hidden states for each child.
+                draft_hidden_states = draft_hidden_states.repeat_interleave(
+                    num_children, dim=1)
+
+            # Concatenate the draft tokens, positions, and hidden states.
+            tree_input_ids = torch.cat([tree_input_ids, draft_token_ids],
+                                       dim=1)
+            tree_positions = torch.cat([tree_positions, draft_positions],
+                                       dim=1)
+            tree_hidden_states = torch.cat(
+                [tree_hidden_states, draft_hidden_states], dim=1)
+
+            # Build new attention metadata for the next level of drafts.
+            # This is necessary to support tree attention.
+            query_len = total_num_drafts - tree_root_level
+            common_attn_metadata = replace(
+                common_attn_metadata,
+                query_start_loc=query_len * self.arange[:batch_size + 1],
+                seq_lens=common_attn_metadata.seq_lens + level_num_drafts,
+                num_actual_tokens=batch_size * query_len,
+                max_query_len=query_len,
+            )
+            attn_metadata = tree_attn_metadata_builder.build_for_drafting(
+                common_attn_metadata=common_attn_metadata,
+                draft_index=tree_root_level + 1,
+            )
+
+            # Apply new attention metadata to all layers.
+            per_layer_attn_metadata = {}
+            for layer_name in self.attn_layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
+
+            # Consider max model length.
+            attn_metadata.max_seq_len = min(attn_metadata.max_seq_len,
+                                            self.max_model_len)
+            # For the requests that exceed the max model length, we set the
+            # sequence length to 1 to minimize their overheads in attention.
+            attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
+
+            # Compute the slot mapping.
+            query_positions = flattened_draft_positions[:, level:level +
+                                                        query_len]
+            block_numbers = query_positions // self.block_size
+            block_ids = attn_metadata.block_table.gather(dim=1,
+                                                         index=block_numbers)
+            slot_mapping = (block_ids * self.block_size +
+                            query_positions % self.block_size)
+            # Mask out the slot mappings that exceed the max model length.
+            # Otherwise, the KV cache will be inadvertently updated with the
+            # padding tokens.
+            slot_mapping[exceeds_max_model_len] = PADDING_SLOT_ID
+            attn_metadata.slot_mapping = slot_mapping.view(-1)
+
+            # Copy inputs to buffer for cudagraph.
+            num_tokens = attn_metadata.num_actual_tokens
+            input_ids = tree_input_ids.view(-1)
+            self.input_ids[:num_tokens] = input_ids
+            self.positions[:num_tokens] = tree_positions.view(-1)
+            self.hidden_states[:num_tokens] = tree_hidden_states.view(
+                num_tokens, -1)
+
+            if self.use_cuda_graph and \
+                num_tokens <= self.cudagraph_batch_sizes[-1]:
+                num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                    num_tokens)
+            else:
+                num_input_tokens = num_tokens
+            # Run the model.
+            with set_forward_context(per_layer_attn_metadata,
+                                     self.vllm_config,
+                                     num_tokens=num_input_tokens):
+                last_hidden_states, hidden_states = self.model(
+                    input_ids=self.input_ids[:num_input_tokens],
+                    positions=self.positions[:num_input_tokens],
+                    hidden_states=self.hidden_states[:num_input_tokens],
+                    inputs_embeds=None,
+                )
+
+            # Get the output hidden states for the draft tokens.
+            draft_hidden_states = hidden_states[:num_tokens].view(
+                batch_size, query_len, -1)[:, -level_num_drafts:]
+            draft_last_hidden_states = last_hidden_states[:num_tokens].view(
+                batch_size, query_len, -1)[:, -level_num_drafts:]
+
+            # Get the output logits for the draft tokens.
+            logits = self.model.compute_logits(
+                draft_last_hidden_states.reshape(batch_size * level_num_drafts,
+                                                 -1),
+                None,
+            )
+
+            # Sample a draft token for each child at the next tree level.
+            num_children = self.child_drafts_per_level[level + 1]
+            if num_children == 1:
+                draft_token_ids = logits.argmax(dim=-1).view(batch_size, -1)
+            else:
+                draft_token_ids = torch.topk(logits, num_children,
+                                             dim=-1).indices.view(
+                                                 batch_size, -1)
+            draft_token_ids_list.append(draft_token_ids)
+
+            # Update the # drafts counters for the next tree level.
+            level_num_drafts = self.cu_drafts_per_level[level +
+                                                        1] - total_num_drafts
+            total_num_drafts = self.cu_drafts_per_level[level + 1]
+
+        return draft_token_ids_list
 
     def prepare_inputs(
         self,
