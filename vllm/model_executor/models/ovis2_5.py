@@ -503,7 +503,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal):
 
             if not isinstance(indicator_tokens, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of indicator_tokens. "
-                                 f"Got type: {type(pixel_values)}")
+                                 f"Got type: {type(indicator_tokens)}")
 
             return Ovis2_5ImagePatchInputs(
                 type="image_patches",
