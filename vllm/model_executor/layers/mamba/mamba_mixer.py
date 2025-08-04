@@ -154,10 +154,18 @@ class MambaMixer(MambaBase, CustomOp):
 
         self.prefix = prefix
 
+    def forward(self,
+                hidden_states: torch.Tensor,
+                mamba_cache_params: Optional[MambaCacheParams] = None):
+        if not envs.VLLM_USE_V1:
+            return CustomOp.forward(self, hidden_states, mamba_cache_params)
+        else:
+            return self.forward_cuda(hidden_states, mamba_cache_params)
+
     def forward_native(self,
                        hidden_states: torch.Tensor,
                        mamba_cache_params: Optional[MambaCacheParams] = None):
-        return self.forward_cuda(hidden_states, mamba_cache_params)
+        pass
 
     def forward_cuda(self,
                      hidden_states: torch.Tensor,
