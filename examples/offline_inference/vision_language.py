@@ -1565,7 +1565,12 @@ def parse_args():
     parser.add_argument(
         "--disable-mm-preprocessor-cache",
         action="store_true",
-        help="If True, disables caching of multi-modal preprocessor/mapper.",
+        help="If True, disables caching of multi-modal processor.",
+    )
+    parser.add_argument(
+        "--disable-mm-ipc-cache",
+        action="store_true",
+        help="If True, disables caching of multi-modal transfer from P0 to P1.",
     )
 
     parser.add_argument(
@@ -1604,6 +1609,7 @@ def main(args):
     engine_args = asdict(req_data.engine_args) | {
         "seed": args.seed,
         "disable_mm_preprocessor_cache": args.disable_mm_preprocessor_cache,
+        "mm_ipc_cache_gb": 0 if args.disable_mm_ipc_cache else 4,
     }
     llm = LLM(**engine_args)
 

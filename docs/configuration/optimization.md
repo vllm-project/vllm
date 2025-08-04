@@ -2,6 +2,9 @@
 
 This guide covers optimization strategies and performance tuning for vLLM V1.
 
+!!! tip
+    Running out of memory? Consult [this guide](./conserving_memory.md) on how to conserve memory
+
 ## Preemption
 
 Due to the auto-regressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
@@ -126,62 +129,63 @@ Data parallelism replicates the entire model across multiple GPU sets and proces
 Data parallelism can be combined with the other parallelism strategies and is set by `data_parallel_size=N`.
 Note that MoE layers will be sharded according to the product of the tensor parallel size and data parallel size.
 
-## Reducing Memory Usage
+## Multi-modal Processing
 
-If you encounter out-of-memory issues, consider these strategies:
+### Processor Cache
 
-### Context Length and Batch Size
+By default, the multi-modal processor cache is enabled to avoid repeatedly processing
+the same multi-modal inputs via Hugging Face `AutoProcessor`,
+which commonly occurs in multi-turn conversations.
 
-You can reduce memory usage by limiting the context length and batch size:
+You can adjust the size of the cache via `VLLM_MM_INPUT_CACHE_GIB` environment variable
+(default 4 GiB per API process).
 
-```python
-from vllm import LLM
-
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    max_model_len=2048,  # Limit context window
-    max_num_seqs=4       # Limit batch size
-)
-```
-
-### Adjust CUDA Graph Compilation
-
-CUDA graph compilation in V1 uses more memory than in V0. You can reduce memory usage by adjusting the compilation level:
+If you do not benefit much from the cache, you can disable it completely via `disable_mm_preprocessor_cache`:
 
 ```python
-from vllm import LLM
-from vllm.config import CompilationConfig, CompilationLevel
-
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    compilation_config=CompilationConfig(
-        level=CompilationLevel.PIECEWISE,
-        cudagraph_capture_sizes=[1, 2, 4, 8]  # Capture fewer batch sizes
-    )
-)
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          disable_mm_preprocessor_cache=True)
 ```
 
-Or, if you are not concerned about latency or overall performance, disable CUDA graph compilation entirely with `enforce_eager=True`:
+### IPC Cache
+
+By default, the multi-modal IPC cache is enabled to avoid repeatedly transferring
+the same multi-modal inputs between API and engine core processes,
+which commonly occurs in multi-turn conversations.
+
+You can adjust the size of the cache by setting the `mm_ipc_cache_gb` engine argument
+(default 4 GiB per engine core process).
+
+If you do not benefit much from the cache, you can disable it completely by setting it to `0`:
 
 ```python
-from vllm import LLM
+# Use a larger IPC cache
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          mm_ipc_cache_gb=8)
 
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    enforce_eager=True  # Disable CUDA graph compilation
-)
+# Fully disable the IPC cache
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          mm_ipc_cache_gb=0)
 ```
 
-### Multimodal Models
+### Parallel Processing
 
-For multi-modal models, you can reduce memory usage by limiting the number of images/videos per request:
+You can run input processing in parallel via [API server scale-out](../serving/data_parallel_deployment.md#internal-load-balancing).
+This is useful when input processing (which is run inside the API server)
+becomes a bottleneck compared to model execution (which is run inside engine core)
+and you have excess CPU capacity.
 
-```python
-from vllm import LLM
+```console
+# Run 4 API processes and 1 engine core process
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4
 
-# Accept up to 2 images per prompt
-llm = LLM(
-    model="Qwen/Qwen2.5-VL-3B-Instruct",
-    limit_mm_per_prompt={"image": 2}
-)
+# Run 4 API processes and 2 engine core processes
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
 ```
+
+!!! note
+    API server scale-out is only available for online inference.
+
+!!! note
+    Multi-modal IPC cache is disabled when API server scale-out is enabled
+    because it requires a one-to-one correspondance between API and engine core processes.

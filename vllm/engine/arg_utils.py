@@ -360,6 +360,7 @@ class EngineArgs:
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = \
         MultiModalConfig.disable_mm_preprocessor_cache
+    mm_ipc_cache_gb: int = MultiModalConfig.mm_ipc_cache_gb
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -722,6 +723,8 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--disable-mm-preprocessor-cache",
             **multimodal_kwargs["disable_mm_preprocessor_cache"])
+        multimodal_group.add_argument("--mm-ipc-cache-gb",
+                                      **multimodal_kwargs["mm_ipc_cache_gb"])
         multimodal_group.add_argument(
             "--interleave-mm-strings",
             **multimodal_kwargs["interleave_mm_strings"])
@@ -923,6 +926,7 @@ class EngineArgs:
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
             disable_mm_preprocessor_cache=self.disable_mm_preprocessor_cache,
+            mm_ipc_cache_gb=self.mm_ipc_cache_gb,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
@@ -1230,17 +1234,17 @@ class EngineArgs:
             enable_multimodal_encoder_data_parallel,
         )
 
-        supports_mm_preprocessor_cache = (self.data_parallel_size == 1
-                                          or data_parallel_external_lb)
-        if (not supports_mm_preprocessor_cache
-                and model_config.is_multimodal_model
-                and not model_config.disable_mm_preprocessor_cache):
-            logger.warning(
-                "Multi-modal preprocessor cache is not compatible "
-                "with data parallelism when there does not exist a "
-                "one-to-one correspondance between API process and "
-                "EngineCore process, so the cache will be disabled.")
-            model_config.set_disable_mm_preprocessor_cache(True)
+        if model_config.is_multimodal_model:
+            dp_supports_mm_ipc_cache = (self.data_parallel_size == 1
+                                        or data_parallel_external_lb)
+            if (not dp_supports_mm_ipc_cache
+                    and model_config.mm_ipc_cache_gb > 0):
+                logger.warning(
+                    "Multi-modal IPC cache is disabled because "
+                    "it is not compatible with data parallelism when "
+                    "there does not exist a one-to-one correspondance "
+                    "between API and engine core processes.")
+                model_config.set_mm_ipc_cache_gb(0)
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
