@@ -10,6 +10,7 @@ from typing import Callable, Final, Optional, Union
 import jinja2
 from fastapi import Request
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+import openai.types.responses as openai_responses_tyes
 from openai_harmony import Message as OpenAIMessage
 
 from vllm import envs
@@ -30,6 +31,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               PromptTokenUsageInfo,
                                               RequestResponseMetadata,
                                               ResponseReasoningItem,
+                                              ResponseReasoningTextContent,
                                               ResponsesRequest,
                                               ResponsesResponse, UsageInfo)
 # yapf: enable
@@ -430,7 +432,7 @@ class OpenAIServingResponses(OpenAIServing):
         output_items = []
         if reasoning_content:
             reasoning_item = ResponseReasoningItem(
-                text=reasoning_content,
+                content=[ResponseReasoningTextContent(text=reasoning_content)],
                 status=None,  # NOTE: Only the last output item has status.
             )
             output_items.append(reasoning_item)

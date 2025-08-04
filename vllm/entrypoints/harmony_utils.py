@@ -15,7 +15,7 @@ from openai_harmony import (Conversation, DeveloperContent,
 
 from typing import Any
 
-from vllm.entrypoints.openai.protocol import ResponseReasoningItem
+from vllm.entrypoints.openai.protocol import ResponseReasoningItem, ResponseReasoningTextContent
 from vllm.utils import random_uuid
 
 REASONING_EFFORT = {
@@ -141,7 +141,7 @@ def parse_output_message(message: Message):
     elif message.channel in ("analysis", "commentary"):
         for content in message.content:
             reasoning_item = ResponseReasoningItem(
-                text=content.text,
+                content=[ResponseReasoningTextContent(text=content.text)],
                 status=None,
             )
             output_items.append(reasoning_item)
