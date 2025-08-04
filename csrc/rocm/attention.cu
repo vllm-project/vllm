@@ -37,7 +37,7 @@
 #if defined(__HIPCC__) && (defined(__gfx1200__) || defined(__gfx1201__))
   #define __HIP__GFX12__
 #endif
-#define __HIP__GFX9__
+
 #if defined(NDEBUG)
   #undef NDEBUG
   #include <assert.h>
