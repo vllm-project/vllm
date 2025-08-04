@@ -43,9 +43,10 @@ from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
+from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -171,16 +172,12 @@ class Qwen2_5_VisionMLP(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
         super().__init__()
-        self.gate_proj = ColumnParallelLinear(in_features,
-                                              hidden_features,
-                                              bias=bias,
-                                              quant_config=quant_config,
-                                              prefix=f"{prefix}.gate_proj")
-        self.up_proj = ColumnParallelLinear(in_features,
-                                            hidden_features,
-                                            bias=bias,
-                                            quant_config=quant_config,
-                                            prefix=f"{prefix}.up_proj")
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=in_features,
+            output_sizes=[hidden_features] * 2,  # [gate_proj, up_proj]
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj")
         self.down_proj = RowParallelLinear(hidden_features,
                                            in_features,
                                            bias=bias,
@@ -189,10 +186,9 @@ class Qwen2_5_VisionMLP(nn.Module):
         self.act_fn = act_fn
 
     def forward(self, x: torch.Tensor):
-        x_gate, _ = self.gate_proj(x)
-        x_gate = self.act_fn(x_gate)
-        x_up, _ = self.up_proj(x)
-        x_down, _ = self.down_proj(x_gate * x_up)
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x_down, _ = self.down_proj(x)
         return x_down
 
 
@@ -250,11 +246,15 @@ class Qwen2_5_VisionAttention(nn.Module):
         # Detect attention implementation.
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
         if self.attn_backend not in {
-                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
+                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
+                _Backend.ROCM_AITER_FA
         }:
             raise RuntimeError(
                 f"Qwen2.5-VL does not support {self.attn_backend} backend now."
             )
+        self.is_flash_attn_backend = self.attn_backend in {
+            _Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA
+        }
 
         self.apply_rotary_pos_emb_vision = get_rotary_pos_emb_vision_callback()
 
@@ -307,10 +307,13 @@ class Qwen2_5_VisionAttention(nn.Module):
             k = self.apply_rotary_pos_emb_vision(k, rotary_pos_emb_cos,
                                                  rotary_pos_emb_sin)
 
-        if self.attn_backend == _Backend.FLASH_ATTN:
+        if self.is_flash_attn_backend:
             # from vllm_flash_attn.flash_attn_interface import (
             #   flash_attn_varlen_func)
-            from flash_attn import flash_attn_varlen_func
+            if self.attn_backend == _Backend.ROCM_AITER_FA:
+                from aiter import flash_attn_varlen_func
+            else:
+                from flash_attn import flash_attn_varlen_func
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
@@ -321,7 +324,7 @@ class Qwen2_5_VisionAttention(nn.Module):
                                             cu_seqlens_k=cu_seqlens,
                                             max_seqlen_q=max_seqlen,
                                             max_seqlen_k=max_seqlen,
-                                            dropout_p=0,
+                                            dropout_p=0.0,
                                             causal=False)
 
             context_layer = rearrange(output,
@@ -569,14 +572,14 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
 
         self.blocks = nn.ModuleList([
-            Qwen2_5_VisionBlock(
-                dim=self.hidden_size,
-                num_heads=self.num_heads,
-                mlp_hidden_dim=vision_config.intermediate_size,
-                act_fn=_ACTIVATION_REGISTRY[vision_config.hidden_act],
-                norm_layer=norm_layer,
-                quant_config=quant_config,
-                prefix=f"{prefix}.blocks.{layer_idx}")
+            Qwen2_5_VisionBlock(dim=self.hidden_size,
+                                num_heads=self.num_heads,
+                                mlp_hidden_dim=vision_config.intermediate_size,
+                                act_fn=get_act_and_mul_fn(
+                                    vision_config.hidden_act),
+                                norm_layer=norm_layer,
+                                quant_config=quant_config,
+                                prefix=f"{prefix}.blocks.{layer_idx}")
             for layer_idx in range(depth)
         ])
         self.merger = Qwen2_5_VisionPatchMerger(
@@ -683,7 +686,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_seqlens: torch.Tensor,
     ) -> tuple[Optional[int], Optional[list[int]]]:
         max_seqlen, seqlens = None, None
-        if self.attn_backend == _Backend.FLASH_ATTN:
+        if (self.attn_backend == _Backend.FLASH_ATTN
+                or self.attn_backend == _Backend.ROCM_AITER_FA):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
@@ -803,6 +807,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
             ("attn.qkv.", "attn.q.", "q"),
             ("attn.qkv.", "attn.k.", "k"),
             ("attn.qkv.", "attn.v.", "v"),
+            ("mlp.gate_up_proj.", "mlp.gate_proj.", 0),
+            ("mlp.gate_up_proj.", "mlp.up_proj.", 1),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
@@ -831,25 +837,10 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2_5_VLConfig)
 
-    def get_hf_processor(
-        self,
-        *,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        size: Optional[dict[str, int]] = None,
-        fps: Optional[Union[float, list[float]]] = None,
-        **kwargs: object,
-    ) -> Qwen2_5_VLProcessor:
-        if fps is not None:
-            kwargs["fps"] = fps
-
+    def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
         return self.ctx.get_hf_processor(
             Qwen2_5_VLProcessor,
-            image_processor=self.get_image_processor(min_pixels=min_pixels,
-                                                     max_pixels=max_pixels,
-                                                     size=size,
-                                                     use_fast=kwargs.get(
-                                                         "use_fast", True)),
+            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 
