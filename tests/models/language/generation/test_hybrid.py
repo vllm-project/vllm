@@ -99,19 +99,15 @@ def test_models(
             example_prompts, max_tokens, num_logprobs)
 
     if model in V1_SUPPORTED_MODELS:
-        enforce_eager = False
         with monkeypatch.context() as m:
             m.setenv("VLLM_USE_V1", "1")
             if model in HYBRID_MODELS:
                 # required due to reorder_batch behaviour
                 m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
-                # Set to True until support in CUDA Graphs
-                enforce_eager = True
 
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
-                             enable_prefix_caching=False,
-                             enforce_eager=enforce_eager) as vllm_model:
+                             enable_prefix_caching=False) as vllm_model:
                 vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                     example_prompts, max_tokens, num_logprobs)
     else:
