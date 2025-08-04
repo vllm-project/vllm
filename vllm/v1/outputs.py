@@ -6,7 +6,10 @@ from typing import NamedTuple, Optional
 
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferStats
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorType
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVTransferStats)
+
 
 class LogprobsLists(NamedTuple):
 
@@ -114,8 +117,7 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
 
-    # TODO Replace once Linkun PR lands. Needs to be per-connector.
-    kv_transfer_stats: Optional[dict[str, KVTransferStats]] = None
+    kv_transfer_stats: Optional[dict[KVConnectorType, KVTransferStats]] = None
 
 
 @dataclass
