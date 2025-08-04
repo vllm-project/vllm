@@ -409,7 +409,7 @@ class EngineCore:
         if request.mm_hashes is not None:
             assert request.mm_inputs is not None
             # Note on thread safety: no race condition.
-            # `mm_input_cache_server` is reset at the end of LLMEngine init,
+            # `mm_ipc_cache` is reset at the end of LLMEngine init,
             # and will only accessed in the input processing thread afterwards.
             request.mm_inputs = self.mm_ipc_cache.get_and_update(
                 request.mm_inputs, request.mm_hashes)
