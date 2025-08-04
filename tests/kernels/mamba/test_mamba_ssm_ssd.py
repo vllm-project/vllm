@@ -232,19 +232,18 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
     B = B.squeeze(0)
     C = C.squeeze(0)
     Y = torch.empty_like(X)
-    final_state = mamba_chunk_scan_combined_varlen(
-        X,
-        dt,
-        A,
-        B,
-        C,
-        chunk_size,
-        D=None,
-        cu_seqlens=cu_seqlens,
-        seq_idx=seq_idx,
-        chunk_indices=chunk_indices,
-        chunk_offsets=chunk_offsets,
-        out=Y)
+    final_state = mamba_chunk_scan_combined_varlen(X,
+                                                   dt,
+                                                   A,
+                                                   B,
+                                                   C,
+                                                   chunk_size,
+                                                   D=None,
+                                                   cu_seqlens=cu_seqlens,
+                                                   seq_idx=seq_idx,
+                                                   chunk_indices=chunk_indices,
+                                                   chunk_offsets=chunk_offsets,
+                                                   out=Y)
 
     # just test the last in sequence
     torch.testing.assert_close(Y[-1], Y_min[0, -1], atol=atol, rtol=rtol)

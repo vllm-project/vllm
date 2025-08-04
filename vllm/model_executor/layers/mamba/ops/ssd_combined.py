@@ -153,7 +153,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
         initial_states=initial_states,
-        out=out, # in-place update
+        out=out,  # in-place update
     )
 
     varlen_states = chunk_state_varlen(
