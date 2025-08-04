@@ -68,7 +68,7 @@ RERANK_MODELS = [
                     enable_test=False),
     RerankModelInfo("BAAI/bge-reranker-v2-m3",
                     architecture="XLMRobertaForSequenceClassification",
-                    enable_test=False)
+                    enable_test=True)
 ]
 
 
