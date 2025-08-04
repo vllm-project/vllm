@@ -118,7 +118,7 @@ MODELS_ON_S3 = [
     "stabilityai/stablelm-zephyr-3b",
     "state-spaces/mamba-130m-hf",
     "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",
-    "THUDM/glm-4v-9b",
+    "zai-org/glm-4v-9b",
     "TIGER-Lab/Mantis-8B-siglip-llama3",
     "TIGER-Lab/VLM2Vec-Full",
     "tiiuae/falcon-40b",
