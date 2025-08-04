@@ -10,7 +10,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.tasks import PoolingTask
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, PoolerConfig
+    from vllm.config import ModelConfig
 
 
 class PoolingParams(
@@ -56,7 +56,7 @@ class PoolingParams(
         ]
 
     @property
-    def legal_parameters(self):
+    def valid_parameters(self):
         return {
             "embed": ["dimensions", "normalize"],
             "classify": ["activation"],
@@ -68,10 +68,10 @@ class PoolingParams(
         """Returns a deep copy of the PoolingParams instance."""
         return deepcopy(self)
 
-    def verify_task(
-        self,
-        task: PoolingTask,
-    ):
+    def verify(self,
+               task: PoolingTask,
+               model_config: Optional["ModelConfig"] = None) -> None:
+
         if self.task is None:
             self.task = task
         elif self.task != task:
@@ -82,11 +82,32 @@ class PoolingParams(
         # which is not available in model config. So, it's not included
         # in this method
 
-    def verify(self,
-               task: PoolingTask,
-               model_config: Optional["ModelConfig"] = None) -> None:
-        self.verify_task(task)
+        self._merge_default_parameters(model_config)
+        self._set_default_parameters(model_config)
+        self._verify_valid_parameters()
 
+    def _merge_default_parameters(self,
+                                  model_config: Optional["ModelConfig"] = None
+                                  ) -> None:
+
+        if model_config is None:
+            return
+
+        pooler_config = model_config.pooler_config
+        if pooler_config is None:
+            return
+
+        assert self.task is not None, "task must be set"
+        valid_parameters = self.valid_parameters[self.task]
+
+        for k in valid_parameters:
+            if getattr(pooler_config, k, None) is None:
+                continue
+
+            if getattr(self, k, None) is None:
+                setattr(self, k, getattr(pooler_config, k))
+
+    def _set_default_parameters(self, model_config: Optional["ModelConfig"]):
         if self.task == "embed":
             if self.normalize is None:
                 self.normalize = True
@@ -120,11 +141,12 @@ class PoolingParams(
         else:
             raise ValueError(f"Unknown pooling task: {self.task}")
 
+    def _verify_valid_parameters(self):
         assert self.task is not None, "task must be set"
-        legal_parameters = self.legal_parameters[self.task]
+        valid_parameters = self.valid_parameters[self.task]
         invalid_parameters = []
         for k in self.all_parameters:
-            if k in legal_parameters:
+            if k in valid_parameters:
                 continue
 
             if getattr(self, k, None) is not None:
@@ -132,27 +154,9 @@ class PoolingParams(
 
         if invalid_parameters:
             raise ValueError(
-                f"Task {self.task} only supports {legal_parameters} "
+                f"Task {self.task} only supports {valid_parameters} "
                 f"parameters, does not support "
                 f"{invalid_parameters} parameters")
-
-    def merge_default_parameters(
-            self, task: PoolingTask,
-            pooler_config: Optional["PoolerConfig"]) -> None:
-        if pooler_config is None:
-            return
-
-        self.verify_task(task)
-
-        assert self.task is not None, "task must be set"
-        legal_parameters = self.legal_parameters[self.task]
-
-        for k in legal_parameters:
-            if getattr(pooler_config, k, None) is None:
-                continue
-
-            if getattr(self, k, None) is None:
-                setattr(self, k, getattr(pooler_config, k))
 
     def __repr__(self) -> str:
         return (f"PoolingParams("

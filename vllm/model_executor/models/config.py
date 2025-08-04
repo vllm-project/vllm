@@ -173,6 +173,15 @@ class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
         if pooler_config.step_tag_id is None:
             pooler_config.step_tag_id = 151651
 
+class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        pooler_config = vllm_config.model_config.pooler_config
+
+        if pooler_config.softmax is None:
+            pooler_config.softmax = False
+
 
 class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
 

@@ -140,8 +140,6 @@ class OpenAIServingPooling(OpenAIServing):
             pooling_params = request.to_pooling_params()
 
             try:
-                pooling_params.merge_default_parameters(
-                    "encode", self.model_config.pooler_config)
                 pooling_params.verify("encode", self.model_config)
             except ValueError as e:
                 return self.create_error_response(str(e))
