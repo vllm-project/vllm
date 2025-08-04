@@ -51,17 +51,9 @@ class LinearAttentionMetadataBuilder(
 
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
-        print("query_start_loc: ", query_start_loc)
-        print("seq_lens: ", seq_lens)
-        print("state_indices_tensor: ", state_indices_tensor)
-
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(common_attn_metadata,
                                        decode_threshold=1))
-
-        print("num_prefills:       ", num_prefills)
-        print("num_prefill_tokens: ", num_prefill_tokens)
-        print("num_decodes:        ", num_decodes)
 
         attn_metadata = LinearAttentionMetadata(
             num_prefills=num_prefills,
