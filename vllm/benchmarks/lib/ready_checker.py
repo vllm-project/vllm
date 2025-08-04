@@ -14,6 +14,7 @@ from .endpoint_request_func import RequestFuncInput, RequestFuncOutput
 async def wait_for_endpoint(
     request_func,
     test_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
     timeout_seconds: int = 600,
     retry_interval: int = 5,
 ) -> RequestFuncOutput:
@@ -55,7 +56,8 @@ async def wait_for_endpoint(
 
             # ping the endpoint using request_func
             try:
-                output = await request_func(request_func_input=test_input)
+                output = await request_func(
+                    request_func_input=test_input, session=session)
                 if output.success:
                     pbar.close()
                     return output
