@@ -1780,6 +1780,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=[],
             kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
+            kv_transfer_stats=self.get_kv_transfer_stats(),
         )
 
     def propose_draft_token_ids(
