@@ -64,6 +64,9 @@ class Worker(WorkerBase):
 
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        
+        # executed cuda graph
+        self._token_compiled_cudagraphs: set[int] = set() 
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
@@ -310,8 +313,8 @@ class Worker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
-        if not self.model_config.enforce_eager:
-            self.model_runner.capture_model()
+        # if not self.model_config.enforce_eager:
+        #     self.model_runner.capture_model()
 
         # Warm up sampler and preallocate memory buffer for logits and other
         # sampling related tensors of max possible shape to avoid memory
@@ -355,6 +358,12 @@ class Worker(WorkerBase):
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
 
+        # Adding capture model in execution time
+        if scheduler_output.total_num_scheduled_tokens not in self._token_compiled_cudagraphs:
+            logger.info("DIEGO: CUDAgraph in execution time for %d input tokens", scheduler_output.total_num_scheduled_tokens)
+            self._token_compiled_cudagraphs.add(scheduler_output.total_num_scheduled_tokens)
+            self.model_runner.capture_model(scheduler_output.total_num_scheduled_tokens)
+        
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
 

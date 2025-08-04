@@ -2516,7 +2516,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.encoder_cache.clear()
         gc.collect()
 
-    def capture_model(self) -> None:
+    def capture_model(self, specific_token_num: Optional[int]) -> None:
         if not self.use_cuda_graph:
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
@@ -2550,16 +2550,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         with freeze_gc(), graph_capture(device=self.device):
             full_cg = self.full_cuda_graph
             # Only rank 0 should print progress bar during capture
-            compilation_cases = reversed(self.cudagraph_batch_sizes)
-            if is_global_first_rank():
+            compilation_cases = [specific_token_num] if specific_token_num else reversed(self.cudagraph_batch_sizes)
+
+            if is_global_first_rank() and specific_token_num is None:
                 compilation_cases = tqdm(
                     list(compilation_cases),
                     disable=not self.load_config.use_tqdm_on_load,
                     desc="Capturing CUDA graph shapes")
             for num_tokens in compilation_cases:
                 # We skip EPLB here since we don't want to record dummy metrics
-                logger.info("DIEGO: compilation for number of tokens %d",
-                    num_tokens)
                 for _ in range(
                         self.compilation_config.cudagraph_num_of_warmups):
                     self._dummy_run(num_tokens,
