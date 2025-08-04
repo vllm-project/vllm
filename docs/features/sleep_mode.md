@@ -53,5 +53,5 @@ These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`
 
 ### Notes
 
-- **Sleep levels**: `level=1` offloads weights and discards KV cache,`level=2` discards both but retain the buffers.
+- **Sleep levels**: `level=1 (default)` offloads weights and discards KV cache,`level=2` discards both but retain the buffers.
 - **Platform support**: Supported on CUDA platform.
