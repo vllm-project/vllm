@@ -377,7 +377,8 @@ class ModelConfig:
     max_logprobs: int = 20
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
-    OpenAI Chat Completions API. -1 means no cap."""
+    OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
+    vocab_size) logprobs are allowed to be returned and it may cause OOM."""
     logprobs_mode: LogprobsMode = "raw_logprobs"
     """Indicates the content returned in the logprobs and prompt_logprobs.
     Supported mode:
@@ -1585,7 +1586,7 @@ class ModelConfig:
         """
         This method attempts to retrieve the non-default values of the
         generation config for this model.
-        
+
         The generation config can contain information about special tokens, as
         well as sampling parameters. Which is why this method exists separately
         to `get_diff_sampling_param`.
