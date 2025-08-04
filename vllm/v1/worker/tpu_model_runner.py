@@ -1147,7 +1147,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_connector_output=KVConnectorOutput(
                 finished_sending=finished_sending,
                 finished_recving=finished_recving,
-            ))
+            ),
             kv_transfer_stats=self.get_kv_transfer_stats(),
         )
 

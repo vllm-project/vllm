@@ -875,6 +875,7 @@ class Scheduler(SchedulerInterface):
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
+
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
             self.running = [
