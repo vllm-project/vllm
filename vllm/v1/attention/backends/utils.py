@@ -97,7 +97,9 @@ def _make_metadata_with_slice(
 
     query_start_loc = slice_query_start_locs(attn_metadata.query_start_loc,
                                              request_slice)
-    assert len(query_start_loc >= 2)
+    assert len(query_start_loc) >= 2, (
+        f"query_start_loc must have at least 2 elements, "
+        f"got {len(query_start_loc)}")
     query_start_loc_cpu = slice_query_start_locs(
         attn_metadata.query_start_loc_cpu, request_slice)
 
