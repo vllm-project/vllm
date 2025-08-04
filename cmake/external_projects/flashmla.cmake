@@ -19,7 +19,7 @@ else()
   FetchContent_Declare(
         flashmla
         GIT_REPOSITORY https://github.com/vllm-project/FlashMLA.git
-        GIT_TAG 575f7724b9762f265bbee5889df9c7d630801845
+        GIT_TAG 75cb7a754bce725ed38b7e6b74e98dcd8e952e20
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
@@ -27,6 +27,7 @@ else()
 endif()
 
 
+list(APPEND VLLM_GPU_FLAGS "-lineinfo")
 FetchContent_MakeAvailable(flashmla)
 message(STATUS "FlashMLA is available at ${flashmla_SOURCE_DIR}")
 
@@ -37,9 +38,9 @@ cuda_archs_loose_intersection(FLASH_MLA_ARCHS "9.0a" "${CUDA_ARCHS}")
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.3 AND FLASH_MLA_ARCHS)
     set(FlashMLA_SOURCES
         ${flashmla_SOURCE_DIR}/csrc/flash_api.cpp
-        ${flashmla_SOURCE_DIR}/csrc/flash_fwd_mla_bf16_sm90.cu
-        ${flashmla_SOURCE_DIR}/csrc/flash_fwd_mla_fp16_sm90.cu
-        ${flashmla_SOURCE_DIR}/csrc/flash_fwd_mla_metadata.cu)
+        ${flashmla_SOURCE_DIR}/csrc/kernels/splitkv_mla.cu
+        ${flashmla_SOURCE_DIR}/csrc/kernels/mla_combine.cu
+        ${flashmla_SOURCE_DIR}/csrc/kernels/get_mla_metadata.cu)
 
     set(FlashMLA_INCLUDES
         ${flashmla_SOURCE_DIR}/csrc/cutlass/include
