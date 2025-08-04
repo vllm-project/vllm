@@ -1102,13 +1102,8 @@ class NixlConnectorWorker:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
-                    # TODO get from nixl telemetry once integrated
-                    transfer_duration = 11.0
-                    bytes_transferred = 1111
-                    num_blocks_transferred = 1111
-                    self.xfer_stats.record_transfer(transfer_duration,
-                                                    bytes_transferred,
-                                                    num_blocks_transferred)
+                    # TODO (NickLucche) Get from NIXL telemetry once integrated
+                    self.xfer_stats.record_transfer()
                 elif xfer_state == "PROC":
                     in_progress = True
                     continue

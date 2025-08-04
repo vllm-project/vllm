@@ -18,12 +18,17 @@ import torch
 
 from vllm import LLM
 from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorType
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    NixlKVTransferStats)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
     NixlConnectorWorker)
 from vllm.forward_context import ForwardContext
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 from .utils import create_request, create_scheduler, create_vllm_config
 
@@ -475,6 +480,137 @@ class TestNixlHandshake:
 # NOTE: resource cleanup in mp backend is a bit finicky, so the order in which
 # we put here is important. First run ray, it will clean up the resources, then
 # the rest of the tests.
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+    FakeNixlWrapper)
+def test_kv_transfer_stats(dist_init):
+    """Test that KV transfer stats are properly recorded and retrieved."""
+    vllm_config = create_vllm_config()
+
+    # Test worker role in decode server.
+    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+    connector.connector_worker = FakeNixlConnectorWorker(vllm_config,
+                                                         connector.engine_id,
+                                                         hand_shake_latency=0)
+
+    # Verify that xfer_stats starts empty
+    initial_stats = connector.get_kv_transfer_stats()
+    assert KVConnectorType.NIXL in initial_stats
+    assert initial_stats[KVConnectorType.NIXL].is_empty()
+    assert initial_stats[KVConnectorType.NIXL].num_successful_transfers == 0
+
+    # Create transfer metadata
+    request_id = "test_req_for_stats"
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req(request_id=request_id,
+                         local_block_ids=[1, 2, 3],
+                         kv_transfer_params={
+                             "remote_block_ids": [4, 5, 6],
+                             "remote_engine_id":
+                             FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                             "remote_host": "localhost",
+                             "remote_port": 1234,
+                             "remote_tp_size": 1,
+                         })
+    connector.bind_connector_metadata(metadata)
+
+    # Start the transfer
+    dummy_ctx = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        virtual_engine=0,
+    )
+    connector.start_load_kv(dummy_ctx)
+
+    # Verify stats are recorded after transfer is complete
+    max_iterations = 2
+    # Clear metadata before start_load_kv to prevent reprocessing same request
+    connector.bind_connector_metadata(NixlConnectorMetadata())
+    for _ in range(max_iterations):
+        # Need to call start_load_kv to process completed handshakes
+        connector.start_load_kv(dummy_ctx)
+        _, done_recving = connector.get_finished(finished_req_ids=set())
+        if len(done_recving) > 0 and request_id in done_recving:
+            break
+        time.sleep(
+            0.1)  # Small delay to allow background handshake to complete
+    else:
+        assert "Transfer did not complete within expected iterations"
+
+    # Now check that stats were recorded
+    stats_after_transfer = connector.get_kv_transfer_stats()
+    assert KVConnectorType.NIXL in stats_after_transfer
+    stats = stats_after_transfer[KVConnectorType.NIXL]
+
+    # Verify stats values are recorded
+    assert not stats.is_empty()
+    assert stats.num_successful_transfers == 1
+
+    # Verify stats are reset after retrieval
+    stats_after_reset = connector.get_kv_transfer_stats()
+    assert KVConnectorType.NIXL in stats_after_reset
+    assert stats_after_reset[KVConnectorType.NIXL].is_empty()
+    assert stats_after_reset[
+        KVConnectorType.NIXL].num_successful_transfers == 0
+
+
+def test_kv_transfer_stats_aggregation():
+    """
+    Test KV transfer stats aggregation across TP ranks using 
+    KVOutputAggregator (used by MultiprocExecutor).
+    """
+
+    # Create KVOutputAggregator for 3 workers (simulating TP=3), same thing
+    # done in MultiprocExecutor.execute_model
+    aggregator = KVOutputAggregator(world_size=3)
+
+    # Create stats for multiple workers with different transfer patterns
+    worker1_stats = NixlKVTransferStats()
+    worker2_stats = NixlKVTransferStats()
+    worker3_stats = NixlKVTransferStats()
+
+    # Record different transfers on each worker
+    # Worker 1: 2 transfers
+    worker1_stats.record_transfer()
+    worker1_stats.record_transfer()
+
+    # Worker 2: 1 transfer
+    worker2_stats.record_transfer()
+
+    # Worker 3: 3 transfers
+    worker3_stats.record_transfer()
+    worker3_stats.record_transfer()
+    worker3_stats.record_transfer()
+
+    # Create ModelRunnerOutput instances for each worker
+    worker_outputs = []
+    for i, worker_stats in enumerate(
+        [worker1_stats, worker2_stats, worker3_stats]):
+        output = ModelRunnerOutput(
+            req_ids=[f"req_{i}"],
+            req_id_to_index={f"req_{i}": 0},
+            sampled_token_ids=[[123]],  # dummy token
+            spec_token_ids=None,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[None],
+            kv_connector_output=KVConnectorOutput(
+                finished_sending=set([f"req_{i}_send"])
+                if i < 2 else None,  # Workers 0,1 finished sending
+                finished_recving=set([f"req_{i}_recv"])
+                if i > 0 else None,  # Workers 1,2 finished receiving
+            ),
+            kv_transfer_stats={KVConnectorType.NIXL: worker_stats})
+        worker_outputs.append(output)
+
+    # Use the real aggregation mechanism (like MultiprocExecutor.execute_model)
+    aggregated_output = aggregator.aggregate(worker_outputs, output_rank=0)
+    kv_transfer_stats = aggregated_output.kv_transfer_stats[
+        KVConnectorType.NIXL]
+    # Number of total transfers across all workers.
+    assert kv_transfer_stats.num_successful_transfers == 6
+
+
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",

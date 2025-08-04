@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import NamedTuple, Optional
+from typing import TYPE_CHECKING, NamedTuple, Optional
 
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorType
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVTransferStats)
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorType)
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+        KVTransferStats)
 
 
 class LogprobsLists(NamedTuple):
@@ -80,6 +82,12 @@ class KVConnectorOutput:
     # [req_ids]
     finished_sending: Optional[set[str]] = None
     finished_recving: Optional[set[str]] = None
+    kv_transfer_stats: Optional[dict["KVConnectorType",
+                                     "KVTransferStats"]] = None
+
+    def is_empty(self):
+        return (not self.finished_sending and not self.finished_recving
+                and not self.kv_transfer_stats)
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
@@ -116,8 +124,6 @@ class ModelRunnerOutput:
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
-
-    kv_transfer_stats: Optional[dict[KVConnectorType, KVTransferStats]] = None
 
 
 @dataclass
