@@ -624,25 +624,29 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     ) -> FusedMoEPermuteExpertsUnpermute:
         # cutlass path
         if self.use_cutlass:
-            from vllm.model_executor.layers.fused_moe import CutlassExpertsFp8
-
-            use_batched_format = (prepare_finalize.activation_format ==
-                                  FusedMoEActivationFormat.BatchedExperts)
+            from vllm.model_executor.layers.fused_moe import (
+                CutlassExpertsFp8,
+                CutlassBatchedExpertsFp8)
 
             num_dispatchers = prepare_finalize.num_dispatchers()
-            num_experts = (moe.num_local_experts
-                           if use_batched_format else moe.num_experts)
 
-            logger.debug("CutlassExpertsFp8(%s)", self.__class__.__name__)
-
-            experts = CutlassExpertsFp8(
-                num_experts,
-                moe.in_dtype,
-                self.input_quant.strategy == QuantizationStrategy.TOKEN,
-                self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
-                num_dispatchers=num_dispatchers,
-                use_batched_format=use_batched_format,
-            )
+            if (prepare_finalize.activation_format ==
+                FusedMoEActivationFormat.BatchedExperts):
+                logger.debug("CutlassBatchedExpertsFp8(%s)", self.__class__.__name__)
+                experts = CutlassBatchedExpertsFp8(
+                    moe.num_local_experts,
+                    num_dispatchers,
+                    moe.in_dtype,
+                    self.input_quant.strategy == QuantizationStrategy.TOKEN,
+                    self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
+                )
+            else:
+                logger.debug("CutlassExpertsFp8(%s)", self.__class__.__name__)
+                experts = CutlassExpertsFp8(
+                    moe.in_dtype,
+                    self.input_quant.strategy == QuantizationStrategy.TOKEN,
+                    self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
+                )
 
             self.disable_expert_map = (num_dispatchers > 1
                                        or not experts.supports_expert_map())

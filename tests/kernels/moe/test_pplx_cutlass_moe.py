@@ -9,7 +9,7 @@ import torch
 from tests.kernels.utils import torch_experts
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
+from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassBatchedExpertsFp8
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
@@ -123,12 +123,11 @@ def pplx_cutlass_moe(
         num_local_experts=num_local_experts,
         num_dispatchers=num_dispatchers)
 
-    experts = CutlassExpertsFp8(num_local_experts,
-                                out_dtype,
-                                per_act_token,
-                                per_out_ch,
-                                num_dispatchers=num_dispatchers,
-                                use_batched_format=True)
+    experts = CutlassBatchedExpertsFp8(num_local_experts,
+                                       num_dispatchers,
+                                       out_dtype,
+                                       per_act_token,
+                                       per_out_ch)
 
     fused_cutlass_experts = FusedMoEModularKernel(
         prepare_finalize,

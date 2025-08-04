@@ -48,13 +48,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2_gscale: torch.Tensor,
         out_dtype: torch.dtype,  # Optional?
         use_nvfp4_w4a4: bool = False,  # undo defaults?
-        use_dp: bool = False,
         ep_rank: int = 0,
         ep_size: int = 1,
         tp_rank: int = 0,
         tp_size: int = 1,
-        num_dispatchers: Optional[int] = None,
-        use_batched_format: bool = False,
     ):
         super().__init__(
             FusedMoEQuantConfig(
@@ -63,14 +60,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 block_shape=None,
             ))
         self.use_nvfp4_w4a4 = use_nvfp4_w4a4
-        self.use_fp8_w8a8 = False
         self.ep_rank = ep_rank
         self.ep_size = ep_size
         self.tp_rank = tp_rank
         self.tp_size = tp_size
-        self.use_dp = use_dp
-        assert not use_batched_format or num_dispatchers is not None
-        self.num_dispatchers = num_dispatchers
         self.g1_alphas = g1_alphas
         self.g2_alphas = g2_alphas
         self.a1_gscale = a1_gscale

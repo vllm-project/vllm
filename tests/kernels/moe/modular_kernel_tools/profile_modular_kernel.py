@@ -83,7 +83,7 @@ def rank_worker(
     # sanity check
     from vllm import envs
     if config.fused_moe_chunk_size is not None:
-        assert (config.fused_moe_chunk_size == envs.VLLM_FUSED_MOE_CHUNK_SIZE)
+        assert config.fused_moe_chunk_size == envs.VLLM_FUSED_MOE_CHUNK_SIZE
 
     # get weights to this device
     weights.to_current_device()
