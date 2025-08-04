@@ -1454,7 +1454,6 @@ class EngineArgs:
                 "Please consider using other speculative decoding methods "
                 "such as ngram, medusa, eagle, or deepseek_mtp.")
 
-        # No XFormers so far.
         V1_BACKENDS = [
             "FLASH_ATTN_VLLM_V1",
             "FLASH_ATTN",
@@ -1469,6 +1468,7 @@ class EngineArgs:
             "ROCM_AITER_MLA",
             "TORCH_SDPA_VLLM_V1",
             "FLEX_ATTENTION",
+            "TREE_ATTN",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
