@@ -164,6 +164,8 @@ class ServingScores(OpenAIServing):
             tokenizer=tokenizer,
             tokenization_kwargs=tokenization_kwargs,
         )
+        self._validate_input(request, engine_prompt["prompt_token_ids"],
+                             full_prompt)
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
 
