@@ -383,8 +383,8 @@ class WorkerProc:
         tp_str = f"TP{rank % tp_size}" if tp_size > 1 else ""
         suffix = f"{pp_str}{'_' if pp_str and tp_str else ''}{tp_str}"
         process_name = "VllmWorker"
+        set_process_title(name=process_name, suffix=suffix)
         if suffix:
-            set_process_title(suffix, append=True)
             process_name = f"{process_name} {suffix}"
         decorate_logs(process_name)
 
