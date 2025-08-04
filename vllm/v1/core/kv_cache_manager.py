@@ -68,7 +68,7 @@ class KVCacheManager:
         self,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
-        enable_caching: bool = True,
+        enable_caching: bool = False,
         caching_hash_algo: str = "builtin",
         use_eagle: bool = False,
         log_stats: bool = False,
