@@ -1,22 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import lru_cache
 from typing import Optional
 
 import torch.nn as nn
 
-from vllm.config import get_current_vllm_config
+from vllm.config import get_cached_compilation_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
-
-
-@lru_cache(maxsize=1)
-def get_cached_compilation_config():
-    """Cache config to avoid repeated calls to get_current_vllm_config()"""
-    return get_current_vllm_config().compilation_config
 
 
 class CustomOp(nn.Module):
