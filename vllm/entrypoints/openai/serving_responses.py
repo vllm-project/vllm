@@ -102,6 +102,8 @@ class OpenAIServingResponses(OpenAIServing):
         self.supports_code_interpreter = False
         self.use_harmony = True  # FIXME
         if self.use_harmony:
+            logger.warning("For gpt-oss, we ignore --enable-auto-tool-choice "
+                           "and always enable tool use.")
             # OpenAI models have two EOS-like tokens: <|return|> and <|call|>.
             # We need to add them to the stop token ids.
             if "stop_token_ids" not in self.default_sampling_params:
