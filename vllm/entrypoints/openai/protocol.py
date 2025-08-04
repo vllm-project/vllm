@@ -763,7 +763,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     "anyOf": [get_tool_schema(tool) for tool in self.tools]
                 }
             }
-            if not self.parallel_tool_calls:
+            if self.parallel_tool_calls is False:
                 json_schema["maxItems"] = 1
             json_schema_defs = get_tool_schema_defs(self.tools)
             if json_schema_defs:
