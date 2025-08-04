@@ -271,7 +271,7 @@ def get_tokenizer(
             }
             tokenizer.add_special_tokens(special_tokens_map)
 
-        # NOTE: We can remove this after https://github.com/THUDM/ChatGLM3/issues/1324
+        # NOTE: We can remove this after https://github.com/zai-org/ChatGLM3/issues/1324
         if type(tokenizer).__name__ in ("ChatGLMTokenizer",
                                         "ChatGLM4Tokenizer"):
             assert isinstance(tokenizer, PreTrainedTokenizer)
