@@ -227,8 +227,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             is_spec_decode=bool(self.vllm_config.speculative_config),
         )
 
-        self.cudagraph_mode = self.compilation_config.cudagraph_mode
-
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
         # self.cudagraph_batch_sizes sorts in ascending order.
@@ -780,7 +778,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # valid, we fill the padded indices with the last index.
             self.kv_sharing_fast_prefill_logits_indices[num_logits:].fill_(
                 logits_indices[-1].item())
-            if (self.cudagraph_mode != CUDAGraphMode.NONE
+            if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
                     and num_logits <= self.cudagraph_batch_sizes[-1]):
                 # Use piecewise CUDA graphs.
                 # Add padding to the batch size.
@@ -1491,7 +1489,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
          max_query_len) = (self._prepare_inputs(scheduler_output))
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if (self.cudagraph_mode != CUDAGraphMode.NONE
+        if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use CUDA graphs.
             # Add padding to the batch size.
@@ -2608,7 +2606,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         gc.collect()
 
     def capture_model(self) -> None:
-        if self.cudagraph_mode == CUDAGraphMode.NONE:
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
                 "ensure `cudagraph_mode` was not manually set to `NONE`")
@@ -2639,8 +2637,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
         with freeze_gc(), graph_capture(device=self.device):
-            if self.cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
-                cudagraph_runtime_mode = self.cudagraph_mode.mixed_mode()
+            cudagraph_mode = self.compilation_config.cudagraph_mode
+            if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
+                cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
 
                 compilation_cases = list(reversed(self.cudagraph_batch_sizes))
                 self._capture_cudagraphs(
@@ -2650,8 +2649,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # Capture full cudagraph for uniform decode batches if we have
             # dont already have full mixed prefill-decode cudagraphs
-            if self.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL and \
-                self.cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
+            if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL and \
+                cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 max_num_tokens = self.scheduler_config.max_num_seqs * \
                         self.uniform_decode_query_len
                 decode_cudagraph_batch_sizes = [
@@ -2816,20 +2815,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     min_cg_support = builder.cudagraph_support
                     min_cg_builder_name = builder.__class__.__name__
 
-            if self.cudagraph_mode == CUDAGraphMode.FULL \
+            if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL \
                 and min_cg_support != AttentionCGSupport.ALWAYS:
-                error_msg = "CUDAGraphMode.FULL is not supported " +\
-                    f"with {min_cg_builder_name} backend"
+                warn_msg = "CUDAGraphMode.FULL is not supported with " +\
+                    f"{min_cg_builder_name} backend (support: {min_cg_support})"
                 if min_cg_support == AttentionCGSupport.NEVER:
-                    error_msg += " please try cudagraph_mode=PIECEWISE"
+                    warn_msg += "; setting cudagraph_mode=PIECEWISE"
+                    self.compilation_config.cudagraph_mode = \
+                        CUDAGraphMode.PIECEWISE
                 else:
-                    error_msg += " please try cudagraph_mode=FULL_AND_PIECEWISE"
-                raise ValueError(error_msg)
+                    warn_msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
+                    self.compilation_config.cudagraph_mode = \
+                        CUDAGraphMode.FULL_AND_PIECEWISE
+                logger.warning(warn_msg)
 
         # Trigger cudagraph dispatching keys initialization here (after
         # initializing attn backends).
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
-            self.cudagraph_mode, self.uniform_decode_query_len)
+            self.compilation_config.cudagraph_mode,
+            self.uniform_decode_query_len)
 
     def calculate_reorder_batch_threshold(self) -> None:
         """
