@@ -1060,7 +1060,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Enables support for the "store" option in the OpenAI Responses API.
     # When set to 1, vLLM's OpenAI server will retain the input and output
-    # messages for those requests in memory. By default, this is disabled (0).
+    # messages for those requests in memory. By default, this is disabled (0),
+    # and the "store" option is ignored.
     # NOTE/WARNING:
     # 1. Messages are kept in memory only (not persisted to disk) and will be
     #    lost when the vLLM server shuts down.
