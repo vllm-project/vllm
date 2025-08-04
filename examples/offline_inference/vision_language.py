@@ -221,7 +221,7 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
 # GLM-4v
 def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
-    model_name = "THUDM/glm-4v-9b"
+    model_name = "zai-org/glm-4v-9b"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -250,7 +250,7 @@ def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
 
 # GLM-4.1V
 def run_glm4_1v(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "THUDM/GLM-4.1V-9B-Thinking"
+    model_name = "zai-org/GLM-4.1V-9B-Thinking"
 
     engine_args = EngineArgs(
         model=model_name,

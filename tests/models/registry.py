@@ -153,7 +153,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                         extras={"tiny": "hmellor/tiny-random-BambaForCausalLM"}),  # noqa: E501
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloom-560m",
                                         {"1b": "bigscience/bloomz-1b1"}),
-    "ChatGLMModel": _HfExamplesInfo("THUDM/chatglm3-6b",
+    "ChatGLMModel": _HfExamplesInfo("zai-org/chatglm3-6b",
                                     trust_remote_code=True,
                                     max_transformers_version="4.48"),
     "ChatGLMForConditionalGeneration": _HfExamplesInfo("thu-coai/ShieldLM-6B-chatglm3",  # noqa: E501
@@ -187,8 +187,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it",    # noqa: E501
                                           min_transformers_version="4.53"),
-    "GlmForCausalLM": _HfExamplesInfo("THUDM/glm-4-9b-chat-hf"),
-    "Glm4ForCausalLM": _HfExamplesInfo("THUDM/GLM-4-9B-0414"),
+    "GlmForCausalLM": _HfExamplesInfo("zai-org/glm-4-9b-chat-hf"),
+    "Glm4ForCausalLM": _HfExamplesInfo("zai-org/GLM-4-9B-0414"),
     "Glm4MoeForCausalLM": _HfExamplesInfo("zai-org/GLM-4.5",
                                           min_transformers_version="4.54"),   # noqa: E501
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2",
@@ -380,10 +380,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo("ibm-granite/granite-speech-3.3-2b"),  # noqa: E501
-    "GLM4VForCausalLM": _HfExamplesInfo("THUDM/glm-4v-9b",
+    "GLM4VForCausalLM": _HfExamplesInfo("zai-org/glm-4v-9b",
                                         trust_remote_code=True,
                                         hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
-    "Glm4vForConditionalGeneration": _HfExamplesInfo("THUDM/GLM-4.1V-9B-Thinking"),  # noqa: E501
+    "Glm4vForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.1V-9B-Thinking"),  # noqa: E501
     "Glm4v_moeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V-Air",
                                           is_available_online=False),   # noqa: E501
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m",
