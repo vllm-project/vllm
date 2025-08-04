@@ -19,6 +19,16 @@ Two main reasons:
 
 Please refer to <gh-file:examples/online_serving/disaggregated_prefill.sh> for the example usage of disaggregated prefilling.
 
+Now v1 supports 5 types of connectors:
+- **SharedStorageConnector**: refer to <gh-file:examples/offline_inference/disaggregated-prefill-v1/run.sh> for the example usage of SharedStorageConnector disaggregated prefilling.
+- **LMCacheConnectorV1**: refer to <gh-file:examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh> for the example usage of LMCacheConnectorV1 disaggregated prefilling which uses NIXL as the underlying KV transmission.
+- **NixlConnector**: refer to <gh-file:tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh> for the example usage of NixlConnector disaggregated prefilling which support fully async send/recv.
+- **P2pNcclConnector**:refer to <gh-file:examples/online_serving/disaggregated_serving_p2p_nccl_xpyd/disagg_example_p2p_nccl_xpyd.sh> for the example usage of P2pNcclConnector disaggregated prefilling.
+- **MultiConnector**: take advantage of the kv_connector_extra_config: dict[str, Any] already present in KVTransferConfig to stash all the connectors we want in an ordered list of kwargs.such as:
+  ```
+  --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both"},{"kv_connector":"SharedStorageConnector","kv_role":"kv_both","kv_connector_extra_config":{"shared_storage_path":"local_storage"}}]}}'
+  ```
+
 ## Benchmarks
 
 Please refer to <gh-file:benchmarks/disagg_benchmarks> for disaggregated prefilling benchmarks.
@@ -47,6 +57,14 @@ The workflow of disaggregated prefilling is as follows:
 ![Disaggregated prefilling workflow](../assets/features/disagg_prefill/overview.jpg)
 
 The `buffer` corresponds to `insert` API in LookupBuffer, and the `drop_select` corresponds to `drop_select` API in LookupBuffer.
+
+Now in v1, every process in vLLM will have a corresponding connector. Specifically, we have:
+- Scheduler connector: the connector that locates in the same process as the scheduler process. It schedules the KV cache transfer ops.
+- Worker connectors: the connectors that locate in the worker processes. They execute KV cache transfer ops.
+Here is a figure illustrating how the above 2 connectors are organized:
+![Disaggregated prefilling abstractions v1](../assets/features/disagg_prefill/abstraction_v1.png)
+The figure below shows how the worker connector works with the attention module to achieve layer-by-layer KV cache store and load:
+![Disaggregated prefilling workflow v1](../assets/features/disagg_prefill/workflow_v1.png)
 
 ## Third-party contributions
 
