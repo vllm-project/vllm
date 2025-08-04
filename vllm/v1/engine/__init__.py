@@ -9,7 +9,9 @@ from typing import Any, Optional, Union
 import msgspec
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferAggregatedStats
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorType
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVTransferStatsType)
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -116,8 +118,9 @@ class EngineCoreOutput(
     kv_transfer_params: Optional[dict[str, Any]] = None
 
     trace_headers: Optional[Mapping[str, str]] = None
-    kv_transfer_stats: Optional[KVTransferAggregatedStats] = None
-    
+    kv_transfer_stats: Optional[dict[KVConnectorType,
+                                     KVTransferStatsType]] = None
+
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
 

@@ -14,7 +14,8 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole, KVConnectorType)
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferStats
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVTransferStats)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -124,14 +125,11 @@ class MultiConnector(KVConnectorBase_V1):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]], dict[KVConnectorType, Optional[KVTransferStats]]]:
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         finished_sending: set[str] = set()
         finished_recving: set[str] = set()
-        xfer_stats_by_connector: dict[KVConnectorType, Optional[KVTransferStats]] = {}
         for c in self._connectors:
-            sending, recving, xfer_stats = c.get_finished(finished_req_ids)
-            if xfer_stats is not None:
-                xfer_stats_by_connector.update(xfer_stats)
+            sending, recving = c.get_finished(finished_req_ids)
             if not recving and not sending:
                 continue
             # Aggregate finished recving request ids.
@@ -150,7 +148,7 @@ class MultiConnector(KVConnectorBase_V1):
                 else:
                     self._extra_async_saves[req_id] = extra_pending - 1
 
-        return finished_sending or None, finished_recving or None, xfer_stats_by_connector
+        return finished_sending or None, finished_recving or None
 
     # ==============================
     # Scheduler-side methods
@@ -268,3 +266,11 @@ class MultiConnector(KVConnectorBase_V1):
                              f"({', '.join(layouts) })."
                              f"All connectors must use the same layout.")
         return next(iter(layouts), None)
+
+    def get_kv_transfer_stats(self) -> dict[KVConnectorType, KVTransferStats]:
+        # Group xfer stats by connector type.
+        xfer_stats_by_connector = dict[KVConnectorType, KVTransferStats]()
+        for c in self._connectors:
+            xfer_stats = c.get_kv_transfer_stats()
+            xfer_stats_by_connector.update(xfer_stats)
+        return xfer_stats_by_connector

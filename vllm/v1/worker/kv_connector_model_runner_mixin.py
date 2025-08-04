@@ -13,6 +13,9 @@ from vllm.distributed.kv_transfer import (ensure_kv_transfer_shutdown,
                                           get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorType
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVTransferStats)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput,
@@ -120,3 +123,8 @@ class KVConnectorModelRunnerMixin:
                 kv_connector.get_finished(scheduler_output.finished_req_ids))
 
             kv_connector.clear_connector_metadata()
+
+    def get_kv_transfer_stats(self) -> dict[KVConnectorType, KVTransferStats]:
+        if has_kv_transfer_group():
+            return get_kv_transfer_group().get_kv_transfer_stats()
+        return {}

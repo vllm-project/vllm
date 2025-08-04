@@ -41,7 +41,6 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferStats
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
@@ -50,6 +49,8 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+        KVTransferStats)
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
@@ -70,11 +71,13 @@ class KVConnectorRole(enum.Enum):
     # Connector running in the worker process
     WORKER = 1
 
+
 class KVConnectorType(enum.Enum):
-    NIXL=enum.auto()
-    LMCACHE=enum.auto()
-    NCCL=enum.auto()
-    SHARED_STORAGE=enum.auto()
+    NIXL = enum.auto()
+    LMCACHE = enum.auto()
+    NCCL = enum.auto()
+    SHARED_STORAGE = enum.auto()
+
 
 class KVConnectorMetadata(ABC):  # noqa: B024
     """
@@ -214,10 +217,10 @@ class KVConnectorBase_V1(ABC):
         This prevents overwrites of paged KV buffer before saving done.
         """
         pass
-    
+
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]], Optional[dict[KVConnectorType, KVTransferStats]]]:
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens on the worker.
@@ -231,7 +234,7 @@ class KVConnectorBase_V1(ABC):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        return None, None, None
+        return None, None
 
     def shutdown(self):
         """
@@ -372,3 +375,10 @@ class KVConnectorBase_V1(ABC):
         """
 
         return None
+
+    def get_kv_transfer_stats(self) -> dict[KVConnectorType, KVTransferStats]:
+        """
+        Get the KV transfer stats for the connector. Results are aggregated by
+        connector type, hence a dict is returned.
+        """
+        return {}
