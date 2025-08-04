@@ -201,8 +201,6 @@ _CROSS_ENCODER_MODELS = {
                                          "RobertaForSequenceClassification"),
     "XLMRobertaForSequenceClassification": ("xlm_roberta",
                                             "XLMRobertaForSequenceClassification"),
-    "ModernBertForSequenceClassification": ("modernbert",
-                                            "ModernBertForSequenceClassification"),
     # [Auto-converted (see adapters.py)]
     "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"), # noqa: E501,
 }
