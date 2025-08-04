@@ -36,6 +36,8 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              Nemotron_Nano_VL_Config,
                                              NemotronConfig, NVLM_D_Config,
                                              Ovis2_5Config, RWConfig,
+                                             SpeculatorsConfig,
+                                             Step3TextConfig, Step3VLConfig,
                                              UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
@@ -81,10 +83,13 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "mlp_speculator": MLPSpeculatorConfig,
     "medusa": MedusaConfig,
     "eagle": EAGLEConfig,
+    "speculators": SpeculatorsConfig,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
     "ovis2_5": Ovis2_5Config,
     "ultravox": UltravoxConfig,
+    "step3_vl": Step3VLConfig,
+    "step3_text": Step3TextConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
@@ -286,6 +291,36 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     return config
 
 
+def maybe_override_with_speculators_target_model(
+    model: str,
+    tokenizer: str,
+    trust_remote_code: bool,
+    revision: Optional[str] = None,
+    **kwargs,
+) -> tuple[str, str]:
+    """
+    If running a speculators config, override running model with target model
+    """
+    is_gguf = check_gguf_file(model)
+    if is_gguf:
+        kwargs["gguf_file"] = Path(model).name
+        gguf_model_repo = Path(model).parent
+    else:
+        gguf_model_repo = None
+    config_dict, _ = PretrainedConfig.get_config_dict(
+        model if gguf_model_repo is None else gguf_model_repo,
+        revision=revision,
+        trust_remote_code=trust_remote_code,
+        token=_get_hf_token(),
+        **kwargs,
+    )
+    spec_config = config_dict.get("speculators_config", None)
+    # Return the target model
+    if spec_config is not None:
+        model = tokenizer = spec_config["verifier"]["name_or_path"]
+    return model, tokenizer
+
+
 def get_config(
     model: Union[str, Path],
     trust_remote_code: bool,
@@ -344,9 +379,12 @@ def get_config(
             token=_get_hf_token(),
             **kwargs,
         )
-
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
+        if model_type is None:
+            model_type = "speculators" if config_dict.get(
+                "speculators_config") is not None else model_type
+
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
