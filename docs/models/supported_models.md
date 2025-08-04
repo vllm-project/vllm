@@ -415,11 +415,9 @@ th {
 
 See [this page](./pooling_models.md) for more information on how to use pooling models.
 
-!!! important
-    Since some model architectures support both generative and pooling tasks,
-    you should explicitly specify `--runner pooling` to ensure that the model is used in pooling mode instead of generative mode.
+#### Embedding
 
-#### Text Embedding
+These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) API.
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
@@ -457,27 +455,9 @@ If your model is not in the above list, we will try to automatically convert the
 [as_embedding_model][vllm.model_executor.models.adapters.as_embedding_model]. By default, the embeddings
 of the whole prompt are extracted from the normalized hidden state corresponding to the last token.
 
-#### Reward Modeling
-
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
-|--------------|--------|-------------------|----------------------|---------------------------|---------------------|
-| `InternLM2ForRewardModel` | InternLM2-based | `internlm/internlm2-1_8b-reward`, `internlm/internlm2-7b-reward`, etc. | ✅︎ | ✅︎ | ✅︎ |
-| `LlamaForCausalLM`<sup>C</sup> | Llama-based | `peiyi9979/math-shepherd-mistral-7b-prm`, etc. | ✅︎ | ✅︎ | ✅︎ |
-| `Qwen2ForRewardModel` | Qwen2-based | `Qwen/Qwen2.5-Math-RM-72B`, etc. | ✅︎ | ✅︎ | ✅︎ |
-| `Qwen2ForProcessRewardModel` | Qwen2-based | `Qwen/Qwen2.5-Math-PRM-7B`, etc. | ✅︎ | ✅︎ | ✅︎ |
-| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* | \* |
-
-<sup>C</sup> Automatically converted into a reward model via `--convert reward`. ([details](./pooling_models.md#model-conversion))  
-\* Feature support is the same as that of the original model.
-
-If your model is not in the above list, we will try to automatically convert the model using
-[as_reward_model][vllm.model_executor.models.adapters.as_reward_model]. By default, we return the hidden states of each token directly.
-
-!!! important
-    For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
-    e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
-
 #### Classification
+
+These models primarily support the [`LLM.classify`](./pooling_models.md#llmclassify) API.
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
@@ -491,7 +471,9 @@ If your model is not in the above list, we will try to automatically convert the
 If your model is not in the above list, we will try to automatically convert the model using
 [as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
-#### Sentence Pair Scoring
+#### Cross-encoder / Reranker
+
+These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) API.
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
@@ -501,6 +483,7 @@ If your model is not in the above list, we will try to automatically convert the
 | `Qwen3ForSequenceClassification` | Qwen3-based | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. | ✅︎ | ✅︎ | ✅︎ |
 | `RobertaForSequenceClassification` | RoBERTa-based | `cross-encoder/quora-roberta-base`, etc. | | | |
 | `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc. | | | |
+| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* | \* |
 
 <sup>C</sup> Automatically converted into a classification model via `--convert classify`. ([details](./pooling_models.md#model-conversion))  
 \* Feature support is the same as that of the original model.
@@ -525,6 +508,28 @@ If your model is not in the above list, we will try to automatically convert the
     ```bash
     vllm serve Qwen/Qwen3-Reranker-0.6B --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
     ```
+
+#### Reward Modeling
+
+These models primarily support the [`LLM.reward`](./pooling_models.md#llmreward) API.
+
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
+|--------------|--------|-------------------|----------------------|---------------------------|---------------------|
+| `InternLM2ForRewardModel` | InternLM2-based | `internlm/internlm2-1_8b-reward`, `internlm/internlm2-7b-reward`, etc. | ✅︎ | ✅︎ | ✅︎ |
+| `LlamaForCausalLM`<sup>C</sup> | Llama-based | `peiyi9979/math-shepherd-mistral-7b-prm`, etc. | ✅︎ | ✅︎ | ✅︎ |
+| `Qwen2ForRewardModel` | Qwen2-based | `Qwen/Qwen2.5-Math-RM-72B`, etc. | ✅︎ | ✅︎ | ✅︎ |
+| `Qwen2ForProcessRewardModel` | Qwen2-based | `Qwen/Qwen2.5-Math-PRM-7B`, etc. | ✅︎ | ✅︎ | ✅︎ |
+| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* | \* |
+
+<sup>C</sup> Automatically converted into a reward model via `--convert reward`. ([details](./pooling_models.md#model-conversion))  
+\* Feature support is the same as that of the original model.
+
+If your model is not in the above list, we will try to automatically convert the model using
+[as_reward_model][vllm.model_executor.models.adapters.as_reward_model]. By default, we return the hidden states of each token directly.
+
+!!! important
+    For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
+    e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 
 [](){ #supported-mm-models }
 
@@ -724,7 +729,9 @@ See [this page](./pooling_models.md) for more information on how to use pooling 
     Since some model architectures support both generative and pooling tasks,
     you should explicitly specify `--runner pooling` to ensure that the model is used in pooling mode instead of generative mode.
 
-#### Text Embedding
+#### Embedding
+
+These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) API.
 
 !!! note
     To get the best results, you should use pooling models that are specifically trained as such.
@@ -742,7 +749,9 @@ The following table lists those that are tested in vLLM.
 
 ---
 
-#### Scoring
+#### Cross-encoder / Reranker
+
+These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) API.
 
 | Architecture                        | Models             | Inputs   | Example HF Models        | [LoRA][lora-adapter]   | [PP][distributed-serving]   | [V1](gh-issue:8779)   |
 |-------------------------------------|--------------------|----------|--------------------------|------------------------|-----------------------------|-----------------------|
