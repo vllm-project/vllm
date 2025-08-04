@@ -311,6 +311,8 @@ See [this page](generative_models.md) for more information on how to use generat
 
 #### Text Generation
 
+These models primarily accept the [`LLM.generate`](./generative_models.md#llmgenerate) API. Chat/Instruct models additionally support the [`LLM.chat`](./generative_models.md#llmchat) API.
+
 <style>
 th {
   white-space: nowrap;
@@ -473,6 +475,7 @@ If your model is not in the above list, we will try to automatically convert the
 
 #### Cross-encoder / Reranker
 
+Cross-encoder and reranker models are a subset of classification models that accept two prompts as input.
 These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) API.
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
@@ -583,6 +586,8 @@ See [this page](../features/multimodal_inputs.md) on how to pass multi-modal inp
 See [this page](generative_models.md) for more information on how to use generative models.
 
 #### Text Generation
+
+These models primarily accept the [`LLM.generate`](./generative_models.md#llmgenerate) API. Chat/Instruct models additionally support the [`LLM.chat`](./generative_models.md#llmchat) API.
 
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
 |--------------|--------|--------|-------------------|----------------------|---------------------------|---------------------|
@@ -751,6 +756,7 @@ The following table lists those that are tested in vLLM.
 
 #### Cross-encoder / Reranker
 
+Cross-encoder and reranker models are a subset of classification models that accept two prompts as input.
 These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) API.
 
 | Architecture                        | Models             | Inputs   | Example HF Models        | [LoRA][lora-adapter]   | [PP][distributed-serving]   | [V1](gh-issue:8779)   |
