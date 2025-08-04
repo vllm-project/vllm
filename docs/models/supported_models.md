@@ -417,6 +417,10 @@ th {
 
 See [this page](./pooling_models.md) for more information on how to use pooling models.
 
+!!! important
+    Since some model architectures support both generative and pooling tasks,
+    you should explicitly specify `--runner pooling` to ensure that the model is used in pooling mode instead of generative mode.
+
 #### Embedding
 
 These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) API.
@@ -729,10 +733,6 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 ### Pooling Models
 
 See [this page](./pooling_models.md) for more information on how to use pooling models.
-
-!!! important
-    Since some model architectures support both generative and pooling tasks,
-    you should explicitly specify `--runner pooling` to ensure that the model is used in pooling mode instead of generative mode.
 
 #### Embedding
 
