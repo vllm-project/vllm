@@ -30,7 +30,7 @@ from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -118,9 +118,6 @@ class Scheduler(SchedulerInterface):
 
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
-        # The keys are request IDs, and the values are corresponding token
-        # count that have been successfully loaded from the remote KV store
-        self.finished_loading_dict: dict[str, int] = {}
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -887,7 +884,9 @@ class Scheduler(SchedulerInterface):
             self.waiting.remove_requests(stopped_preempted_reqs)
 
         # KV Connector: update state for finished KV Transfers.
-        self._update_from_kv_xfer_finished(model_runner_output)
+        if model_runner_output.kv_connector_output:
+            self._update_from_kv_xfer_finished(
+                model_runner_output.kv_connector_output)
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -1097,27 +1096,6 @@ class Scheduler(SchedulerInterface):
         (block_ids, ) = self.kv_cache_manager.get_block_ids(request.request_id)
         return self.connector.request_finished(request, block_ids)
 
-    def _update_actual_load_token_num_from_remote_kv(self,
-                                                     request: Request) -> bool:
-
-        num_actual_load_tokens = self.finished_loading_dict.pop(
-            request.request_id)
-        num_computed_tokens = num_actual_load_tokens
-        assert self.connector is not None
-        if num_actual_load_tokens <= 0 and hasattr(self.connector,
-                                                   "add_failure_request"):
-            self.connector.add_failure_request(request)
-            return True
-
-        if num_actual_load_tokens == request.num_tokens:
-            num_computed_tokens -= 1
-
-        self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
-
-        # Update the request state for scheduling.
-        request.num_computed_tokens = num_computed_tokens
-        return True
-
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """
         KV Connector: check if the request_id is finished_recving.
@@ -1131,9 +1109,6 @@ class Scheduler(SchedulerInterface):
         WAITING_FOR_REMOTE_KV.
         """
         assert self.connector is not None
-        if request.request_id in self.finished_loading_dict:
-            return self._update_actual_load_token_num_from_remote_kv(request)
-
         if request.request_id not in self.finished_recving_kv_req_ids:
             return False
 
@@ -1155,7 +1130,7 @@ class Scheduler(SchedulerInterface):
         return True
 
     def _update_from_kv_xfer_finished(self,
-                                      model_runner_output: ModelRunnerOutput):
+                                      kv_connector_output: KVConnectorOutput):
         """
         KV Connector: update the scheduler state based on the output.
 
@@ -1166,12 +1141,9 @@ class Scheduler(SchedulerInterface):
             scheduler the request during the next step.
         """
         # KV Connector:: update recv and send status from last step.
-        for req_id in (model_runner_output.finished_recving or ()):
+        for req_id in (kv_connector_output.finished_recving or ()):
             logger.debug("Finished recving KV transfer for request %s", req_id)
             self.finished_recving_kv_req_ids.add(req_id)
-        for req_id in (model_runner_output.finished_sending or ()):
+        for req_id in (kv_connector_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
-        if model_runner_output.finished_loading_dict:
-            self.finished_loading_dict.update(
-                model_runner_output.finished_loading_dict)

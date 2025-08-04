@@ -16,8 +16,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
-from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
-                                          has_kv_transfer_group)
+from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -71,12 +70,23 @@ class Worker(WorkerBase):
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
+            logger.debug(
+                "Profiler config: record_shapes=%s,"
+                "profile_memory=%s,with_stack=%s,with_flops=%s",
+                envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
+                envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
+                envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
+            )
             self.profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
                     torch.profiler.ProfilerActivity.CUDA,
                 ],
-                with_stack=True,
+                record_shapes=envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
+                profile_memory=envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
+                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                with_flops=envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
                     torch_profiler_trace_dir, use_gzip=True))
         else:
@@ -209,7 +219,7 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
-        """Profiles the peak memory usage of the model to determine how much 
+        """Profiles the peak memory usage of the model to determine how much
         memory can be used for KV cache without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
@@ -310,11 +320,16 @@ class Worker(WorkerBase):
         if get_pp_group().is_last_rank:
             max_num_reqs = min(self.scheduler_config.max_num_seqs,
                                self.scheduler_config.max_num_batched_tokens)
+            # activate building attn_metadata for this dummy run to avoid
+            # potential illegal memory access for full cudagraph relay.
+            attn_cudagraph = self.compilation_config.full_cuda_graph and\
+                not self.model_config.enforce_eager
 
             # We skip EPLB here since we don't want to record dummy metrics
             hidden_states, last_hidden_states = \
                 self.model_runner._dummy_run(
                     num_tokens=max_num_reqs,
+                    capture_attn_cudagraph=attn_cudagraph,
                     skip_eplb=True,
                 )
             if self.model_runner.is_pooling_model:
@@ -353,19 +368,20 @@ class Worker(WorkerBase):
             assert isinstance(output, IntermediateTensors)
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
-            if not has_kv_transfer_group():
+
+            kv_connector_output = output.kv_connector_output
+            if not kv_connector_output:
                 return None
 
             # In case of PP with kv transfer, we need to pass through the
-            # finished_sending and finished_recving buffers.
-            new_output = EMPTY_MODEL_RUNNER_OUTPUT
-            if (output.finished_sending or output.finished_recving
-                    or output.finished_loading_dict):
-                new_output = copy.copy(new_output)
-                new_output.finished_sending = output.finished_sending
-                new_output.finished_recving = output.finished_recving
-                new_output.finished_loading_dict = output.finished_loading_dict
-            output = new_output
+            # kv_connector_output
+            if (not kv_connector_output.finished_sending
+                    and not kv_connector_output.finished_recving):
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+            output.kv_connector_output = kv_connector_output
+            return output
 
         assert isinstance(output, ModelRunnerOutput)
         return output
