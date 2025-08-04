@@ -116,11 +116,11 @@ class EplbState:
 
     Shape: (window_size, num_moe_layers, num_local_physical_experts)
     """
-    new_physical_to_logical_map: torch.tensor
+    new_physical_to_logical_map: torch.Tensor
 
-    new_logical_to_physical_map: torch.tensor
+    new_logical_to_physical_map: torch.Tensor
 
-    new_logical_replica_count: torch.tensor
+    new_logical_replica_count: torch.Tensor
 
     expert_load_window_step: int = 0
     """
@@ -200,7 +200,7 @@ class EplbState:
         """
         Build the initial EPLB state.
         """
-        is_async = parallel_config.is_async
+        is_async = parallel_config.eplb_async
 
         physical_to_logical_map_list = (
             cls.build_initial_global_physical_to_logical_map(
@@ -265,8 +265,6 @@ class EplbState:
         eplb_step_interval = parallel_config.eplb_step_interval
         expert_rearrangement_step = max(
             0, eplb_step_interval - eplb_step_interval // 4)
-
-#--------------------------------------各种原因重启后仍有专家负载数据保留的情况---------------------------------------------
         if global_expert_load is not None:
             ep_group = get_ep_group().device_group
             assert global_expert_load.shape == (model.num_moe_layers,
@@ -308,7 +306,6 @@ class EplbState:
             physical_to_logical_map = new_physical_to_logical_map.to(device)
             logical_to_physical_map.copy_(new_logical_to_physical_map)
             logical_replica_count.copy_(new_logical_replica_count)
-#----------------------------------------------------------------------------------------------------------------
         model.set_eplb_state(
             expert_load_pass,
             logical_to_physical_map,
@@ -557,9 +554,9 @@ class EplbState:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                loop.run_until_complete(self.tansfer_run_periodically(model=model, is_profile=is_profile, rank_mapping=rank_mapping))
+                loop.run_until_complete(self.transfer_run_periodically(model=model, is_profile=is_profile, rank_mapping=rank_mapping))
             except Exception as e:
-                print(f"async loop error (Rank {rank}): {e}")
+                logger.error(f"async loop error (Rank {rank}): {e}")
             finally:
                 loop.close()
 
@@ -580,15 +577,15 @@ class EplbState:
                         old_global_expert_indices=self.physical_to_logical_map,
                         new_global_expert_indices=self.new_physical_to_logical_map,
                         expert_weights=model.expert_weights,
-                        expert_weights_buffer=self.buffer,
+                        expert_weights_buffer=self.expert_buffer,
                         is_profile=is_profile,
                         layer=self.layer,
                         cuda_stream=experts_stream,
                         rank_mapping=rank_mapping,
                     )
                     self.ep_buffer_ready = True
-                    if stream is not None:
-                        stream.synchronize()  
+                    if experts_stream is not None:
+                        experts_stream.synchronize()  
                 finally:
                     # release lock
                     self.buffer_lock.release()
@@ -600,7 +597,7 @@ class EplbState:
 
 
     def move_to_workspace(self, model: MixtureOfExperts,is_profile: bool = False):
-        with asyncio.to_thread(self.buffer_lock.acquire):
+        with self.buffer_lock:
             move_from_buffer(
                 expert_weights=model.expert_weights[self.layer],
                 expert_weights_buffer=self.buffer,
@@ -626,14 +623,13 @@ class EplbState:
             max_physical_slots = self.new_logical_to_physical_map.shape[-1]
             assert max_physical_slots <= self.logical_to_physical_map.shape[-1]
             self.new_logical_to_physical_map = torch.nn.functional.pad(
-                new_logical_to_physical_map,
+                self.new_logical_to_physical_map,
                 (0,
                  self.logical_to_physical_map.shape[-1] - max_physical_slots),
                 value=-1,
             )
             self.logical_to_physical_map.copy_(self.new_logical_to_physical_map)
             self.logical_replica_count.copy_(self.new_logical_replica_count)
-        print("eplb rearrange done")
 
     @staticmethod
     def recv_state() -> tuple[torch.Tensor, torch.Tensor]:
