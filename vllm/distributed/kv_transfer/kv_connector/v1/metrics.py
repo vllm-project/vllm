@@ -122,11 +122,11 @@ class KVTransferLogging:
         self.reset()
 
     def reset(self):
-        self.transfer_stats = defaultdict[KVConnectorType,
+        self.transfer_stats = defaultdict["KVConnectorType",
                                           list[KVTransferStats]](list)
 
-    def observe(self, transfer_stats: dict[KVConnectorType,
-                                           KVTransferStatsType]):
+    def observe(self, transfer_stats: dict["KVConnectorType",
+                                           KVTransferStats]):
         # Called periodically when connector syncs with the scheduler.
         # Note that this is not the same as the logging interval.
         # We expect transfer_stats to be aggregated across all workers.
