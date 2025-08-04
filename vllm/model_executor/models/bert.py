@@ -25,7 +25,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 
@@ -606,9 +605,6 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
             assert self.bert.config.vocab_size < (1 << TOKEN_TYPE_SHIFT)
             assert input_ids is not None
             _encode_token_type_ids(input_ids, token_type_ids)
-
-            if (synchronize := current_platform.synchronize) is not None:
-                synchronize()
 
         return self.bert(input_ids=input_ids,
                          position_ids=positions,

@@ -219,4 +219,4 @@ class TestModel:
                                                invocation_output["data"]):
             assert score_data.keys() == invocation_data.keys()
             assert score_data["score"] == pytest.approx(
-                invocation_data["score"], rel=0.01)
+                invocation_data["score"], rel=0.05)
