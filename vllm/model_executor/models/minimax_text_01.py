@@ -448,22 +448,13 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
     def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor,
                                attn_metadata):
         hidden = []
-        if attn_metadata.num_decode_tokens > 0:
-            hidden.append(
-                self._decode_infer(q, k, v, kv_cache, state_indices_tensor,
-                                   attn_metadata))
         for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
             if _prefill_idx >= len(attn_metadata.query_start_loc):
                 break
             if _prefill_idx >= len(state_indices_tensor):
                 break
-
-            if envs.VLLM_USE_V1:
-                # prefills are packed at end of batch
-                offset = getattr(attn_metadata, "num_decodes", 0)
-            else:
-                offset = 0
-
+            # prefills are packed at end of batch in V1
+            offset = attn_metadata.num_decode_tokens if envs.VLLM_USE_V1 else 0
             _start = attn_metadata.query_start_loc[offset + _prefill_idx]
             _end = attn_metadata.query_start_loc[offset + _prefill_idx + 1]
             slot_id = state_indices_tensor[offset + _prefill_idx]
@@ -482,6 +473,15 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
                 layer_idx=self.layer_idx)
             hidden.append(out_slice.contiguous())
 
+        if attn_metadata.num_decode_tokens > 0:
+            hidden_decode = self._decode_infer(q, k, v, kv_cache,
+                                               state_indices_tensor,
+                                               attn_metadata)
+            if envs.VLLM_USE_V1:
+                hidden.insert(0, hidden_decode)
+            else:
+                hidden.append(hidden_decode)
+
         if not hidden:
             return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
 
@@ -490,10 +490,17 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
 
     def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor,
                       attn_metadata):
-        q = q[:attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
-        k = k[:attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
-        v = v[:attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
-        slot_id = state_indices_tensor[:attn_metadata.num_decode_tokens]
+        if not envs.VLLM_USE_V1:
+            q = q[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
+            k = k[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
+            v = v[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
+            num_prefills = getattr(attn_metadata, "num_prefills", 0)
+            slot_id = state_indices_tensor[num_prefills:]
+        else:
+            q = q[:attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
+            k = k[:attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
+            v = v[:attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
+            slot_id = state_indices_tensor[:attn_metadata.num_decodes]
         hidden = linear_decode_forward_triton(q, k, v, kv_cache, self.tp_slope,
                                               slot_id, 32)
         return hidden
@@ -1012,7 +1019,8 @@ class MiniMaxText01Model(nn.Module):
                 **kwargs) -> Union[torch.Tensor, IntermediateTensors]:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
-
+        if not envs.VLLM_USE_V1 and attn_metadata is None:
+            return None
         if "request_ids_to_seq_ids" not in kwargs:
             kwargs["request_ids_to_seq_ids"] = {}
         if "finished_requests_ids" not in kwargs:
