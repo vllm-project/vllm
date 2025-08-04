@@ -3,7 +3,7 @@
 This guide covers optimization strategies and performance tuning for vLLM V1.
 
 !!! tip
-    Running out of memory? Consult [this guide](./conserving_memory.md) on how to conserve memory
+    Running out of memory? Consult [this guide](./conserving_memory.md) on how to conserve memory.
 
 ## Preemption
 
