@@ -34,22 +34,22 @@ class ConstantList(Generic[T], Sequence):
         self._x = x
 
     def append(self, item):
-        raise Exception("Cannot append to a constant list")
+        raise TypeError("Cannot append to a constant list")
 
     def extend(self, item):
-        raise Exception("Cannot extend a constant list")
+        raise TypeError("Cannot extend a constant list")
 
     def insert(self, item):
-        raise Exception("Cannot insert into a constant list")
+        raise TypeError("Cannot insert into a constant list")
 
     def pop(self, item):
-        raise Exception("Cannot pop from a constant list")
+        raise TypeError("Cannot pop from a constant list")
 
     def remove(self, item):
-        raise Exception("Cannot remove from a constant list")
+        raise TypeError("Cannot remove from a constant list")
 
     def clear(self):
-        raise Exception("Cannot clear a constant list")
+        raise TypeError("Cannot clear a constant list")
 
     def index(self,
               item: T,
@@ -78,10 +78,10 @@ class ConstantList(Generic[T], Sequence):
         ...
 
     def __setitem__(self, item: Union[int, slice], value: Union[T, list[T]]):
-        raise Exception("Cannot set item in a constant list")
+        raise TypeError("Cannot set item in a constant list")
 
     def __delitem__(self, item):
-        raise Exception("Cannot delete item from a constant list")
+        raise TypeError("Cannot delete item from a constant list")
 
     def __iter__(self):
         return iter(self._x)
