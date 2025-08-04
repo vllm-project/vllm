@@ -186,13 +186,17 @@ direct_register_custom_op(
 )
 
 def get_symm_input_impl(dummy: torch.Tensor, size: List[int], dtype: torch.dtype) -> torch.Tensor:
-    with use_symmetric_memory(_WORLD) as sm:
+    # with use_symmetric_memory(_WORLD) as sm:
+    #     mem = torch.empty(size, dtype=dtype, device='cuda')
+    #     sm.tag(mem)
+    with torch.cuda.use_mem_pool(get_nccl_mem_pool()):
         mem = torch.empty(size, dtype=dtype, device='cuda')
-        sm.tag(mem)
+        mem.symmetric_memory = True
+        _WORLD.device_communicator.pynccl_comm.register_comm_window(mem)
     return mem
 
 def get_symm_input_fake(dummy: torch.Tensor, size: List[int], dtype: torch.dtype) -> torch.Tensor:
-    return torch.empty(size, dtype=dtype, device='cuda')
+    return torch.ones(size, dtype=dtype, device='cuda')*10
 
 direct_register_custom_op(
     op_name="get_symm_input",
@@ -205,12 +209,13 @@ class simple_model(torch.nn.Module):
     def __init__(self):
         super().__init__()
         # self.symm_input = get_symm_input(size, dtype)
+        self.dummy = torch.empty(1, device='cuda', dtype=torch.float32)
     def forward(self, x):
         y =torch.add(x,x)
         z = torch.add(y,x)
         # Create a dummy tensor to satisfy PyTorch's requirement
-        dummy = torch.empty(1, device='cuda', dtype=torch.float32)
-        symm_input = torch.ops.vllm.get_symm_input(dummy, size, dtype)
+        #dummy = torch.empty(1, device='cuda', dtype=torch.float32)
+        symm_input = torch.ops.vllm.get_symm_input(self.dummy, size, dtype)
         torch.add(z,x,out=symm_input)
         torch.ops.vllm.pynccl_all_reduce(
             symm_input,
@@ -221,21 +226,21 @@ class simple_model(torch.nn.Module):
         return b
 
 # important settings
-use_compiled = True
-
-# first test
-size = [1024,1024]
-dtype = torch.float16
+use_compiled = False
 model = simple_model()
 if use_compiled:
     compiled_model = torch.compile(model, backend="inductor", fullgraph=True)
+
+# first test
+size = [2048,2048]
+dtype = torch.float16
 x = torch.full(size, local_rank, dtype=dtype, device="cuda")
 for _ in range(10):
     y = compiled_model(x) if use_compiled else model(x)
 print(y)
 
 # continue second test
-size = [512,512]
+size = [4096,4096]
 dtype = torch.float16
 x = torch.full(size, local_rank*2, dtype=dtype, device="cuda")
 for _ in range(10):
@@ -243,7 +248,7 @@ for _ in range(10):
 print(y)
 
 # continue third test
-size = [2048,2048]
+size = [8192,8192]
 dtype = torch.float16
 x = torch.full(size, local_rank*4, dtype=dtype, device="cuda")
 for _ in range(10):

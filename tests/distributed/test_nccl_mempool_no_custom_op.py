@@ -192,6 +192,7 @@ def get_symm_input_impl(dummy: torch.Tensor, size: List[int], dtype: torch.dtype
     return mem
 
 def get_symm_input_fake(dummy: torch.Tensor, size: List[int], dtype: torch.dtype) -> torch.Tensor:
+    print("in FAKE IT SHOULD NOT BE CALLED")
     return torch.empty(size, dtype=dtype, device='cuda')
 
 direct_register_custom_op(
@@ -211,9 +212,13 @@ class simple_model(torch.nn.Module):
         # Create a dummy tensor to satisfy PyTorch's requirement
         # dummy = torch.empty(1, device='cuda', dtype=torch.float32)
         # symm_input = torch.ops.vllm.get_symm_input(dummy, size, dtype)
-        with use_symmetric_memory(_WORLD) as sm:
+        # with use_symmetric_memory(_WORLD) as sm:
+        #     symm_input = torch.empty_like(z)
+        #     sm.tag(symm_input)
+        with torch.cuda.use_mem_pool(get_nccl_mem_pool()):
             symm_input = torch.empty_like(z)
-            sm.tag(symm_input)
+            symm_input.symmetric_memory = True
+            _WORLD.device_communicator.pynccl_comm.register_comm_window(symm_input)
         torch.add(z,x,out=symm_input)
         _WORLD.device_communicator.pynccl_comm.all_reduce(symm_input, symm_input)
         # torch.ops.vllm.pynccl_all_reduce(
@@ -228,7 +233,7 @@ class simple_model(torch.nn.Module):
 use_compiled = False
 
 # first test
-size = [1024,1024]
+size = [2048,2048]
 dtype = torch.float16
 model = simple_model()
 if use_compiled:

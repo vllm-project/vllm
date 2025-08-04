@@ -49,7 +49,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if use_pynccl and self.world_size > 1:
             # initialize the mem pool to avoid torch dynamo error
-            get_nccl_mem_pool()
+            #get_nccl_mem_pool()
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group,
                 device=self.device,
