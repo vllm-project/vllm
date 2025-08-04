@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.routing_simulator import (
-    RoutingSimulator)
+    DistributionBasedRouting, RoutingSimulator)
 
 
 @pytest.fixture
@@ -117,69 +117,40 @@ def test_routing_strategy_integration(monkeypatch, device):
         ) < num_experts, f"Invalid expert ID (too large) for {strategy}"
 
 
-def test_direct_routing_simulator_methods(device):
-    """Test the new routing methods directly."""
-    pytest.importorskip("vllm.model_executor.layers.fused_moe.layer")
+def test_distribution_based_routing_with_custom_strategy():
+    """Test registering and using DistributionBasedRouting with custom
+    parameters."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    # Register custom distribution-based strategy
+    custom_strategy = DistributionBasedRouting(distribution="normal",
+                                               mean=2.0,
+                                               std=0.5)
+    RoutingSimulator.register_strategy("custom_normal", custom_strategy)
 
-    # Test parameters
-    num_tokens = 24
-    hidden_size = 12
-    num_experts = 4
-    top_k = 2
+    # Test data
+    num_tokens = 60
+    hidden_size = 48
+    num_experts = 6
+    top_k = 3
 
-    # Create test data
     hidden_states = torch.randn(num_tokens, hidden_size, device=device)
     router_logits = torch.randn(num_tokens, num_experts, device=device)
 
-    # Test the new select_experts_with_simulated_strategy method
-    strategies = ["uniform_random", "weighted_random"]
-
-    for strategy in strategies:
-        topk_weights, topk_ids = \
-            FusedMoE.select_experts_with_simulated_strategy(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                top_k=top_k,
-                strategy=strategy,
-                indices_type=torch.long)
-
-        # Verify output shapes
-        assert topk_weights.shape == (
-            num_tokens, top_k), f"Wrong weights shape for {strategy}"
-        assert topk_ids.shape == (num_tokens,
-                                  top_k), f"Wrong ids shape for {strategy}"
-
-
-def test_static_methods():
-    """Test that static methods work without instantiation."""
-    # Test that we can register strategies without creating an instance
-    from vllm.model_executor.layers.fused_moe.routing_simulator import (
-        UniformRandomRouting)
-
-    # Register a custom strategy
-    custom_strategy = UniformRandomRouting()
-    name = "custom_uniform"
-    RoutingSimulator.register_strategy(name, custom_strategy)
-
-    # Verify it was registered
-    available_strategies = RoutingSimulator.get_available_strategies()
-    assert name in available_strategies
-
-    # Test that we can use the static simulate_routing method
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    hidden_states = torch.randn(10, 8, device=device)
-    router_logits = torch.randn(10, 4, device=device)
-
+    # Use the custom strategy
     topk_weights, topk_ids = RoutingSimulator.simulate_routing(
         hidden_states=hidden_states,
         router_logits=router_logits,
-        strategy_name=name,
-        top_k=2)
+        strategy_name="custom_normal",
+        top_k=top_k)
 
-    assert topk_weights.shape == (10, 2)
-    assert topk_ids.shape == (10, 2)
+    # Check output shapes
+    assert topk_weights.shape == (num_tokens, top_k)
+    assert topk_ids.shape == (num_tokens, top_k)
+
+    # Check that expert IDs are valid
+    assert topk_ids.min() >= 0
+    assert topk_ids.max() < num_experts
 
 
 def test_instance_compatibility():
