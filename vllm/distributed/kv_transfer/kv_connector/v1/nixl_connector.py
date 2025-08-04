@@ -21,8 +21,10 @@ from vllm import envs
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole, KVConnectorType)
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferStats, NixlKVTransferStats
+    CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole,
+    KVConnectorType)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVTransferStats, NixlKVTransferStats)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -198,7 +200,7 @@ class NixlConnector(KVConnectorBase_V1):
         self.connector_worker.set_host_xfer_buffer_ops(copy_operation)
 
     def get_finished(self,
-                     finished_req_ids: set[str]) -> tuple[set[str], set[str], Optional[dict[KVConnectorType, KVTransferStats]]]:
+                     finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
@@ -1019,7 +1021,10 @@ class NixlConnectorWorker:
             self.copy_blocks(self.device_kv_caches, self.host_xfer_buffers,
                              meta.local_block_ids, meta.local_block_ids, "d2h")
 
-    def get_finished(self) -> tuple[set[str], set[str], Optional[dict[KVConnectorType, KVTransferStats]]]:
+    def get_finished(
+        self
+    ) -> tuple[set[str], set[str], Optional[dict[KVConnectorType,
+                                                 KVTransferStats]]]:
         """
         Get requests that are done sending or recving on this specific worker.
         The scheduler process (via the MultiprocExecutor) will use this output
@@ -1054,9 +1059,7 @@ class NixlConnectorWorker:
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
 
-        # Clear stats for next iteration
-        xfer_stats = self.xfer_stats.clone_and_reset()
-        return done_sending, done_recving, {KVConnectorType.NIXL: xfer_stats}
+        return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
         """
@@ -1104,7 +1107,9 @@ class NixlConnectorWorker:
                     transfer_duration = 11.0
                     bytes_transferred = 1111
                     num_blocks_transferred = 1111
-                    self.xfer_stats.record_transfer(transfer_duration, bytes_transferred, num_blocks_transferred)
+                    self.xfer_stats.record_transfer(transfer_duration,
+                                                    bytes_transferred,
+                                                    num_blocks_transferred)
                 elif xfer_state == "PROC":
                     in_progress = True
                     continue
@@ -1251,7 +1256,6 @@ class NixlConnectorWorker:
         self.nixl_wrapper.transfer(handle)
 
         # Use handle to check completion in future step().
-        # TODO (NickLucche) surface xfer elapsed time
         self._recving_transfers[request_id].append(
             (handle, time.perf_counter()))
 
@@ -1287,6 +1291,13 @@ class NixlConnectorWorker:
             for block_id in block_ids:
                 descs_ids.append(reg_id * num_blocks + block_id)
         return descs_ids
+
+    def get_kv_transfer_stats(self) -> dict[KVConnectorType, KVTransferStats]:
+        """
+        Get the KV transfer stats for the connector.
+        """
+        # Clear stats for next iteration
+        return {KVConnectorType.NIXL: self.xfer_stats.clone_and_reset()}
 
 
 @contextlib.contextmanager
