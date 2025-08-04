@@ -47,9 +47,10 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         is_pin_memory_available, round_up, supports_dynamo)
 from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata,
+    AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     make_kv_sharing_fast_prefill_attention_metadata,
-    make_local_attention_virtual_batches)
+    make_local_attention_virtual_batches,
+    reorder_batch_to_split_decodes_and_prefills)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
@@ -68,7 +69,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
-    KVConnectorModelRunnerMixin)
+    KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from ..sample.logits_processor import LogitsProcessorManager
@@ -329,6 +330,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.kv_sharing_fast_prefill_logits_indices = torch.zeros(
                 self.max_num_tokens, dtype=torch.int32, device=self.device)
 
+        self.reorder_batch_threshold: Optional[int] = None
+
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
         Update the order of requests in the batch based on the attention
@@ -347,20 +350,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if len(self.kv_cache_config.kv_cache_groups) == 0:
             return
 
-        self.attn_metadata_builders[0].reorder_batch(self.input_batch,
-                                                     scheduler_output)
-
-        # For models with multiple KV cache groups, the groups should agree on
-        # the same order of requests. We ensure this by only allowing the first
-        # group to reorder the batch and asserting that all other groups do not
-        # reorder the batch.
-        # TODO(tdoublep): make this more flexible so that any group can
-        # re-order the batch (not only the first).
-        # TODO(tdoublep): verify this during engine init instead of at runtime
-        for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
-            batch_reordered = self.attn_metadata_builders[i].reorder_batch(
-                self.input_batch, scheduler_output)
-            assert not batch_reordered
+        if self.reorder_batch_threshold is not None:
+            reorder_batch_to_split_decodes_and_prefills(
+                self.input_batch,
+                scheduler_output,
+                decode_threshold=self.reorder_batch_threshold)
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
@@ -1429,8 +1423,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
-        finished_sending: Optional[set[str]],
-        finished_recving: Optional[set[str]],
+        kv_connector_output: Optional[KVConnectorOutput],
     ) -> ModelRunnerOutput:
         assert self.input_batch.num_reqs ==\
             len(self.input_batch.pooling_params), \
@@ -1465,8 +1458,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
-            finished_sending=finished_sending,
-            finished_recving=finished_recving,
+            kv_connector_output=kv_connector_output,
         )
 
     @torch.inference_mode()
@@ -1570,8 +1562,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 skip_cuda_graphs=skip_cuda_graphs,
-        ):
-            self.maybe_setup_kv_connector(scheduler_output)
+        ), self.maybe_get_kv_connector_output(
+                scheduler_output) as kv_connector_output:
 
             model_output = self.model(
                 input_ids=input_ids,
@@ -1583,10 +1575,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     device=self.device,
                 ),
             )
-
-            self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = (
-                self.get_finished_kv_transfers(scheduler_output))
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
@@ -1603,20 +1591,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             == "external_launcher" and len(get_pp_group().ranks) > 0
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
-            if not broadcast_pp_output:
-                if finished_sending or finished_recving:
-                    hidden_states.finished_sending = finished_sending
-                    hidden_states.finished_recving = finished_recving
-                return hidden_states
             assert isinstance(hidden_states, IntermediateTensors)
+            if not broadcast_pp_output:
+                hidden_states.kv_connector_output = kv_connector_output
+                return hidden_states
             get_pp_group().send_tensor_dict(hidden_states.tensors,
                                             all_gather_group=get_tp_group())
             logits = None
         else:
             if self.input_batch.pooling_params:
                 return self._pool(hidden_states, num_scheduled_tokens,
-                                  num_scheduled_tokens_np, finished_sending,
-                                  finished_recving)
+                                  num_scheduled_tokens_np, kv_connector_output)
 
             sample_hidden_states = hidden_states[logits_indices]
             logits = self.model.compute_logits(sample_hidden_states, None)
@@ -1766,8 +1751,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
-            finished_sending=finished_sending,
-            finished_recving=finished_recving,
+            kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
         )
 
@@ -2619,12 +2603,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.device,
         )
 
-        if (self.full_cuda_graph
-                and not attn_metadata_builder_i.full_cudagraph_supported):
-            raise ValueError(
-                f"Full CUDAGraph not supported for "
-                f"{attn_backend_i.__name__}. Turn off CompilationConfig."
-                f"full_cuda_graph or use a different attention backend.")
+        if self.full_cuda_graph:
+            if attn_metadata_builder_i.attn_cudagraph_support == \
+                AttentionCGSupport.NEVER:
+                raise ValueError(f"Full CUDAGraph not supported for "
+                                 f"{attn_backend_i.__name__}. Turn off "
+                                 f"CompilationConfig.full_cuda_graph or use a "
+                                 f" different attention backend.")
+            if attn_metadata_builder_i.attn_cudagraph_support == \
+                AttentionCGSupport.PURE_DECODE_ONLY:
+                # Limit the max cudagraph size to the max number of
+                # sequences for pure decode only cudagraph backend,
+                # whose max_query_len is 1.
+                self.cudagraph_batch_sizes = [
+                    size for size in self.cudagraph_batch_sizes
+                    if size <= self.scheduler_config.max_num_seqs
+                ]
         return attn_backend_i, attn_metadata_builder_i
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
@@ -2643,6 +2637,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     kv_cache_spec, kv_cache_group_spec.layer_names))
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
+
+        # Calculate reorder batch threshold (if neeeded)
+        self.calculate_reorder_batch_threshold()
 
         if len(self.attn_backends) > 0:
             return
@@ -2677,6 +2674,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.attn_backends.append(attn_backend)
             self.attn_metadata_builders.append(attn_metadata_builder)
             self.is_encoder_only_model = True
+
+    def calculate_reorder_batch_threshold(self) -> None:
+        """
+        Check that if any backends reorder batches; that the reordering
+        is compatible (e.g., decode threshold is the same)
+        """
+        for attn_metadata_builder_i in self.attn_metadata_builders:
+            # check that if any backends reorder batches; that the reordering
+            # is compatible (e.g., decode threshold is the same)
+            reorder_batch_threshold_i = (
+                attn_metadata_builder_i.reorder_batch_threshold)
+            if reorder_batch_threshold_i is not None:
+                if self.reorder_batch_threshold is not None:
+                    if reorder_batch_threshold_i != \
+                        self.reorder_batch_threshold:
+                        raise ValueError(
+                            f"Attention backend reorders decodes with "
+                            f"threshold {reorder_batch_threshold_i} but other "
+                            f"backend uses threshold "
+                            f"{self.reorder_batch_threshold}")
+                else:
+                    self.reorder_batch_threshold = reorder_batch_threshold_i
 
     def may_reinitialize_input_batch(self,
                                      kv_cache_config: KVCacheConfig) -> None:

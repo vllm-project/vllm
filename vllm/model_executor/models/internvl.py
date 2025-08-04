@@ -665,14 +665,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
     """Basic image-only ProcessingInfo for InternVL-style models."""
 
     @abstractmethod
-    def get_hf_processor(
-        self,
-        *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        **kwargs: object,
-    ) -> BaseInternVLProcessor:
+    def get_hf_processor(self, **kwargs: object) -> BaseInternVLProcessor:
         raise NotImplementedError
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -882,27 +875,12 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
 
         return max(max_frames_per_video, 1)
 
-    def get_hf_processor(
-        self,
-        *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        **kwargs: object,
-    ) -> InternVLProcessor:
-        if min_dynamic_patch is not None:
-            kwargs["min_dynamic_patch"] = min_dynamic_patch
-        if max_dynamic_patch is not None:
-            kwargs["max_dynamic_patch"] = max_dynamic_patch
-        if dynamic_image_size is not None:
-            kwargs["dynamic_image_size"] = dynamic_image_size
-
-        kwargs["video_token"] = self.get_video_token()
-
+    def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
         return self.ctx.init_processor(
             InternVLProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
+            video_token=self.get_video_token(),
             **kwargs,
         )
 
