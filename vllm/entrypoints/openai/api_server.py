@@ -49,6 +49,8 @@ from vllm.entrypoints.chat_utils import (load_chat_template,
                                          resolve_mistral_chat_template)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.nixl_side_channel_server import (
+    set_up_nixl_side_channel_server)
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
 # yapf conflicts with isort for this block
@@ -1953,12 +1955,24 @@ async def run_server_worker(listen_address,
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
 
+        # create shared SSL configuration
+        from vllm.entrypoints.ssl import SSLConfig
+        ssl_config = SSLConfig.from_args(args)
+
+        nixl_side_channel_server = None
+        try:
+            nixl_side_channel_server = await \
+                set_up_nixl_side_channel_server(vllm_config, ssl_config)
+        except Exception as e:
+            logger.warning("Failed to start NIXL side channel server: %s", e)
+
         logger.info("Starting vLLM API server %d on %s", server_index,
                     listen_address)
+
         shutdown_task = await serve_http(
             app,
             sock=sock,
-            enable_ssl_refresh=args.enable_ssl_refresh,
+            ssl_config=ssl_config,
             host=args.host,
             port=args.port,
             log_level=args.uvicorn_log_level,
@@ -1979,6 +1993,12 @@ async def run_server_worker(listen_address,
     try:
         await shutdown_task
     finally:
+        if nixl_side_channel_server is not None:
+            try:
+                await nixl_side_channel_server.stop_async()
+            except Exception as e:
+                logger.warning("Error stopping NIXL side channel server: %s",
+                               e)
         sock.close()
 
 
