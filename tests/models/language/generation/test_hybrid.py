@@ -389,9 +389,7 @@ def test_distributed_correctness(
     )
 
 
-@pytest.mark.parametrize(
-    "model",
-    ["nvidia/Nemotron-H-8B-Base-8K", "mistralai/Mamba-Codestral-7B-v0.1"])
+@pytest.mark.parametrize("model", ["Zyphra/Zamba2-1.2B-instruct"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_full_cuda_graph(
