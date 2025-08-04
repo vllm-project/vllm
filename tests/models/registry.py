@@ -207,10 +207,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                              trust_remote_code=True),
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-A13B-Instruct",
                                                trust_remote_code=True),
-    # TODO: Remove is_available_online once their config.json is fixed
-    "HunYuanDenseV1ForCausalLM":_HfExamplesInfo("tencent/Hunyuan-7B-Instruct-0124",
+
+    "HunYuanDenseV1ForCausalLM":_HfExamplesInfo("tencent/Hunyuan-0.5B-Instruct",
                                                 trust_remote_code=True,
-                                                is_available_online=False),
+                                               revision="4970b23cedaf745f963779b4eae68da281e8c6ca"),
     "HCXVisionForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
         trust_remote_code=True),
