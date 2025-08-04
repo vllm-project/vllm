@@ -271,7 +271,7 @@ __device__ __forceinline__ _B16x8 convert_b8x8_custom(const _B8x8 input) {
   return ret;
 }
 
-#define _MI308 // enable for MI308 when full fp8 attention required for better performance
+//#define __FP8__PA__ // enable for MI308 when full fp8 attention required for better performance
 typedef union u64_cvt {
   half f16x4[4];
   int16_t b16x4[4];
@@ -303,13 +303,8 @@ val = max(val, __shfl_down(val, offset, hipWarpSize)); // Using max() for reduct
 }
 return val;
 }
+#endif
 
-__device__ float warpReduceMin(float val) {
-for (int offset = hipWarpSize / 2; offset > 0; offset /= 2) {
-val = min(val, __shfl_down(val, offset, hipWarpSize)); // Using max() for reduction
-}
-return val;
-}
 
 // grid (num_seqs, num_partitions,num_kv_heads)
 // block (256)
