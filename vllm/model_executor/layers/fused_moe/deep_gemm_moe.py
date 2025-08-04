@@ -53,7 +53,9 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     _, K, N = w2.size()
     if not _valid_deep_gemm_shape(M, N, K):
         logger.debug_once(
-            "DeepGemm disabled: unaligned problem size. M: %s, N: %s, K: %s",
+            "DeepGemm disabled for this problem size. M: %s, N: %s, K: %s. "
+            "This log means we will fallback to triton "
+            "for this specific shape for further speed up.",
             M,
             N,
             K,
