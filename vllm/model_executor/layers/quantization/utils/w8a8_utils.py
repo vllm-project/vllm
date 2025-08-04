@@ -176,7 +176,8 @@ def rocm_per_tensor_w8a8_scaled_mm_fake(
         qinput: torch.Tensor, weight: torch.Tensor, out_dtype: torch.dtype,
         scale_a: torch.Tensor, scale_b: torch.Tensor, bias: torch.Tensor,
         input_2d: torch.Tensor) -> torch.Tensor:
-    return qinput.new_empty((*qinput.shape[:-1], weight.shape[0]))
+    return qinput.new_empty((*qinput.shape[:-1], weight.shape[1]),
+                            dtype=out_dtype)
 
 
 def rocm_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
