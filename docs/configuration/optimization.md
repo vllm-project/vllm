@@ -129,7 +129,31 @@ Data parallelism replicates the entire model across multiple GPU sets and proces
 Data parallelism can be combined with the other parallelism strategies and is set by `data_parallel_size=N`.
 Note that MoE layers will be sharded according to the product of the tensor parallel size and data parallel size.
 
-## Multi-modal Processing
+## Input Processing
+
+### Parallel Processing
+
+You can run input processing in parallel via [API server scale-out](../serving/data_parallel_deployment.md#internal-load-balancing).
+This is useful when input processing (which is run inside the API server)
+becomes a bottleneck compared to model execution (which is run inside engine core)
+and you have excess CPU capacity.
+
+```console
+# Run 4 API processes and 1 engine core process
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4
+
+# Run 4 API processes and 2 engine core processes
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
+```
+
+!!! note
+    API server scale-out is only available for online inference.
+
+!!! note
+    [Multi-modal IPC cache](#ipc-cache) is disabled when API server scale-out is enabled
+    because it requires a one-to-one correspondance between API and engine core processes.
+
+## Multi-Modal Caching
 
 ### Processor Cache
 
@@ -167,25 +191,3 @@ llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
 llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
           mm_ipc_cache_gb=0)
 ```
-
-### Parallel Processing
-
-You can run input processing in parallel via [API server scale-out](../serving/data_parallel_deployment.md#internal-load-balancing).
-This is useful when input processing (which is run inside the API server)
-becomes a bottleneck compared to model execution (which is run inside engine core)
-and you have excess CPU capacity.
-
-```console
-# Run 4 API processes and 1 engine core process
-vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4
-
-# Run 4 API processes and 2 engine core processes
-vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
-```
-
-!!! note
-    API server scale-out is only available for online inference.
-
-!!! note
-    Multi-modal IPC cache is disabled when API server scale-out is enabled
-    because it requires a one-to-one correspondance between API and engine core processes.
