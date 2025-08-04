@@ -1,41 +1,49 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import abc
 import copy
-from dataclasses import dataclass, field
-from typing import Union
+from collections import defaultdict
+from typing import TYPE_CHECKING, Union
+
+import msgspec
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorType)
 
-class KVTransferStats(abc.ABC):
 
-    @abc.abstractmethod
+# Sent to scheduler process to aggregate stats.
+class KVTransferStats(msgspec.Struct,
+                      array_like=True,
+                      omit_defaults=True,
+                      tag_field="type"):
+
     def reset(self):
         raise NotImplementedError
 
-    @abc.abstractmethod
     def aggregate(self, other: "KVTransferStats") -> "KVTransferStats":
         raise NotImplementedError
 
-    @abc.abstractmethod
     def reduce(self) -> dict[str, Union[int, float]]:
         raise NotImplementedError
 
+    def is_empty(self) -> bool:
+        raise NotImplementedError
 
-@dataclass
-class NixlKVTransferStats(KVTransferStats):
+
+class NixlKVTransferStats(KVTransferStats, tag="NIXL"):
     """Container for transfer performance metrics"""
     # Setup buffers
     # TODO we could use specialized data structures to avoid copying the data
     # or even just maintaining order when merging. Let's keep it simple for now.
-    transfer_durations: list[float] = field(
+    transfer_durations: list[float] = msgspec.field(
         default_factory=list)  # Transfer durations in seconds
-    bytes_transferred: list[int] = field(
+    bytes_transferred: list[int] = msgspec.field(
         default_factory=list)  # Bytes transferred per transfer
-    num_blocks_transferred: list[int] = field(
+    num_blocks_transferred: list[int] = msgspec.field(
         default_factory=list)  # Number of blocks per transfer
     num_successful_transfers: int = 0
 
@@ -104,29 +112,45 @@ class NixlKVTransferStats(KVTransferStats):
         }
 
 
+# Union type for serialization/deserialization
+KVTransferStatsType = Union[NixlKVTransferStats]
+
+
 class KVTransferLogging:
 
     def __init__(self):
         self.reset()
 
     def reset(self):
-        self.transfer_stats: list[KVTransferStats] = []
+        self.transfer_stats = defaultdict[KVConnectorType,
+                                          list[KVTransferStats]](list)
 
-    def observe(self, transfer_stats: KVTransferStats):
+    def observe(self, transfer_stats: dict[KVConnectorType,
+                                           KVTransferStatsType]):
         # Called periodically when connector syncs with the scheduler.
         # Note that this is not the same as the logging interval.
-        self.transfer_stats.append(transfer_stats)
+        # We expect transfer_stats to be aggregated across all workers.
+        if len(transfer_stats):
+            for connector_type, stats in transfer_stats.items():
+                if not stats.is_empty():
+                    self.transfer_stats[connector_type].append(stats)
 
     def log(self, log_fn=logger.info):
         """Log transfer metrics periodically, similar to throughput logging"""
         if self.transfer_stats:
             # Produce a single cumulative stats object for the last time
-            # interval. Resulting key/value mapping is logged. This allows
-            # different connectors to log their own stats.
-            cumulative_stats = self.transfer_stats[0]
-            for stats in self.transfer_stats[1:]:
-                cumulative_stats.aggregate(stats)
-            log_fn("KV Transfer metrics: %s", cumulative_stats.reduce())
+            # interval from the recorded observations. This allows different
+            # connectors to log their own set of stats.
+            for connector_type, stats_list in self.transfer_stats.items():
+                if len(stats_list) > 0:
+                    cumulative_stats = stats_list[0]
+                    for stats in stats_list[1:]:
+                        cumulative_stats.aggregate(stats)
+                    cumulative_stats = cumulative_stats.reduce()
+                    fields = ", ".join(f"{k}={v}"
+                                       for k, v in cumulative_stats.items())
+                    log_fn("KVConnectorType: %s, KV Transfer metrics: %s",
+                           connector_type, fields)
 
             # example
             # logger.info(
