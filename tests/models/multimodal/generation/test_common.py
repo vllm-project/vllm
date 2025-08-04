@@ -355,7 +355,7 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
     ),
     "glm4v": VLMTestInfo(
-        models=["THUDM/glm-4v-9b"],
+        models=["zai-org/glm-4v-9b"],
         test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|assistant|>",  # noqa: E501
         single_image_prompts=IMAGE_ASSETS.prompts({
@@ -374,7 +374,7 @@ VLM_TEST_SETTINGS = {
         marks=[large_gpu_mark(min_gb=32)],
     ),
     "glm4_1v": VLMTestInfo(
-        models=["THUDM/GLM-4.1V-9B-Thinking"],
+        models=["zai-org/GLM-4.1V-9B-Thinking"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|assistant|>",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<|begin_of_image|><|image|><|end_of_image|>", # noqa: E501
@@ -388,7 +388,7 @@ VLM_TEST_SETTINGS = {
         marks=[large_gpu_mark(min_gb=32)],
     ),
     "glm4_1v-video": VLMTestInfo(
-        models=["THUDM/GLM-4.1V-9B-Thinking"],
+        models=["zai-org/GLM-4.1V-9B-Thinking"],
         # GLM4.1V require include video metadata for input
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=4096,
