@@ -5,7 +5,7 @@ from matplotlib.colors import LinearSegmentedColormap
 
 model = "llama3.1-8B"
 dataset = "instructcode"
-method1 = "eagle"
+method1 = "ngram"
 method2 = "eagle3"
 
 def get_datapath(method):
@@ -66,4 +66,4 @@ ax2.set_ylabel("# of Accepted Tokens", labelpad=10)         # Set right y-axis l
 plt.title(f"Diff between {method2} - {method1} acceptance stats for {dataset}")
 
 plt.tight_layout()
-plt.savefig(f"figures/{model}/diff_{method2}_{method1}_{dataset}_acceptance_stats.png")
+plt.savefig(f"figures/{model}/diff_{method2}_{method1}_{dataset}_acceptance_stats.pdf")
