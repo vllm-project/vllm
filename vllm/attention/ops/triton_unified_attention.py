@@ -402,7 +402,7 @@ def kernel_unified_attention_3d(
     if USE_QQ_BIAS:
         qq_bias_row_ptrs = (qq_bias_ptr + query_pos[:, None] * qq_bias_stride_0
                             )  # shape: [BLOCK_M]
-        
+
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
     max_seq_prefix_len = context_len + q_block_local_idx * BLOCK_Q + (
