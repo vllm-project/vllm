@@ -5,12 +5,13 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorType
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVTransferStats)
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorType)
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
     from vllm.v1.engine.output_processor import RequestState
 
@@ -116,7 +117,7 @@ class IterationStats:
                            engine_core_timestamp: float, is_prefilling: bool,
                            prompt_len: int, req_stats: RequestStateStats,
                            lora_stats: Optional[LoRAStats],
-                           kv_transfer_stats: Optional[dict[KVConnectorType,
+                           kv_transfer_stats: Optional[dict["KVConnectorType",
                                                             KVTransferStats]]):
         num_new_generation_tokens = len(output.new_token_ids)
 

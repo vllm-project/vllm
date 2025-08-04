@@ -13,7 +13,7 @@ from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole, KVConnectorType)
+    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVTransferStats)
 from vllm.logger import init_logger
@@ -23,6 +23,8 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E501
+        KVConnectorType)
     from vllm.forward_context import ForwardContext
     from vllm.v1.request import Request
 
@@ -267,9 +269,10 @@ class MultiConnector(KVConnectorBase_V1):
                              f"All connectors must use the same layout.")
         return next(iter(layouts), None)
 
-    def get_kv_transfer_stats(self) -> dict[KVConnectorType, KVTransferStats]:
+    def get_kv_transfer_stats(
+            self) -> dict["KVConnectorType", KVTransferStats]:
         # Group xfer stats by connector type.
-        xfer_stats_by_connector = dict[KVConnectorType, KVTransferStats]()
+        xfer_stats_by_connector = dict["KVConnectorType", KVTransferStats]()
         for c in self._connectors:
             xfer_stats = c.get_kv_transfer_stats()
             xfer_stats_by_connector.update(xfer_stats)

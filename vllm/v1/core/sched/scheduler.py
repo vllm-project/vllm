@@ -957,6 +957,9 @@ class Scheduler(SchedulerInterface):
             if new_token_ids or pooler_output is not None \
                 or kv_transfer_params:
 
+                kv_transfer_stats = (
+                    model_runner_output.kv_connector_output.kv_transfer_stats
+                    if model_runner_output.kv_connector_output else None)
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -971,12 +974,12 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
-                        kv_transfer_stats=model_runner_output.
-                        kv_transfer_stats,
+                        kv_transfer_stats=kv_transfer_stats,
                     ))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
+
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
             self.running = remove_all(self.running, stopped_running_reqs)

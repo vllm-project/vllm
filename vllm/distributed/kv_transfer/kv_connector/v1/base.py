@@ -376,7 +376,8 @@ class KVConnectorBase_V1(ABC):
 
         return None
 
-    def get_kv_transfer_stats(self) -> dict[KVConnectorType, KVTransferStats]:
+    def get_kv_transfer_stats(
+            self) -> dict[KVConnectorType, "KVTransferStats"]:
         """
         Get the KV transfer stats for the connector. Results are aggregated by
         connector type, hence a dict is returned.

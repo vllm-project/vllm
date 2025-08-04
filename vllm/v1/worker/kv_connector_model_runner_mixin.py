@@ -121,10 +121,12 @@ class KVConnectorModelRunnerMixin:
 
             output.finished_sending, output.finished_recving = (
                 kv_connector.get_finished(scheduler_output.finished_req_ids))
-
+            output.kv_transfer_stats = (
+                KVConnectorModelRunnerMixin.get_kv_transfer_stats())
             kv_connector.clear_connector_metadata()
 
-    def get_kv_transfer_stats(self) -> dict[KVConnectorType, KVTransferStats]:
+    @staticmethod
+    def get_kv_transfer_stats() -> dict[KVConnectorType, KVTransferStats]:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_kv_transfer_stats()
         return {}
