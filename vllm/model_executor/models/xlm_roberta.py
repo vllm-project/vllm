@@ -22,7 +22,8 @@ from .interfaces import SupportsCrossEncoding
 
 
 class XLMRobertaEmbeddingModel(BertEmbeddingModel):
-    """A model that uses XLM-RoBERTa to provide embedding functionalities.
+    """A model that uses XLM-RoBERTa to provide embeddings
+    functionalities.
 
    This class encapsulates the BertModel and provides an interface for
    embedding operations and customized pooling functions.
@@ -81,7 +82,8 @@ class XLMRobertaEmbeddingModel(BertEmbeddingModel):
 
 
 class XLMRobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
-    """A model that uses XLM-RoBERTa to provide sequence classification functionality.
+    """A model that uses XLM-RoBERTa to provide sequence classification
+    functionality.
 
    This class encapsulates the BertModel and provides an interface for
    classification operations and cross-encoding.
@@ -92,7 +94,7 @@ class XLMRobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
    """
 
     is_pooling_model = True
-    # Weight mapping for Jina-style checkpoints that might be used with XLM-RoBERTa
+    # Weight mapping for Jina-style checkpoints with XLM-RoBERTa
     jina_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             'emb_ln': "embeddings.LayerNorm",
@@ -139,8 +141,43 @@ class XLMRobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         })
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.jina_to_vllm_mapper)
+        weights_list = list(weights)
+
+        # Check if this is a Jina-style checkpoint by looking for unique
+        # Jina weight names
+        is_jina_checkpoint = any("emb_ln" in name or "mixer.Wqkv" in name
+                                 or "mixer.out_proj" in name
+                                 for name, _ in weights_list)
+
+        if is_jina_checkpoint:
+            # For Jina-style checkpoints, apply the Jina mapper
+            loader = AutoWeightsLoader(self)
+            return loader.load_weights(weights_list,
+                                       mapper=self.jina_to_vllm_mapper)
+        else:
+            # For standard XLM-RoBERTa checkpoints
+            has_roberta_prefix = any(
+                name.startswith("roberta.") for name, _ in weights_list)
+
+            if has_roberta_prefix:
+                # For models with the `roberta.` prefix, map roberta weights
+                # to the roberta submodule and leave classifier weights as-is
+                mapper = WeightsMapper(
+                    orig_to_new_prefix={"roberta.": "roberta."})
+            else:
+                # For models without the `roberta.` prefix, add the roberta
+                # prefix but only for weights that go to the roberta submodule
+                def weight_mapping_fn(name: str) -> str:
+                    # Don't prefix classifier weights
+                    if name.startswith("classifier."):
+                        return name
+                    # Add roberta prefix for all other weights
+                    return f"roberta.{name}"
+
+                mapper = WeightsMapper(orig_to_new_func=weight_mapping_fn)
+
+            loader = AutoWeightsLoader(self)
+            return loader.load_weights(weights_list, mapper=mapper)
 
     def forward(
         self,
