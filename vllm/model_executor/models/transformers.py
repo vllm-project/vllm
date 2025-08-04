@@ -90,7 +90,7 @@ def log_replacement(name: str, old_module: nn.Module, new_module: nn.Module):
 def replace_linear_class(
     linear: nn.Linear, style: Literal["colwise", "rowwise"],
     quant_config: QuantizationConfig
-) -> Union[ColumnParallelLinear, RowParallelLinear]:
+) -> Union[ColumnParallelLinear, RowParallelLinear, ReplicatedLinear]:
     """
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
 
