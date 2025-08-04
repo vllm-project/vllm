@@ -367,7 +367,6 @@ class BertWithRopeBlock(nn.Module):
         return hidden_states
 
 
-@support_torch_compile
 class BertWithRopeEncoder(nn.Module):
 
     def __init__(self,
@@ -475,6 +474,7 @@ class BertWithRope(nn.Module, SupportsQuant):
         return loaded_params
 
 
+@support_torch_compile
 class NomicBertModel(BertWithRope):
     # for https://huggingface.co/nomic-ai/nomic-bert-2048
 
@@ -495,6 +495,7 @@ class NomicBertModel(BertWithRope):
         })
 
 
+@support_torch_compile
 class GteNewModel(BertWithRope):
     # for https://huggingface.co/Alibaba-NLP/new-impl
 
@@ -550,6 +551,7 @@ class SnowflakeGteNewModel(GteNewModel):
         })
 
 
+@support_torch_compile
 class JinaRobertaModel(BertWithRope):
     # for https://huggingface.co/jinaai/jina-embeddings-v3
 
