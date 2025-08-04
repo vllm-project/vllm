@@ -989,7 +989,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 a2_gscale=self.layer.w2_input_scale_quant,
                 out_dtype=moe.in_dtype,
                 use_nvfp4_w4a4=True,
-                use_dp=moe.moe_parallel_config.dp_size > 1,
                 ep_rank=moe.moe_parallel_config.ep_rank,
                 ep_size=moe.moe_parallel_config.ep_size,
                 tp_rank=moe.moe_parallel_config.tp_rank,

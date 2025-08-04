@@ -11,36 +11,16 @@ from tests.kernels.moe.utils import make_test_weights, per_token_cast_to_fp8
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig
 from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
-# Fused experts and PrepareFinalize imports
-from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    BatchedDeepGemmExperts)
-from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
-    BatchedTritonOrDeepGemmExperts)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEParallelConfig, FusedMoEQuantConfig)
-from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedTritonExperts, NaiveBatchedExperts)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
-from vllm.model_executor.layers.fused_moe.layer import (FusedMoEMethodBase,
-                                                        TritonExperts)
+from vllm.model_executor.layers.fused_moe.layer import FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
-    TritonOrDeepGemmExperts)
 from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
 
 from .parallel_utils import ProcessGroupInfo
-
-if has_pplx():
-    from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-        PplxPrepareAndFinalize)
-if has_deep_ep():
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
-        DeepEPHTPrepareAndFinalize)
-    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
-        DeepEPLLPrepareAndFinalize)
+from .mk_objects import prepare_finalize_info, expert_info, make_fused_experts
 
 
 def _describe_tensor(t: Optional[torch.Tensor], name: str) -> str:
@@ -67,6 +47,10 @@ class Config:
     world_size: int
 
     torch_trace_dir_path: Optional[str] = None
+
+    def __post_init__(self):
+        if self.quant_config is None:
+            self.quant_config = FusedMoEQuantConfig()
 
     def describe(self) -> str:
         s = ""
@@ -95,33 +79,23 @@ class Config:
 
     @property
     def quant_dtype(self) -> Union[torch.dtype, str, None]:
-        if self.quant_config is None:
-            return None
         return self.quant_config.quant_dtype
 
     @property
     def is_per_act_token_quant(self) -> bool:
-        if self.quant_config is None:
-            return False
         return self.quant_config.per_act_token_quant
 
     @property
     def is_per_tensor_act_quant(self) -> bool:
-        if self.quant_config is None:
-            return False
         return (not self.is_per_act_token_quant
                 and self.quant_block_shape is None)
 
     @property
     def is_per_out_ch_quant(self) -> bool:
-        if self.quant_config is None:
-            return False
         return self.quant_config.per_out_ch_quant
 
     @property
     def quant_block_shape(self) -> Optional[list[int]]:
-        if self.quant_config is None:
-            return None
         return self.quant_config.block_shape
 
     @property
@@ -130,35 +104,30 @@ class Config:
         return self.topks
 
     @property
-    def topk_ids_dtype(self) -> Optional[torch.dtype]:
-        topk_ids_dtype = None
-        if self.prepare_finalize_type == PplxPrepareAndFinalize:
-            topk_ids_dtype = torch.uint32
-        elif self.prepare_finalize_type in [
-                DeepEPHTPrepareAndFinalize, DeepEPLLPrepareAndFinalize
-        ]:
-            topk_ids_dtype = torch.int64
-        return topk_ids_dtype
-
-    @property
     def num_local_experts(self) -> int:
         return self.E // self.world_size
 
     def make_env_data(self) -> tuple[VllmConfig, dict[Any, Any]]:
         """
-        make env data for vllm launch. 
+        make env data for vllm launch.
         """
         vllm_config = VllmConfig()
         vllm_config.parallel_config.data_parallel_size = self.world_size
         vllm_config.parallel_config.enable_expert_parallel = True
 
         env_dict = {
-            "VLLM_ALL2ALL_BACKEND": self.all2all_backend(),
             "VLLM_USE_DEEP_GEMM": str(int(self.needs_deep_gemm())),
         }
+
+        backend = self.all2all_backend()
+        if backend is not None:
+            env_dict.update(
+                {"VLLM_ALL2ALL_BACKEND": backend})
+
         if self.fused_moe_chunk_size is not None:
             env_dict.update(
                 {"VLLM_FUSED_MOE_CHUNK_SIZE": str(self.fused_moe_chunk_size)})
+
         return vllm_config, env_dict
 
     def is_fp8_block_quantized(self):
@@ -166,85 +135,58 @@ class Config:
                 and self.quant_block_shape is not None)
 
     def is_batched_prepare_finalize(self):
-        return self.prepare_finalize_type in [
-            PplxPrepareAndFinalize, DeepEPLLPrepareAndFinalize
-        ]
+        info = prepare_finalize_info(self.prepare_finalize_type)
+        return mk.FusedMoEActivationFormat.BatchedExperts == info.activation_format
 
     def is_batched_fused_experts(self):
-        return self.fused_experts_type in [
-            CutlassExpertsFp8, BatchedDeepGemmExperts, BatchedTritonExperts,
-            NaiveBatchedExperts, BatchedTritonOrDeepGemmExperts
-        ]
+        info = expert_info(self.fused_experts_type)
+        return mk.FusedMoEActivationFormat.BatchedExperts == info.activation_format
 
     def is_standard_fused_experts(self):
-        return self.fused_experts_type in [
-            CutlassExpertsFp8, DeepGemmExperts, TritonOrDeepGemmExperts,
-            TritonExperts
-        ]
+        info = expert_info(self.fused_experts_type)
+        return mk.FusedMoEActivationFormat.Standard == info.activation_format
 
     def is_fe_16bit_supported(self):
-        return self.fused_experts_type in [
-            BatchedTritonExperts, BatchedTritonOrDeepGemmExperts,
-            NaiveBatchedExperts, TritonExperts
-        ]
+        info = expert_info(self.fused_experts_type)
+        return torch.bfloat16 in info.supported_dtypes
 
     def is_fe_fp8_supported(self):
-        return self.fused_experts_type in [
-            BatchedDeepGemmExperts,
-            BatchedTritonExperts,
-            BatchedTritonOrDeepGemmExperts,
-            CutlassExpertsFp8,
-            DeepGemmExperts,
-            TritonExperts,
-            TritonOrDeepGemmExperts,
-            NaiveBatchedExperts,
-        ]
+        info = expert_info(self.fused_experts_type)
+        return torch.float8_e4m3fn in info.supported_dtypes
 
     def is_fe_block_fp8_supported(self):
-        return self.fused_experts_type in [
-            BatchedDeepGemmExperts,
-            BatchedTritonOrDeepGemmExperts,
-            DeepGemmExperts,
-            TritonExperts,
-            TritonOrDeepGemmExperts,
-            BatchedTritonExperts,
-            NaiveBatchedExperts,
-        ]
+        info = expert_info(self.fused_experts_type)
+        return (torch.float8_e4m3fn in info.supported_dtypes and
+                info.blocked_quantization_support)
 
     def is_fe_supports_chunking(self):
-        return self.fused_experts_type in [
-            CutlassExpertsFp8, DeepGemmExperts, TritonOrDeepGemmExperts,
-            TritonExperts
-        ]
+        info = expert_info(self.fused_experts_type)
+        return info.supports_chunking
+
+    def supports_expert_map(self):
+        info = expert_info(self.fused_experts_type)
+        return info.supports_expert_map
 
     def needs_deep_gemm(self):
-        return self.fused_experts_type in [
-            BatchedDeepGemmExperts,
-            DeepGemmExperts,
-        ]
+        info = expert_info(self.fused_experts_type)
+        return info.needs_deep_gemm
 
     def needs_pplx(self):
-        return self.prepare_finalize_type in [PplxPrepareAndFinalize]
+        info = prepare_finalize_info(self.prepare_finalize_type)
+        return info.backend == "pplx"
 
     def needs_deep_ep(self):
-        return self.prepare_finalize_type in [
-            DeepEPHTPrepareAndFinalize, DeepEPLLPrepareAndFinalize
-        ]
+        info = prepare_finalize_info(self.prepare_finalize_type)
+        return (info.backend == "deepep_high_throughput" or
+                info.backend == "deepep_low_latency")
 
     def all2all_backend(self):
-        if self.needs_pplx():
-            return "pplx"
-        if self.prepare_finalize_type == DeepEPHTPrepareAndFinalize:
-            return "deepep_high_throughput"
-        if self.prepare_finalize_type == DeepEPLLPrepareAndFinalize:
-            return "deepep_low_latency"
-        return "naive"
+        info = prepare_finalize_info(self.prepare_finalize_type)
+        return info.backend
 
     def needs_all2all(self):
-        return self.prepare_finalize_type in [
-            PplxPrepareAndFinalize, DeepEPHTPrepareAndFinalize,
-            DeepEPLLPrepareAndFinalize
-        ]
+        info = prepare_finalize_info(self.prepare_finalize_type)
+        return info.backend is not None and info.backend != "naive"
 
     def is_valid(self):
         # Check prepare-finalize and fused-experts compatibility
@@ -428,7 +370,6 @@ class RankTensors:
                             dtype=dtype)
         topk_weights, topk_ids, _ = fused_topk(hidden_states, score, topk,
                                                False)
-        topk_ids = topk_ids.to(config.topk_ids_dtype)
 
         # distribute topk_ids evenly
         for mi in range(m):
@@ -436,7 +377,7 @@ class RankTensors:
         topk_ids = topk_ids.to(device=torch.cuda.current_device())
 
         expert_map = None
-        if config.world_size > 1:
+        if config.world_size > 1 and config.supports_expert_map():
             expert_map = torch.full((global_num_experts, ),
                                     fill_value=-1,
                                     dtype=torch.int32)
@@ -475,77 +416,6 @@ def reference_moe_impl(config: Config, weights: WeightTensors,
                          apply_router_weights_on_input=config.topk == 1)
 
 
-def make_fused_experts(
-        config: Config, moe: FusedMoEConfig,
-        num_dispatchers: int) -> mk.FusedMoEPermuteExpertsUnpermute:
-
-    use_fp8 = config.quant_dtype == torch.float8_e4m3fn
-    batch_kwargs = {
-        "max_num_tokens": moe.max_num_tokens,
-        "num_dispatchers": num_dispatchers,
-    }
-    quant_kwargs = {
-        "use_fp8_w8a8": use_fp8,
-        "use_int8_w8a8": False,
-        "use_int8_w8a16": False,
-        "use_int4_w4a16": False,
-        "block_shape": config.quant_block_shape,
-        "per_act_token_quant": config.is_per_act_token_quant,
-    }
-    deepgemm_kwargs = {"allow_deep_gemm": has_deep_gemm()}
-
-    if config.fused_experts_type == BatchedDeepGemmExperts:
-        kwargs = batch_kwargs | {
-            "block_shape": config.quant_block_shape,
-            "per_act_token_quant": config.is_per_act_token_quant,
-        }
-        print(f"Making BatchedDeepGemmExperts {kwargs} ...")
-        experts = BatchedDeepGemmExperts(**kwargs)
-    elif config.fused_experts_type == BatchedTritonExperts:
-        kwargs = batch_kwargs | quant_kwargs
-        print(f"Making BatchedTritonExperts {kwargs} ...")
-        experts = BatchedTritonExperts(**kwargs)
-    elif config.fused_experts_type == BatchedTritonOrDeepGemmExperts:
-        kwargs = batch_kwargs | quant_kwargs | deepgemm_kwargs
-        print(f"Making BatchedTritonOrDeepGemmExperts {kwargs} ...")
-        experts = BatchedTritonOrDeepGemmExperts(**kwargs)
-    elif config.fused_experts_type == DeepGemmExperts:
-        print("Making DeepGemmExperts () ...")
-        experts = DeepGemmExperts()
-    elif config.fused_experts_type == TritonExperts:
-        kwargs = quant_kwargs
-        print(f"Making TritonExperts {kwargs} ...")
-        experts = TritonExperts(**kwargs)
-    elif config.fused_experts_type == TritonOrDeepGemmExperts:
-        kwargs = quant_kwargs | deepgemm_kwargs
-        print(f"Making TritonOrDeepGemmExperts {kwargs} ...")
-        experts = TritonOrDeepGemmExperts(**kwargs)
-    elif config.fused_experts_type == NaiveBatchedExperts:
-        kwargs = batch_kwargs | quant_kwargs
-        print(f"Making NaiveBatchedExperts {kwargs} ...")
-        experts = NaiveBatchedExperts(**kwargs)
-    elif config.fused_experts_type == CutlassExpertsFp8:
-        use_batched_format = config.is_batched_prepare_finalize()
-        num_experts = (moe.num_local_experts
-                       if use_batched_format else moe.num_experts)
-        kwargs = {
-            "max_experts_per_worker": num_experts,
-            "out_dtype": moe.in_dtype,
-            "per_act_token_quant": config.is_per_act_token_quant,
-            "per_out_ch_quant": config.is_per_out_ch_quant,
-            "block_shape": config.quant_block_shape,
-            "num_dispatchers": num_dispatchers,
-            "use_batched_format": use_batched_format
-        }
-        print(f"Making CutlassExpertsFp8 {kwargs} ...")
-        experts = CutlassExpertsFp8(**kwargs)
-    else:
-        raise RuntimeError(
-            f"Unknown fused experts type: {config.fused_experts_type}")
-
-    return experts
-
-
 def make_modular_kernel(config: Config,
                         vllm_config: VllmConfig) -> mk.FusedMoEModularKernel:
 
@@ -572,6 +442,8 @@ def make_modular_kernel(config: Config,
         max_num_tokens=next_power_of_2(config.M),
     )
 
+    print(config.prepare_finalize_type)
+
     # make modular kernel
     prepare_finalize = None
     if config.needs_all2all():
@@ -580,7 +452,7 @@ def make_modular_kernel(config: Config,
     else:
         prepare_finalize = MoEPrepareAndFinalizeNoEP()
 
-    fused_experts = make_fused_experts(config, moe,
+    fused_experts = make_fused_experts(config.fused_experts_type, moe,
                                        prepare_finalize.num_dispatchers())
 
     modular_kernel = mk.FusedMoEModularKernel(
@@ -610,7 +482,7 @@ def run_modular_kernel(
         "w1": rank_weights.w1,
         "w2": rank_weights.w2,
         "topk_weights": rank_tensors.topk_weights,
-        "topk_ids": rank_tensors.topk_ids,
+        "topk_ids": rank_tensors.topk_ids.to(mk.prepare_finalize.topk_indices_dtype()),
         "expert_map": rank_tensors.expert_map,
         "w1_scale": rank_weights.w1_scale,
         "w2_scale": rank_weights.w2_scale,

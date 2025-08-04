@@ -15,13 +15,16 @@ from vllm.config import VllmConfig, current_platform, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
     BatchedTritonOrDeepGemmExperts)
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
+from vllm.model_executor.layers.fused_moe.cutlass_moe import (CutlassExpertsFp4,
+                                                              CutlassExpertsFp8,
+                                                              CutlassBatchedExpertsFp8)
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts)
 from vllm.model_executor.layers.fused_moe.layer import TritonExperts
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts)
 from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
 from .modular_kernel_tools.common import (Config, RankTensors, WeightTensors,
                                           reference_moe_impl,
@@ -32,12 +35,12 @@ from .modular_kernel_tools.mk_objects import (
 from .modular_kernel_tools.parallel_utils import (ProcessGroupInfo,
                                                   parallel_launch_with_config)
 
-# TODO (varun): These requirements are very strict and could be relaxed.
-has_all_packages = (has_deep_ep() and has_deep_gemm() and has_pplx())
+has_any_multi_gpu_package = (has_deep_ep() or has_deep_gemm() or has_pplx() or
+                             has_flashinfer_cutlass_fused_moe())
 
 meets_package_requirements = pytest.mark.skipif(
-    not has_all_packages,
-    reason="Requires deep_ep & deep_gemm & pplx packages",
+    not has_any_multi_gpu_package,
+    reason="Requires deep_ep or deep_gemm or pplx or flashinfer packages",
 )
 
 
@@ -150,7 +153,9 @@ def is_nyi_config(config: Config) -> bool:
         return unsupported_quant_config
 
     # cutlass kernels dont support expert_maps yet.
-    return config.fused_experts_type == CutlassExpertsFp8
+    return (config.fused_experts_type == CutlassExpertsFp8 or
+            config.fused_experts_type == CutlassBatchedExpertsFp8 or
+            config.fused_experts_type == CutlassExpertsFp4)
 
 
 @pytest.mark.parametrize("k", Ks)
@@ -166,7 +171,7 @@ def is_nyi_config(config: Config) -> bool:
 @meets_package_requirements
 def test_modular_kernel_combinations_multigpu(
         k: int, n: int, e: int, dtype: torch.dtype,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: Optional[FusedMoEQuantConfig],
         combination: tuple[mk.FusedMoEPrepareAndFinalize,
                            mk.FusedMoEPermuteExpertsUnpermute],
         fused_moe_chunk_size: Optional[int], world_size: int, pytestconfig):
@@ -204,10 +209,9 @@ def test_modular_kernel_combinations_multigpu(
     product(MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES, MK_FUSED_EXPERT_TYPES))
 @pytest.mark.parametrize("fused_moe_chunk_size", FUSED_MOE_CHUNK_SIZEs)
 @pytest.mark.parametrize("world_size", [1])
-@meets_package_requirements
 def test_modular_kernel_combinations_singlegpu(
         k: int, n: int, e: int, dtype: torch.dtype,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: Optional[FusedMoEQuantConfig],
         combination: tuple[mk.FusedMoEPrepareAndFinalize,
                            mk.FusedMoEPermuteExpertsUnpermute],
         fused_moe_chunk_size: Optional[int], world_size: int, pytestconfig):

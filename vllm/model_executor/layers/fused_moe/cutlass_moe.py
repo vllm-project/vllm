@@ -212,19 +212,14 @@ def run_cutlass_moe_fp8(
         output.copy_(c3[c_map].view(M * topk, K), non_blocking=True)
 
 
-# TODO (bnell): split class batched vs. non-batched?
-# maybe remove need for passing aq to workspace_shapes
-class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
+class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
-        max_experts_per_worker: int,
         out_dtype: Optional[torch.dtype],
         per_act_token_quant: bool,
         per_out_ch_quant: bool,
         block_shape: Optional[list[int]] = None,
-        num_dispatchers: Optional[int] = None,
-        use_batched_format: bool = False,
     ):
         super().__init__(
             FusedMoEQuantConfig(
@@ -233,64 +228,11 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
                 per_out_ch_quant=per_out_ch_quant,
                 block_shape=block_shape,
             ))
-        assert max_experts_per_worker > 0
-        assert not use_batched_format or num_dispatchers is not None
-        self.max_experts_per_worker = max_experts_per_worker
-        self.num_dispatchers = num_dispatchers
         self.out_dtype = out_dtype
-        self.use_batched_format = use_batched_format
-
-    @property
-    def activation_formats(
-        self
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        if self.use_batched_format:
-            return (mk.FusedMoEActivationFormat.BatchedExperts,
-                    mk.FusedMoEActivationFormat.BatchedExperts)
-        else:
-            return (mk.FusedMoEActivationFormat.Standard,
-                    mk.FusedMoEActivationFormat.Standard)
-
-    def supports_chunking(self) -> bool:
-        return not self.use_batched_format
-
-    def supports_expert_map(self) -> bool:
-        return not self.use_batched_format
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
-
-    def workspace_shapes(
-        self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
-        M: int,
-        N: int,
-        K: int,
-        topk: int,
-        global_num_experts: int,
-        local_num_experts: int,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
-        workspace1: tuple[int, ...] = ()
-        workspace2: tuple[int, ...] = ()
-        output: tuple[int, ...] = ()
-        if self.use_batched_format:
-            padded_M = aq.size(1)
-            num_dp = self.num_dispatchers
-            assert num_dp is not None
-            workspace1 = (self.max_experts_per_worker, padded_M * num_dp,
-                          max(N, K))
-            workspace2 = (self.max_experts_per_worker, padded_M * num_dp,
-                          (N // 2))
-            output = (self.max_experts_per_worker, padded_M, K)
-        else:
-            workspace1 = (M * topk, max(N, K))
-            workspace2 = (M * topk, N // 2)
-            output = (M * topk, K)
-        return (workspace1, workspace2, output,
-                self.out_dtype if self.out_dtype is not None else a.dtype)
 
     def apply(
         self,
@@ -323,6 +265,8 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
 
         activation_callable = lambda o, i: self.activation(activation, o, i)
 
+        use_batched_format = self.activation_formats[0] == mk.FusedMoEActivationFormat.BatchedExperts
+
         in_dtype = hidden_states.dtype
         run_cutlass_moe_fp8(
             output, hidden_states, w1, w2, topk_ids, activation_callable,
@@ -330,7 +274,112 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
             a2_scale, workspace13, workspace2, expert_num_tokens,
             self.out_dtype if self.out_dtype is not None else in_dtype,
             self.per_act_token_quant, self.per_out_ch_quant,
-            self.use_batched_format)
+            use_batched_format)
+
+
+class CutlassExpertsFp8(CutlassExpertsFp8Base):
+    def __init__(
+        self,
+        out_dtype: Optional[torch.dtype],
+        per_act_token_quant: bool,
+        per_out_ch_quant: bool,
+        block_shape: Optional[list[int]] = None,
+    ):
+        super().__init__(
+            out_dtype,
+            per_act_token_quant,
+            per_out_ch_quant,
+            block_shape,
+        )
+
+    @property
+    def activation_formats(
+        self
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (mk.FusedMoEActivationFormat.Standard,
+                mk.FusedMoEActivationFormat.Standard)
+
+    def supports_chunking(self) -> bool:
+        return True
+
+    def supports_expert_map(self) -> bool:
+        return True
+
+    def workspace_shapes(
+        self,
+        a: torch.Tensor,
+        aq: torch.Tensor,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        workspace1 = (M * topk, max(N, K))
+        workspace2 = (M * topk, N // 2)
+        output = (M * topk, K)
+        return (workspace1, workspace2, output,
+                self.out_dtype if self.out_dtype is not None else a.dtype)
+
+
+class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
+    def __init__(
+        self,
+        max_experts_per_worker: int,
+        num_dispatchers: int,
+        out_dtype: Optional[torch.dtype],
+        per_act_token_quant: bool,
+        per_out_ch_quant: bool,
+        block_shape: Optional[list[int]] = None,
+    ):
+        super().__init__(
+            out_dtype,
+            per_act_token_quant,
+            per_out_ch_quant,
+            block_shape,
+        )
+        assert max_experts_per_worker > 0
+        self.max_experts_per_worker = max_experts_per_worker
+        self.num_dispatchers = num_dispatchers
+
+    @property
+    def activation_formats(
+        self
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (mk.FusedMoEActivationFormat.BatchedExperts,
+                mk.FusedMoEActivationFormat.BatchedExperts)
+
+    def supports_chunking(self) -> bool:
+        return False
+
+    def supports_expert_map(self) -> bool:
+        return False
+
+    # TODO(bnell): maybe remove need for passing aq to workspace_shapes
+    def workspace_shapes(
+        self,
+        a: torch.Tensor,
+        aq: torch.Tensor,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        padded_M = aq.size(1)
+        num_dp = self.num_dispatchers
+        assert num_dp is not None
+        workspace1 = (self.max_experts_per_worker, padded_M * num_dp,
+                      max(N, K))
+        workspace2 = (self.max_experts_per_worker, padded_M * num_dp,
+                      (N // 2))
+        output = (self.max_experts_per_worker, padded_M, K)
+        return (workspace1, workspace2, output,
+                self.out_dtype if self.out_dtype is not None else a.dtype)
 
 
 def cutlass_moe_fp8(
@@ -396,11 +445,9 @@ def cutlass_moe_fp8(
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
         CutlassExpertsFp8(
-            max_experts_per_worker=num_experts,
             out_dtype=a.dtype,
             per_act_token_quant=per_act_token,
             per_out_ch_quant=per_out_ch,
-            use_batched_format=False,
         ),
     )
 
@@ -835,16 +882,6 @@ def run_cutlass_block_scaled_fused_experts(
     k = w1_q.size(1)
     n = w2_q.size(1)
 
-    expert_offsets = torch.empty((num_experts + 1, ),
-                                 dtype=torch.int32,
-                                 device="cuda")
-    problem_sizes1 = torch.empty((num_experts, 3),
-                                 dtype=torch.int32,
-                                 device="cuda")
-    problem_sizes2 = torch.empty((num_experts, 3),
-                                 dtype=torch.int32,
-                                 device="cuda")
-
     topk = topk_ids.size(1)
 
     a_q, a1_scale = _fp8_quantize(a,
@@ -852,6 +889,16 @@ def run_cutlass_block_scaled_fused_experts(
                                   per_act_token=False,
                                   block_shape=[128, 128])
     device = a_q.device
+
+    expert_offsets = torch.empty((num_experts + 1, ),
+                                 dtype=torch.int32,
+                                 device=device)
+    problem_sizes1 = torch.empty((num_experts, 3),
+                                 dtype=torch.int32,
+                                 device=device)
+    problem_sizes2 = torch.empty((num_experts, 3),
+                                 dtype=torch.int32,
+                                 device=device)
 
     a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
     c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
