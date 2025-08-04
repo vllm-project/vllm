@@ -3,7 +3,11 @@ import copy
 import torch
 from typing import Callable, ContextManager, List, Optional
 
-from vllm.compilation.nano_utils import (
+import torch.fx.graph_module
+
+from vllm.compilation.nanoflow.split_utils import (
+    analyze_graph,
+    split_graph,
     NanoOpInfo,
     NanoSplitConfig,
     FakeModule,
@@ -11,69 +15,61 @@ from vllm.compilation.nano_utils import (
     get_split_config,
     tag_graph,
 )
-from vllm.compilation.nano_split import (
-    analyze_graph,
-    concat_outputs,
-    split_computations,
-    split_inputs,
-)
+from vllm.config import CompilationConfig
 
 
 class NanoSplitManager:
     def __init__(
-        self, graph_module: torch.fx.GraphModule, max_nano_splits: int = 2
+        self, graph_module: torch.fx.GraphModule, compilation_config: CompilationConfig,
     ) -> None:
-        self.graph_module = graph_module
+        self.original_graph_module = graph_module
         self.original_graph = graph_module.graph
 
         # Nano split preparation
-        self.max_nano_splits = max_nano_splits
-        self.new_graphs = {1: self.original_graph}
+        # NOTE(yi): move this to compilation config
+        self.max_nano_splits = 2
+        # Initialize the base graph
+        tag_graph(
+            self.original_graph_module,
+            {
+                "vllm.unified_attention": "attention",
+                "vllm.unified_attention_with_output": "attention",
+                "vllm.all_reduce": "all_reduce",
+            },
+        )
+        self.graph_modules = {1: self.original_graph_module}
 
         # Runtime preparation
         self.cached_config: Optional[NanoSplitConfig] = None
         self.comm_stream = torch.cuda.Stream()
         self.comp_stream = torch.cuda.Stream()
         self.hook: Optional[Callable[[NanoOpInfo], ContextManager[None]]] = None
+        self.get_bs_fn = "get_batch_size"
+        self.split_fn = "split_input"
+        self.wrapper_fn = "op_wrapper"
+        setattr(self.original_graph_module, self.get_bs_fn, None)
+        setattr(self.original_graph_module, self.split_fn, None)
+        setattr(self.original_graph_module, self.wrapper_fn, None)
 
-        # Initialize the base graph
-        tag_graph(self.graph_module, {
-            "vllm.unified_attention": "attention",
-            "vllm.unified_attention_with_output": "attention",
-            "vllm.all_reduce": "all_reduce",
-        })
         splittable_inputs, base_graph = analyze_graph(self.original_graph)
-        for num_splits in range(2, max_nano_splits + 1):
+        for num_splits in range(2, self.max_nano_splits + 1):
             new_graph = copy.deepcopy(base_graph)
-            nano_batch_sizes = []
-            for i in range(num_splits):
-                nano_batch_sizes.append(
-                    new_graph.call_module(
-                        "get_batch_size",
-                        args=(i,),
-                        kwargs={},
-                    )
-                )
-            mapping = split_inputs(
-                new_graph, splittable_inputs, "split_input", num_splits
-            )
-            split_computations(
+            split_graph(
                 self.original_graph,
-                new_graph,
-                mapping,
-                nano_batch_sizes,
-                "op_wrapper",
-                num_splits,
+                out=new_graph,
+                splittable_inputs=splittable_inputs,
+                num_splits=num_splits,
+                get_bs_fn=self.get_bs_fn,
+                split_fn=self.split_fn,
+                wrapper_fn=self.wrapper_fn,
             )
-            concat_outputs(
-                self.original_graph,
-                new_graph,
-                mapping,
-            )
-            self.new_graphs[num_splits] = new_graph
-            print(new_graph)
-            self.graph_module.graph = new_graph
-            display_graph(self.graph_module, f"after nano split {num_splits}")
+            new_graph_module = torch.fx.GraphModule(self.original_graph_module, new_graph)
+            for name, _ in self.original_graph_module.named_modules():
+                if "." in name or name == "":
+                    continue
+                torch.fx.graph_module._copy_attr(self.original_graph_module, new_graph_module, name)
+            self.graph_modules[num_splits] = new_graph_module
+
 
     @staticmethod
     def get_batch_size(idx: int, cached_config: NanoSplitConfig):
@@ -107,13 +103,9 @@ class NanoSplitManager:
     def get_callable(self) -> Callable:
         def _forward(*args, **kwargs):
             if self.cached_config is None:
-                self.graph_module.graph = self.original_graph
-                return self.graph_module(*args, **kwargs)
+                return self.original_graph_module(*args, **kwargs)
 
             num_nano_batches = self.cached_config.num_nano_batches
-            # NOTE(yi): This can be time consuming
-            if self.graph_module.graph != self.new_graphs[num_nano_batches]:
-                self.graph_module.graph = self.new_graphs[num_nano_batches]
             comm_finished = [None for _ in range(num_nano_batches)]
             comp_finished = [None for _ in range(num_nano_batches)]
 
@@ -154,28 +146,25 @@ class NanoSplitManager:
             assert self.hook is not None
             op_wrapper = FakeModule(
                 NanoSplitManager.op_wrapper,
-                gm=self.graph_module,
+                gm=self.graph_modules[num_nano_batches],
                 hooks=[
                     set_stream,
                     nvtx_mark,
                     self.hook,
                 ],
             )
-            setattr(self.graph_module, "op_wrapper", op_wrapper)
             get_batch_size = FakeModule(
                 NanoSplitManager.get_batch_size,
                 cached_config=self.cached_config,
             )
-            setattr(self.graph_module, "get_batch_size", get_batch_size)
             split_input = FakeModule(
                 NanoSplitManager.split_input,
                 cached_config=self.cached_config,
             )
-            setattr(self.graph_module, "split_input", split_input)
-            output = self.graph_module(*args, **kwargs)
-            delattr(self.graph_module, "op_wrapper")
-            delattr(self.graph_module, "get_batch_size")
-            delattr(self.graph_module, "split_input")
+            setattr(self.graph_modules[num_nano_batches], self.wrapper_fn, op_wrapper)
+            setattr(self.graph_modules[num_nano_batches], self.get_bs_fn, get_batch_size)
+            setattr(self.graph_modules[num_nano_batches], self.split_fn, split_input)
+            output = self.graph_modules[num_nano_batches](*args, **kwargs)
             return output
 
         return _forward
@@ -188,7 +177,7 @@ class NanoSplitManager:
     ) -> NanoSplitConfig:
         self.cached_config = get_split_config(batch_size, num_tokens, cached_seqlens)
         return self.cached_config
-    
+
     def set_hooks(self, op_hook: Callable[[NanoOpInfo], ContextManager[None]]):
         self.hook = op_hook
 
@@ -196,10 +185,10 @@ class NanoSplitManager:
 _split_manager = None
 
 
-def get_callable(graph_module: torch.fx.GraphModule) -> Callable:
+def get_callable(graph_module: torch.fx.GraphModule, compilation_config: CompilationConfig) -> Callable:
     global _split_manager
     if _split_manager is None:
-        _split_manager = NanoSplitManager(graph_module)
+        _split_manager = NanoSplitManager(graph_module, compilation_config)
     return _split_manager.get_callable()
 
 
@@ -211,9 +200,8 @@ def prepare_nano_split(
     global _split_manager
     if _split_manager is None:
         raise ValueError("Split manager not initialized")
-    return _split_manager.prepare(
-        batch_size, num_tokens, cached_seqlens
-    )
+    return _split_manager.prepare(batch_size, num_tokens, cached_seqlens)
+
 
 def set_op_hook(op_hook: Callable[[NanoOpInfo], ContextManager[None]]):
     global _split_manager

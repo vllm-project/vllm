@@ -445,6 +445,7 @@ class ModelConfig:
         factors.append(self.override_generation_config)
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
+        factors.append(self.enable_nano_split)
         # hf_config can control how the model looks!
         factors.append(self.hf_config.to_json_string())
         str_factors = str(factors)

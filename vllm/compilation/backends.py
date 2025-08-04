@@ -14,7 +14,7 @@ import torch
 import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
-from vllm.compilation import nano_manager
+from vllm.compilation.nanoflow import manager as nano_manager
 import vllm.envs as envs
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
@@ -593,7 +593,10 @@ class VllmBackend:
         if not self.compilation_config.use_cudagraph or \
             not self.compilation_config.cudagraph_copy_inputs:
             if self.vllm_config.model_config.enable_nano_split:
-                return nano_manager.get_callable(self.split_gm)
+                return nano_manager.get_callable(
+                    self.split_gm,
+                    compilation_config=self.compilation_config
+                )
             else:
                 return self.split_gm
 

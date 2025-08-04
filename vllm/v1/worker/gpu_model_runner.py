@@ -45,6 +45,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, check_use_alibi, get_dtype_size,
                         is_pin_memory_available, round_up)
+from vllm.utils.nano_split import prepare_nano_split_and_set_hooks
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
@@ -792,10 +793,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 spec_decode_common_attn_metadata)
     
     def _prepare_nano_split(self, scheduler_output: "SchedulerOutput"):
-        from vllm.utils.nano_split import prepare_nano_split_and_set_hooks
         prepare_nano_split_and_set_hooks(
-            gpu_model_runner=self,
             scheduler_output=scheduler_output,
+            input_batch=self.input_batch,
+            attn_metadata_builders=self.attn_metadata_builders,
+            kv_cache_config=self.kv_cache_config
         )
 
     def _compute_cascade_attn_prefix_len(
@@ -1404,8 +1406,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # If attention doesn't support CUDA Graphs for this batch, but we
         # compiled with full CUDA graphs, we have to skip them entirely.
         skip_cuda_graphs = self.full_cuda_graph and not attention_cuda_graphs
-        if self.vllm_config.model_config.enable_nano_split:
-            self._prepare_nano_split(scheduler_output)
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
@@ -1417,6 +1417,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_cuda_graphs=skip_cuda_graphs,
         ):
             self.maybe_setup_kv_connector(scheduler_output)
+            if self.vllm_config.model_config.enable_nano_split:
+                self._prepare_nano_split(scheduler_output)
 
             model_output = self.model(
                 input_ids=input_ids,
