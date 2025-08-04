@@ -473,17 +473,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
 
-        if current_platform.is_hpu():
-            if layer.weight_scale.dim() > 1:
-                weight_scale = layer.weight_scale.transpose(0, 1)
-            else:
-                weight_scale = layer.weight_scale
-            return hpu_ops.apply_fp8_linear_hpu(input=x,
-                                                weight=layer.weight,
-                                                weight_scale=weight_scale,
-                                                input_scale=layer.input_scale,
-                                                bias=bias,
-                                                trans_B=False)
         return self.fp8_linear.apply(input=x,
                                      weight=layer.weight,
                                      weight_scale=layer.weight_scale,
