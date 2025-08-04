@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Optional
 
+import aiohttp
 import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
@@ -338,6 +339,24 @@ async def benchmark(
     else:
         raise ValueError(f"Unknown endpoint_type: {endpoint_type}")
 
+    # Reuses connections across requests to reduce TLS handshake overhead.
+    connector = aiohttp.TCPConnector(
+        limit=max_concurrency or 0,
+        limit_per_host=max_concurrency or 0,
+        ttl_dns_cache=300,
+        use_dns_cache=True,
+        keepalive_timeout=60,
+        enable_cleanup_closed=True,
+        force_close=False,
+        ssl=("https://" in api_url),
+    )
+
+    session = aiohttp.ClientSession(
+        connector=connector,
+        trust_env=True,
+        timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
+    )
+
     print("Starting initial single prompt test run...")
     test_prompt, test_prompt_len, test_output_len, test_mm_content = (
         input_requests[0].prompt,
@@ -361,7 +380,11 @@ async def benchmark(
     )
 
     test_output = await wait_for_endpoint(
-        request_func, test_input, timeout_seconds=ready_check_timeout_sec)
+        request_func,
+        test_input,
+        session,
+        timeout_seconds=ready_check_timeout_sec,
+    )
     if not test_output.success:
         raise ValueError(
             "Initial test run failed - Please make sure benchmark arguments "
@@ -386,7 +409,8 @@ async def benchmark(
                                          multi_modal_content=test_mm_content,
                                          ignore_eos=ignore_eos,
                                          extra_body=extra_body)
-        profile_output = await request_func(request_func_input=profile_input)
+        profile_output = await request_func(
+            request_func_input=profile_input, session=session)
         if profile_output.success:
             print("Profiler started")
 
@@ -412,12 +436,14 @@ async def benchmark(
     semaphore = (asyncio.Semaphore(max_concurrency)
                  if max_concurrency else None)
 
-    async def limited_request_func(request_func_input, pbar):
+    async def limited_request_func(request_func_input, session, pbar):
         if semaphore is None:
             return await request_func(request_func_input=request_func_input,
+                                      session=session,
                                       pbar=pbar)
         async with semaphore:
-            return await request_func(request_func_input=request_func_input,
+            return await request_func(request_func_input=request_func_input, 
+                                      session=session,
                                       pbar=pbar)
 
     benchmark_start_time = time.perf_counter()
@@ -469,6 +495,7 @@ async def benchmark(
         tasks.append(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input,
+                                     session=session,
                                      pbar=pbar)))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
@@ -580,9 +607,12 @@ async def benchmark(
             output_len=test_output_len,
             logprobs=logprobs,
         )
-        profile_output = await request_func(request_func_input=profile_input)
+        profile_output = await request_func(
+            request_func_input=profile_input, session=session)
         if profile_output.success:
             print("Profiler stopped")
+
+    await session.close()
     return result
 
 
