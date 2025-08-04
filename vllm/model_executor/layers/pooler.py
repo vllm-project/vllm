@@ -110,14 +110,12 @@ class Pooler(nn.Module, ABC):
             pooler_config=pooler_config,
             pooling_type=default_pooling_type,
         )
-        base_pooler = SimplePooler.from_config(resolved_config)
-        if classifier is None:
-            return base_pooler
+
+        pooling = PoolingMethod.from_pooling_type(resolved_config.pooling_type)
 
         return ClassifierPooler(
-            pooling=base_pooler.pooling,
+            pooling=pooling,
             classifier=classifier,
-            act_fn=base_pooler.head.activation,
         )
 
     @abstractmethod
@@ -555,7 +553,7 @@ class SimplePooler(Pooler):
         elif pooler_config.task == "encode":
             head = RewardPoolerHead()
         else:
-            head = PoolerHead(PoolerIdentity())
+            raise NotImplementedError(f"Unknown task: {pooler_config.task}")
         return cls(pooling, head)
 
     def __init__(self, pooling: PoolingMethod, head: PoolerHead) -> None:
@@ -651,14 +649,14 @@ class ClassifierPooler(Pooler):
     def __init__(
         self,
         pooling: PoolingFn,
-        classifier: ClassifierFn,
-        act_fn: PoolerActivation,
+        classifier: Optional[ClassifierFn],
+        act_fn: Optional[PoolerActivation] = None,
     ) -> None:
         super().__init__()
 
         self.pooling = pooling
         self.classifier = classifier
-        self.act_fn = act_fn
+        self.act_fn = act_fn or PoolerClassify()
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"classify", "score"}
@@ -670,23 +668,24 @@ class ClassifierPooler(Pooler):
     ) -> PoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
 
-        # apply classifier once on the full batch if possible
-        if isinstance(pooled_data, torch.Tensor):
-            pooled_output = self.classifier(pooled_data)
-        elif len({data.shape for data in pooled_data}) <= 1:
-            pooled_output = self.classifier(torch.stack(pooled_data))
-        else:
-            pooled_output = [self.classifier(data) for data in pooled_data]
+        if self.classifier is not None:
+            # apply classifier once on the full batch if possible
+            if isinstance(pooled_data, torch.Tensor):
+                pooled_data = self.classifier(pooled_data)
+            elif len({data.shape for data in pooled_data}) <= 1:
+                pooled_data = self.classifier(torch.stack(pooled_data))
+            else:
+                pooled_data = [self.classifier(data) for data in pooled_data]
 
         pooling_params = get_pooling_params(pooling_metadata)
         flags = [p.activation for p in pooling_params]
 
         if len(set(flags)) == 1:
-            scores = self.act_fn(pooled_output) if flags[0] else pooled_output
+            scores = self.act_fn(pooled_data) if flags[0] else pooled_data
         else:
             scores = [
                 self.act_fn(vecs) if f else vecs
-                for vecs, f in zip(pooled_output, flags)
+                for vecs, f in zip(pooled_data, flags)
             ]
 
         return build_output(scores)
