@@ -337,7 +337,9 @@ class InputBatch:
                 self.generators[req_index] = request.generator
 
             if sampling_params.logprobs is not None:
-                self.num_logprobs[req_id] = sampling_params.logprobs
+                self.num_logprobs[req_id] = (self.vocab_size
+                                             if sampling_params.logprobs == -1
+                                             else sampling_params.logprobs)
             if sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[
                     req_id] = sampling_params.prompt_logprobs
