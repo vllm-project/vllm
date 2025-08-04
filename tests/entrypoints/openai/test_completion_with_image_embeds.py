@@ -14,7 +14,7 @@ from ...conftest import ImageTestAssets
 from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
-MODEL_NAME = "/home/jovyan/llava-1.5-7b-hf"
+MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
 CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
 
 
