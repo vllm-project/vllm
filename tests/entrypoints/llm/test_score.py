@@ -11,7 +11,7 @@ from vllm.distributed import cleanup_dist_env_and_memory
 
 from ...models.utils import softmax
 
-MODEL_NAME = "BAAI/bge-reranker-v2-m3"
+MODEL_NAME = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
 
 
 @pytest.fixture(autouse=True)
@@ -22,7 +22,6 @@ def v1(run_with_both_engines):
     pass
 
 
-@pytest.mark.skip_v1
 @pytest.fixture(scope="module")
 def llm():
     # pytest caches the fixture so we use weakref.proxy to
