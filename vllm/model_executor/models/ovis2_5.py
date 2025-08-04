@@ -556,18 +556,19 @@ class Ovis2_5(nn.Module, SupportsMultiModal):
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
-        image_input = None
-        for input_key in kwargs:
-            if input_key == "pixel_values":
-                image_input = self._parse_and_validate_visual_input(
-                    False, **kwargs)
-            if input_key == "video_pixel_values":
-                image_input = self._parse_and_validate_visual_input(
-                    True, **kwargs)
-        if image_input is None:
-            return None
-        image_features = self._process_image_input(image_input)
-        return image_features
+        embeddings = []
+
+        # NOTE: _parse_and_validate_visual_input has side-effects and pops
+        # keys from kwargs. We process images first, then videos.
+        image_input = self._parse_and_validate_visual_input(False, **kwargs)
+        if image_input:
+            embeddings.extend(self._process_image_input(image_input))
+
+        video_input = self._parse_and_validate_visual_input(True, **kwargs)
+        if video_input:
+            embeddings.extend(self._process_image_input(video_input))
+
+        return tuple(embeddings) if embeddings else None
 
     def get_input_embeddings(
         self,
