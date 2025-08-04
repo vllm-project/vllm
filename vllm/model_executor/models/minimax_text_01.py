@@ -472,7 +472,6 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
                 self.BLOCK,
                 layer_idx=self.layer_idx)
             hidden.append(out_slice.contiguous())
-
         if attn_metadata.num_decode_tokens > 0:
             hidden_decode = self._decode_infer(q, k, v, kv_cache,
                                                state_indices_tensor,
@@ -514,7 +513,6 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
-
         if envs.VLLM_USE_V1:
             if attn_metadata is not None:
                 assert isinstance(attn_metadata, dict)
@@ -545,13 +543,11 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
             state_indices_tensor = kv_caches.state_indices_tensor
 
         decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
-
         if attn_metadata is None:
             hidden = torch.empty((q.shape[0], q.shape[1] * q.shape[2]),
                                  device=q.device,
                                  dtype=q.dtype)
         else:
-
             if not decode_only:
                 hidden = self._prefill_and_mix_infer(q, k, v, kv_cache,
                                                      state_indices_tensor,
@@ -668,7 +664,6 @@ class MiniMaxText01DecoderLayer(nn.Module):
         self._ilayer = layer_id
         self._irank = get_tensor_model_parallel_rank()
         self.prefix = prefix
-
         super().__init__()
 
         self.hidden_size = config.hidden_size
