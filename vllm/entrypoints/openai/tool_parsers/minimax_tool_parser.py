@@ -31,7 +31,7 @@ class MinimaxToolParser(ToolParser):
 
         self.tool_states: list[dict] = []
         self.current_tool_index: int = -1
-        
+
         self.tool_call_start_token: str = "<tool_calls>"
         self.tool_call_end_token: str = "</tool_calls>"
 
@@ -62,6 +62,7 @@ class MinimaxToolParser(ToolParser):
                 "tokens in the tokenizer. Falling back to string matching.")
 
     def preprocess_model_output(self, model_output: str) -> str:
+
         def remove_tool_calls_from_think(match):
             think_content = match.group(1)
             cleaned_content = re.sub(r"<tool_calls>.*?</tool_calls>",
@@ -136,7 +137,8 @@ class MinimaxToolParser(ToolParser):
                     lines = tool_call_content.strip().split('\n')
                     for line in lines:
                         line = line.strip()
-                        if line and line.startswith('{') and line.endswith('}'):
+                        if line and line.startswith('{') and line.endswith(
+                                '}'):
                             try:
                                 parsed_call = json.loads(line)
                                 raw_function_calls.append(parsed_call)
@@ -304,7 +306,7 @@ class MinimaxToolParser(ToolParser):
 
     def _find_tool_boundaries(self, text: str) -> list[tuple[int, int]]:
         boundaries = []
-        
+
         i = 0
         while i < len(text):
             if text[i] == '{':
@@ -324,26 +326,27 @@ class MinimaxToolParser(ToolParser):
                     i += 1
             else:
                 i += 1
-        
+
         return boundaries
 
-    def _get_current_tool_content(self, text: str, tool_index: int) -> tuple[str, str]:
+    def _get_current_tool_content(self, text: str,
+                                  tool_index: int) -> tuple[str, str]:
         boundaries = self._find_tool_boundaries(text)
-        
+
         if tool_index >= len(boundaries):
             return None, None
-            
+
         start, end = boundaries[tool_index]
         tool_content = text[start:end]
-        
+
         name_match = self.tool_name_pattern.search(tool_content)
         name = name_match.group(1) if name_match else None
-        
+
         args_match = self.tool_args_pattern.search(tool_content)
         if args_match:
             args_start_pos = args_match.end()
             remaining_content = tool_content[args_start_pos:]
-            
+
             try:
                 if remaining_content.strip().startswith('{'):
                     depth = 0
@@ -356,7 +359,7 @@ class MinimaxToolParser(ToolParser):
                             if depth == 0:
                                 args_end = i + 1
                                 break
-                    
+
                     if args_end > 0:
                         args_text = remaining_content[:args_end]
                         return name, args_text
@@ -368,7 +371,7 @@ class MinimaxToolParser(ToolParser):
             except Exception:
                 args_text = remaining_content.rstrip('}').strip()
                 return name, args_text
-        
+
         return name, None
 
     def extract_tool_calls_streaming(
@@ -437,15 +440,16 @@ class MinimaxToolParser(ToolParser):
             if original_tool_start == -1:
                 return None
 
-            tool_content_start = original_tool_start + len(self.tool_call_start_token)
+            tool_content_start = original_tool_start + len(
+                self.tool_call_start_token)
             tool_content = current_text[tool_content_start:]
-            
+
             end_pos = tool_content.find(self.tool_call_end_token)
             if end_pos != -1:
                 tool_content = tool_content[:end_pos]
 
             current_tools_count = self._detect_tools_in_text(tool_content)
-            
+
             if current_tools_count == 0:
                 return None
 
@@ -455,41 +459,45 @@ class MinimaxToolParser(ToolParser):
 
             for tool_idx in range(current_tools_count):
                 self._ensure_tool_state(tool_idx)
-                
-                tool_name, tool_args = self._get_current_tool_content(tool_content, tool_idx)
-                
+
+                tool_name, tool_args = self._get_current_tool_content(
+                    tool_content, tool_idx)
+
                 if not tool_name:
                     continue
-                    
+
                 tool_state = self.tool_states[tool_idx]
-                
-                if not tool_state['name_sent'] and tool_idx <= self.current_tool_index + 1:
+
+                if not tool_state['name_sent'] and (
+                        tool_idx <= self.current_tool_index + 1):
                     tool_state['name'] = tool_name
                     tool_state['name_sent'] = True
                     self.current_tool_index = tool_idx
                     return DeltaMessage(tool_calls=[
-                        DeltaToolCall(
-                            index=tool_idx,
-                            type="function",
-                            id=tool_state['id'],
-                            function=DeltaFunctionCall(name=tool_name).model_dump(
-                                exclude_none=True))
+                        DeltaToolCall(index=tool_idx,
+                                      type="function",
+                                      id=tool_state['id'],
+                                      function=DeltaFunctionCall(
+                                          name=tool_name).model_dump(
+                                              exclude_none=True))
                     ])
-                
-                if (tool_state['name_sent'] and tool_args is not None and 
-                    tool_idx <= self.current_tool_index + 1):
+
+                if (tool_state['name_sent'] and tool_args is not None
+                        and tool_idx <= self.current_tool_index + 1):
                     clean_args = self._clean_duplicate_braces(tool_args)
-                    
+
                     if clean_args != tool_state['args_sent']:
-                        if tool_state['args_sent'] and clean_args.startswith(tool_state['args_sent']):
+                        if tool_state['args_sent'] and clean_args.startswith(
+                                tool_state['args_sent']):
                             args_delta = extract_intermediate_diff(
                                 clean_args, tool_state['args_sent'])
-                            
+
                             if args_delta:
-                                args_delta = self._clean_delta_braces(args_delta)
+                                args_delta = self._clean_delta_braces(
+                                    args_delta)
                                 tool_state['args_sent'] = clean_args
                                 self.current_tool_index = tool_idx
-                                
+
                                 return DeltaMessage(tool_calls=[
                                     DeltaToolCall(
                                         index=tool_idx,
@@ -498,16 +506,16 @@ class MinimaxToolParser(ToolParser):
                                                 exclude_none=True))
                                 ])
                         elif not tool_state['args_sent'] and clean_args:
-                            clean_args_delta = self._clean_delta_braces(clean_args)
+                            clean_args_delta = self._clean_delta_braces(
+                                clean_args)
                             tool_state['args_sent'] = clean_args
                             self.current_tool_index = tool_idx
-                            
+
                             return DeltaMessage(tool_calls=[
-                                DeltaToolCall(
-                                    index=tool_idx,
-                                    function=DeltaFunctionCall(
-                                        arguments=clean_args_delta).model_dump(
-                                            exclude_none=True))
+                                DeltaToolCall(index=tool_idx,
+                                              function=DeltaFunctionCall(
+                                                  arguments=clean_args_delta).
+                                              model_dump(exclude_none=True))
                             ])
 
             return None
