@@ -37,8 +37,11 @@ def default_image_server_args():
 
 @pytest.fixture(scope="module")
 def image_server(default_image_server_args):
-    with RemoteOpenAIServer(MODEL_NAME,
-                            default_image_server_args) as remote_server:
+    with RemoteOpenAIServer(
+            MODEL_NAME,
+            default_image_server_args,
+            env_dict={"VLLM_ENABLE_RESPONSES_API_STORE": "1"},
+    ) as remote_server:
         yield remote_server
 
 

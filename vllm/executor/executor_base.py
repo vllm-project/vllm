@@ -35,6 +35,7 @@ class ExecutorBase(ABC):
     """
 
     uses_ray: bool  # whether the executor uses Ray for orchestration.
+    supports_pp: bool = False  # whether the executor supports PP
 
     def __init__(
         self,

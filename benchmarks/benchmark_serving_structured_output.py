@@ -4,7 +4,7 @@ r"""Benchmark online serving throughput with structured outputs.
 
 On the server side, run one of the following commands:
     (vLLM OpenAI API server)
-    vllm serve <your_model> --disable-log-requests
+    vllm serve <your_model>
 
 On the client side, run:
     python benchmarks/benchmark_serving_structured_output.py \
@@ -555,6 +555,10 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    if max_concurrency is not None:
+        print("{:<40} {:<10}".format("Maximum request concurrency:", max_concurrency))
+    if request_rate != float("inf"):
+        print("{:<40} {:<10.2f}".format("Request rate configured (RPS):", request_rate))
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
     print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))

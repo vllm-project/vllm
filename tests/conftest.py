@@ -775,7 +775,7 @@ class VllmRunner:
         tokenizer_mode: str = "auto",
         trust_remote_code: bool = True,
         seed: Optional[int] = 0,
-        max_model_len: int = 1024,
+        max_model_len: Optional[int] = 1024,
         dtype: str = "auto",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
@@ -1051,6 +1051,10 @@ class VllmRunner:
 
     def encode(self, prompts: list[str]) -> list[list[float]]:
         req_outputs = self.llm.encode(prompts)
+        return [req_output.outputs.data for req_output in req_outputs]
+
+    def reward(self, prompts: list[str]) -> list[list[float]]:
+        req_outputs = self.llm.reward(prompts)
         return [req_output.outputs.data for req_output in req_outputs]
 
     def score(
