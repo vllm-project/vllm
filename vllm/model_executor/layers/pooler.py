@@ -555,7 +555,7 @@ class SimplePooler(Pooler):
         elif pooler_config.task == "encode":
             head = RewardPoolerHead()
         else:
-            raise NotImplementedError(f"Unknown task: {pooler_config.task}")
+            head = PoolerHead(PoolerIdentity())
         return cls(pooling, head)
 
     def __init__(self, pooling: PoolingMethod, head: PoolerHead) -> None:
