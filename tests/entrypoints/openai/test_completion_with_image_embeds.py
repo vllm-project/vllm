@@ -60,7 +60,7 @@ def encode_image_embedding_to_base64(image_embedding) -> str:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("dtype", [torch.half, torch.float16, torch.float32])
-async def test_completions_with_prompt_embeds(
+async def test_completions_with_image_embeds(
     client_with_image_embeds: openai.AsyncOpenAI,
     model_name: str,
     image_assets: ImageTestAssets,
