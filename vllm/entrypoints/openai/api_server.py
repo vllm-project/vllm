@@ -199,15 +199,18 @@ async def build_async_engine_client_from_engine_args(
 
         from vllm.v1.engine.async_llm import AsyncLLM
         async_llm: Optional[AsyncLLM] = None
+        client_count = client_config.pop(
+            "client_count") if client_config else 1
         client_index = client_config.pop(
             "client_index") if client_config else 0
         try:
             async_llm = AsyncLLM.from_vllm_config(
                 vllm_config=vllm_config,
                 usage_context=usage_context,
-                disable_log_requests=engine_args.disable_log_requests,
+                enable_log_requests=engine_args.enable_log_requests,
                 disable_log_stats=engine_args.disable_log_stats,
                 client_addresses=client_config,
+                client_count=client_count,
                 client_index=client_index)
 
             # Don't keep the dummy data in memory
@@ -227,7 +230,7 @@ async def build_async_engine_client_from_engine_args(
             engine_client = AsyncLLMEngine.from_vllm_config(
                 vllm_config=vllm_config,
                 usage_context=usage_context,
-                disable_log_requests=engine_args.disable_log_requests,
+                enable_log_requests=engine_args.enable_log_requests,
                 disable_log_stats=engine_args.disable_log_stats)
             yield engine_client
         finally:
@@ -272,7 +275,7 @@ async def build_async_engine_client_from_engine_args(
             target=run_mp_engine,
             args=(vllm_config, UsageContext.OPENAI_API_SERVER, ipc_path,
                   engine_args.disable_log_stats,
-                  engine_args.disable_log_requests, engine_alive))
+                  engine_args.enable_log_requests, engine_alive))
         engine_process.start()
         engine_pid = engine_process.pid
         assert engine_pid is not None, "Engine process failed to start."
@@ -1570,10 +1573,10 @@ async def init_app_state(
     else:
         served_model_names = [args.model]
 
-    if args.disable_log_requests:
-        request_logger = None
-    else:
+    if args.enable_log_requests:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
+    else:
+        request_logger = None
 
     base_model_paths = [
         BaseModelPath(name=name, model_path=args.model)
