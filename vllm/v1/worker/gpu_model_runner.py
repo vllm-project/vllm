@@ -2799,9 +2799,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         if len(self.attn_metadata_builders) > 0:
             min_cg_support = AttentionCGSupport.ALWAYS
-            min_cg_builder_name = self.attn_metadata_builders[0].\
-                __class__.__name__
+            min_cg_builder_name = self.attn_metadata_builders[
+                0].__class__.__name__
+            preferred_cg_dict: dict[AttentionCGSupport, str] = {}
             for builder in self.attn_metadata_builders:
+                preferred_cg_dict[
+                    builder.cudagraph_support] = builder.__class__.__name__
+
                 if builder.cudagraph_support.value < min_cg_support.value:
                     min_cg_support = builder.cudagraph_support
                     min_cg_builder_name = builder.__class__.__name__
@@ -2819,6 +2823,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.compilation_config.cudagraph_mode = \
                         CUDAGraphMode.FULL_AND_PIECEWISE
                 logger.warning(warn_msg)
+
+            if (AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE in \
+                preferred_cg_dict and self.uniform_decode_query_len == 1 and \
+                self.compilation_config.cudagraph_mode.mixed_mode() == \
+                CUDAGraphMode.FULL):
+                builder_name = preferred_cg_dict[
+                    AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE]
+                logger.warning(
+                    "NOTE: %s backend prefers full cuda-graphs for"
+                    " decodes only, using `cudagraph_mode=FULL_AND_PIECEWISE` "
+                    "will likely boost performance", builder_name)
 
         # Trigger cudagraph dispatching keys initialization here (after
         # initializing attn backends).
