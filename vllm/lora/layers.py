@@ -277,6 +277,9 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA, CustomOp):
 
         return full_output.view_as(full_output_org)
 
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
+
     @classmethod
     def can_replace_layer(
         cls,
