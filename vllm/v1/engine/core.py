@@ -51,7 +51,7 @@ from vllm.version import __version__ as VLLM_VERSION
 # functional for users without tpu_commons installed.
 # This try ... import ... block will be removed once DI is officially added.
 try:
-    from tpu_commons.interfaces.engine import IEngineCore, IEngineProcess
+    from tpu_commons.interfaces.engine import IEngineCore, IEngineProc
 except ImportError:
     # This is a standard pattern for handling optional dependencies.
     # The linter complains about a potential redefinition, but this is a
@@ -63,7 +63,7 @@ except ImportError:
     class IEngineCore(Protocol):  # type: ignore[no-redef]
         pass
 
-    class IEngineProcess(Protocol):  # type: ignore[no-redef]
+    class IEngineProc(Protocol):  # type: ignore[no-redef]
         pass
 
 
@@ -448,7 +448,7 @@ class EngineCore(IEngineCore):
         return req, request.current_wave
 
 
-class EngineCoreProc(EngineCore, IEngineProcess):
+class EngineCoreProc(EngineCore, IEngineProc):
     """ZMQ-wrapper for running EngineCore in background process."""
 
     ENGINE_CORE_DEAD = b'ENGINE_CORE_DEAD'
