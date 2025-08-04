@@ -44,7 +44,10 @@ class StructuredOutputManager:
         self.fill_bitmask_parallel_threshold = 128
         if self.fill_bitmask_parallel_threshold < max_batch_size:
             self.fill_bitmask_parallel_batch_size = 16
-            max_workers = max(1, min(multiprocessing.cpu_count(), 8))
+            # Use:
+            # - at least 1 CPU
+            # - at most half the number of CPUs or 8, whichever is less
+            max_workers = max(1, min(multiprocessing.cpu_count() // 2, 8))
             self.executor_for_fillmask = ThreadPoolExecutor(
                 max_workers=max_workers)
 
