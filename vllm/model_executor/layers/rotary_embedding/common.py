@@ -12,20 +12,20 @@ if current_platform.is_cuda():
 
 
 # common functions
-def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
+def rotate_neox(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., :x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2:]
     return torch.cat((-x2, x1), dim=-1)
 
 
-def _rotate_gptj(x: torch.Tensor) -> torch.Tensor:
+def rotate_gptj(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., ::2]
     x2 = x[..., 1::2]
     x = torch.stack((-x2, x1), dim=-1)
     return x.flatten(-2)
 
 
-def _apply_rotary_emb_torch(
+def apply_rotary_emb_torch(
     x: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
@@ -46,8 +46,9 @@ def _apply_rotary_emb_torch(
         return torch.stack((o1, o2), dim=-1).flatten(-2)
 
 
-def _apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
-                      is_neox_style: bool) -> torch.Tensor:
+def apply_rotary_emb_dispatch(x: torch.Tensor, cos: torch.Tensor,
+                              sin: torch.Tensor,
+                              is_neox_style: bool) -> torch.Tensor:
     """
     Args:
         x: [num_tokens, num_heads, head_size]
@@ -60,37 +61,36 @@ def _apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
         return apply_rotary_emb(x.unsqueeze(0), cos, sin,
                                 not is_neox_style).squeeze(0)
     else:
-        return _apply_rotary_emb_torch(x, cos, sin, is_neox_style)
+        return apply_rotary_emb_torch(x, cos, sin, is_neox_style)
 
 
 # yarn functions
 # Inverse dim formula to find dim based on number of rotations
-def _yarn_find_correction_dim(num_rotations: int,
-                              dim: int,
-                              base: float = 10000,
-                              max_position_embeddings: int = 2048) -> float:
+def yarn_find_correction_dim(num_rotations: int,
+                             dim: int,
+                             base: float = 10000,
+                             max_position_embeddings: int = 2048) -> float:
     return (dim * math.log(max_position_embeddings /
                            (num_rotations * 2 * math.pi))) / (2 *
                                                               math.log(base))
 
 
 # Find dim range bounds based on rotations
-def _yarn_find_correction_range(
+def yarn_find_correction_range(
         low_rot: int,
         high_rot: int,
         dim: int,
         base: float = 10000,
         max_position_embeddings: int = 2048) -> tuple[int, int]:
     low = math.floor(
-        _yarn_find_correction_dim(low_rot, dim, base, max_position_embeddings))
+        yarn_find_correction_dim(low_rot, dim, base, max_position_embeddings))
     high = math.ceil(
-        _yarn_find_correction_dim(high_rot, dim, base,
-                                  max_position_embeddings))
+        yarn_find_correction_dim(high_rot, dim, base, max_position_embeddings))
     return max(low, 0), min(high, dim - 1)  # Clamp values just in case
 
 
-def _yarn_linear_ramp_mask(low: float, high: float, dim: int,
-                           dtype: torch.dtype) -> torch.Tensor:
+def yarn_linear_ramp_mask(low: float, high: float, dim: int,
+                          dtype: torch.dtype) -> torch.Tensor:
     if low == high:
         high += 0.001  # Prevent singularity
 
@@ -99,7 +99,7 @@ def _yarn_linear_ramp_mask(low: float, high: float, dim: int,
     return ramp_func
 
 
-def _yarn_get_mscale(scale: float = 1) -> float:
+def yarn_get_mscale(scale: float = 1) -> float:
     if scale <= 1:
         return 1.0
     return 0.1 * math.log(scale) + 1.0

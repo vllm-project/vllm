@@ -7,7 +7,7 @@ import torch
 
 from vllm.model_executor.custom_op import CustomOp
 
-from .common import _apply_rotary_emb, _apply_rotary_emb_torch
+from .common import apply_rotary_emb_dispatch, apply_rotary_emb_torch
 
 
 @CustomOp.register("rotary_embedding")
@@ -76,8 +76,8 @@ class RotaryEmbedding(CustomOp):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = _apply_rotary_emb_torch(query_rot, cos, sin,
-                                            self.is_neox_style)
+        query_rot = apply_rotary_emb_torch(query_rot, cos, sin,
+                                           self.is_neox_style)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         # key may be None in some cases, e.g. cross-layer KV sharing
@@ -86,8 +86,8 @@ class RotaryEmbedding(CustomOp):
             key = key.view(num_tokens, -1, self.head_size)
             key_rot = key[..., :self.rotary_dim]
             key_pass = key[..., self.rotary_dim:]
-            key_rot = _apply_rotary_emb_torch(key_rot, cos, sin,
-                                              self.is_neox_style)
+            key_rot = apply_rotary_emb_torch(key_rot, cos, sin,
+                                             self.is_neox_style)
             key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
@@ -200,10 +200,12 @@ class RotaryEmbedding(CustomOp):
             key = key.view(num_tokens, -1, self.head_size)
 
         if self.rotary_dim == self.head_size:
-            query = _apply_rotary_emb(query, cos, sin, self.is_neox_style)
+            query = apply_rotary_emb_dispatch(query, cos, sin,
+                                              self.is_neox_style)
             query = query.reshape(query_shape)
             if key is not None:
-                key = _apply_rotary_emb(key, cos, sin, self.is_neox_style)
+                key = apply_rotary_emb_dispatch(key, cos, sin,
+                                                self.is_neox_style)
                 key = key.reshape(key_shape)
         else:
             head_size = query.shape[-1]

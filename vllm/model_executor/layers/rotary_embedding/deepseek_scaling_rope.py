@@ -9,8 +9,8 @@ import torch
 from vllm.platforms import current_platform
 
 from .base import RotaryEmbedding
-from .common import (_rotate_gptj, _rotate_neox, _yarn_find_correction_range,
-                     _yarn_linear_ramp_mask)
+from .common import (rotate_gptj, rotate_neox, yarn_find_correction_range,
+                     yarn_linear_ramp_mask)
 
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
@@ -66,11 +66,11 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scaling_factor * pos_freqs)
 
-        low, high = _yarn_find_correction_range(self.beta_fast, self.beta_slow,
-                                                self.rotary_dim, self.base,
-                                                self.max_position_embeddings)
+        low, high = yarn_find_correction_range(self.beta_fast, self.beta_slow,
+                                               self.rotary_dim, self.base,
+                                               self.max_position_embeddings)
         # Get n-d rotational scaling corrected for extrapolation
-        inv_freq_mask = (1 - _yarn_linear_ramp_mask(
+        inv_freq_mask = (1 - yarn_linear_ramp_mask(
             low, high, self.rotary_dim // 2,
             dtype=torch.float)) * self.extrapolation_factor
         inv_freq = inv_freq_interpolation * (
@@ -118,7 +118,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
             cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
             sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
 
-        rotate_fn = _rotate_neox if self.is_neox_style else _rotate_gptj
+        rotate_fn = rotate_neox if self.is_neox_style else rotate_gptj
         query_rot = query_rot * cos + rotate_fn(query_rot) * sin
         key_rot = key_rot * cos + rotate_fn(key_rot) * sin
 
