@@ -507,7 +507,27 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                 break
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
+        assert not any(block == self._null_block for block in removed_blocks)
         self.block_pool.free_blocks(removed_blocks)
+
+    def free(self, request_id: str) -> None:
+        """
+            Free the blocks for the request.
+
+            Args:
+                request_id: The request ID.
+            """
+        # Default to [] in case a request is freed (aborted) before alloc.
+        req_blocks = self.req_to_blocks.pop(request_id, [])
+
+        # Free blocks in reverse order so that the tail blocks are
+        # freed first.
+        ordered_blocks = [
+            block for block in reversed(req_blocks)
+            if block != self._null_block
+        ]
+        self.block_pool.free_blocks(ordered_blocks)
+        self.num_cached_block.pop(request_id, None)
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
