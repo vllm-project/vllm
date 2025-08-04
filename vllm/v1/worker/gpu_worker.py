@@ -544,7 +544,7 @@ class Worker(WorkerBase):
         old_ep_size = get_ep_group().world_size
         old_ep_rank = get_ep_group().rank
         new_ep_size = reconfig_request.new_data_parallel_size * get_tp_group(
-        ).world_size * get_pp_group().world_size
+        ).world_size
         if new_ep_size < old_ep_size:
             self._eplb_before_scale_down(old_ep_size, new_ep_size)
 
