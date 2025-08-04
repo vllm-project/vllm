@@ -55,7 +55,8 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import NemotronHConfig
-from vllm.utils import LayerBlockType
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType,
+                        get_kv_cache_torch_dtype)
 
 
 class NemotronHMLP(nn.Module):
@@ -155,7 +156,8 @@ class NemotronHMambaDecoderLayer(nn.Module):
             activation=config.mamba_hidden_act,
             quant_config=quant_config,
             prefix=f"{prefix}.mixer",
-        )
+            mamba_ssm_cache_dtype=STR_DTYPE_TO_TORCH_DTYPE[
+                cache_config.mamba_ssm_cache_dtype])
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -552,10 +554,18 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                 mamba_state_shape = \
                     self.get_mamba_state_shape_from_config(
                         self.vllm_config, use_v1=False)
-                self.mamba_cache = MambaCacheManager(self.vllm_config,
-                                                     self.lm_head.weight.dtype,
-                                                     num_mamba_layers,
-                                                     *mamba_state_shape)
+
+                mamba_ssm_cache_dtype = get_kv_cache_torch_dtype(
+                    self.vllm_config.cache_config.mamba_ssm_cache_dtype,
+                    self.lm_head.weight.dtype)
+
+                self.mamba_cache = MambaCacheManager(
+                    vllm_config=self.vllm_config,
+                    dtype=self.lm_head.weight.dtype,
+                    mamba_ssm_cache_dtype=mamba_ssm_cache_dtype,
+                    num_mamba_layers=num_mamba_layers,
+                    conv_state_shape=mamba_state_shape[0],
+                    temporal_state_shape=mamba_state_shape[1])
 
             mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
