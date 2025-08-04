@@ -20,6 +20,7 @@ from vllm.model_executor.models.bert import (TOKEN_TYPE_SHIFT,
                                              _encode_token_type_ids)
 from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
                                               maybe_prefix)
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
@@ -225,6 +226,8 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
             assert self.roberta.config.vocab_size < (1 << TOKEN_TYPE_SHIFT)
             assert input_ids is not None
             _encode_token_type_ids(input_ids, token_type_ids)
+        if (synchronize := current_platform.synchronize) is not None:
+            synchronize()
         return self.roberta(input_ids=input_ids,
                             position_ids=positions,
                             inputs_embeds=inputs_embeds,
