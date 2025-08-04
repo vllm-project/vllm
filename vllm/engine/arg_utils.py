@@ -1454,7 +1454,6 @@ class EngineArgs:
                 "Please consider using other speculative decoding methods "
                 "such as ngram, medusa, eagle, or deepseek_mtp.")
 
-        # No XFormers so far.
         V1_BACKENDS = [
             "FLASH_ATTN_VLLM_V1",
             "FLASH_ATTN",
@@ -1469,6 +1468,7 @@ class EngineArgs:
             "ROCM_AITER_MLA",
             "TORCH_SDPA_VLLM_V1",
             "FLEX_ATTENTION",
+            "TREE_ATTN",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
@@ -1490,14 +1490,18 @@ class EngineArgs:
                 and _warn_or_fallback("Engine in background thread")):
             return False
 
-        if (self.pipeline_parallel_size > 1
-                and self.distributed_executor_backend
-                not in (ParallelConfig.distributed_executor_backend, "ray",
-                        "mp", "external_launcher")):
-            name = "Pipeline Parallelism without Ray distributed executor " \
-                    "or multiprocessing executor or external launcher"
-            _raise_or_fallback(feature_name=name, recommend_to_remove=False)
-            return False
+        if self.pipeline_parallel_size > 1:
+            supports_pp = getattr(self.distributed_executor_backend,
+                                  'supports_pp', False)
+            if not supports_pp and self.distributed_executor_backend not in (
+                    ParallelConfig.distributed_executor_backend, "ray", "mp",
+                    "external_launcher"):
+                name = "Pipeline Parallelism without Ray distributed " \
+                        "executor or multiprocessing executor or external " \
+                        "launcher"
+                _raise_or_fallback(feature_name=name,
+                                   recommend_to_remove=False)
+                return False
 
         # The platform may be supported on V1, but off by default for now.
         if not current_platform.default_v1(  # noqa: SIM103
