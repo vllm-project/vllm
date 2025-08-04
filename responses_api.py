@@ -8,12 +8,13 @@ import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, required=False, choices=["gpt-4.1", "o4-mini"])
+parser.add_argument("--port", type=int, required=False, default=8000)
 args = parser.parse_args()
 
 MODEL = args.model
 if MODEL is None:
     openai_api_key = "EMPTY"
-    openai_api_base = "http://localhost:8000/v1"
+    openai_api_base = f"http://localhost:{args.port}/v1"
 else:
     openai_api_key = None
     openai_api_base = None

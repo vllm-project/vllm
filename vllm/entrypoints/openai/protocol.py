@@ -1699,10 +1699,13 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
     choices: list[TranscriptionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
 
+class ResponseReasoningTextContent(OpenAIBaseModel):
+    text: str
+    type: Literal["reasoning_text"] = "reasoning_text"
 
 class ResponseReasoningItem(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"rs_{random_uuid()}")
-    text: str
+    content: list[ResponseReasoningTextContent] = Field(default_factory=list)
     summary: list = Field(default_factory=list)
     type: Literal["reasoning"] = "reasoning"
     encrypted_content: Optional[str] = None
