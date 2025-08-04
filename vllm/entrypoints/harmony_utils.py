@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import datetime
 import json
-from typing import Literal, Optional
+from collections.abc import Iterable
+from typing import Any, Literal, Optional
 
 from openai.types.responses import (ResponseInputParam, ResponseOutputMessage,
                                     ResponseOutputText)
@@ -13,9 +14,8 @@ from openai_harmony import (Conversation, DeveloperContent,
                             Role, StreamableParser, SystemContent, TextContent,
                             load_harmony_encoding)
 
-from typing import Any
-
-from vllm.entrypoints.openai.protocol import ResponseReasoningItem, ResponseReasoningTextContent
+from vllm.entrypoints.openai.protocol import (ResponseReasoningItem,
+                                              ResponseReasoningTextContent)
 from vllm.utils import random_uuid
 
 REASONING_EFFORT = {
@@ -170,7 +170,7 @@ def parse_output_message(message: Message):
     return output_items
 
 
-def parse_output_into_messages(token_ids: list[int]) -> list[Message]:
+def parse_output_into_messages(token_ids: Iterable[int]) -> list[Message]:
     parser = get_streamable_parser_for_assistant()
     for token_id in token_ids:
         parser.process(token_id)
