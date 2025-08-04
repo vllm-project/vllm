@@ -3049,6 +3049,19 @@ class SpeculativeConfig:
                             f"num_speculative_tokens:{self.num_speculative_tokens}"
                             f" must be divisible by {n_predict=}")
 
+                if self.speculative_token_tree is None:
+                    # Generate chain of tokens.
+                    self.speculative_token_tree = str([
+                        (i + 1) * (0, )
+                        for i in range(self.num_speculative_tokens)
+                    ])
+                else:
+                    # Sort the token tree breadth-first.
+                    tree_choices = ast.literal_eval(
+                        self.speculative_token_tree)
+                    self.speculative_token_tree = str(
+                        sorted(tree_choices, key=lambda t: (len(t), t)))
+
                 self.draft_tensor_parallel_size = \
                     SpeculativeConfig._verify_and_get_draft_tp(
                         self.target_parallel_config,
