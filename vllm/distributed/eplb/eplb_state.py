@@ -112,13 +112,13 @@ class EplbState:
     Expert load during this forward pass. 
     We use the token count each expert processes as the load.
 
-    Shape: (num_moe_layers, num_local_physical_experts)
+    Shape: (num_moe_layers, num_physical_experts)
     """
     expert_load_window: torch.Tensor
     """
     A sliding window of expert load.
 
-    Shape: (window_size, num_moe_layers, num_local_physical_experts)
+    Shape: (window_size, num_moe_layers, num_physical_experts)
     """
     expert_load_window_step: int = 0
     """
@@ -353,11 +353,26 @@ class EplbState:
             self.expert_load_pass.zero_()
 
         if log_stats:
-            # `num_tokens`: (num_moe_layers,)
-            num_tokens = self.expert_load_pass.sum(dim=-1)
+            logical_expert_load = torch.zeros(
+                (model.num_moe_layers, model.num_logical_experts),
+                dtype=self.expert_load_pass.dtype,
+                device=self.expert_load_pass.device,
+            )
+            logical_expert_load.scatter_add_(
+                dim=-1,
+                index=self.physical_to_logical_map.long(),
+                src=self.expert_load_pass,
+            )
 
             # Collect load metrics from all ranks
             ep_group = get_ep_group().device_group
+            assert ep_group is not None
+            ep_size = ep_group.size()
+
+            # Since the global load is now calculated for each rank, it needs to
+            # be divided by the EP size to obtain the actual load
+            # `num_tokens`: (num_moe_layers,)
+            num_tokens = logical_expert_load.sum(dim=-1).sum(dim=-1) // ep_size
             assert ep_group is not None
             num_tokens_list = [
                 torch.empty_like(num_tokens) for _ in range(ep_group.size())
@@ -426,16 +441,6 @@ class EplbState:
                         "(profile)" if is_profile else "")
 
         if global_expert_load is None:
-            # This mapping is only used here, so we do not store it in the state
-            physical_expert_start = ep_rank * model.num_local_physical_experts
-            physical_expert_end = (physical_expert_start +
-                                   model.num_local_physical_experts)
-            # (num_moe_layers, num_local_physical_experts)
-            local_physical_to_logical_map = self.physical_to_logical_map[
-                :,
-                physical_expert_start:physical_expert_end,
-            ]
-
             # Map the local physical expert load to global logical experts
             logical_expert_load_window = torch.zeros(
                 self.expert_load_window_size,
@@ -446,8 +451,8 @@ class EplbState:
             )
             logical_expert_load_window.scatter_add_(
                 dim=-1,
-                index=local_physical_to_logical_map.unsqueeze(0).expand_as(
-                    self.expert_load_window).long(),
+                index=self.physical_to_logical_map.unsqueeze(0).expand(
+                    self.expert_load_window_size, -1, -1).long(),
                 src=self.expert_load_window,
             )
 
@@ -465,7 +470,9 @@ class EplbState:
                                             group_src=0)
 
             # Perform all-reduce to get the expert load across all ranks
-            global_expert_load_window = logical_expert_load_window.sum(dim=0)
+            ep_size = ep_group.size()
+            global_expert_load_window = (
+                logical_expert_load_window.sum(dim=0) // ep_size)
             all_reduce(global_expert_load_window, group=ep_group)
 
             if not execute_shuffle:
