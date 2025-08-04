@@ -112,7 +112,9 @@ class Ovis2_5Config(PretrainedConfig):
         self.hidden_size = hidden_size
         self.conversation_formatter_class = conversation_formatter_class
         if kwargs.get('attn_implementation'):
-            self.llm_config._attn_implementation = kwargs[
-                'attn_implementation']
-            self.vit_config._attn_implementation = kwargs[
-                'attn_implementation']
+            if self.llm_config:
+                self.llm_config._attn_implementation = kwargs[
+                    'attn_implementation']
+            if self.vit_config:
+                self.vit_config._attn_implementation = kwargs[
+                    'attn_implementation']
