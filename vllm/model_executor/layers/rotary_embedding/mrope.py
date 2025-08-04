@@ -9,7 +9,7 @@ import torch
 from transformers import PretrainedConfig
 
 from .base import RotaryEmbedding
-from .utils import _apply_rotary_emb
+from .common import _apply_rotary_emb
 
 
 class MRotaryEmbedding(RotaryEmbedding):

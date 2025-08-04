@@ -7,7 +7,7 @@ import torch
 
 from vllm.model_executor.custom_op import CustomOp
 
-from .utils import _rotate_gptj, _rotate_neox
+from .common import _rotate_gptj, _rotate_neox
 
 
 @CustomOp.register("dual_chunk_rotary_embedding")

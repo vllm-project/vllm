@@ -6,7 +6,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from .utils import _rotate_neox
+from .common import _rotate_neox
 
 
 class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
