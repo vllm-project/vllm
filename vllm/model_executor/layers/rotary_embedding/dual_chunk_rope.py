@@ -7,7 +7,7 @@ import torch
 
 from vllm.model_executor.custom_op import CustomOp
 
-from .common import _rotate_gptj, _rotate_neox
+from .common import rotate_gptj, rotate_neox
 
 
 @CustomOp.register("dual_chunk_rotary_embedding")
@@ -171,7 +171,7 @@ class DualChunkRotaryEmbedding(CustomOp):
         else:
             cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
             sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
-        rotate_fn = _rotate_neox if self.is_neox_style else _rotate_gptj
+        rotate_fn = rotate_neox if self.is_neox_style else rotate_gptj
         hidden_rot = hidden_rot * cos + rotate_fn(hidden_rot) * sin
 
         if self.rotary_dim < self.head_size:

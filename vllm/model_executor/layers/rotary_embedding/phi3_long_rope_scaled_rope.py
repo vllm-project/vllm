@@ -6,7 +6,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from .common import _rotate_neox
+from .common import rotate_neox
 
 
 class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
@@ -118,12 +118,12 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
 
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = query_rot * cos + _rotate_neox(query_rot) * sin
+        query_rot = query_rot * cos + rotate_neox(query_rot) * sin
         query = torch.cat((query_rot, query_pass), dim=-1)
 
         key_rot = key[..., :self.rotary_dim]
         key_pass = key[..., self.rotary_dim:]
-        key_rot = key_rot * cos + _rotate_neox(key_rot) * sin
+        key_rot = key_rot * cos + rotate_neox(key_rot) * sin
         key = torch.cat((key_rot, key_pass), dim=-1)
 
         return query.flatten(-2), key.flatten(-2)
