@@ -48,7 +48,7 @@ from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
                     Optional, TextIO, Tuple, TypeVar, Union, cast, overload)
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 import cachetools
@@ -3311,3 +3311,35 @@ def decorate_logs(process_name: Optional[str] = None) -> None:
     pid = os.getpid()
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
+
+
+def build_uri(scheme: str,
+              host: str,
+              port: Optional[int] = None,
+              path: str = "",
+              params: str = "",
+              query: str = "",
+              fragment: str = "") -> str:
+    """
+    Robustly build a URI that properly handles IPv6 addresses.
+    
+    Args:
+        scheme: URI scheme (e.g., 'http', 'https')
+        host: hostname or IP address
+        port: port number (optional)
+        path: path component
+        params: parameters component
+        query: query string
+        fragment: fragment identifier
+    
+    Returns:
+        Complete URI string
+    """
+
+    # Ensure IPv6 addresses are bracketed
+    if (is_valid_ipv6_address(host)
+            and not (host.startswith('[') and host.endswith(']'))):
+        host = f'[{host}]'
+
+    netloc = f"{host}:{port}" if port else host
+    return urlunparse((scheme, netloc, path, params, query, fragment))
