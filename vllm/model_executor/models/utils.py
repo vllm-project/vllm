@@ -16,6 +16,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (get_cuda_view_from_cpu_tensor, is_pin_memory_available,
                         is_uva_available)
@@ -748,3 +749,59 @@ def fast_topk(values, topk, dim):
     else:
         # Use topk for efficiency with larger k values
         return torch.topk(values, topk, dim=dim)
+
+
+def should_use_multi_stream() -> bool:
+    """Utility function to check if multi-stream should be enabled.
+    Multi-stream is only enabled when cuda graph is turned on because switch
+    stream has extra host overhead.
+    """
+    return current_platform.is_cuda() \
+        and torch.cuda.is_current_stream_capturing()
+
+
+def maybe_run_multi_stream(
+        fn0: Callable,
+        fn1: Callable,
+        event0: Optional[torch.cuda.Event] = None,
+        event1: Optional[torch.cuda.Event] = None,
+        aux_stream: Optional[torch.cuda.Stream] = None) -> tuple[Any, Any]:
+    """Utility function to run two functions in two cuda streams in parallel.
+    Multi-stream is only enabled when cuda graph is turned on because switch
+    stream has extra host overhead.
+
+    If the current platform is not CUDA, or if any of the events/aux_stream are
+    not provided, it will just run the functions sequentially.
+
+    For simplicity, fn0 and fn1 do not support inputs.
+
+    Args:
+        fn0: callable for the default stream
+        fn1: callable for the second stream, aux_stream
+        event0: cuda event for fn0
+        event1: cuda event for fn1
+        aux_stream: the second cuda stream for fn1.
+
+    Returns:
+        tuple[Any, Any]: the return values of fn0() and fn1()
+    """
+
+    if should_use_multi_stream() \
+        and aux_stream is not None \
+        and event0 is not None \
+        and event1 is not None:
+
+        event0.record()
+        result0 = fn0()
+
+        with torch.cuda.stream(aux_stream):
+            event0.wait()
+            result1 = fn1()
+            event1.record()
+        event1.wait()
+
+    else:
+        result0 = fn0()
+        result1 = fn1()
+
+    return (result0, result1)

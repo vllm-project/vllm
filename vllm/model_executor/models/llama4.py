@@ -35,8 +35,11 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.models.utils import (maybe_run_multi_stream,
+                                              should_use_multi_stream)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.platforms import current_platform
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
@@ -60,6 +63,7 @@ class Llama4MoE(nn.Module):
     def __init__(self,
                  config: Llama4TextConfig,
                  quant_config: Optional[QuantizationConfig] = None,
+                 aux_stream: Optional[torch.cuda.Stream] = None,
                  prefix: str = ""):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -94,13 +98,50 @@ class Llama4MoE(nn.Module):
             reduce_results=self.experts.must_reduce_shared_expert_outputs(),
         )
 
+        # Save aux stream and create two cuda events to run q_norm and k_norm
+        # in parallel.
+        if current_platform.is_cuda():
+            self.aux_stream = aux_stream
+            self.cuda_event_0 = torch.cuda.Event()
+            self.cuda_event_1 = torch.cuda.Event()
+        else:
+            self.aux_stream = None
+            self.cuda_event_0 = None
+            self.cuda_event_1 = None
+
     def forward(self, hidden_states):
-        router_logits, _ = self.router(hidden_states)
-        shared_out = self.shared_expert(hidden_states)
-        routed_out = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
+
+        # If we will run with multi-stream, hidden_states must be copied for
+        # shared_expert since the routed experts may write to it inplace to
+        # apply router weight.
+        if should_use_multi_stream():
+            hidden_states_clone = hidden_states.clone()
+        else:
+            hidden_states_clone = hidden_states
+
+        # Run routed experts and shared expert in parallel if possible.
+        # Shared expert must go before routed experts since the routed experts
+        # may write to the hidden_states inplace to apply router weight.
+        def _forward_shared_expert():
+            shared_out = self.shared_expert(hidden_states_clone)
+            return shared_out
+
+        def _forward_routed_experts():
+            router_logits, _ = self.router(hidden_states)
+            routed_out = self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
+            return routed_out
+
+        routed_out, shared_out = maybe_run_multi_stream(
+            _forward_shared_expert,
+            _forward_routed_experts,
+            event0=self.cuda_event_0,
+            event1=self.cuda_event_1,
+            aux_stream=self.aux_stream,
         )
+
         experts_out = routed_out + shared_out
 
         if self.tp_size > 1:
@@ -124,6 +165,7 @@ class Llama4Attention(nn.Module):
                  bias: bool = False,
                  bias_o_proj: bool = False,
                  cache_config: Optional[CacheConfig] = None,
+                 aux_stream: Optional[torch.cuda.Stream] = None,
                  prefix: str = "") -> None:
         super().__init__()
         self.layer_idx = extract_layer_index(prefix)
@@ -206,6 +248,17 @@ class Llama4Attention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
+        # Save aux stream and create two cuda events to run q_norm and k_norm
+        # in parallel.
+        if current_platform.is_cuda():
+            self.aux_stream = aux_stream
+            self.cuda_event_0 = torch.cuda.Event()
+            self.cuda_event_1 = torch.cuda.Event()
+        else:
+            self.aux_stream = None
+            self.cuda_event_0 = None
+            self.cuda_event_1 = None
+
     def _get_attn_scale(self, positions: torch.Tensor) -> torch.Tensor:
         floor = torch.floor((positions + 1.0) / self.floor_scale)
         attn_scale = torch.log(floor + 1.0) * self.attn_scale + 1.0
@@ -222,11 +275,27 @@ class Llama4Attention(nn.Module):
 
         if self.rotary_emb is not None:
             q, k = self.rotary_emb(positions, q, k)
+
         if self.qk_norm is not None:
-            q = q.reshape(-1, self.num_heads, self.head_dim)
-            q = self.qk_norm(q.float()).reshape(-1, self.q_size).to(q.dtype)
-            k = k.reshape(-1, self.num_kv_heads, self.head_dim)
-            k = self.qk_norm(k.float()).reshape(-1, self.kv_size).to(k.dtype)
+
+            # Run q_norm and k_norm in parallel if possible.
+            def _forward_q_norm():
+                q_out = q.reshape(-1, self.num_heads, self.head_dim)
+                q_out = self.qk_norm(q_out.float()).reshape(-1, self.q_size).to(q.dtype)
+                return q_out
+
+            def _forward_k_norm():
+                k_out = k.reshape(-1, self.num_kv_heads, self.head_dim)
+                k_out = self.qk_norm(k_out.float()).reshape(-1, self.kv_size).to(k.dtype)
+                return k_out
+
+            q, k = maybe_run_multi_stream(
+                _forward_q_norm,
+                _forward_k_norm,
+                event0=self.cuda_event_0,
+                event1=self.cuda_event_1,
+                aux_stream=self.aux_stream,
+            )
 
         # We are applying temperature tuning (https://arxiv.org/abs/2501.19399)
         # to NoPE layers, where the inference-time temperature tuning function
@@ -251,6 +320,7 @@ class Llama4DecoderLayer(nn.Module):
         config: Llama4TextConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        aux_stream: Optional[torch.cuda.Stream] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -275,6 +345,7 @@ class Llama4DecoderLayer(nn.Module):
             bias_o_proj=False,
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
+            aux_stream=aux_stream,
         )
         is_moe_layer = config.interleave_moe_layer_step > 0 and (
             self.layer_idx + 1) % config.interleave_moe_layer_step == 0
@@ -283,6 +354,7 @@ class Llama4DecoderLayer(nn.Module):
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.feed_forward",
+                aux_stream=aux_stream,
             )
         else:
             self.feed_forward = LlamaMLP(

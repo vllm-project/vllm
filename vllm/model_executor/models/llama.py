@@ -47,6 +47,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -230,6 +231,7 @@ class LlamaDecoderLayer(nn.Module):
         config: LlamaConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        aux_stream: Optional[torch.cuda.Stream] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -343,11 +345,21 @@ class LlamaModel(nn.Module):
             )
         else:
             self.embed_tokens = PPMissingLayer()
+
+        # Aux cuda stream to allow running different parts in parallel on
+        # different streams. Use one aux stream for all layers to avoid creating
+        # too many streams.
+        if current_platform.is_cuda():
+            self.aux_stream = torch.cuda.Stream()
+        else:
+            self.aux_stream = None
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: layer_type(config=config,
                                       cache_config=cache_config,
                                       quant_config=quant_config,
+                                      aux_stream=self.aux_stream,
                                       prefix=prefix),
             prefix=f"{prefix}.layers",
         )
