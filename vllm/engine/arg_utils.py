@@ -22,14 +22,14 @@ from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigFormat, ConfigType, DecodingConfig,
-                         DetailedTraceModules, Device, DeviceConfig,
-                         DistributedExecutorBackend, GuidedDecodingBackend,
-                         GuidedDecodingBackendV1, HfOverrides, KVEventsConfig,
-                         KVTransferConfig, LoadConfig, LoadFormat,
-                         LogprobsMode, LoRAConfig, ModelConfig, ModelDType,
-                         ModelImpl, MultiModalConfig, ObservabilityConfig,
-                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
+                         ConfigFormat, ConfigType, ConvertOption,
+                         DecodingConfig, DetailedTraceModules, Device,
+                         DeviceConfig, DistributedExecutorBackend,
+                         GuidedDecodingBackend, HfOverrides, KVEventsConfig,
+                         KVTransferConfig, LoadConfig, LogprobsMode,
+                         LoRAConfig, ModelConfig, ModelDType, ModelImpl,
+                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
+                         PoolerConfig, PrefixCachingHashAlgo, RunnerOption,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
                          TaskOption, TokenizerMode, VllmConfig, get_attr_docs,
                          get_field)
@@ -47,10 +47,12 @@ from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
 if TYPE_CHECKING:
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization import QuantizationMethods
+    from vllm.model_executor.model_loader import LoadFormats
     from vllm.usage.usage_lib import UsageContext
 else:
     ExecutorBase = Any
     QuantizationMethods = Any
+    LoadFormats = Any
     UsageContext = Any
 
 logger = init_logger(__name__)
@@ -106,15 +108,19 @@ def get_type(type_hints: set[TypeHint], type: TypeHintT) -> TypeHintT:
 
 
 def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
-    """Convert Literal type hints to argparse kwargs."""
+    """Get the `type` and `choices` from a `Literal` type hint in `type_hints`.
+
+    If `type_hints` also contains `str`, we use `metavar` instead of `choices`.
+    """
     type_hint = get_type(type_hints, Literal)
-    choices = get_args(type_hint)
-    choice_type = type(choices[0])
-    if not all(isinstance(choice, choice_type) for choice in choices):
+    options = get_args(type_hint)
+    option_type = type(options[0])
+    if not all(isinstance(option, option_type) for option in options):
         raise ValueError(
-            "All choices must be of the same type. "
-            f"Got {choices} with types {[type(c) for c in choices]}")
-    return {"type": choice_type, "choices": sorted(choices)}
+            "All options must be of the same type. "
+            f"Got {options} with types {[type(c) for c in options]}")
+    kwarg = "metavar" if contains_type(type_hints, str) else "choices"
+    return {"type": option_type, kwarg: sorted(options)}
 
 
 def is_not_builtin(type_hint: TypeHint) -> bool:
@@ -211,10 +217,12 @@ Additionally, list elements can be passed individually using `+`:
         elif contains_type(type_hints, list):
             type_hint = get_type(type_hints, list)
             types = get_args(type_hint)
-            assert len(types) == 1, (
-                "List type must have exactly one type. Got "
-                f"{type_hint} with types {types}")
-            kwargs[name]["type"] = types[0]
+            list_type = types[0]
+            if get_origin(list_type) is Union:
+                msg = "List type must contain str if it is a Union."
+                assert str in get_args(list_type), msg
+                list_type = str
+            kwargs[name]["type"] = list_type
             kwargs[name]["nargs"] = "+"
         elif contains_type(type_hints, int):
             kwargs[name]["type"] = int
@@ -269,14 +277,16 @@ class EngineArgs:
         str, List[str]]] = ModelConfig.served_model_name
     tokenizer: Optional[str] = ModelConfig.tokenizer
     hf_config_path: Optional[str] = ModelConfig.hf_config_path
-    task: TaskOption = ModelConfig.task
+    runner: RunnerOption = ModelConfig.runner
+    convert: ConvertOption = ModelConfig.convert
+    task: Optional[TaskOption] = ModelConfig.task
     skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
     enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
     tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     download_dir: Optional[str] = LoadConfig.download_dir
-    load_format: str = LoadConfig.load_format
+    load_format: Union[str, LoadFormats] = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
@@ -295,9 +305,11 @@ class EngineArgs:
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: Optional[int] = None
+    data_parallel_start_rank: Optional[int] = None
     data_parallel_size_local: Optional[int] = None
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
+    data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_eplb: bool = ParallelConfig.enable_eplb
@@ -435,6 +447,9 @@ class EngineArgs:
     # DEPRECATED
     enable_prompt_adapter: bool = False
 
+    kv_sharing_fast_prefill: bool = \
+        CacheConfig.kv_sharing_fast_prefill
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -458,7 +473,11 @@ class EngineArgs:
         )
         if not ('serve' in sys.argv[1:] and '--help' in sys.argv[1:]):
             model_group.add_argument("--model", **model_kwargs["model"])
-        model_group.add_argument("--task", **model_kwargs["task"])
+        model_group.add_argument("--runner", **model_kwargs["runner"])
+        model_group.add_argument("--convert", **model_kwargs["convert"])
+        model_group.add_argument("--task",
+                                 **model_kwargs["task"],
+                                 deprecated=True)
         model_group.add_argument("--tokenizer", **model_kwargs["tokenizer"])
         model_group.add_argument("--tokenizer-mode",
                                  **model_kwargs["tokenizer_mode"])
@@ -545,9 +564,7 @@ class EngineArgs:
             title="LoadConfig",
             description=LoadConfig.__doc__,
         )
-        load_group.add_argument("--load-format",
-                                choices=[f.value for f in LoadFormat],
-                                **load_kwargs["load_format"])
+        load_group.add_argument("--load-format", **load_kwargs["load_format"])
         load_group.add_argument("--download-dir",
                                 **load_kwargs["download_dir"])
         load_group.add_argument("--model-loader-extra-config",
@@ -604,6 +621,11 @@ class EngineArgs:
             type=int,
             help='Data parallel rank of this instance. '
             'When set, enables external load balancer mode.')
+        parallel_group.add_argument('--data-parallel-start-rank',
+                                    '-dpr',
+                                    type=int,
+                                    help='Starting data parallel rank '
+                                    'for secondary nodes.')
         parallel_group.add_argument('--data-parallel-size-local',
                                     '-dpl',
                                     type=int,
@@ -625,6 +647,9 @@ class EngineArgs:
                                     default='mp',
                                     help='Backend for data parallel, either '
                                     '"mp" or "ray".')
+        parallel_group.add_argument(
+            "--data-parallel-hybrid-lb",
+            **parallel_kwargs["data_parallel_hybrid_lb"])
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
@@ -677,6 +702,8 @@ class EngineArgs:
                                  **cache_kwargs["cpu_offload_gb"])
         cache_group.add_argument("--calculate-kv-scales",
                                  **cache_kwargs["calculate_kv_scales"])
+        cache_group.add_argument("--kv-sharing-fast-prefill",
+                                 **cache_kwargs["kv_sharing_fast_prefill"])
 
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)
@@ -854,14 +881,15 @@ class EngineArgs:
 
         # NOTE: This is to allow model loading from S3 in CI
         if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
-                and self.model in MODELS_ON_S3
-                and self.load_format == LoadFormat.AUTO):  # noqa: E501
+                and self.model in MODELS_ON_S3 and self.load_format == "auto"):
             self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
-            self.load_format = LoadFormat.RUNAI_STREAMER
+            self.load_format = "runai_streamer"
 
         return ModelConfig(
             model=self.model,
             hf_config_path=self.hf_config_path,
+            runner=self.runner,
+            convert=self.convert,
             task=self.task,
             tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
@@ -952,8 +980,28 @@ class EngineArgs:
         provided as a JSON string input via CLI arguments or directly as a
         dictionary from the engine.
         """
+
+        from vllm.transformers_utils.config import get_config
+        from vllm.transformers_utils.configs.speculators.base import (
+            SpeculatorsConfig)
+
         if self.speculative_config is None:
-            return None
+            hf_config = get_config(self.hf_config_path or self.model,
+                                   self.trust_remote_code, self.revision,
+                                   self.code_revision, self.config_format)
+
+            # if loading a SpeculatorsConfig, load the specualtive_config
+            # details from the config directly
+            # no user input required / expected
+            if isinstance(hf_config, SpeculatorsConfig):
+                # We create one since we dont create one
+                self.speculative_config = {}
+                self.speculative_config[
+                    "num_speculative_tokens"] = hf_config.num_lookahead_tokens
+                self.speculative_config["model"] = self.model
+                self.speculative_config["method"] = hf_config.method
+            else:
+                return None
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
@@ -972,6 +1020,7 @@ class EngineArgs:
     def create_engine_config(
         self,
         usage_context: Optional[UsageContext] = None,
+        headless: bool = False,
     ) -> VllmConfig:
         """
         Create the VllmConfig.
@@ -1047,6 +1096,7 @@ class EngineArgs:
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
+            kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
         )
 
         # Get the current placement group if Ray is initialized and
@@ -1060,15 +1110,41 @@ class EngineArgs:
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
 
+        assert not headless or not self.data_parallel_hybrid_lb, (
+            "data_parallel_hybrid_lb is not applicable in "
+            "headless mode")
+
         data_parallel_external_lb = self.data_parallel_rank is not None
+        # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
             assert self.data_parallel_size_local in (1, None), (
                 "data_parallel_size_local must be 1 when data_parallel_rank "
                 "is set")
             data_parallel_size_local = 1
+            # Use full external lb if we have local_size of 1.
+            self.data_parallel_hybrid_lb = False
         elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
+
+            if self.data_parallel_start_rank and not headless:
+                # Infer hybrid LB mode.
+                self.data_parallel_hybrid_lb = True
+
+            if self.data_parallel_hybrid_lb and data_parallel_size_local == 1:
+                # Use full external lb if we have local_size of 1.
+                data_parallel_external_lb = True
+                self.data_parallel_hybrid_lb = False
+
+            if data_parallel_size_local == self.data_parallel_size:
+                # Disable hybrid LB mode if set for a single node
+                self.data_parallel_hybrid_lb = False
+
+            self.data_parallel_rank = self.data_parallel_start_rank or 0
         else:
+            assert not self.data_parallel_hybrid_lb, (
+                "data_parallel_size_local must be set to use "
+                "data_parallel_hybrid_lb.")
+
             # Local DP size defaults to global DP size if not set.
             data_parallel_size_local = self.data_parallel_size
 
@@ -1125,6 +1201,7 @@ class EngineArgs:
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
+            data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.num_redundant_experts,
@@ -1141,6 +1218,18 @@ class EngineArgs:
             enable_multimodal_encoder_data_parallel=self.
             enable_multimodal_encoder_data_parallel,
         )
+
+        supports_mm_preprocessor_cache = (self.data_parallel_size == 1
+                                          or data_parallel_external_lb)
+        if (not supports_mm_preprocessor_cache
+                and model_config.is_multimodal_model
+                and not model_config.disable_mm_preprocessor_cache):
+            logger.warning(
+                "Multi-modal preprocessor cache is not compatible "
+                "with data parallelism when there does not exist a "
+                "one-to-one correspondance between API process and "
+                "EngineCore process, so the cache will be disabled.")
+            model_config.set_disable_mm_preprocessor_cache(True)
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
@@ -1261,7 +1350,7 @@ class EngineArgs:
         #############################################################
         # Unsupported Feature Flags on V1.
 
-        if self.load_format == LoadFormat.SHARDED_STATE.value:
+        if self.load_format == "sharded_state":
             _raise_or_fallback(
                 feature_name=f"--load_format {self.load_format}",
                 recommend_to_remove=False)
@@ -1292,14 +1381,6 @@ class EngineArgs:
         if self.scheduler_delay_factor != SchedulerConfig.delay_factor:
             _raise_or_fallback(feature_name="--scheduler-delay-factor",
                                recommend_to_remove=True)
-            return False
-
-        if self.guided_decoding_backend not in get_args(
-                GuidedDecodingBackendV1):
-            _raise_or_fallback(
-                feature_name=
-                f"--guided-decoding-backend={self.guided_decoding_backend}",
-                recommend_to_remove=False)
             return False
 
         # Need at least Ampere for now (FA support required).
@@ -1369,7 +1450,7 @@ class EngineArgs:
             "PALLAS",
             "PALLAS_VLLM_V1",
             "TRITON_MLA",
-            "CUTLASS_MLA_VLLM_V1",
+            "CUTLASS_MLA",
             "FLASHMLA",
             "FLASHINFER",
             "FLASHINFER_VLLM_V1",
@@ -1615,7 +1696,8 @@ class EngineArgs:
 
         if (self.max_num_seqs is None
                 and usage_context in default_max_num_seqs):
-            self.max_num_seqs = default_max_num_seqs[usage_context]
+            self.max_num_seqs = min(default_max_num_seqs[usage_context],
+                                    self.max_num_batched_tokens or sys.maxsize)
 
             logger.debug("Setting max_num_seqs to %d for %s usage context.",
                          self.max_num_seqs, use_context_value)
