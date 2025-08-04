@@ -131,7 +131,7 @@ class KimiVLImagePixelInputs(TensorSchema):
 
     pixel_values: Annotated[
         Union[torch.Tensor, list[torch.Tensor]],
-        TensorShape("np", "nc", "ps", "ps"),
+        TensorShape("np", 3, "ps", "ps"),
     ]
 
     image_grid_hws: Annotated[torch.Tensor, TensorShape("ni", 2)]
