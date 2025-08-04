@@ -86,18 +86,18 @@ class MinimaxToolParser(ToolParser):
 
     def _clean_duplicate_braces(self, args_text: str) -> str:
         import json
-        
+
         args_text = args_text.strip()
-        
+
         if not args_text:
             return args_text
-            
+
         try:
             json.loads(args_text)
             return args_text
         except json.JSONDecodeError:
             pass
-        
+
         while args_text.endswith('}}'):
             candidate = args_text[:-1]
             try:
@@ -105,15 +105,15 @@ class MinimaxToolParser(ToolParser):
                 return candidate
             except json.JSONDecodeError:
                 args_text = candidate
-        
+
         return args_text
 
     def _clean_delta_braces(self, delta_text: str) -> str:
         if not delta_text:
             return delta_text
-            
+
         delta_stripped = delta_text.strip()
-        
+
         if delta_stripped and all(c in '}\n\r\t ' for c in delta_stripped):
             brace_count = delta_stripped.count('}')
             if brace_count > 1:
@@ -121,7 +121,7 @@ class MinimaxToolParser(ToolParser):
                     return '}\n'
                 else:
                     return '}'
-        
+
         return delta_text
 
     def extract_tool_calls(
@@ -434,7 +434,7 @@ class MinimaxToolParser(ToolParser):
                     end_pos = args_text.find(self.tool_call_end_token)
                     if end_pos != -1:
                         args_text = args_text[:end_pos]
-                    
+
                     # Clean up potential duplicate closing braces
                     args_text = self._clean_duplicate_braces(args_text)
 
@@ -449,7 +449,8 @@ class MinimaxToolParser(ToolParser):
                                 args_text, already_streamed)
                             # Clean up potential duplicate braces in delta
                             if args_delta:
-                                args_delta = self._clean_delta_braces(args_delta)
+                                args_delta = self._clean_delta_braces(
+                                    args_delta)
                                 self.streamed_args_for_tool[
                                     self.current_tool_id] = args_text
                                 return DeltaMessage(tool_calls=[
@@ -479,9 +480,10 @@ class MinimaxToolParser(ToolParser):
                                     if prev_end_pos != -1:
                                         prev_args_text = prev_args_text[:
                                                                         prev_end_pos]
-                                    
-                                    # Clean up potential duplicate closing braces
-                                    prev_args_text = self._clean_duplicate_braces(prev_args_text)
+
+                                    prev_args_text = (
+                                        self._clean_duplicate_braces(
+                                            prev_args_text))
 
                         if prev_args_text and args_text.startswith(
                                 prev_args_text) and len(args_text) > len(
@@ -491,7 +493,8 @@ class MinimaxToolParser(ToolParser):
                                 args_text, prev_args_text)
                             # Clean up potential duplicate braces in delta
                             if args_delta:
-                                args_delta = self._clean_delta_braces(args_delta)
+                                args_delta = self._clean_delta_braces(
+                                    args_delta)
                                 self.streamed_args_for_tool[
                                     self.current_tool_id] = args_text
                                 return DeltaMessage(tool_calls=[
@@ -504,7 +507,8 @@ class MinimaxToolParser(ToolParser):
                         elif args_text and not prev_args_text:
                             # This is the very first content, send it all
                             # Clean up potential duplicate braces
-                            clean_args_text = self._clean_delta_braces(args_text)
+                            clean_args_text = self._clean_delta_braces(
+                                args_text)
                             self.streamed_args_for_tool[
                                 self.current_tool_id] = args_text
                             return DeltaMessage(tool_calls=[
