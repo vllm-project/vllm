@@ -253,6 +253,12 @@ class CompilationConfig:
     Map from layer name to layer objects that need to be accessed outside
     model code, e.g., Attention, FusedMOE when dp_size>1."""
 
+    multi_stream_layers: dict[str, Any] = field(default_factory=dict,
+                                                init=False)
+    """Layers that will run in multi-stream using the maybe_multi_stream_forward
+    custom op.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

@@ -23,21 +23,24 @@ from typing import Any, Optional
 import torch
 from torch import nn
 from transformers import Llama4TextConfig
+from typing import List
 
 from vllm.attention import Attention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, get_current_vllm_config, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
+import vllm.model_executor.layers.multi_stream as multi_stream
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.platforms import current_platform
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
@@ -95,13 +98,48 @@ class Llama4MoE(nn.Module):
             reduce_results=self.experts.must_reduce_shared_expert_outputs(),
         )
 
+        self.prefix = prefix
+        if current_platform.is_cuda():
+            self.enable_multi_stream = True
+
+            def _forward_shared_expert(hidden_states: torch.Tensor):
+                return self.shared_expert(hidden_states.clone())
+
+            def _forward_routed_experts(hidden_states: torch.Tensor):
+                router_logits, _ = self.router(hidden_states)
+                return self.experts(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                )
+
+            def _forward_fake(a: torch.Tensor):
+                return torch.empty_like(a)
+
+            multi_stream_layers = get_current_vllm_config().compilation_config.multi_stream_layers
+            multi_stream_layers[f"{prefix}.shared_expert"] = _forward_shared_expert
+            multi_stream_layers[f"{prefix}.shared_expert.fake"] = _forward_fake
+            multi_stream_layers[f"{prefix}.routed_experts"] = _forward_routed_experts
+            multi_stream_layers[f"{prefix}.routed_experts.fake"] = _forward_fake
+        else:
+            self.enable_multi_stream = False
+
     def forward(self, hidden_states):
-        router_logits, _ = self.router(hidden_states)
-        shared_out = self.shared_expert(hidden_states)
-        routed_out = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-        )
+
+        if self.enable_multi_stream:
+            shared_out, routed_out = torch.ops.vllm.maybe_multi_stream_forward(
+                f"{self.prefix}.shared_expert",
+                f"{self.prefix}.routed_experts",
+                hidden_states,
+                hidden_states,
+            )
+        else:
+            shared_out = self.shared_expert(hidden_states)
+            router_logits, _ = self.router(hidden_states)
+            routed_out = self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
+
         experts_out = routed_out + shared_out
 
         if self.tp_size > 1:
@@ -208,6 +246,30 @@ class Llama4Attention(nn.Module):
                 "attention_chunk_size": config.attention_chunk_size
             } if not self.nope else {}))
 
+        self.prefix = prefix
+        if current_platform.is_cuda():
+            self.enable_multi_stream = True
+
+            def _forward_q_norm(q: torch.Tensor):
+                q = q.reshape(-1, self.head_dim)
+                return self.qk_norm(q.float()).reshape(-1, self.q_size).to(q.dtype)
+
+            def _forward_k_norm(k: torch.Tensor):
+                k = k.reshape(-1, self.head_dim)
+                return self.qk_norm(k.float()).reshape(-1, self.kv_size).to(k.dtype)
+
+            def _forward_fake(a: torch.Tensor):
+                return torch.empty_like(a)
+
+            multi_stream_layers = get_current_vllm_config().compilation_config.multi_stream_layers
+            multi_stream_layers[f"{prefix}.q_norm"] = _forward_q_norm
+            multi_stream_layers[f"{prefix}.q_norm.fake"] = _forward_fake
+            multi_stream_layers[f"{prefix}.k_norm"] = _forward_k_norm
+            multi_stream_layers[f"{prefix}.k_norm.fake"] = _forward_fake
+        else:
+            self.enable_multi_stream = False
+
+
     def _get_attn_scale(self, positions: torch.Tensor) -> torch.Tensor:
         floor = torch.floor((positions + 1.0) / self.floor_scale)
         attn_scale = torch.log(floor + 1.0) * self.attn_scale + 1.0
@@ -229,10 +291,19 @@ class Llama4Attention(nn.Module):
             # Normalization is applied on the head_dim dimension. The rest of
             # the dimensions are collapsed into a single dimension to support
             # custom rms_norm cuda kernel.
-            q = q.reshape(-1, self.head_dim)
-            q = self.qk_norm(q.float()).reshape(-1, self.q_size).to(q.dtype)
-            k = k.reshape(-1, self.head_dim)
-            k = self.qk_norm(k.float()).reshape(-1, self.kv_size).to(k.dtype)
+
+            if self.enable_multi_stream:
+                q, k = torch.ops.vllm.maybe_multi_stream_forward(
+                    f"{self.prefix}.q_norm",
+                    f"{self.prefix}.k_norm",
+                    q,
+                    k,
+                )
+            else:
+                q = q.reshape(-1, self.head_dim)
+                q = self.qk_norm(q.float()).reshape(-1, self.q_size).to(q.dtype)
+                k = k.reshape(-1, self.head_dim)
+                k = self.qk_norm(k.float()).reshape(-1, self.kv_size).to(k.dtype)
 
         # We are applying temperature tuning (https://arxiv.org/abs/2501.19399)
         # to NoPE layers, where the inference-time temperature tuning function

@@ -29,7 +29,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
     prepare_communication_buffer_for_model)
-from vllm.forward_context import DPMetadata, set_forward_context
+from vllm.forward_context import DPMetadata, MultiStreamContext, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -336,6 +336,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else None)
 
         self.reorder_batch_threshold: Optional[int] = None
+
+        self.multi_stream_context = MultiStreamContext(
+            aux_stream=torch.cuda.Stream(),
+            event0=torch.cuda.Event(),
+            event1=torch.cuda.Event(),
+        )
 
     def _init_model_kwargs(self, num_tokens: int):
         model_kwargs = dict[str, Any]()
@@ -1588,6 +1594,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 skip_cuda_graphs=skip_cuda_graphs,
+                multi_stream_context=self.multi_stream_context,
         ), self.maybe_get_kv_connector_output(
                 scheduler_output) as kv_connector_output:
 
@@ -2301,7 +2308,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens,
-                    num_tokens_across_dp=num_tokens_across_dp):
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    multi_stream_context=self.multi_stream_context):
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,

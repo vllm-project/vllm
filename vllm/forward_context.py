@@ -13,6 +13,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -138,6 +139,13 @@ class DPMetadata:
 
 
 @dataclass
+class MultiStreamContext:
+    aux_stream: torch.cuda.Stream
+    event0: torch.cuda.Event
+    event1: torch.cuda.Event
+
+
+@dataclass
 class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
@@ -154,6 +162,9 @@ class ForwardContext:
     dp_metadata: Optional[DPMetadata] = None
     skip_cuda_graphs: bool = False
 
+    multi_stream_context: Optional[MultiStreamContext] = None
+
+    multi_stream_layers: dict[str, Any] = None
 
 _forward_context: Optional[ForwardContext] = None
 
@@ -174,6 +185,7 @@ def set_forward_context(
     num_tokens: Optional[int] = None,
     num_tokens_across_dp: Optional[torch.Tensor] = None,
     skip_cuda_graphs: bool = False,
+    multi_stream_context: Optional[MultiStreamContext] = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -199,6 +211,8 @@ def set_forward_context(
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
         skip_cuda_graphs=skip_cuda_graphs,
+        multi_stream_context=multi_stream_context,
+        multi_stream_layers=vllm_config.compilation_config.multi_stream_layers,
     )
 
     try:
@@ -216,7 +230,6 @@ def set_forward_context(
             # we use synchronous scheduling right now,
             # adding a sync point here should not affect
             # scheduling of the next batch
-            from vllm.platforms import current_platform
             synchronize = current_platform.synchronize
             if synchronize is not None:
                 synchronize()
