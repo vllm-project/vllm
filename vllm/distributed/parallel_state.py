@@ -1238,8 +1238,6 @@ def destroy_distributed_environment():
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     destroy_model_parallel()
     destroy_distributed_environment()
-    with contextlib.suppress(AssertionError):
-        torch.distributed.destroy_process_group()
     if shutdown_ray:
         import ray  # Lazy import Ray
         ray.shutdown()
