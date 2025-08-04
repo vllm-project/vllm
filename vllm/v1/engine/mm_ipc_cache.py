@@ -39,13 +39,9 @@ class MultiModalIPCCacheLookup:
     def __init__(self, model_config: "ModelConfig") -> None:
         super().__init__()
 
-        mm_config = model_config.multimodal_config
-
-        self.enabled = (mm_config is not None
-                        and mm_config.mm_ipc_cache_gb > 0)
-
+        self.enabled = model_config.enable_mm_ipc_cache
         self.mm_cache = MultiModalCache.get_lru_cache(
-            mm_config.mm_ipc_cache_gb if mm_config else 0,
+            model_config.get_mm_ipc_cache_gb(),
             MultiModalCacheItemMetadata,
         )
 
@@ -72,10 +68,8 @@ class MultiModalIPCCacheLookup:
 
         return full_mm_inputs
 
-    def reset(self) -> bool:
+    def reset(self) -> None:
         self.mm_cache.clear()
-
-        return True
 
 
 class MultiModalIPCCache:
@@ -84,13 +78,9 @@ class MultiModalIPCCache:
     def __init__(self, model_config: "ModelConfig") -> None:
         super().__init__()
 
-        mm_config = model_config.multimodal_config
-
-        self.enabled = (mm_config is not None
-                        and mm_config.mm_ipc_cache_gb > 0)
-
+        self.enabled = model_config.enable_mm_ipc_cache
         self.mm_cache = MultiModalCache.get_lru_cache(
-            mm_config.mm_ipc_cache_gb if mm_config else 0,
+            model_config.get_mm_ipc_cache_gb(),
             MultiModalKwargs,
         )
 
@@ -116,7 +106,5 @@ class MultiModalIPCCache:
 
         return full_mm_inputs
 
-    def reset(self) -> bool:
+    def reset(self) -> None:
         self.mm_cache.clear()
-
-        return True

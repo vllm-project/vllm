@@ -1706,6 +1706,22 @@ class ModelConfig:
                 or mm_config.mm_ipc_cache_gb > 0)
 
     @property
+    def enable_mm_ipc_cache(self) -> bool:
+        """Whether the multi-modal IPC cache should be enabled."""
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            return False
+
+        return mm_config.mm_ipc_cache_gb > 0
+
+    def get_mm_ipc_cache_gb(self) -> int:
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            return 0
+
+        return mm_config.mm_ipc_cache_gb
+
+    @property
     def is_cross_encoder(self) -> bool:
         return (self._model_info.supports_cross_encoding
                 or self.convert_type == "classify")
