@@ -232,14 +232,14 @@ class EplbState:
         ).contiguous()
 
         expert_load_pass = torch.zeros(
-            (model.num_moe_layers, model.num_local_physical_experts),
+            (model.num_moe_layers, model.num_physical_experts),
             dtype=torch.int32,
             device=device,
         )
         expert_load_window_size = parallel_config.eplb_window_size
         expert_load_window = torch.zeros(
             (expert_load_window_size, model.num_moe_layers,
-             model.num_local_physical_experts),
+             model.num_physical_experts),
             dtype=torch.int32,
             device=device,
         )
@@ -367,13 +367,9 @@ class EplbState:
             # Collect load metrics from all ranks
             ep_group = get_ep_group().device_group
             assert ep_group is not None
-            ep_size = ep_group.size()
 
-            # Since the global load is now calculated for each rank, it needs to
-            # be divided by the EP size to obtain the actual load
             # `num_tokens`: (num_moe_layers,)
-            num_tokens = logical_expert_load.sum(dim=-1).sum(dim=-1) // ep_size
-            assert ep_group is not None
+            num_tokens = logical_expert_load.sum(dim=-1)
             num_tokens_list = [
                 torch.empty_like(num_tokens) for _ in range(ep_group.size())
             ]
@@ -441,7 +437,7 @@ class EplbState:
                         "(profile)" if is_profile else "")
 
         if global_expert_load is None:
-            # Map the local physical expert load to global logical experts
+            # Map the physical expert load to global logical experts
             logical_expert_load_window = torch.zeros(
                 self.expert_load_window_size,
                 model.num_moe_layers,
