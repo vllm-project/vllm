@@ -279,18 +279,13 @@ class OutputProcessor:
 
     def __init__(self,
                  tokenizer: TokenizerGroup,
-                 log_stats: bool,
-                 observability_config: Optional[ObservabilityConfig] = None):
+                 log_stats: bool):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
         self.lora_states = LoRARequestStates()
-        self.observability_config = observability_config
         self.tracer: Optional[Tracer] = None
-
-    def is_tracing_enabled(self) -> bool:
-        return self.tracer is not None
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
