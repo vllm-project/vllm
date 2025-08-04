@@ -218,23 +218,21 @@ class MambaMixer2(MambaBase, CustomOp):
     **selective** state spaces)
     """
 
-    def __init__(
-        self,
-        hidden_size: int,
-        ssm_state_size: int,
-        conv_kernel_size: int,
-        intermediate_size: int,
-        use_conv_bias: bool,
-        use_bias: bool,
-        n_groups: int = 1,
-        num_heads: int = 128,
-        head_dim: int = 64,
-        rms_norm_eps: float = 1e-5,
-        activation: str = "silu",
-        use_rms_norm: bool = True,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self,
+                 hidden_size: int,
+                 ssm_state_size: int,
+                 conv_kernel_size: int,
+                 intermediate_size: int,
+                 use_conv_bias: bool,
+                 use_bias: bool,
+                 n_groups: int = 1,
+                 num_heads: int = 128,
+                 head_dim: int = 64,
+                 rms_norm_eps: float = 1e-5,
+                 activation: str = "silu",
+                 use_rms_norm: bool = True,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
 
         # For TP, the sharding plan is as follows:
@@ -670,7 +668,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
                                                 self.head_dim),
-            )
+                mamba_ssm_cache_dtype=mamba_cache_params.mamba_ssm_cache_dtype)
 
             # update ssm states
             # - varlen state is a (num_prefills, nheads, headdim, dstate) tensor
