@@ -131,16 +131,15 @@ class VisualTokenizer(torch.nn.Module):
 
         return features
 
-    def forward(
-        self, pixel_values, grid_thws
-    ) -> torch.Tensor:  # [BatchSize, ImageShape] -> [BatchSize, #Token, VocabSize]
+    def forward(self, pixel_values, grid_thws) -> torch.Tensor:
+        # [BatchSize, ImageShape] -> [BatchSize, #Token, VocabSize]
         torch.cuda.nvtx.range_push("VisualTokenizer forward")
         features = self.encode(pixel_values, grid_thws)
         logits = self.head(features)
         tokens = self.tokenize(logits)
-        # tokens' shape is [#Token, VocabSize-5], so padding with [#Token, 5], after
-        # which, tokens' shape should become [#Token, VocabSize];
-        # this is different from original aimv2 which has [BatchSize, #Token, VocabSize-5]
+        # tokens' shape is [#Token, VocabSize-4],
+        # so padding with [#Token, 4], after which,
+        # tokens' shape should become [#Token, VocabSize];
         tokens = torch.nn.functional.pad(
             tokens,
             (0, len(INDICATOR_IDS)),

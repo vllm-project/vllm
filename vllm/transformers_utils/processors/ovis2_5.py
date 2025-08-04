@@ -33,16 +33,20 @@ class Ovis2_5ProcessorKwargs(ProcessingKwargs,
 
 class Ovis2_5Processor(ProcessorMixin):
     r"""
-    Constructs a Ovis processor which wraps a Ovis image processor and a Qwen2 tokenizer into a single processor.
-    [`OvisProcessor`] offers all the functionalities of [`Qwen2VLImageProcessor`] and [`Qwen2TokenizerFast`]. See the
-    [`~OvisProcessor.__call__`] and [`~OvisProcessor.decode`] for more information.
+    Constructs a Ovis processor which wraps a Ovis image processor
+    and a Qwen2 tokenizer into a single processor.
+    [`OvisProcessor`] offers all the functionalities of 
+    [`Qwen2VLImageProcessor`] and [`Qwen2TokenizerFast`]. 
+    See the [`~OvisProcessor.__call__`] and [`~OvisProcessor.decode`]
+    for more information.
     Args:
         image_processor ([`Qwen2VLImageProcessor`], *optional*):
             The image processor is a required input.
         tokenizer ([`Qwen2TokenizerFast`], *optional*):
             The tokenizer is a required input.
-        chat_template (`str`, *optional*): A Jinja template which will be used to convert lists of messages
-            in a chat into a tokenizable string.
+        chat_template (`str`, *optional*): A Jinja template which will
+            be used to convert lists of messages in a chat into
+            a tokenizable string.
     """
 
     attributes = ["image_processor", "tokenizer"]
@@ -97,38 +101,59 @@ class Ovis2_5Processor(ProcessorMixin):
         **kwargs: Unpack[Ovis2_5ProcessorKwargs],
     ) -> BatchFeature:
         """
-        Main method to prepare for the model one or several sequences(s) and image(s). This method forwards the `text`
-        and `kwargs` arguments to Qwen2TokenizerFast's [`~Qwen2TokenizerFast.__call__`] if `text` is not `None` to encode
-        the text. To prepare the vision inputs, this method forwards the `vision_infos` and `kwrags` arguments to
-        Qwen2VLImageProcessor's [`~Qwen2VLImageProcessor.__call__`] if `vision_infos` is not `None`.
+        Main method to prepare for the model one or several sequences(s)
+        and image(s). This method forwards the `text`and `kwargs` arguments
+        to Qwen2TokenizerFast's [`~Qwen2TokenizerFast.__call__`] if `text`
+        is not `None` to encode the text. To prepare the vision inputs,
+        this method forwards the `vision_infos` and `kwrags` arguments to
+        Qwen2VLImageProcessor's [`~Qwen2VLImageProcessor.__call__`]
+        if `vision_infos` is not `None`.
             Args:
-                images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`, `list[PIL.Image.Image]`, `list[np.ndarray]`, `list[torch.Tensor]`):
-                    The image or batch of images to be prepared. Each image can be a PIL image, NumPy array or PyTorch
-                    tensor. Both channels-first and channels-last formats are supported.
+                images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`,
+                    `list[PIL.Image.Image]`, `list[np.ndarray]`,
+                    `list[torch.Tensor]`):
+                    The image or batch of images to be prepared.
+                    Each image can be a PIL image, NumPy array or PyTorch
+                    tensor. Both channels-first and channels-last formats
+                    are supported.
                 text (`str`, `list[str]`, `list[list[str]]`):
-                    The sequence or batch of sequences to be encoded. Each sequence can be a string or a list of strings
-                    (pretokenized string). If the sequences are provided as list of strings (pretokenized), you must set
-                    `is_split_into_words=True` (to lift the ambiguity with a batch of sequences).
-                videos (`np.ndarray`, `torch.Tensor`, `list[np.ndarray]`, `list[torch.Tensor]`):
-                    The image or batch of videos to be prepared. Each video can be a 4D NumPy array or PyTorch
-                    tensor, or a nested list of 3D frames. Both channels-first and channels-last formats are supported.
+                    The sequence or batch of sequences to be encoded.
+                    Each sequence can be a string or a list of strings
+                    (pretokenized string). If the sequences are provided as
+                    list of strings (pretokenized), you must set
+                    `is_split_into_words=True` (to lift the ambiguity with
+                    a batch of sequences).
+                videos (`np.ndarray`, `torch.Tensor`, `list[np.ndarray]`,
+                    `list[torch.Tensor]`):
+                    The image or batch of videos to be prepared. Each video
+                    can be a 4D NumPy array or PyTorch tensor, or a nested
+                    list of 3D frames. Both channels-first and channels-last
+                    formats are supported.
                 return_tensors (`str` or [`~utils.TensorType`], *optional*):
-                    If set, will return tensors of a particular framework. Acceptable values are:
+                    If set, will return tensors of a particular framework.
+                    Acceptable values are:
                     - `'tf'`: Return TensorFlow `tf.constant` objects.
                     - `'pt'`: Return PyTorch `torch.Tensor` objects.
                     - `'np'`: Return NumPy `np.ndarray` objects.
                     - `'jax'`: Return JAX `jnp.ndarray` objects.
             Returns:
                 [`BatchFeature`]: A [`BatchFeature`] with the following fields:
-                - **input_ids** -- list of token ids to be fed to a model. Returned when `text` is not `None`.
-                - **attention_mask** -- list of indices specifying which tokens should be attended to by the model (when
-                  `return_attention_mask=True` or if *"attention_mask"* is in `self.model_input_names` and if `text` is not
-                  `None`).
-                - **pixel_values** -- Pixel values to be fed to a model. Returned when `images` is not `None`.
-                - **pixel_values_videos** -- Pixel values of videos to be fed to a model. Returned when `videos` is not `None`.
-                - **image_grid_thw** -- list of image 3D grid in LLM. Returned when `images` is not `None`.
-                - **video_grid_thw** -- list of video 3D grid in LLM. Returned when `videos` is not `None`.
-                - **second_per_grid_ts** -- list of video seconds per time grid. Returned when `videos` is not `None`.
+                - **input_ids** -- list of token ids to be fed to a model.
+                  Returned when `text` is not `None`.
+                - **attention_mask** -- list of indices specifying which tokens 
+                  should be attended to by the model (when
+                  `return_attention_mask=True` or if *"attention_mask"* 
+                  is in `self.model_input_names` and if `text` is not `None`).
+                - **pixel_values** -- Pixel values to be fed to a model.
+                  Returned when `images` is not `None`.
+                - **pixel_values_videos** -- Pixel values of videos to be fed to
+                  a model. Returned when `videos` is not `None`.
+                - **image_grid_thw** -- list of image 3D grid in LLM. Returned
+                  when `images` is not `None`.
+                - **video_grid_thw** -- list of video 3D grid in LLM. Returned
+                  when `videos` is not `None`.
+                - **second_per_grid_ts** -- list of video seconds per time grid.
+                  Returned when `videos` is not `None`.
         """
         output_kwargs = self._merge_kwargs(
             Ovis2_5ProcessorKwargs,
@@ -257,19 +282,14 @@ class Ovis2_5Processor(ProcessorMixin):
                      min_pixels: int = 56 * 56,
                      max_pixels: int = 14 * 14 * 4 * 1280):
         """Rescales the image so that the following conditions are met:
-
         1. Both dimensions (height and width) are divisible by 'factor'.
-
-        2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
-
+        2. The total number of pixels is within the range 
+            ['min_pixels', 'max_pixels'].
         3. The aspect ratio of the image is maintained as closely as possible.
-
         """
-
         if height < factor or width < factor:
-            print(
-                f"height:{height} or width:{width} must be larger than factor:{factor}"
-            )
+            print(f"height:{height} or width:{width} must be "
+                  f"larger than factor:{factor}")
             if height < width:
                 width = round(factor / height * width)
                 height = factor
@@ -278,9 +298,8 @@ class Ovis2_5Processor(ProcessorMixin):
                 width = factor
 
         elif max(height, width) / min(height, width) > 200:
-            print(
-                f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
-            )
+            print(f"absolute aspect ratio must be smaller than 200, "
+                  f"got {max(height, width) / min(height, width)}")
             if height > width:
                 height = 200 * width
             else:
@@ -328,12 +347,7 @@ class Ovis2_5Processor(ProcessorMixin):
                 for c in range(grid[1]):
                     image_placeholders.append(
                         self.get_token_value('image_atom'))
-                    if c < grid[1] - 1:
-                        image_placeholders.append(
-                            self.get_token_value('image_col_sep'))
-                if r < grid[0] - 1:
-                    image_placeholders.append(
-                        self.get_token_value('image_row_sep'))
+
         image_placeholders.append(end_token)
         return image_placeholders
 
@@ -413,7 +427,8 @@ class Ovis2_5Processor(ProcessorMixin):
             patches = np.concatenate([patches, repeats], axis=0)
         channel = patches.shape[1]
         grid_t = patches.shape[0] // self.temporal_patch_size
-        grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
+        grid_h = resized_height // self.patch_size
+        grid_w = resized_width // self.patch_size
 
         patches = patches.reshape(
             grid_t,

@@ -67,7 +67,8 @@ class Siglip2VisionEmbeddings(nn.Module):
             )
             if self.preserve_original_pe:
                 self.num_patches = (self.image_size // self.patch_size)**2
-                self.position_embedding_size = self.image_size // self.patch_size
+                self.position_embedding_size = (self.image_size //
+                                                self.patch_size)
                 self.position_embedding = nn.Embedding(self.num_patches,
                                                        self.embed_dim)
 
@@ -77,8 +78,10 @@ class Siglip2VisionEmbeddings(nn.Module):
         """
         Args:
             pixel_values (`torch.FloatTensor`):
-                Pixel values of shape 
-                (num_patches, num_channels * temporal_patch_size * patch_size * patch_size)
+                Pixel values of shape (
+                    num_patches,
+                    num_channels * temporal_patch_size * patch_size * patch_size
+                )
             grid_thws: (`torch.LongTensor`):
                 grid shape (num_patches, 3)
         """
@@ -104,7 +107,7 @@ class Siglip2VisionEmbeddings(nn.Module):
                 -1).unsqueeze(0).permute(0, 3, 1, 2)
             cnt = 0
             for t, h, w in grid_thws:
-                thw = t * h * w
+                volume = t * h * w
                 pe = F.interpolate(positional_embeddings,
                                    size=(h, w),
                                    mode='bicubic',
@@ -114,9 +117,9 @@ class Siglip2VisionEmbeddings(nn.Module):
                 pe = pe.reshape(t, h // self.hidden_stride, self.hidden_stride,
                                 w // self.hidden_stride, self.hidden_stride,
                                 -1)
-                pe = pe.permute(0, 1, 3, 2, 4, 5).reshape(thw, -1)
-                pos_embed_new[cnt:cnt + thw] = pe
-                cnt += thw
+                pe = pe.permute(0, 1, 3, 2, 4, 5).reshape(volume, -1)
+                pos_embed_new[cnt:cnt + volume] = pe
+                cnt += volume
             patch_embeds = patch_embeds + pos_embed_new
 
         return patch_embeds
@@ -144,7 +147,8 @@ class Siglip2Attention(nn.Module):
         self.head_dim = self.embed_dim // self.num_heads
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
-                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
+                f"embed_dim must be divisible by num_heads "
+                f"(got `embed_dim`: {self.embed_dim} and `num_heads`:"
                 f" {self.num_heads}).")
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
@@ -226,9 +230,6 @@ class Siglip2EncoderLayer(nn.Module):
         Args:
             hidden_states (`torch.FloatTensor`):
                 Input to the layer of shape `(batch, seq_len, embed_dim)`.
-            attention_mask (`torch.FloatTensor`):
-                Attention mask of shape `(batch, 1, q_len, k_v_seq_len)` 
-                where padding elements are indicated by very large negative values.
             output_attentions (`bool`, *optional*, defaults to `False`):
                 Whether or not to return the attentions tensors of all 
                 attention layers. See `attentions` under
@@ -273,9 +274,12 @@ class Siglip2Encoder(nn.Module):
         self.hidden_stride = config.hidden_stride
         self.window_size = config.window_size
         self.spatial_merge_unit = config.hidden_stride * config.hidden_stride
-        self.fullatt_block_indexes = None if config.fullatt_block_indexes is None else [
-            int(i) for i in config.fullatt_block_indexes.split('|')
-        ]
+        if config.fullatt_block_indexes is None:
+            self.fullatt_block_indexes = None
+        else:
+            self.fullatt_block_indexes = [
+                int(i) for i in config.fullatt_block_indexes.split('|')
+            ]
 
     # copied from qwen2.5_vl
     def rot_pos_emb(self, grid_thw):
@@ -313,7 +317,8 @@ class Siglip2Encoder(nn.Module):
         cu_window_seqlens: list = [0]
         window_index_id = 0
         # patch (after merge) number in each window
-        vit_merger_window_size = self.window_size // self.hidden_stride // self.patch_size 
+        vit_merger_window_size = (self.window_size // self.hidden_stride //
+                                  self.patch_size)
 
         for grid_t, grid_h, grid_w in grid_thw:
             llm_grid_h, llm_grid_w = (
@@ -361,25 +366,21 @@ class Siglip2Encoder(nn.Module):
     ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, ...]]]:
         r"""
         Args:
-            inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
-                Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation.
-                This is useful if you want more control over how to convert `input_ids` indices into associated vectors
-                than the model's internal embedding lookup matrix.
-            attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
-
-                - 1 for tokens that are **not masked**,
-                - 0 for tokens that are **masked**.
-
-                [What are attention masks?](../glossary#attention-mask)
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
+            inputs_embeds (`torch.FloatTensor` of shape
+                `(batch_size, sequence_length, hidden_size)`):
+                Optionally, instead of passing `input_ids` you can choose to
+                directly pass an embedded representation. This is useful if
+                you want more control over how to convert `input_ids` indices
+                into associated vectors than the model's internal embedding
+                lookup matrix.
+            grid_thws (`torch.LongTensor`):
+                grid shape (num_patches, 3)
             output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
-                for more detail.
+                Whether or not to return the hidden states of all layers. See
+                `hidden_states` under returned tensors for more detail.
             return_dict (`bool`, *optional*):
-                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+                Whether or not to return a [`~utils.ModelOutput`] instead of
+                a plain tuple.
         """
         rotary_pos_emb = self.rot_pos_emb(grid_thws)
         window_index, cu_window_seqlens = self.get_window_index(grid_thws)
@@ -408,8 +409,10 @@ class Siglip2Encoder(nn.Module):
             dim=0,
             # Select dtype based on the following factors:
             #  - FA2 requires that cu_seqlens_q must have dtype int32
-            #  - torch.onnx.export requires that cu_seqlens_q must have same dtype as grid_thw
-            # See https://github.com/huggingface/transformers/pull/34852 for more information
+            #  - torch.onnx.export requires that cu_seqlens_q must have
+            #    same dtype as grid_thw
+            # See https://github.com/huggingface/transformers/pull/34852
+            # for more information
             dtype=grid_thws.dtype if torch.jit.is_tracing() else torch.int32,
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
@@ -419,17 +422,13 @@ class Siglip2Encoder(nn.Module):
 
         hidden_states = inputs_embeds
         for index, block in enumerate(self.layers):
-            if self.fullatt_block_indexes is None or index in self.fullatt_block_indexes:
+            if (not self.fullatt_block_indexes
+                    or index in self.fullatt_block_indexes):
                 cu_seqlens_tmp = cu_seqlens
             else:
                 cu_seqlens_tmp = cu_window_seqlens
-            if self.gradient_checkpointing and self.training:
-                hidden_states = self._gradient_checkpointing_func(
-                    block.__call__, hidden_states, cu_seqlens_tmp,
-                    position_embeddings)
-            else:
-                hidden_states = block(hidden_states, cu_seqlens_tmp,
-                                      position_embeddings)
+            hidden_states = block(hidden_states, cu_seqlens_tmp,
+                                  position_embeddings)
             if output_hidden_states:
                 hidden_states_ = hidden_states.reshape(
                     seq_len // self.spatial_merge_unit,
@@ -455,7 +454,8 @@ class Siglip2VisionTransformer(nn.Module):
         self.encoder = Siglip2Encoder(config)
         self.post_layernorm = nn.LayerNorm(embed_dim,
                                            eps=config.layer_norm_eps)
-        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
+        self._use_flash_attention_2 = \
+            (config._attn_implementation == "flash_attention_2")
 
     def forward(
         self,
@@ -470,7 +470,8 @@ class Siglip2VisionTransformer(nn.Module):
     ]:
         r"""
         spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
-            Tensor containing the spatial dimensions (height, width) of the input images.
+            Tensor containing the spatial dimensions (height, width)
+            of the input images.
         """
         hidden_states = self.embeddings(pixel_values, grid_thws)
 

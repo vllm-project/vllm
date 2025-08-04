@@ -46,11 +46,8 @@ __all__ = [
     "NemotronHConfig",
     "Nemotron_Nano_VL_Config",
     "NVLM_D_Config",
-<<<<<<< HEAD
     "Ovis2_5Config",
-=======
     "SpeculatorsConfig",
->>>>>>> upstream/main
     "UltravoxConfig",
     "Step3VLConfig",
     "Step3VisionEncoderConfig",
