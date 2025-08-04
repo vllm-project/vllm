@@ -159,6 +159,17 @@ def rocm_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                    scale_b: torch.Tensor, bias: torch.Tensor,
                                    input_2d: torch.Tensor,
                                    output_shape: list) -> torch.Tensor:
+    return torch.ops.vllm.rocm_per_tensor_w8a8_scaled_mm_impl(qinput, weight, out_dtype
+                                   scale_a, scale_b, bias, input_2d,
+                                   output_shape)
+
+def rocm_per_tensor_w8a8_scaled_mm_impl(qinput: torch.Tensor,
+                                   weight: torch.Tensor,
+                                   out_dtype: torch.dtype,
+                                   scale_a: torch.Tensor,
+                                   scale_b: torch.Tensor, bias: torch.Tensor,
+                                   input_2d: torch.Tensor,
+                                   output_shape: list) -> torch.Tensor:
     from vllm.platforms.rocm import on_mi3xx
     if envs.VLLM_ROCM_USE_SKINNY_GEMM and on_mi3xx(
     ) and qinput.shape[0] == 1 and qinput.shape[1] % 16 == 0:
@@ -174,6 +185,22 @@ def rocm_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
 
     return torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)
 
+def rocm_per_tensor_w8a8_scaled_mm_impl_fake (qinput: torch.Tensor,
+                                   weight: torch.Tensor,
+                                   out_dtype: torch.dtype,
+                                   scale_a: torch.Tensor,
+                                   scale_b: torch.Tensor, bias: torch.Tensor,
+                                   input_2d: torch.Tensor,
+                                   output_shape: list) -> torch.Tensor:
+    return qinput.new_empty((*qinput.shape[:-1], weight.shape[0]))
+
+direct_register_custom_op(
+    op_name="rocm_per_tensor_w8a8_scaled_mm_impl",
+    op_func=rocm_per_tensor_w8a8_scaled_mm_impl,
+    mutates_args=[],
+    fake_impl=,rocm_per_tensor_w8a8_scaled_mm_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
 
 def torch_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                     weight: torch.Tensor,
