@@ -466,9 +466,7 @@ class EplbState:
                                             group_src=0)
 
             # Perform all-reduce to get the expert load across all ranks
-            ep_size = ep_group.size()
-            global_expert_load_window = (
-                logical_expert_load_window.sum(dim=0) // ep_size)
+            global_expert_load_window = logical_expert_load_window.sum(dim=0)
             all_reduce(global_expert_load_window, group=ep_group)
 
             if not execute_shuffle:
