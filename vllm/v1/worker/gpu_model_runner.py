@@ -602,9 +602,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             mm_budget = self.mm_budget
             assert mm_budget is not None
 
-            dummy_modality, _ = mm_budget \
-                .get_modality_with_max_tokens()
-
+            dummy_modality, _ = mm_budget.get_modality_with_max_tokens()
             dummy_mm_data = self._get_mm_decoder_dummy_data(dummy_modality, 1)
 
             return self._get_mm_decoder_dummy_batch(
