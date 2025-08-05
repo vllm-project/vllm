@@ -290,20 +290,29 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
 
 
 def maybe_override_with_speculators_target_model(
-        model: str,
-        tokenizer: str,
-        trust_remote_code: bool,
-        revision: Optional[str] = None) -> tuple[str, str]:
+    model: str,
+    tokenizer: str,
+    trust_remote_code: bool,
+    revision: Optional[str] = None,
+    **kwargs,
+) -> tuple[str, str]:
     """
     If running a speculators config, override running model with target model
     """
+    is_gguf = check_gguf_file(model)
+    if is_gguf:
+        kwargs["gguf_file"] = Path(model).name
+        gguf_model_repo = Path(model).parent
+    else:
+        gguf_model_repo = None
     config_dict, _ = PretrainedConfig.get_config_dict(
-        model,
+        model if gguf_model_repo is None else gguf_model_repo,
         revision=revision,
         trust_remote_code=trust_remote_code,
         token=_get_hf_token(),
+        **kwargs,
     )
-    spec_config = config_dict.get("speculators_config")
+    spec_config = config_dict.get("speculators_config", None)
     # Return the target model
     if spec_config is not None:
         model = tokenizer = spec_config["verifier"]["name_or_path"]
@@ -439,6 +448,20 @@ def get_config(
                 f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
+
+    # ModelOpt 0.31.0 and after saves the quantization config in the model
+    # config file.
+    quantization_config = config_dict.get("quantization_config", None)
+
+    # ModelOpt 0.29.0 and before saves the quantization config in a separate
+    # "hf_quant_config.json" in the same directory as the model config file.
+    if quantization_config is None \
+        and file_or_path_exists(model, "hf_quant_config.json", revision):
+        quantization_config = get_hf_file_to_dict("hf_quant_config.json",
+                                                  model, revision)
+
+    if quantization_config is not None:
+        config.quantization_config = quantization_config
 
     if hf_overrides_kw:
         logger.debug("Overriding HF config with %s", hf_overrides_kw)
