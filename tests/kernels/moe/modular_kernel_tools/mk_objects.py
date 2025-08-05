@@ -41,6 +41,7 @@ class ExpertInfo:
     blocked_quantization_support: bool
     supports_chunking: bool
     supports_expert_map: bool
+    needs_matching_quant: bool = False
     needs_deep_gemm: bool = False
 
 
@@ -92,6 +93,7 @@ def register_experts(
     blocked_quantization_support: bool,
     supports_chunking: bool,
     supports_expert_map: bool,
+    needs_matching_quant: bool = False,
     needs_deep_gemm: bool = False,
 ):
     global EXPERT_INFO
@@ -104,6 +106,7 @@ def register_experts(
         blocked_quantization_support,
         supports_chunking,
         supports_expert_map,
+        needs_matching_quant,
         needs_deep_gemm,
     )
 
@@ -126,7 +129,7 @@ register_prepare_and_finalize(
     MoEPrepareAndFinalizeNoEP,
     standard_format,
     common_float_types,
-    True,
+    blocked_quantization_support=True,
     backend=None, # naive?
 )
 
@@ -134,25 +137,27 @@ register_experts(
     BatchedTritonExperts,
     batched_format,
     common_float_types,
-    True,
+    blocked_quantization_support=True,
     supports_chunking=False,
     supports_expert_map=False,
+    needs_matching_quant=True,
 )
 
 register_experts(
     TritonExperts,
     standard_format,
     common_float_and_int_types,
-    True,
+    blocked_quantization_support=True,
     supports_chunking=True,
     supports_expert_map=True,
+    needs_matching_quant=True,
 )
 
 register_experts(
     NaiveBatchedExperts,
     batched_format,
     common_float_and_int_types,
-    True,
+    blocked_quantization_support=True,
     supports_chunking=False,
     supports_expert_map=True,
 )
@@ -167,7 +172,7 @@ if has_deep_ep():
         DeepEPHTPrepareAndFinalize,
         standard_format,
         common_float_types,
-        True,
+        blocked_quantization_support=True,
         backend="deepep_high_throughput",
     )
 
@@ -175,7 +180,7 @@ if has_deep_ep():
         DeepEPLLPrepareAndFinalize,
         batched_format,
         common_float_types,
-        True,
+        blocked_quantization_support=True,
         backend="deepep_low_latency",
     )
 
@@ -186,7 +191,7 @@ if has_pplx():
         PplxPrepareAndFinalize,
         batched_format,
         common_float_and_int_types,
-        True,
+        blocked_quantization_support=True,
         backend="pplx",
     )
 
@@ -201,7 +206,7 @@ if False and has_flashinfer_cutlass_fused_moe():
         FlashInferCutlassMoEPrepareAndFinalize,
         standard_format,
         nv_fp4_types,
-        True, # ?
+        blocked_quantization_support=True, # ?
         backend=None,
     )
 
@@ -209,7 +214,7 @@ if False and has_flashinfer_cutlass_fused_moe():
         FlashInferExperts,
         standard_format,
         nv_fp4_types,
-        True,
+        blocked_quantization_support=True,
         supports_chunking=True,
         supports_expert_map=False,
     )
@@ -219,37 +224,39 @@ if has_deep_gemm():
         BatchedDeepGemmExperts,
         batched_format,
         fp8_types,
-        True,
+        blocked_quantization_support=True,
         supports_chunking=False,
         supports_expert_map=False,
+        needs_matching_quant=False,
         needs_deep_gemm=True,
     )
     register_experts(
         DeepGemmExperts,
         standard_format,
         fp8_types,
-        True,
+        blocked_quantization_support=True,
         supports_chunking=True,
         supports_expert_map=True,
+        needs_matching_quant=False,
         needs_deep_gemm=True,
     ),
     register_experts(
         BatchedTritonOrDeepGemmExperts,
         batched_format,
         common_float_and_int_types,
-        True,
+        blocked_quantization_support=True,
         supports_chunking=False,
         supports_expert_map=False,
-        needs_deep_gemm=True,
+        needs_matching_quant=True,
     )
     register_experts(
         TritonOrDeepGemmExperts,
         standard_format,
         common_float_and_int_types,
-        True,
+        blocked_quantization_support=True,
         supports_chunking=True,
         supports_expert_map=True,
-        needs_deep_gemm=True,
+        needs_matching_quant=True,
     )
 
 if cutlass_fp8_supported():
@@ -259,15 +266,15 @@ if cutlass_fp8_supported():
         CutlassExpertsFp8,
         standard_format,
         fp8_types,
-        True,
+        blocked_quantization_support=False,
         supports_chunking=True,
-        supports_expert_map=True,
+        supports_expert_map=False,
     )
     register_experts(
         CutlassBatchedExpertsFp8,
         batched_format,
         fp8_types,
-        True,
+        blocked_quantization_support=False,
         supports_chunking=False,
         supports_expert_map=False,
     )
@@ -278,7 +285,7 @@ if False and cutlass_fp4_supported():
         CutlassExpertsFp4,
         standard_format,
         nv_fp4_types,
-        True,
+        blocked_quantization_support=True,
         supports_chunking=True,
         supports_expert_map=False,
     )
