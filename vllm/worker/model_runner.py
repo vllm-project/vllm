@@ -2265,8 +2265,12 @@ class DecoderModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata
             else:
                 sampled = broadcast_tensor_dict()
             if sampled["token_ids"] is not None:
-                sampled_token_embeds = self.model.get_input_embeddings(
-                    sampled["token_ids"].squeeze(1))
+                # Since we don't have input embeddings, we just have 0s tensor
+                # sampled_token_embeds = self.model.get_input_embeddings(
+                #     sampled["token_ids"].squeeze(1))
+                sampled_token_embeds = torch.zeros(
+                    sampled["token_ids"].shape[0], self.model_config.get_hidden_size(), device=sampled["token_ids"].device
+                )
                 if self.is_driver_worker:
                     self.sampler.include_gpu_probs_tensor = \
                         orig_include_gpu_probs
@@ -2574,6 +2578,7 @@ class MiddleModelRunner(GPUModelRunnerBase[ModelInputForGPU]):
         # we can skip prefilling on tokens that successfully received KV caches
         # NOTE: The receive operation is blocking
         bypass_model_exec = False
+        # TODO: Check whether we need to use intermediate_tensors or just hidden tensors
         if self.need_recv_kv(model_input, kv_caches):
             hidden_or_intermediate_states, bypass_model_exec, model_input = \
                 get_kv_transfer_group().recv_kv_caches_and_hidden_states(
@@ -2706,9 +2711,16 @@ class MiddleModelRunner(GPUModelRunnerBase[ModelInputForGPU]):
             return None
         # Create PoolerOutput from the hidden or intermediate states.
         # The data should be just the hidden states
-        output: List[PoolerOutput] = [PoolerOutput(outputs=[
+        # output: List[PoolerOutput] = [PoolerOutput(outputs=[
+        #     PartialSequenceGroupOutput(
+        #         hidden_states=hidden_or_intermediate_states,
+        #         residual=hidden_or_intermediate_states
+        #     )
+        # ])]
+        output = [PoolerOutput(outputs=[
             PoolingSequenceGroupOutput(
-                data=hidden_or_intermediate_states
+                data=hidden_or_intermediate_states,
+                # residual=hidden_or_intermediate_states
             )
         ])]
         return output

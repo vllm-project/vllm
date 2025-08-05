@@ -367,6 +367,22 @@ class SequenceData(msgspec.Struct,
                 (self._cached_all_token_embeds,
                  token_embed.to(device=self._cached_all_token_embeds.device)),
                 dim=0)
+            
+
+    def append_token_embeds(self, token_embed: torch.Tensor) -> None:
+        # Do not pass in with batch or sequence dimensions
+        assert token_embed.ndim == 1
+        token_embed = token_embed.detach().cpu().unsqueeze(0)
+        if self._output_embeds is None:
+            self._output_embeds = token_embed
+        else:
+            self._output_embeds = torch.cat(
+                (self._output_embeds, token_embed), dim=0)
+        assert self._cached_all_token_embeds is not None
+        self._cached_all_token_embeds = torch.cat(
+            (self._cached_all_token_embeds,
+                token_embed.to(device=self._cached_all_token_embeds.device)),
+            dim=0)
 
     def get_len(self) -> int:
         return len(self._output_token_ids) + len(self._prompt_token_ids)
@@ -1218,6 +1234,28 @@ class PoolingSequenceGroupOutput(
         if not isinstance(other, PoolingSequenceGroupOutput):
             raise NotImplementedError()
         return self.data == other.data
+    
+class PartialSequenceGroupOutput(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        array_like=True):  # type: ignore[call-arg]
+    """The model output associated with a partial sequence group."""
+    __metaclass__ = SequenceGroupOutput
+    
+
+    hidden_states: Any
+    residual: Any
+
+    def __repr__(self) -> str:
+        return (f"PartialSequenceGroupOutput("
+                f"hidden_states={self.hidden_states}, "
+                f"residual={self.residual})")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, PartialSequenceGroupOutput):
+            raise NotImplementedError()
+        return (self.hidden_states == other.hidden_states
+                and self.residual == other.residual)
 
 
 # cannot use msgspec.Struct here because Dynamo does not support it
@@ -1264,12 +1302,12 @@ class PoolerOutput(
         omit_defaults=True,  # type: ignore[call-arg]
         array_like=True):  # type: ignore[call-arg]
     """The output from a pooling operation in the pooling model."""
-    outputs: list[PoolingSequenceGroupOutput]
+    outputs: list[Union[PoolingSequenceGroupOutput, PartialSequenceGroupOutput]]
 
-    def __getitem__(self, idx: int) -> PoolingSequenceGroupOutput:
+    def __getitem__(self, idx: int) -> Union[PoolingSequenceGroupOutput, PartialSequenceGroupOutput]:
         return self.outputs[idx]
 
-    def __setitem__(self, idx: int, value: PoolingSequenceGroupOutput):
+    def __setitem__(self, idx: int, value: Union[PoolingSequenceGroupOutput, PartialSequenceGroupOutput]):
         self.outputs[idx] = value
 
     def __len__(self):
