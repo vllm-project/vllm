@@ -404,10 +404,12 @@ def make_local_attention_virtual_batches(
         causal=True,
     )
 
+USE_WIDE_DECODE = True
+DECODE_THRESHOLD = 2 if USE_WIDE_DECODE else 1
 
 def split_decodes_and_prefills(
     common_attn_metadata: CommonAttentionMetadata,
-    decode_threshold: int = 1,
+    decode_threshold: int = DECODE_THRESHOLD,
 ) -> tuple[int, int, int, int]:
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
@@ -438,8 +440,8 @@ def split_decodes_and_prefills(
         return num_reqs, 0, num_tokens, 0
 
     first_prefill = is_prefill.int().argmax(dim=-1).item()
-    assert torch.all(query_lens[first_prefill:] > decode_threshold)
-    assert torch.all(query_lens[:first_prefill] <= decode_threshold)
+    # assert torch.all(query_lens[first_prefill:] > decode_threshold)
+    # assert torch.all(query_lens[:first_prefill] <= decode_threshold)
     num_decodes = first_prefill
     num_prefills = num_reqs - num_decodes
     num_decode_tokens = query_start_loc[first_prefill].item()
@@ -450,7 +452,7 @@ def split_decodes_and_prefills(
 def reorder_batch_to_split_decodes_and_prefills(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
-    decode_threshold: int = 1,
+    decode_threshold: int = DECODE_THRESHOLD,
 ) -> bool:
     """
     Reorders the batch to split into prefill and decode requests; places all

@@ -1812,6 +1812,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()
+        # return [[x[-1]] if x else [] for x in sampled_token_ids]
         return spec_token_ids
 
     def propose_ngram_draft_token_ids(
