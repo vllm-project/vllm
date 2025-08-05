@@ -10,17 +10,17 @@ Use the provided script to start a vLLM server with chunked processing enabled:
 
 ```bash
 # Basic usage (supports very long texts up to ~3M tokens)
-./openai_embedding_long_text_service.sh
+./service.sh
 
 # Custom configuration with different models
 MODEL_NAME="jinaai/jina-embeddings-v3" \
 MAX_EMBED_LEN=1048576 \
-./openai_embedding_long_text_service.sh
+./service.sh
 
 # For extremely long documents
 MODEL_NAME="intfloat/multilingual-e5-large" \
 MAX_EMBED_LEN=3072000 \
-./openai_embedding_long_text_service.sh
+./service.sh
 ```
 
 ### 2. Test Long Text Embedding
@@ -28,16 +28,16 @@ MAX_EMBED_LEN=3072000 \
 Run the comprehensive test client:
 
 ```bash
-python openai_embedding_long_text_client.py
+python client.py
 ```
 
 ## 📁 Files
 
 | File | Description |
 |------|-------------|
-| `openai_embedding_long_text_service.sh` | Server startup script with chunked processing enabled |
-| `openai_embedding_long_text_client.py` | Comprehensive test client for long text embedding |
-| `openai_embedding_client.py` | Basic embedding client (updated with chunked processing info) |
+| `service.sh` | Server startup script with chunked processing enabled |
+| `client.py` | Comprehensive test client for long text embedding |
+| `../openai_embedding_client.py` | Basic embedding client (updated with chunked processing info) |
 
 ## ⚙️ Configuration
 
@@ -47,20 +47,22 @@ The key parameters for chunked processing are in the `--override-pooler-config`:
 
 ```json
 {
-  "pooling_type": "MEAN",
+  "pooling_type": "auto",
   "normalize": true,
   "enable_chunked_processing": true,
   "max_embed_len": 3072000
 }
 ```
 
+**Note**: `pooling_type` sets the model's own pooling strategy for processing within each chunk. The cross-chunk aggregation automatically uses MEAN strategy when input exceeds the model's native maximum length.
+
 #### Chunked Processing Behavior
 
-Chunked processing now uses **MEAN aggregation** for cross-chunk combination, regardless of the model's native pooling type:
+Chunked processing uses **MEAN aggregation** for cross-chunk combination when input exceeds the model's native maximum length:
 
 | Component | Behavior | Description |
 |-----------|----------|-------------|
-| **Within chunks** | Native pooling (MEAN/CLS/LAST) | Uses model's original pooling strategy |
+| **Within chunks** | Model's native pooling | Uses the model's configured pooling strategy |
 | **Cross-chunk aggregation** | Always MEAN | Weighted averaging based on chunk token counts |
 | **Performance** | Optimal | All chunks processed for complete semantic coverage |
 
@@ -72,15 +74,15 @@ Chunked processing now uses **MEAN aggregation** for cross-chunk combination, re
 | `PORT` | `31090` | Server port |
 | `GPU_COUNT` | `1` | Number of GPUs to use |
 | `MAX_EMBED_LEN` | `3072000` | Maximum embedding input length (supports very long documents) |
-| `POOLING_TYPE` | `auto` | Model's native pooling type: `auto`, `MEAN`, `CLS`, `LAST` |
+| `POOLING_TYPE` | `auto` | Model's native pooling type: `auto`, `MEAN`, `CLS`, `LAST` (only affects within-chunk pooling, not cross-chunk aggregation) |
 | `API_KEY` | `EMPTY` | API key for authentication |
 
 ## 🔧 How It Works
 
 1. **Enhanced Input Validation**: `max_embed_len` allows accepting inputs longer than `max_model_len` without environment variables
 2. **Smart Chunking**: Text is split based on `max_position_embeddings` to maintain semantic integrity
-3. **Unified Processing**: All chunks processed separately through the model using native pooling
-4. **MEAN Aggregation**: Results combined using token count-based weighted averaging across all chunks
+3. **Unified Processing**: All chunks processed separately through the model using its configured pooling strategy
+4. **MEAN Aggregation**: When input exceeds model's native length, results combined using token count-based weighted averaging across all chunks
 5. **Consistent Output**: Final embeddings maintain the same dimensionality as standard processing
 
 ### Input Length Handling
