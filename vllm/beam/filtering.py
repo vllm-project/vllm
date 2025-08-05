@@ -22,7 +22,32 @@ def format_filter(filter_params_list):
     return [dict(zip(keys, vals)) for vals in filter_params_list]
 
 
-DEFAULT_CHAR_SERVER_FILTER = [{"name": "annotations_porn", "threshold": 0.5156}, {"name": "annotations_racist", "threshold": 0.9763}, {"name": "annotations_disturbing", "threshold": 0.5472}, {"name": "annotations_harmful_promotes_selfharm", "threshold": 0.0657}]
+DEFAULT_CHAR_SERVER_FILTER = [
+  {
+    "name": "annotations_sx3_plus",
+    "threshold": 0.93
+  },
+  {
+    "name": "annotations_scim",
+    "threshold": 0.35
+  },
+  {
+    "name": "annotations_selfharm",
+    "threshold": 0.14
+  },
+  {
+    "name": "annotations_violence",
+    "threshold": 0.44
+  },
+  {
+    "name": "annotations_racism",
+    "threshold": 0.08
+  },
+  {
+    "name": "annotations_eatingdisorder",
+    "threshold": 0.26
+  }
+]
 
 MAX_GENERATIONS = 10
 _CHUNK_SIZE = 16

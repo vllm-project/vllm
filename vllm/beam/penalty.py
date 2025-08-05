@@ -629,8 +629,16 @@ MEOW_CLASSI = [
 MEOW_CLASSI_IDX = {n["name"]: n["index"] for n in MEOW_CLASSI}
 
 MODEL_SERVER_RANKING = [
-    {"name": "chosen_after_swipe_crowd_preference", "pow": 0.5, "negation": False},
-    {"name": "chosen_after_swipe_preference", "pow": 0.5, "negation": False},
+  {
+    "name": "chosen_after_swipe_crowd_preference",
+    "negation": False,
+    "pow": 0.5
+  },
+  {
+    "name": "chosen_after_swipe_preference",
+    "negation": False,
+    "pow": 0.5
+  }
 ]
 
 
@@ -646,7 +654,74 @@ def format_penalty(penalty_params_list):
     return [dict(zip(keys, vals)) for vals in penalty_params_list]
 
 
-MODEL_SERVER_PENALTY = [{"name": "annotations_sexually_suggestive", "penalty": 15000, "final_threshold": 0.4484, "per_unit_penalty": 0}, {"name": "annotations_porn", "penalty": 15000, "final_threshold": 0.4378, "per_unit_penalty": 0}, {"name": "annotations_porn", "penalty": 20000, "final_threshold": 0.7773, "per_unit_penalty": 1}, {"name": "annotations_racist", "penalty": 20000, "final_threshold": 0.9763, "per_unit_penalty": 1}, {"name": "annotations_disturbing", "penalty": 15000, "final_threshold": 0.4156, "per_unit_penalty": 1}, {"name": "annotations_harmful_promotes_selfharm", "penalty": 10000, "final_threshold": 0.0657, "per_unit_penalty": 1}, {"name": "annotations_harmful_promotes_selfharm", "penalty": 10001, "final_threshold": 0.0017, "per_unit_penalty": 1}, {"name": "repetitive", "penalty": 1000, "final_threshold": 0.8164, "per_unit_penalty": 1}, {"name": "annotations_nonsense_gd", "penalty": 1000, "final_threshold": 0.2539, "per_unit_penalty": 1}, {"name": "annotations_looping", "penalty": 1000, "final_threshold": 0.1944, "per_unit_penalty": 1}, {"name": "annotations_out_of_character_gd", "penalty": 1000, "final_threshold": 0.3631, "per_unit_penalty": 1}]
+MODEL_SERVER_PENALTY = [
+  {
+    "final_threshold": 0.4455,
+    "name": "annotations_sexually_suggestive",
+    "penalty": 15000,
+    "per_unit_penalty": 0
+  },
+  {
+    "final_threshold": 0.81,
+    "name": "annotations_sx3_plus",
+    "penalty": 15000,
+    "per_unit_penalty": 1
+  },
+  {
+    "final_threshold": 0.26,
+    "name": "annotations_scim",
+    "penalty": 10000,
+    "per_unit_penalty": 1
+  },
+  {
+    "final_threshold": 0.07,
+    "name": "annotations_selfharm",
+    "penalty": 15000,
+    "per_unit_penalty": 1
+  },
+  {
+    "final_threshold": 0.19,
+    "name": "annotations_eatingdisorder",
+    "penalty": 10000,
+    "per_unit_penalty": 1
+  },
+  {
+    "final_threshold": 0.33,
+    "name": "annotations_violence",
+    "penalty": 10000,
+    "per_unit_penalty": 1
+  },
+  {
+    "final_threshold": 0.06,
+    "name": "annotations_racism",
+    "penalty": 10000,
+    "per_unit_penalty": 1
+  },
+  {
+    "final_threshold": 0.7718,
+    "name": "repetitive",
+    "penalty": 1000,
+    "per_unit_penalty": 1
+  },
+  {
+    "final_threshold": 0.1986,
+    "name": "annotations_nonsense_gd",
+    "penalty": 1000,
+    "per_unit_penalty": 1
+  },
+  {
+    "final_threshold": 0.1361,
+    "name": "annotations_looping",
+    "penalty": 1000,
+    "per_unit_penalty": 1
+  },
+  {
+    "final_threshold": 0.3775,
+    "name": "annotations_out_of_character_gd",
+    "penalty": 1000,
+    "per_unit_penalty": 1
+  }
+]
 
 
 class PenaltyComputer:
@@ -675,12 +750,15 @@ class PenaltyComputer:
         self.thresholds_P = _tensor("final_threshold")
         self.per_unit_penalties_P = _tensor("per_unit_penalty")
 
-    def compute(self, logit_GC, debug_infos_G: list[BeamDebugInfo] = None):
+    def compute(self, logit_GC, prob_GC = None, debug_infos_G: list[BeamDebugInfo] = None):
         if not self.classi_indices:
             return torch.zeros_like(logit_GC[:, 0])
 
         logit_GC = logit_GC[:, self.classi_indices]
-        prob_GC = torch.sigmoid(logit_GC)
+        if prob_GC is None:
+            prob_GC = torch.sigmoid(logit_GC)
+        else:
+            prob_GC = prob_GC[:, self.classi_indices]
 
         over_threshold = (prob_GC > self.thresholds_P).to(self.dtype)
         classifiers_that_are_over_threshold = [
