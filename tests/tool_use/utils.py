@@ -252,6 +252,25 @@ SEARCH_TOOL: ChatCompletionToolParam = {
     }
 }
 
+PRODUCT_TOOL: ChatCompletionToolParam = {
+    "type": "function",
+    "function": {
+        "name": "get_product_info",
+        "description":
+        "Get detailed information of a product based on its product ID.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "product_id": {
+                    "type": "integer",
+                    "description": "The product ID of the product."
+                }
+            },
+            "required": ["product_id"]
+        },
+    },
+}
+
 MESSAGES_WITHOUT_TOOLS: list[ChatCompletionMessageParam] = [{
     "role":
     "user",
@@ -359,4 +378,12 @@ MESSAGES_WITH_PARALLEL_TOOL_RESPONSE: list[ChatCompletionMessageParam] = [{
     "content":
     "The weather in Orlando FL is 78 degrees fahrenheit with clear"
     "skies."
+}]
+
+MESSAGES_ASKING_FOR_PRODUCT_INFO: list[ChatCompletionMessageParam] = [{
+    "role":
+    "user",
+    "content":
+    "Hi! Do you have any detailed information about the product id "
+    "7355608?"
 }]

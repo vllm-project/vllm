@@ -7,8 +7,9 @@ from typing import Optional
 import openai
 import pytest
 
-from .utils import (MESSAGES_ASKING_FOR_TOOLS, MESSAGES_WITH_TOOL_RESPONSE,
-                    SEARCH_TOOL, WEATHER_TOOL)
+from .utils import (MESSAGES_ASKING_FOR_PRODUCT_INFO,
+                    MESSAGES_ASKING_FOR_TOOLS, MESSAGES_WITH_TOOL_RESPONSE,
+                    PRODUCT_TOOL, SEARCH_TOOL, WEATHER_TOOL)
 
 
 # test: request a chat completion that should return tool calls, so we know they
@@ -193,3 +194,122 @@ async def test_tool_call_with_results(client: openai.AsyncOpenAI):
     assert finish_reason_count == 1
     assert len(chunks)
     assert "".join(chunks) == choice.message.content
+
+
+# test: request a chat completion with product info tool call
+# with integar argument
+@pytest.mark.asyncio
+async def test_product_info_tool_call(client: openai.AsyncOpenAI):
+    models = await client.models.list()
+    model_name: str = models.data[0].id
+
+    # Non-streaming test
+    chat_completion = await client.chat.completions.create(
+        messages=MESSAGES_ASKING_FOR_PRODUCT_INFO,
+        temperature=0,
+        max_completion_tokens=100,
+        model=model_name,
+        tools=[PRODUCT_TOOL],
+        logprobs=False)
+
+    choice = chat_completion.choices[0]
+    stop_reason = chat_completion.choices[0].finish_reason
+    tool_calls = chat_completion.choices[0].message.tool_calls
+
+    # make sure a tool call is present
+    assert choice.message.role == 'assistant'
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].type == 'function'
+    assert tool_calls[0].function is not None
+    assert isinstance(tool_calls[0].id, str)
+    assert len(tool_calls[0].id) >= 9
+
+    # make sure the product info tool was called with correct arguments
+    assert tool_calls[0].function.name == PRODUCT_TOOL["function"]["name"]
+    assert tool_calls[0].function.arguments is not None
+    assert isinstance(tool_calls[0].function.arguments, str)
+
+    # make sure the arguments parse properly
+    parsed_arguments = json.loads(tool_calls[0].function.arguments)
+    assert isinstance(parsed_arguments, dict)
+    assert isinstance(parsed_arguments.get("product_id"), int)
+    assert parsed_arguments.get("product_id") == 7355608
+
+    assert stop_reason == "tool_calls"
+
+    function_name: Optional[str] = None
+    function_args_str: str = ''
+    tool_call_id: Optional[str] = None
+    role_name: Optional[str] = None
+    finish_reason_count: int = 0
+
+    # Streaming test
+    stream = await client.chat.completions.create(
+        model=model_name,
+        messages=MESSAGES_ASKING_FOR_PRODUCT_INFO,
+        temperature=0,
+        max_completion_tokens=100,
+        tools=[PRODUCT_TOOL],
+        logprobs=False,
+        stream=True)
+
+    async for chunk in stream:
+        assert chunk.choices[0].index == 0
+
+        if chunk.choices[0].finish_reason:
+            finish_reason_count += 1
+            assert chunk.choices[0].finish_reason == 'tool_calls'
+
+        # if a role is being streamed make sure it wasn't already set to
+        # something else
+        if chunk.choices[0].delta.role:
+            assert not role_name or role_name == 'assistant'
+            role_name = 'assistant'
+
+        # if a tool call is streamed make sure there's exactly one
+        streamed_tool_calls = chunk.choices[0].delta.tool_calls
+
+        if streamed_tool_calls and len(streamed_tool_calls) > 0:
+            assert len(streamed_tool_calls) == 1
+            tool_call = streamed_tool_calls[0]
+
+            # if a tool call ID is streamed, make sure one hasn't been already
+            if tool_call.id:
+                assert not tool_call_id
+                tool_call_id = tool_call.id
+
+            # if parts of the function start being streamed
+            if tool_call.function:
+                # if the function name is defined, set it. it should be streamed
+                # IN ENTIRETY, exactly one time.
+                if tool_call.function.name:
+                    assert function_name is None
+                    assert isinstance(tool_call.function.name, str)
+                    function_name = tool_call.function.name
+                if tool_call.function.arguments:
+                    assert isinstance(tool_call.function.arguments, str)
+                    function_args_str += tool_call.function.arguments
+
+    assert finish_reason_count == 1
+    assert role_name == 'assistant'
+    assert isinstance(tool_call_id, str) and (len(tool_call_id) >= 9)
+
+    # validate the name and arguments
+    assert function_name == "get_product_info"
+    assert function_name == tool_calls[0].function.name
+    assert isinstance(function_args_str, str)
+
+    # validate arguments
+    streamed_args = json.loads(function_args_str)
+    assert isinstance(streamed_args, dict)
+    assert isinstance(streamed_args.get("product_id"), int)
+    assert streamed_args.get("product_id") == 7355608
+
+    # make sure everything matches non-streaming except for ID
+    assert function_name == tool_calls[0].function.name
+    assert choice.message.role == role_name
+    assert choice.message.tool_calls[0].function.name == function_name
+
+    # compare streamed with non-streamed args dict-wise, not string-wise
+    assert parsed_arguments == streamed_args
