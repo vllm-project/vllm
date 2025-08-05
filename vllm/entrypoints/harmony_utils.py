@@ -3,7 +3,7 @@
 import datetime
 import json
 from collections.abc import Iterable
-from typing import Any, Literal, Optional, Union
+from typing import Literal, Optional, Union
 
 from openai.types.responses import (ResponseOutputItem, ResponseOutputMessage,
                                     ResponseOutputText)
@@ -43,10 +43,8 @@ def get_system_message(
     model_identity: Optional[str] = None,
     reasoning_effort: Optional[Literal["high", "medium", "low"]] = None,
     start_date: Optional[str] = None,
-    enable_browsing: bool = True,
-    browser_tool: Optional[Any] = None,
-    enable_python: bool = True,
-    python_tool: Optional[Any] = None,
+    browser_description: Optional[str] = None,
+    python_description: Optional[str] = None,
 ) -> Message:
     sys_msg_content = SystemContent.new()
     if model_identity is not None:
@@ -57,12 +55,10 @@ def get_system_message(
     if start_date is None:
         start_date = datetime.datetime.now().strftime("%Y-%m-%d")
     sys_msg_content = sys_msg_content.with_conversation_start_date(start_date)
-    if enable_browsing:
-        assert browser_tool is not None
-        sys_msg_content = sys_msg_content.with_tools(browser_tool.tool_config)
-    if enable_python:
-        assert python_tool is not None
-        sys_msg_content = sys_msg_content.with_tools(python_tool.tool_config)
+    if browser_description is not None:
+        sys_msg_content = sys_msg_content.with_tools(browser_description)
+    if python_description is not None:
+        sys_msg_content = sys_msg_content.with_tools(python_description)
     sys_msg = Message.from_role_and_content(Role.SYSTEM, sys_msg_content)
     return sys_msg
 
