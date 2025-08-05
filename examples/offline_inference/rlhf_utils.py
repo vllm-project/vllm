@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+
 import torch
+
+from vllm.platforms import current_platform
 
 
 def stateless_init_process_group(master_address, master_port, rank, world_size, device):
@@ -11,14 +15,45 @@ def stateless_init_process_group(master_address, master_port, rank, world_size, 
     the data-plane communication (NCCL) between external (train processes)
     and vLLM workers.
     """
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-    from vllm.distributed.utils import StatelessProcessGroup
+    if current_platform.is_xpu():
+        from vllm.distributed.device_communicators.xpu_communicator import (
+            XpuCommunicator,
+        )
 
-    pg = StatelessProcessGroup.create(
-        host=master_address, port=master_port, rank=rank, world_size=world_size
-    )
-    pynccl = PyNcclCommunicator(pg, device=device)
-    return pynccl
+        ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE", "drmfd")
+        ENV_CCL_ATL_TRANSPORT = os.getenv("CCL_ATL_TRANSPORT", "ofi")
+        ENV_LOCAL_WORLD_SIZE = os.getenv("LOCAL_WORLD_SIZE", str(world_size))
+        os.environ["CCL_ZE_IPC_EXCHANGE"] = ENV_CCL_ZE_IPC_EXCHANGE
+        os.environ["CCL_ATL_TRANSPORT"] = ENV_CCL_ATL_TRANSPORT
+        os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
+        os.environ["LOCAL_RANK"] = str(rank)
+        from vllm.utils import get_distributed_init_method
+
+        distributed_init_method = get_distributed_init_method(
+            master_address, master_port
+        )
+
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(
+                backend="ccl",
+                init_method=distributed_init_method,
+                world_size=world_size,
+                rank=rank,
+            )
+
+        ranks = list(range(torch.distributed.get_world_size()))
+        pg = torch.distributed.new_group(ranks, backend="ccl")
+        ccl = XpuCommunicator(pg, device=device)
+        return ccl
+    else:
+        from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+        from vllm.distributed.utils import StatelessProcessGroup
+
+        pg = StatelessProcessGroup.create(
+            host=master_address, port=master_port, rank=rank, world_size=world_size
+        )
+        pynccl = PyNcclCommunicator(pg, device=device)
+        return pynccl
 
 
 class WorkerExtension:
@@ -47,10 +82,14 @@ class WorkerExtension:
 
     def update_weight(self, name, dtype_name, shape):
         dtype = getattr(torch, dtype_name)
-        weight = torch.empty(shape, dtype=dtype, device="cuda")
-        self.model_update_group.broadcast(
-            weight, src=0, stream=torch.cuda.current_stream()
-        )
+        weight = torch.empty(shape, dtype=dtype, device=current_platform.device_type)
+
+        if current_platform.is_xpu():
+            self.model_update_group.broadcast(weight, src=0)
+        else:
+            self.model_update_group.broadcast(
+                weight, src=0, stream=torch.cuda.current_stream()
+            )
 
         self.model_runner.model.load_weights(weights=[(name, weight)])
 
@@ -91,11 +130,18 @@ class ColocateWorkerExtension:
             list_args = list(args)
             # the key is to change device id to the current device id
             # in case two processes have different CUDA_VISIBLE_DEVICES
-            list_args[6] = device_id
-            tensor = func(*list_args)
+            if current_platform.is_xpu():
+                tensor = func(*list_args)
+                tensor = tensor.to(current_platform.device_type + ":" + str(device_id))
+            else:
+                list_args[6] = device_id
+                tensor = func(*list_args)
             weights.append((name, tensor))
         self.model_runner.model.load_weights(weights=weights)
-        torch.cuda.synchronize()
+        if current_platform.is_xpu():
+            torch.xpu.synchronize()
+        else:
+            torch.cuda.synchronize()
 
     def check_weights_changed(self):
         """

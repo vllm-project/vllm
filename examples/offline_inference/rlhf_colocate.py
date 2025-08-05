@@ -36,6 +36,7 @@ from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from vllm import LLM
+from vllm.platforms import current_platform
 
 
 class MyLLM(LLM):
@@ -55,9 +56,11 @@ class MyLLM(LLM):
     def __init__(self, *args, bundle_indices: list[int], **kwargs):
         # Prevent Ray from manipulating the top-level CUDA_VISIBLE_DEVICES variable
         # so that vLLM can its own device placement inside the worker.
+
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         # Each worker uses 0.4 GPU so that two instances fit on the same GPUs.
         os.environ["VLLM_RAY_PER_WORKER_GPUS"] = "0.4"
+        os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
         print(f"creating LLM with bundle_indices={bundle_indices}")
         super().__init__(*args, **kwargs)
@@ -76,14 +79,21 @@ class RayTrainingActor:
         from transformers import AutoModelForCausalLM
 
         self.model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
-        self.model.to("cuda:0")
+        from vllm.platforms import current_platform
+
+        if current_platform.is_xpu():
+            self.model.to("xpu:0")
+        else:
+            self.model.to("cuda:0")
         # Zero out all the parameters.
         for name, p in self.model.named_parameters():
             p.data.zero_()
-        torch.cuda.synchronize()
+        if current_platform.is_xpu():
+            torch.xpu.synchronize()
+        else:
+            torch.cuda.synchronize()
         # The argument for `get_device_uuid` is the index of the GPU in the
         # list of visible devices.
-        from vllm.platforms import current_platform
 
         self.device_uuid = current_platform.get_device_uuid(0)
 
@@ -104,7 +114,7 @@ class RayTrainingActor:
 
 # Ray manages four GPUs.
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+os.environ[current_platform.device_control_env_var] = "0,1,2,3"
 ray.init()
 
 # Co-locate vLLM instances and training actors on the same set of GPUs:
@@ -123,6 +133,7 @@ inference_engines = []
 inference_engine_device_ids = []
 
 for bundle_index in [0, 1, 2, 3]:
+    env_vars = {current_platform.device_control_env_var: str(bundle_index)}
     training_actor = ray.remote(
         num_cpus=0,
         num_gpus=0.4,
@@ -131,6 +142,7 @@ for bundle_index in [0, 1, 2, 3]:
             placement_group_capture_child_tasks=True,
             placement_group_bundle_index=bundle_index,
         ),
+        runtime_env={"env_vars": env_vars} if current_platform.is_xpu() else {},
     )(RayTrainingActor).remote()
     training_actors.append(training_actor)
 
@@ -138,7 +150,6 @@ for bundle_index, training_actor in enumerate(training_actors):
     device_id = ray.get(training_actor.report_device_id.remote())
     print(f"training actor {bundle_index} is on {device_id}")
     training_actor_device_ids.append(device_id)
-
 for i, bundle_indices in enumerate([[0, 1], [2, 3]]):
     # Use the following syntax instead of the @ray.remote decorator so that
     # the placement group is customized for each bundle.

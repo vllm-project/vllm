@@ -55,8 +55,11 @@ class RayDistributedExecutor(DistributedExecutorBase):
     # These env vars are worker-specific, therefore are NOT copied
     # from the driver to the workers
     WORKER_SPECIFIC_ENV_VARS = {
-        "VLLM_HOST_IP", "VLLM_HOST_PORT", "LOCAL_RANK", "CUDA_VISIBLE_DEVICES"
+        "VLLM_HOST_IP",
+        "VLLM_HOST_PORT",
+        "LOCAL_RANK",
     }
+    WORKER_SPECIFIC_ENV_VARS.add(current_platform.device_control_env_var)
 
     # These non-vLLM env vars are copied from the driver to workers
     ADDITIONAL_ENV_VARS = {"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"}
@@ -65,6 +68,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _init_executor(self) -> None:
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
+
+        if current_platform.is_xpu():
+            os.environ.pop("ONEAPI_DEVICE_SELECTOR", None)
+
         if envs.VLLM_USE_V1:
             # V1 uses SPMD worker and compiled DAG
             os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "1"
@@ -191,6 +198,15 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
         worker_metadata: List[RayWorkerMetaData] = []
         driver_ip = get_ip()
+
+        if current_platform.is_xpu():
+            bundle_indices_str = ",".join(map(str, bundle_indices))
+            env_vars = {
+                current_platform.device_control_env_var: bundle_indices_str
+            }
+            runtime_env = ray_remote_kwargs.setdefault("runtime_env", {})
+            runtime_env.setdefault("env_vars", {}).update(env_vars)
+
         for rank, bundle_id in enumerate(bundle_indices):
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,

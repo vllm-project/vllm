@@ -179,3 +179,8 @@ class XPUPlatform(Platform):
     @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
+
+    @classmethod
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
+        return "intel-gpu-" + str(physical_device_id)
