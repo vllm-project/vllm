@@ -21,11 +21,14 @@ if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
 
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorHandshakeMetadata)
     from vllm.executor.executor_base import ExecutorBase
 else:
     RuntimeEnv = Any
     PlacementGroup = Any
     ExecutorBase = Any
+    KVConnectorHandshakeMetadata = Any
 
 logger = init_logger(__name__)
 
