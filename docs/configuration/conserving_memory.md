@@ -87,8 +87,6 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct",
 If you run out of CPU RAM, try the following options:
 
 - (Multi-modal models only) you can set the size of multi-modal input cache using `VLLM_MM_INPUT_CACHE_GIB` environment variable (default 4 GiB).
-  The actual memory usage is double of this value because the cache is mirrored across API and engine core processes.
-  You can also disable the cache entirely via the `disable_mm_preprocessor_cache` flag.
 - (CPU backend only) you can set the size of KV cache using `VLLM_CPU_KVCACHE_SPACE` environment variable (default 4 GiB).
 
 ## Multi-modal input limits
