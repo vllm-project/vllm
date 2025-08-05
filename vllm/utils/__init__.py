@@ -3267,7 +3267,6 @@ def set_process_title(name: str,
         name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
     setproctitle.setproctitle(name)
 
-
 def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     """Prepend each output line with process-specific prefix"""
 
