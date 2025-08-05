@@ -13,6 +13,7 @@ from vllm.assets.image import ImageAsset
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import PromptType
+from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils import set_default_torch_num_threads
@@ -433,7 +434,7 @@ async def test_abort_final_output(
             seed=42,
         )
 
-        outputs = []
+        outputs: list[RequestOutput] = []
         generated = asyncio.create_task(
             collect_outputs(engine, request_id, prompt, sampling_params,
                             outputs))
@@ -477,10 +478,15 @@ async def test_abort_final_output(
         assert not engine.output_processor.has_unfinished_requests()
 
 
-async def collect_outputs(engine, request_id, prompt, sampling_params,
-                          outputs_list):
+async def collect_outputs(
+    engine: AsyncLLM,
+    request_id: str,
+    prompt: PromptType,
+    sampling_params: SamplingParams,
+    outputs_list: list[RequestOutput],
+) -> Optional[RequestOutput]:
     """Helper to collect outputs and return the final one."""
-    final_output = None
+    final_output: Optional[RequestOutput] = None
     async for output in engine.generate(request_id=request_id,
                                         prompt=prompt,
                                         sampling_params=sampling_params):
