@@ -5,7 +5,7 @@ import os
 import threading
 import time
 import traceback
-from typing import Optional
+from typing import Optional, cast
 
 import openai  # use the official client for correctness check
 import pytest
@@ -137,15 +137,17 @@ class MultinodeInternalLBServerManager:
         if not all(self.servers):
             raise Exception("Servers failed to start")
 
-        return self.servers
+        return cast(list[tuple[RemoteOpenAIServer, list[str]]], self.servers)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Stop all server instances."""
         while self.servers:
-            try:
-                self.servers.pop()[0].__exit__(exc_type, exc_val, exc_tb)
-            except Exception as e:
-                print(f"Error stopping server: {e}")
+            if server := self.servers.pop():
+                try:
+                    server[0].__exit__(exc_type, exc_val, exc_tb)
+                except Exception as e:
+                    print(f"Error stopping server: {e}")
+                    traceback.print_exc()
 
 
 class APIOnlyServerManager:
@@ -263,16 +265,17 @@ class APIOnlyServerManager:
         if not all(self.servers):
             raise Exception("Both servers failed to start")
 
-        return self.servers
+        return cast(list[tuple[RemoteOpenAIServer, list[str]]], self.servers)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Stop both server instances."""
         while self.servers:
-            try:
-                self.servers.pop()[0].__exit__(exc_type, exc_val, exc_tb)
-            except Exception as e:
-                print(f"Error stopping server: {e}")
-                traceback.print_exc()
+            if server := self.servers.pop():
+                try:
+                    server[0].__exit__(exc_type, exc_val, exc_tb)
+                except Exception as e:
+                    print(f"Error stopping server: {e}")
+                    traceback.print_exc()
 
 
 @pytest.fixture(scope="module")
