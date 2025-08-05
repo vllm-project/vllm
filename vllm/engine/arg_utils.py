@@ -646,36 +646,32 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
-        parallel_group.add_argument("--eplb-config",
-                                    **parallel_kwargs["eplb_config"])
         parallel_group.add_argument("--enable-eplb",
                                     **parallel_kwargs["enable_eplb"])
+        parallel_group.add_argument("--eplb-config",
+                                    **parallel_kwargs["eplb_config"])
         parallel_group.add_argument(
             "--num-redundant-experts",
             type=int,
             help=
-            '[DEPRECATED] --num-redundant-experts will be removed in v0.12.0.',
-            default=EPLBConfig.num_redundant_experts,
+            "[DEPRECATED] --num-redundant-experts will be removed in v0.12.0.",
             deprecated=True)
         parallel_group.add_argument(
             "--eplb-window-size",
             type=int,
-            help='[DEPRECATED] --eplb-window-size will be removed in v0.12.0.',
-            default=EPLBConfig.window_size,
+            help="[DEPRECATED] --eplb-window-size will be removed in v0.12.0.",
             deprecated=True)
         parallel_group.add_argument(
             "--eplb-step-interval",
             type=int,
             help=
-            '[DEPRECATED] --eplb-step-interval will be removed in v0.12.0.',
-            default=EPLBConfig.step_interval,
+            "[DEPRECATED] --eplb-step-interval will be removed in v0.12.0.",
             deprecated=True)
         parallel_group.add_argument(
             "--eplb-log-balancedness",
             action=argparse.BooleanOptionalAction,
             help=
-            '[DEPRECATED] --eplb-log-balancedness will be removed in v0.12.0.',
-            default=EPLBConfig.log_balancedness,
+            "[DEPRECATED] --eplb-log-balancedness will be removed in v0.12.0.",
             deprecated=True)
 
         parallel_group.add_argument(
@@ -1239,6 +1235,16 @@ class EngineArgs:
                     "Currently, speculative decoding is not supported with "
                     "async scheduling.")
 
+        # Forward the deprecated CLI args to the EPLB config.
+        if self.num_redundant_experts is not None:
+            self.eplb_config.num_redundant_experts = self.num_redundant_experts
+        if self.eplb_window_size is not None:
+            self.eplb_config.window_size = self.eplb_window_size
+        if self.eplb_step_interval is not None:
+            self.eplb_config.step_interval = self.eplb_step_interval
+        if self.eplb_log_balancedness is not None:
+            self.eplb_config.log_balancedness = self.eplb_log_balancedness
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -1251,8 +1257,8 @@ class EngineArgs:
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_expert_parallel=self.enable_expert_parallel,
-            eplb_config=self.eplb_config,
             enable_eplb=self.enable_eplb,
+            eplb_config=self.eplb_config,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
