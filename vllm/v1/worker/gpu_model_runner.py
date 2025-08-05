@@ -875,7 +875,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         attention_cuda_graphs = all(
             g.metadata_builder.can_run_in_cudagraph(common_attn_metadata)
-            for g in itertools.chain.from_iterable(self.attn_groups))
+            for g in self._attn_group_iterator())
 
         # Hot-Swap lora model
         if self.lora_config:
@@ -2655,7 +2655,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Check that if any backends reorder batches; that the reordering
         is compatible (e.g., decode threshold is the same)
         """
-        for group in itertools.chain.from_iterable(self.attn_groups):
+        for group in self._attn_group_iterator():
             attn_metadata_builder_i = group.metadata_builder
 
             # check that if any backends reorder batches; that the reordering
@@ -2730,6 +2730,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert layer_names == set(kv_cache_raw_tensors.keys(
         )), "Some layers are not correctly initialized"
         return kv_cache_raw_tensors
+
+    def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
+        return itertools.chain.from_iterable(self.attn_groups)
 
     def _kv_cache_spec_attn_group_iterator(
             self) -> Iterator[tuple[KVCacheSpec, AttentionGroup]]:
