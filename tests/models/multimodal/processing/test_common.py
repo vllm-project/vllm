@@ -328,6 +328,8 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
+    if model_id == "google/gemma-3n-E2B-it":
+        pytest.skip("Skipping gemma-3n-E2B-it due to transformers #39911 bug.")
     _test_processing_correctness(
         model_id,
         hit_rate=hit_rate,
