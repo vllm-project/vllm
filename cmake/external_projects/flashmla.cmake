@@ -27,7 +27,6 @@ else()
 endif()
 
 
-list(APPEND VLLM_GPU_FLAGS "-lineinfo")
 FetchContent_MakeAvailable(flashmla)
 message(STATUS "FlashMLA is available at ${flashmla_SOURCE_DIR}")
 
