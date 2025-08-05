@@ -330,6 +330,13 @@ def matryoshka_fy(tensor: torch.Tensor, dimensions: int):
     return tensor
 
 
+def softmax(data):
+    if data.shape[-1] == 1:
+        return F.sigmoid(data)
+    else:
+        return F.softmax(data, dim=-1)
+
+
 class EmbedModelInfo(NamedTuple):
     name: str
     is_matryoshka: bool = False
