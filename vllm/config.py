@@ -913,6 +913,9 @@ class ModelConfig:
                     if getattr(pooler_config, k) is None:
                         setattr(pooler_config, k, v)
 
+            if pooler_config.pooling_type is None:
+                pooler_config.pooling_type = self._model_info.default_pooling_type
+
             return pooler_config
 
         return None
@@ -1743,6 +1746,18 @@ class ModelConfig:
         # cross_encoder models defaults to using pad_token.
         # `llm as reranker` models defaults to not using pad_token.
         return getattr(self.hf_config, "use_pad_token", True)
+
+    @property
+    def attn_type(self) -> Optional[str]:
+        if self.is_attention_free:
+            return None
+        if self.is_encoder_decoder:
+            return "encoder_decoder"
+        if self._model_info.default_pooling_type == "CLS" or not getattr(
+                self.hf_config, "is_causal", True):
+            return "encoder_only"
+        else:
+            return "decoder"
 
     def get_and_verify_max_len(self, max_model_len: int):
         # Consider max_model_len in tokenizer_config only when
@@ -4832,12 +4847,12 @@ class VllmConfig:
 
         disable_chunked_prefill_reasons: list[str] = []
 
-        if self.model_config and self.model_config.pooler_config:
-            pooling_type = self.model_config.pooler_config.pooling_type
-            if pooling_type is None or pooling_type.lower() != "last":
+        if self.model_config and self.model_config.runner_type == "pooling":
+            attn_type = self.model_config.attn_type
+            if attn_type != "decoder":
                 disable_chunked_prefill_reasons.append(
-                    "Only \"last\" pooling supports chunked "
-                    "prefill and prefix caching; disabling both.")
+                    "Chunked prefill and prefix caching are only available "
+                    "with attn_type='decoder';disabling both.")
 
         if disable_chunked_prefill_reasons:
             for reason in disable_chunked_prefill_reasons:

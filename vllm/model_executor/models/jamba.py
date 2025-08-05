@@ -591,7 +591,6 @@ class JambaForSequenceClassification(JambaForCausalLM):
             "classify":
             Pooler.for_classify(
                 pooler_config,
-                classifier=self.score,
-                default_pooling_type=PoolingType.LAST,
+                classifier=self.score
             ),
         })

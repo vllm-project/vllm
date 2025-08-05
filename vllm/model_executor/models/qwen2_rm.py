@@ -19,7 +19,7 @@ from vllm.model_executor.layers.pooler import (DispatchPooler, Pooler,
                                                PoolingType)
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, default_pooling_type
 from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader, maybe_prefix
 
@@ -90,6 +90,7 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
         return loader.load_weights(weights)
 
 
+@default_pooling_type("ALL")
 class Qwen2ForRewardModel(Qwen2RewardBaseModel):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -103,6 +104,7 @@ class Qwen2ForRewardModel(Qwen2RewardBaseModel):
             {"encode": Pooler.for_encode(pooler_config)}, )
 
 
+@default_pooling_type("STEP")
 class Qwen2ForProcessRewardModel(Qwen2RewardBaseModel):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -115,7 +117,6 @@ class Qwen2ForProcessRewardModel(Qwen2RewardBaseModel):
         self.pooler = DispatchPooler({
             "encode":
             Pooler.for_encode(
-                pooler_config,
-                default_pooling_type=PoolingType.STEP,
+                pooler_config
             )
         })
