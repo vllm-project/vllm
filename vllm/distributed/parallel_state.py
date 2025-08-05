@@ -1013,6 +1013,7 @@ def initialize_model_parallel(
             parallelism.
         pipeline_model_parallel_size: number of GPUs used for pipeline model
             parallelism.
+        backend: name of torch distributed communication backend.
 
     Let's say we have a total of 8 GPUs denoted by g0 ... g7 and we
     use 2 GPUs to parallelize the model tensor, and 4 GPUs to parallelize
@@ -1124,14 +1125,14 @@ def ensure_model_parallel_initialized(
 
     assert (
         get_tensor_model_parallel_world_size() == tensor_model_parallel_size
-    ), ("tensor parallel group already initialized, but of unexpected size: "
-        f"{get_tensor_model_parallel_world_size()=} vs. "
-        f"{tensor_model_parallel_size=}")
+    ), ("tensor parallel group already initialized, but of unexpected size. "
+        f"got: {get_tensor_model_parallel_world_size()=} vs. "
+        f"wanted: {tensor_model_parallel_size=}")
     pp_world_size = get_pp_group().world_size
     assert (pp_world_size == pipeline_model_parallel_size), (
-        "pipeline parallel group already initialized, but of unexpected size: "
-        f"{pp_world_size=} vs. "
-        f"{pipeline_model_parallel_size=}")
+        "pipeline parallel group already initialized, but of unexpected size. "
+        f"got: {pp_world_size=} vs. "
+        f"wanted: {pipeline_model_parallel_size=}")
 
 
 def prepare_communication_buffer_for_model(model: torch.nn.Module):
@@ -1238,8 +1239,6 @@ def destroy_distributed_environment():
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     destroy_model_parallel()
     destroy_distributed_environment()
-    with contextlib.suppress(AssertionError):
-        torch.distributed.destroy_process_group()
     if shutdown_ray:
         import ray  # Lazy import Ray
         ray.shutdown()
