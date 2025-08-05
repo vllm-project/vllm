@@ -159,8 +159,8 @@ class A(nn.Module):
                  prefix: str = '',
                  **kwargs) -> None:
         super().__init__()
-        self.mod1 = B(vllm_config=vllm_config, perfix=prefix, **kwargs)
-        self.mod2 = B(vllm_config=vllm_config, perfix=prefix, **kwargs)
+        self.mod1 = B(vllm_config=vllm_config, prefix=prefix, **kwargs)
+        self.mod2 = B(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.mod1(x)
