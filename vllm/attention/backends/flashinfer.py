@@ -46,7 +46,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
-from vllm.utils.flashinfer import use_trtllm_decode_attention
+from vllm.utils.flashinfer import use_trtllm_attention
 
 logger = init_logger(__name__)
 
@@ -1114,7 +1114,7 @@ class FlashInferImpl(AttentionImpl):
             assert decode_meta.decode_wrapper._sm_scale == softmax_scale
             # TODO: @pavanimajety Remove this once the switch happens
             # inside flashinfer.
-            if not use_trtllm_decode_attention(
+            if not use_trtllm_attention(
                     num_decode_tokens, attn_metadata.max_decode_seq_len,
                     kv_cache_dtype, attn_metadata.num_qo_heads,
                     attn_metadata.num_kv_heads, attn_metadata.head_dim):
