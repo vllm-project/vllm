@@ -373,6 +373,7 @@ class Hermes2ProToolParser(ToolParser):
                 else:
                     # last argument is not a string,
                     #   so remove the closing brace only.
+                    #   for example, cur_arguments_json = {"product_id": 7}
                     stripped_cur_arguments_json = cur_arguments_json[:-1]
                 if (delta_text not in stripped_cur_arguments_json):
                     return None
