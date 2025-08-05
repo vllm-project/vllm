@@ -184,7 +184,7 @@ def test_prompt_less_than_block_size():
     BLOCK_SIZE = vllm_config.cache_config.block_size
     NUM_TOKENS = int(BLOCK_SIZE * 0.5)
 
-    # Request will have 0 remote blocks.
+    # Request will have 1 partial remote block.
     request = create_request(request_id=1,
                              num_tokens=NUM_TOKENS,
                              do_remote_prefill=True,
@@ -192,13 +192,11 @@ def test_prompt_less_than_block_size():
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
 
-    # This request should not have to read async.
+    # This request will read async.
     kv_connector_metadata = scheduler_output.kv_connector_metadata
     assert kv_connector_metadata is not None
     assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
     assert len(kv_connector_metadata.reqs_to_recv) == 1
-
-    # This request should be scheduled regularly.
     assert len(scheduler_output.scheduled_new_reqs) == 0
 
 

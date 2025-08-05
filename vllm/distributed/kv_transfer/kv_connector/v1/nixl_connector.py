@@ -377,7 +377,7 @@ class NixlConnectorScheduler:
                 or request.status != RequestStatus.FINISHED_LENGTH_CAPPED):
             return False, None
 
-        # [TODO] check whether block_ids actually ever be 0. If not we could
+        # TODO: check whether block_ids actually ever be 0. If not we could
         # remove the conditional below
         delay_free_blocks = len(block_ids) > 0
 

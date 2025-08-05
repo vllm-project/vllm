@@ -129,11 +129,9 @@ def test_short_prompt_lifecycle():
     # Confirm we do not have any memory leaks after req lifecycle.
     # We need to mark sending finish to clear data for persistent batch.
     scheduler_output = scheduler.schedule()
-    scheduler.schedule()
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     model_runner_output.finished_sending = [request.request_id]
     scheduler.update_from_output(scheduler_output, model_runner_output)
-    _ = scheduler.schedule()
     assert_scheduler_empty(scheduler)
 
 
@@ -183,9 +181,7 @@ def test_prefix_cache_lifecycle():
 
     # STEP (2): Ensure it is freed.
     scheduler_output = scheduler.schedule()
-    scheduler.schedule()
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     model_runner_output.finished_sending = [request_remote.request_id]
     scheduler.update_from_output(scheduler_output, model_runner_output)
-    _ = scheduler.schedule()
     assert_scheduler_empty(scheduler)
