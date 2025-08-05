@@ -176,6 +176,10 @@ llm = LLM(model="Qwen/Qwen2-Audio-7B-Instruct",
           mm_processor_kwargs={"device": "cuda"})
 ```
 
+!!! warning
+    The speed-up from GPU processing varies from model to model. In some cases, GPU processing may even become detrimental.
+    Make sure you perform benchmarking before enabling this!
+
 ## Multi-Modal Caching
 
 ### Processor Cache
