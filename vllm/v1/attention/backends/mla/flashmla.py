@@ -159,8 +159,16 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        q = torch.cat([q_nope, q_pe], dim=-1)\
-            .unsqueeze(1) # Add seqlen dim of 1 (decode)
+        q = torch.cat([q_nope, q_pe], dim=-1)
+
+        batch_size = attn_metadata.decode.block_table.shape[0]
+
+        needs_padding = q.shape[0] % batch_size != 0
+
+        if needs_padding:
+            raise ValueError("oops")
+        else:
+            q = q.reshape((batch_size, q.shape[0] // batch_size, *q.shape[1:])) # (batch_size, q_len_per_request, num_heads, head_dim_qk)
 
         o, _ = flash_mla_with_kvcache(
             q=q,
