@@ -17,9 +17,12 @@ from openai.types.chat.chat_completion_audio import (
 from openai.types.chat.chat_completion_message import (
     Annotation as OpenAIAnnotation)
 # yapf: enable
-from openai.types.responses import (ResponseInputParam, ResponseOutputItem,
+from openai.types.responses import (ResponseInputItemParam, ResponseOutputItem,
                                     ResponsePrompt, ResponseStatus,
-                                    ResponseTextConfig)
+                                    ResponseReasoningItem, ResponseTextConfig,
+                                    ResponseFunctionWebSearch,
+                                    ResponseFunctionToolCall,
+                                    ResponseOutputText)
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
@@ -234,6 +237,11 @@ def get_logits_processors(processors: Optional[LogitsProcessors],
     return None
 
 
+ResponseInputOutputItem: TypeAlias = Union[ResponseInputItemParam,
+                                           ResponseReasoningItem,
+                                           ResponseFunctionToolCall]
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -248,7 +256,7 @@ class ResponsesRequest(OpenAIBaseModel):
             "reasoning.encrypted_content",
         ],
     ]] = None
-    input: Union[str, ResponseInputParam]
+    input: Union[str, list[ResponseInputOutputItem]]
     instructions: Optional[str] = None
     max_output_tokens: Optional[int] = None
     max_tool_calls: Optional[int] = None
