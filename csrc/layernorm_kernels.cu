@@ -115,8 +115,8 @@ template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
 fused_add_rms_norm_kernel(
     scalar_t* __restrict__ output,   // [..., hidden_size]
-    const int64_t input_stride,
     const scalar_t* __restrict__ input,     // [..., hidden_size]
+    const int64_t input_stride,
     scalar_t* __restrict__ residual_out,    // [..., hidden_size]
     const scalar_t* __restrict__ residual,  // [..., hidden_size]
     const scalar_t* __restrict__ weight,    // [hidden_size]
