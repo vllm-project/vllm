@@ -3388,10 +3388,9 @@ class MultiModalConfig:
 
     @property
     def is_mm_processing_gpu(self) -> bool:
-        if not self.mm_processor_kwargs:
-            return False
+        kwargs = self.mm_processor_kwargs or {}
 
-        return self.mm_processor_kwargs.get("device", "cpu") != "cpu"
+        return kwargs.get("device", "cpu") != "cpu"
 
     def compute_hash(self) -> str:
         """
