@@ -99,6 +99,10 @@ class CUDAGraphWrapper:
         raise AttributeError(f"Attribute {key} not exists in the runnable of "
                              f"cudagraph wrapper: {self.runnable}")
 
+    def unwrap(self) -> Callable:
+        # in case we need to access the original runnable.
+        return self.runnable
+
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor

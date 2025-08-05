@@ -435,7 +435,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 assert (task := pooling_params.task) is not None, (
                     "You did not set `task` in the API")
 
-                model = cast(VllmModelForPooling, self.model)
+                model = cast(VllmModelForPooling, self.get_model())
                 to_update = model.pooler.get_pooling_updates(task)
                 to_update.apply(pooling_params)
 
@@ -1245,6 +1245,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return mm_embeds
 
     def get_model(self) -> nn.Module:
+        # get raw model out of the cudagraph wrapper.
+        if isinstance(self.model, CUDAGraphWrapper):
+            return self.model.unwrap()
         return self.model
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
@@ -1385,9 +1388,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return
 
         assert self.eplb_state is not None
-        assert is_mixture_of_experts(self.model)
+        model = self.get_model()
+        assert is_mixture_of_experts(model)
         self.eplb_state.step(
-            self.model,
+            model,
             is_dummy,
             is_profile,
             log_stats=self.parallel_config.eplb_log_balancedness,
@@ -2016,14 +2020,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             "Cannot reload weights before model is loaded."
         model_loader = get_model_loader(self.load_config)
         logger.info("Reloading weights inplace...")
-        model_loader.load_weights(self.model, model_config=self.model_config)
+        model = self.get_model()
+        model_loader.load_weights(model, model_config=self.model_config)
 
     def save_tensorized_model(
         self,
         tensorizer_config: "TensorizerConfig",
     ) -> None:
+        model = self.get_model()
         TensorizerLoader.save_model(
-            self.model,
+            model,
             tensorizer_config=tensorizer_config,
             model_config=self.model_config,
         )
@@ -2488,7 +2494,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                       dtype=torch.int32,
                                       device=self.device)
 
-        model = cast(VllmModelForPooling, self.model)
+        model = cast(VllmModelForPooling, self.get_model())
         dummy_pooling_params = PoolingParams(task=task)
         to_update = model.pooler.get_pooling_updates(task)
         to_update.apply(dummy_pooling_params)
