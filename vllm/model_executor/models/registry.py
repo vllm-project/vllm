@@ -296,6 +296,7 @@ _MULTIMODAL_MODELS = {
         "KeyeVL1_5ForConditionalGeneration",
     ),
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
+    "KimiAudioForConditionalGeneration": ("kimi_audio", "KimiAudioForConditionalGeneration"),  # noqa: E501
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),  # noqa: E501
@@ -342,7 +343,6 @@ _MULTIMODAL_MODELS = {
     "Qwen2AudioForConditionalGeneration": ("qwen2_audio", "Qwen2AudioForConditionalGeneration"),  # noqa: E501
     "Qwen2_5OmniModel": ("qwen2_5_omni_thinker", "Qwen2_5OmniThinkerForConditionalGeneration"),  # noqa: E501
     "Qwen2_5OmniForConditionalGeneration": ("qwen2_5_omni_thinker", "Qwen2_5OmniThinkerForConditionalGeneration"),  # noqa: E501
-    "MoonshotKimiaForCausalLM": ("kimi_audio", "MoonshotKimiaForCausalLM"),  # noqa: E501
     "Qwen3VLForConditionalGeneration": ("qwen3_vl", "Qwen3VLForConditionalGeneration"),  # noqa: E501
     "Qwen3VLMoeForConditionalGeneration": ("qwen3_vl_moe", "Qwen3VLMoeForConditionalGeneration"),  # noqa: E501
     "SkyworkR1VChatModel": ("skyworkr1v", "SkyworkR1VChatModel"),
