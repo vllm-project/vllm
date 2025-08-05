@@ -1918,11 +1918,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                        scheduler_output, is_dummy_run)
             # if is_global_first_rank():
             #     logger.info(f"RUNNING FULL BATCH {num_scheduled_tokens}")
+            skip_cuda_graphs = self.parallel_config.enable_microbatching
             with set_forward_context(attn_metadata,
                                      vllm_config=self.vllm_config,
                                      num_tokens=num_scheduled_tokens or 1,
                                      num_tokens_across_dp=num_tokens_across_dp,
-                                     skip_cuda_graphs=True):
+                                     skip_cuda_graphs=skip_cuda_graphs):
                 return self.model(
                     input_ids=input_ids,
                     positions=positions,

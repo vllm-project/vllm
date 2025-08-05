@@ -189,7 +189,6 @@ def _support_torch_compile(
             CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
         ] or not supports_dynamo() or _should_ignore_torch_compile(
             self.__class__)
-        self.do_not_compile = True
         if self.do_not_compile:
             return
 
