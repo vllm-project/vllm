@@ -3,7 +3,6 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator, Mapping
-from copy import deepcopy
 from typing import Any, Optional, Union
 
 from fastapi import Request
@@ -230,7 +229,7 @@ class ServingScores(OpenAIServing):
 
             if envs.VLLM_USE_V1 and (token_type_ids := engine_prompt.pop(
                     "token_type_ids", None)):
-                pooling_params = deepcopy(default_pooling_params)
+                pooling_params = default_pooling_params.clone()
                 compressed = compress_token_type_ids(token_type_ids)
                 pooling_params.extra_kwargs = {
                     "compressed_token_type_ids": compressed
