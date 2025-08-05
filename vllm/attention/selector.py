@@ -193,6 +193,10 @@ def _cached_get_attn_backend(
         backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
         if backend_by_env_var is not None:
             selected_backend = backend_name_to_enum(backend_by_env_var)
+            if selected_backend is None:
+                raise ValueError(
+                    f"Invalid attention backend: '{backend_by_env_var}'. "
+                    f"Valid backends are: {list(_Backend.__members__.keys())}")
 
     # get device-specific attn_backend
     attention_cls = current_platform.get_attn_backend_cls(
