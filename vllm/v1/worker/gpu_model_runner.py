@@ -1579,6 +1579,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                batch_descriptor=batch_descriptor,
         ), self.maybe_get_kv_connector_output(
                 scheduler_output) as kv_connector_output:
             model_output = self.model(
@@ -2641,7 +2642,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Capture full cudagraph for uniform decode batches if we have
             # dont already have full mixed prefill-decode cudagraphs
             if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL and \
-                cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
+                cudagraph_mode.separate_routine():
                 max_num_tokens = self.scheduler_config.max_num_seqs * \
                         self.uniform_decode_query_len
                 decode_cudagraph_batch_sizes = [
@@ -2801,39 +2802,67 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             min_cg_support = AttentionCGSupport.ALWAYS
             min_cg_builder_name = self.attn_metadata_builders[
                 0].__class__.__name__
-            preferred_cg_dict: dict[AttentionCGSupport, str] = {}
+            preferred_cg_separate_routine = False
+            preferred_separate_builder_name = None
+
             for builder in self.attn_metadata_builders:
-                preferred_cg_dict[
-                    builder.cudagraph_support] = builder.__class__.__name__
+                if getattr(builder, "cudagraph_decode_preference", None):
+                    preferred_cg_separate_routine = True
+                    preferred_separate_builder_name = builder.__class__.__name__
 
                 if builder.cudagraph_support.value < min_cg_support.value:
                     min_cg_support = builder.cudagraph_support
                     min_cg_builder_name = builder.__class__.__name__
 
-            if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL \
+            cudagraph_mode = self.compilation_config.cudagraph_mode
+            # check cudagraph for mixed batch is supported
+            if cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL \
                 and min_cg_support != AttentionCGSupport.ALWAYS:
-                warn_msg = "CUDAGraphMode.FULL is not supported with " +\
-                    f"{min_cg_builder_name} backend (support: {min_cg_support})"
+                msg = f"CUDAGraphMode.{cudagraph_mode.name} is not supported "+\
+                    f"with {min_cg_builder_name} backend (support: " +\
+                    f"{min_cg_support})"
                 if min_cg_support == AttentionCGSupport.NEVER:
-                    warn_msg += "; setting cudagraph_mode=PIECEWISE"
-                    self.compilation_config.cudagraph_mode = \
-                        CUDAGraphMode.PIECEWISE
+                    if self.compilation_config.is_attention_splitting:
+                        msg += "; setting cudagraph_mode=PIECEWISE"
+                        self.compilation_config.cudagraph_mode = \
+                            CUDAGraphMode.PIECEWISE
+                    else:
+                        msg += "; please try cudagraph_mode=PIECEWISE, and "\
+                            "make sure compilation level is piecewise"
+                        raise ValueError(msg)
                 else:
-                    warn_msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
-                    self.compilation_config.cudagraph_mode = \
-                        CUDAGraphMode.FULL_AND_PIECEWISE
-                logger.warning(warn_msg)
+                    if self.compilation_config.is_attention_splitting:
+                        msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
+                        self.compilation_config.cudagraph_mode = \
+                            CUDAGraphMode.FULL_AND_PIECEWISE
 
-            if (AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE in \
-                preferred_cg_dict and self.uniform_decode_query_len == 1 and \
-                self.compilation_config.cudagraph_mode.mixed_mode() == \
-                CUDAGraphMode.FULL):
-                builder_name = preferred_cg_dict[
-                    AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE]
+                    else:
+                        msg += "; setting cudagraph_mode=FULL_DECODE_ONLY"
+                        self.compilation_config.cudagraph_mode = \
+                            CUDAGraphMode.FULL_DECODE_ONLY
+
+                logger.warning(msg)
+
+            # check cg for decode is supported and compatible with sepc-decode
+            if cudagraph_mode.separate_routine() and \
+                cudagraph_mode.decode_mode() == CUDAGraphMode.FULL and \
+                self.uniform_decode_query_len > 1:
+                assert min_cg_support.value >= AttentionCGSupport.\
+                    UNIFORM_BATCH.value, (
+                    f"CUDAGraphMode.{cudagraph_mode.name} is not support"
+                    f"with spec-decode for attention backend "
+                    f"{min_cg_builder_name} "
+                    f"(support: {min_cg_support})")
+
+            # logging perference mode for decode if needed when
+            # cudagraph_mode=FULL.
+            if cudagraph_mode==CUDAGraphMode.FULL and \
+                preferred_cg_separate_routine:
                 logger.warning(
                     "NOTE: %s backend prefers full cuda-graphs for"
-                    " decodes only, using `cudagraph_mode=FULL_AND_PIECEWISE` "
-                    "will likely boost performance", builder_name)
+                    " decodes, using `cudagraph_mode=FULL_AND_PIECEWISE` "
+                    "will likely boost performance",
+                    preferred_separate_builder_name)
 
         # Trigger cudagraph dispatching keys initialization here (after
         # initializing attn backends).

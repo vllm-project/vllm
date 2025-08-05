@@ -4103,18 +4103,22 @@ class CUDAGraphMode(enum.Enum):
     FULL = 2
     FULL_DECODE_ONLY = (FULL, NONE)
     FULL_AND_PIECEWISE = (FULL, PIECEWISE)
+    FULL_DOUBLE = (FULL, FULL)
 
     def decode_mode(self) -> 'CUDAGraphMode':
         return CUDAGraphMode(self.value[0]) if \
-            isinstance(self.value, tuple) else self
+            self.separate_routine() else self
 
     def mixed_mode(self) -> 'CUDAGraphMode':
         return CUDAGraphMode(self.value[1]) if \
-            isinstance(self.value, tuple) else self
+            self.separate_routine() else self
 
     def requires_piecewise_compilation(self) -> bool:
         return (self.decode_mode() == CUDAGraphMode.PIECEWISE
                 or self.mixed_mode() == CUDAGraphMode.PIECEWISE)
+
+    def separate_routine(self) -> bool:
+        return isinstance(self.value, tuple)
 
 
 @config

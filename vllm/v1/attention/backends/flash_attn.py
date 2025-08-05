@@ -158,9 +158,8 @@ class FlashAttentionMetadataBuilder(
     # while FA3 launches a unified varlen fwd kernel for both prefill-decode
     # and pure decode batches.
     cudagraph_support = AttentionCGSupport.ALWAYS
-    # FA2 only enables the packed-gqa optimization for single-token decodes,
-    # so we prefer to use cudagraph for single-token decodes.
-    cudagraph_preference = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE \
+
+    cudagraph_decode_preference = AttentionCGSupport.UNIFORM_BATCH \
         if get_flash_attn_version() == 2 else None
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],

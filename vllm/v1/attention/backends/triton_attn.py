@@ -59,7 +59,7 @@ class TritonAttentionMetadata:
 class TritonAttentionMetadataBuilder(
         AttentionMetadataBuilder[TritonAttentionMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
-    cudagraph_preference: ClassVar[
+    cudagraph_decode_preference: ClassVar[
         Optional[AttentionCGSupport]] = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],

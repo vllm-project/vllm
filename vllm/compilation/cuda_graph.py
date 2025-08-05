@@ -127,8 +127,8 @@ class CUDAGraphWrapper:
                 # capturing is fast, we don't need to log it for every
                 # shape. E.g. we only log it for the first subgraph in
                 # piecewise mode.
-                logger.debug("Capturing a cudagraph on %s",
-                             entry.batch_descriptor)
+                logger.debug("Capturing a cudagraph on (%s,%s)",
+                             self.runtime_mode.name, entry.batch_descriptor)
             # validate that cudagraph capturing is legal at this point.
             validate_cudagraph_capturing_enabled()
 

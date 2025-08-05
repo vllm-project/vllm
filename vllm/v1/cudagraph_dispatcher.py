@@ -72,7 +72,7 @@ class CudagraphDispatcher:
         # if decode cudagraph mode is FULL, and we don't already have mixed
         # mode full cudagraphs then add them here.
         if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL \
-            and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL:
+            and cudagraph_mode.separate_routine():
             max_num_tokens = uniform_decode_query_len * \
                 self.vllm_config.scheduler_config.max_num_seqs
             cudagraph_capture_sizes_for_decode = [
