@@ -138,8 +138,13 @@ class Scheduler(SchedulerInterface):
         # NOTE: For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized because cache size is 0
         # for these models.
-        self.encoder_cache_manager = EncoderCacheManager(
-            cache_size=encoder_cache_size)
+        self.encoder_cache_manager: Optional[EncoderCacheManager] = None
+        if not self.is_encoder_decoder:
+            # An encoder-decoder model does not use the encoder cache.
+            # It uses bidirectional attention and inputs are only
+            # processed once per request.
+            self.encoder_cache_manager = EncoderCacheManager(
+                cache_size=encoder_cache_size)
 
         speculative_config = vllm_config.speculative_config
 
@@ -313,8 +318,9 @@ class Scheduler(SchedulerInterface):
                 scheduled_encoder_inputs[request.request_id] = (
                     encoder_inputs_to_schedule)
                 # Allocate the encoder cache.
-                for i in encoder_inputs_to_schedule:
-                    self.encoder_cache_manager.allocate(request, i)
+                if self.encoder_cache_manager:
+                    for i in encoder_inputs_to_schedule:
+                        self.encoder_cache_manager.allocate(request, i)
                 encoder_budget = new_encoder_budget
 
         # Record the LoRAs in scheduled_running_reqs
@@ -534,8 +540,9 @@ class Scheduler(SchedulerInterface):
                     scheduled_encoder_inputs[request.request_id] = (
                         encoder_inputs_to_schedule)
                     # Allocate the encoder cache.
-                    for i in encoder_inputs_to_schedule:
-                        self.encoder_cache_manager.allocate(request, i)
+                    if self.encoder_cache_manager:
+                        for i in encoder_inputs_to_schedule:
+                            self.encoder_cache_manager.allocate(request, i)
                     encoder_budget = new_encoder_budget
 
         # Put back any skipped requests at the head of the waiting queue
@@ -581,6 +588,10 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens,
             req_to_new_block_ids,
         )
+        if self.encoder_cache_manager:
+            free_encoder_input_ids = self.encoder_cache_manager.get_freed_ids()
+        else:
+            free_encoder_input_ids = []
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -594,7 +605,7 @@ class Scheduler(SchedulerInterface):
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
-            free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
+            free_encoder_input_ids=free_encoder_input_ids,
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
         )
@@ -741,7 +752,8 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 continue
 
-            if self.encoder_cache_manager.has_cache(request, i):
+            if (self.encoder_cache_manager
+                    and self.encoder_cache_manager.has_cache(request, i)):
                 # The encoder input is already computed and cached.
                 continue
 
@@ -755,7 +767,8 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = start_pos - num_computed_tokens
                 break
 
-            if (not self.encoder_cache_manager.can_allocate(request, i)
+            if ((self.encoder_cache_manager
+                 and not self.encoder_cache_manager.can_allocate(request, i))
                     or num_encoder_tokens > encoder_budget):
                 # The encoder cache is full or the encoder budget is exhausted.
                 # NOTE(woosuk): We assume that the encoder input tokens should
@@ -968,6 +981,8 @@ class Scheduler(SchedulerInterface):
         return new_token_ids, stopped
 
     def _free_encoder_inputs(self, request: Request) -> None:
+        if not self.encoder_cache_manager:
+            return
         cached_encoder_input_ids = (
             self.encoder_cache_manager.get_cached_input_ids(request))
         # OPTIMIZATION: Avoid list(set) if the set is empty.
@@ -980,7 +995,8 @@ class Scheduler(SchedulerInterface):
             mm_positions = request.mm_positions[input_id]
             start_pos = mm_positions.offset
             num_tokens = mm_positions.length
-            if start_pos + num_tokens <= request.num_computed_tokens:
+            if (self.encoder_cache_manager
+                    and start_pos + num_tokens <= request.num_computed_tokens):
                 # The encoder output is already processed and stored
                 # in the decoder's KV cache.
                 self.encoder_cache_manager.free_encoder_input(
@@ -1044,7 +1060,8 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
 
         delay_free_blocks, kv_xfer_params = self._connector_finished(request)
-        self.encoder_cache_manager.free(request)
+        if self.encoder_cache_manager:
+            self.encoder_cache_manager.free(request)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
