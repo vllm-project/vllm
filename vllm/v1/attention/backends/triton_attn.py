@@ -196,7 +196,8 @@ class TritonAttentionBackend(AttentionBackend):
 @cache
 def use_aiter_unified_attention() -> bool:
     """Check if aiter unified attention should be used."""
-    # VLLM_ROCM_USE_AITER_MHA needs to set to 0 as well as it is set to 1 as default
+    # VLLM_ROCM_USE_AITER_MHA needs to set to 0 as well as it is set
+    # to 1 as default
     return envs.VLLM_ROCM_USE_AITER \
         and envs.VLLM_USE_AITER_UNIFIED_ATTENTION
 
@@ -266,9 +267,11 @@ class TritonAttentionImpl(AttentionImpl):
                 self.unified_attention = unified_attention
 
         self.sinks = sinks
-        if self.sinks is not None:
-            assert sinks.shape[
-                0] == num_heads, "Sinks must have the same number of heads as the number of heads in the layer"
+        if sinks is not None:
+            assert sinks.shape[0] == num_heads, (
+                "Sinks must have the same number of heads as the number of "
+                f"heads in the layer. Sinks shape: {sinks.shape}, "
+                f"num_heads: {num_heads}.")
 
     def forward(
         self,
