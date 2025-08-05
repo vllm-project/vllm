@@ -1350,6 +1350,7 @@ class EngineArgs:
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            ssl_config=None,  # Will be set by API server if needed
             additional_config=self.additional_config,
         )
 

@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import ssl
 from dataclasses import dataclass
 from ssl import SSLContext
 from typing import Any, Callable, Optional
@@ -39,6 +40,9 @@ class SSLConfig:
             (self.ssl_keyfile, "SSL key file"),
             (self.ssl_certfile, "SSL certificate file"),
         ]:
+            if file_path is None:
+                raise ValueError(
+                    f"{name} is required for SSL but not specified")
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"{name} not found: {file_path}")
             if not os.access(file_path, os.R_OK):
@@ -58,7 +62,7 @@ class SSLConfig:
         if not self.is_ssl_enabled:
             return {}
 
-        config = {
+        config: dict[str, Any] = {
             "ssl_keyfile": self.ssl_keyfile,
             "ssl_certfile": self.ssl_certfile,
         }
@@ -66,7 +70,7 @@ class SSLConfig:
         if self.ssl_ca_certs is not None:
             config["ssl_ca_certs"] = self.ssl_ca_certs
         if self.ssl_cert_reqs is not None:
-            config["ssl_cert_reqs"] = self.ssl_cert_reqs
+            config["ssl_cert_reqs"] = int(self.ssl_cert_reqs)
 
         return config
 
@@ -76,6 +80,9 @@ class SSLConfig:
         """Create SSL certificate refresher if SSL refresh is enabled."""
         if not self.enable_ssl_refresh or not self.is_ssl_enabled:
             return None
+
+        if uvicorn_config.ssl is None:
+            raise ValueError("SSL context not available in uvicorn config")
 
         return SSLCertRefresher(ssl_context=uvicorn_config.ssl,
                                 key_path=self.ssl_keyfile,
@@ -92,6 +99,28 @@ class SSLConfig:
             ssl_cert_reqs=getattr(args, 'ssl_cert_reqs', None),
             enable_ssl_refresh=getattr(args, 'enable_ssl_refresh', False),
         )
+
+    def create_ssl_context(self) -> 'ssl.SSLContext':
+        """Create SSL context for client connections."""
+        if not self.is_ssl_enabled:
+            raise ValueError("SSL is not enabled")
+
+        context = ssl.create_default_context()
+
+        # Load CA certificates if provided
+        if self.ssl_ca_certs:
+            context.load_verify_locations(cafile=self.ssl_ca_certs)
+            # Keep default verification settings when CA is provided
+        else:
+            # For self-signed certificates without CA, disable verification
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+        # Apply certificate requirements if specified
+        if (reqs := self.ssl_cert_reqs) is not None:
+            context.verify_mode = ssl.VerifyMode(reqs)
+
+        return context
 
     def get_protocol(self) -> str:
         """Get protocol string (http or https)."""

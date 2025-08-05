@@ -3,7 +3,7 @@
 
 from collections.abc import Mapping, MutableMapping
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from urllib.parse import urlparse
 
 import aiohttp
@@ -11,14 +11,21 @@ import requests
 
 from vllm.version import __version__ as VLLM_VERSION
 
+if TYPE_CHECKING:
+    from vllm.entrypoints.ssl import SSLConfig
+
 
 class HTTPConnection:
     """Helper class to send HTTP requests."""
 
-    def __init__(self, *, reuse_client: bool = True) -> None:
+    def __init__(self,
+                 *,
+                 reuse_client: bool = True,
+                 ssl_config: Optional["SSLConfig"] = None) -> None:
         super().__init__()
 
         self.reuse_client = reuse_client
+        self.ssl_config = ssl_config
 
         self._sync_client: Optional[requests.Session] = None
         self._async_client: Optional[aiohttp.ClientSession] = None
@@ -27,13 +34,25 @@ class HTTPConnection:
         if self._sync_client is None or not self.reuse_client:
             self._sync_client = requests.Session()
 
+            if self.ssl_config and self.ssl_config.is_ssl_enabled:
+                if self.ssl_config.ssl_ca_certs:
+                    self._sync_client.verify = self.ssl_config.ssl_ca_certs
+                else:
+                    self._sync_client.verify = False
+
         return self._sync_client
 
     # NOTE: We intentionally use an async function even though it is not
     # required, so that the client is only accessible inside async event loop
     async def get_async_client(self) -> aiohttp.ClientSession:
         if self._async_client is None or not self.reuse_client:
-            self._async_client = aiohttp.ClientSession(trust_env=True)
+            connector = None
+            if self.ssl_config and self.ssl_config.is_ssl_enabled:
+                ssl_context = self.ssl_config.create_ssl_context()
+                connector = aiohttp.TCPConnector(ssl=ssl_context)
+
+            self._async_client = aiohttp.ClientSession(trust_env=True,
+                                                       connector=connector)
 
         return self._async_client
 

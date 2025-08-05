@@ -142,11 +142,13 @@ class KVOutputAggregator:
         finished_sending = set[str]()
         finished_recving = set[str]()
         for output in outputs:
-            output = output.kv_connector_output
-            update_finished_set(output.finished_sending,
-                                self._send_remaining_count, finished_sending)
-            update_finished_set(output.finished_recving,
-                                self._recv_remaining_count, finished_recving)
+            if (kv_output := output.kv_connector_output) is not None:
+                update_finished_set(kv_output.finished_sending,
+                                    self._send_remaining_count,
+                                    finished_sending)
+                update_finished_set(kv_output.finished_recving,
+                                    self._recv_remaining_count,
+                                    finished_recving)
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]

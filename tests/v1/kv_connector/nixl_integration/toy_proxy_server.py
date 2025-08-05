@@ -25,32 +25,51 @@ async def lifespan(app: FastAPI):
     app.state.prefill_clients = []
     app.state.decode_clients = []
 
+    # Configure SSL verification
+    verify_ssl = True
+    if global_args.enable_ssl:
+        if global_args.ssl_insecure:
+            verify_ssl = False
+        elif global_args.ssl_ca_certs:
+            verify_ssl = global_args.ssl_ca_certs
+
     # Create prefill clients
     for i, (host, port) in enumerate(global_args.prefiller_instances):
-        prefiller_base_url = f'http://{host}:{port}/v1'
+        protocol = 'https' if global_args.enable_ssl else 'http'
+        prefiller_base_url = f'{protocol}://{host}:{port}/v1'
+
+        if global_args.enable_ssl:
+            client = httpx.AsyncClient(timeout=None,
+                                       base_url=prefiller_base_url,
+                                       verify=verify_ssl)
+        else:
+            client = httpx.AsyncClient(timeout=None,
+                                       base_url=prefiller_base_url)
+
         app.state.prefill_clients.append({
-            'client':
-            httpx.AsyncClient(timeout=None, base_url=prefiller_base_url),
-            'host':
-            host,
-            'port':
-            port,
-            'id':
-            i
+            'client': client,
+            'host': host,
+            'port': port,
+            'id': i
         })
 
     # Create decode clients
     for i, (host, port) in enumerate(global_args.decoder_instances):
-        decoder_base_url = f'http://{host}:{port}/v1'
+        protocol = 'https' if global_args.enable_ssl else 'http'
+        decoder_base_url = f'{protocol}://{host}:{port}/v1'
+
+        if global_args.enable_ssl:
+            client = httpx.AsyncClient(timeout=None,
+                                       base_url=decoder_base_url,
+                                       verify=verify_ssl)
+        else:
+            client = httpx.AsyncClient(timeout=None, base_url=decoder_base_url)
+
         app.state.decode_clients.append({
-            'client':
-            httpx.AsyncClient(timeout=None, base_url=decoder_base_url),
-            'host':
-            host,
-            'port':
-            port,
-            'id':
-            i
+            'client': client,
+            'host': host,
+            'port': port,
+            'id': i
         })
 
     # Initialize round-robin iterators
@@ -105,6 +124,19 @@ def parse_args():
                         type=int,
                         nargs="+",
                         default=[8200])
+
+    # SSL/TLS configuration
+    parser.add_argument(
+        "--enable-ssl",
+        action="store_true",
+        help="Enable HTTPS for connections to prefill/decode servers")
+    parser.add_argument(
+        "--ssl-ca-certs",
+        type=str,
+        help="Path to CA certificate file for SSL verification")
+    parser.add_argument("--ssl-insecure",
+                        action="store_true",
+                        help="Disable SSL certificate verification (insecure)")
 
     args = parser.parse_args()
 

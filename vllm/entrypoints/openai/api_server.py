@@ -160,6 +160,9 @@ async def build_async_engine_client(
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
+    from vllm.entrypoints.ssl import SSLConfig
+    ssl_config = SSLConfig.from_args(args)
+
     if disable_frontend_multiprocessing is None:
         disable_frontend_multiprocessing = bool(
             args.disable_frontend_multiprocessing)
@@ -169,6 +172,7 @@ async def build_async_engine_client(
             usage_context=usage_context,
             disable_frontend_multiprocessing=disable_frontend_multiprocessing,
             client_config=client_config,
+            ssl_config=ssl_config,
     ) as engine:
         yield engine
 
@@ -180,6 +184,7 @@ async def build_async_engine_client_from_engine_args(
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     disable_frontend_multiprocessing: bool = False,
     client_config: Optional[dict[str, Any]] = None,
+    ssl_config=None,
 ) -> AsyncIterator[EngineClient]:
     """
     Create EngineClient, either:
@@ -191,6 +196,10 @@ async def build_async_engine_client_from_engine_args(
 
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+
+    if ssl_config is not None:
+        from dataclasses import replace
+        vllm_config = replace(vllm_config, ssl_config=ssl_config)
 
     # V1 AsyncLLM.
     if envs.VLLM_USE_V1:
@@ -1845,9 +1854,8 @@ async def run_server_worker(listen_address,
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
 
-        # create shared SSL configuration
-        from vllm.entrypoints.ssl import SSLConfig
-        ssl_config = SSLConfig.from_args(args)
+        # SSL configuration for NIXL side channel server
+        ssl_config = vllm_config.ssl_config
 
         nixl_side_channel_server = None
         try:

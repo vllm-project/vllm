@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
 import contextlib
-import json
 import logging
 import math
 import queue
@@ -15,9 +14,6 @@ from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
-from urllib.error import HTTPError, URLError
-from urllib.request import Request as URLRequest
-from urllib.request import urlopen
 
 import msgspec
 import torch
@@ -26,6 +22,7 @@ import zmq
 from vllm import envs
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
+from vllm.connections import HTTPConnection
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp, KVConnectorBase_V1, KVConnectorHandshakeMetadata,
     KVConnectorMetadata, KVConnectorRole)
@@ -234,28 +231,36 @@ class HttpHandshakeStrategy(HandshakeStrategy):
     North-South, not P2P.
     """
 
-    def __init__(self, nixl_wrapper, tp_rank: int, tp_size: int,
-                 side_channel_port: int, engine_id: str,
-                 add_remote_agent_func):
+    def __init__(self,
+                 nixl_wrapper,
+                 tp_rank: int,
+                 tp_size: int,
+                 side_channel_port: int,
+                 engine_id: str,
+                 add_remote_agent_func,
+                 ssl_config=None):
         super().__init__(nixl_wrapper, tp_rank, tp_size, side_channel_port,
                          engine_id)
         self.add_remote_agent_func = add_remote_agent_func
         self._tp_size_mapping: dict[str, int] = {engine_id: tp_size}
+        self.ssl_config = ssl_config
 
     def initiate_handshake(self, host: str, port: int, remote_tp_size: int,
                            expected_engine_id: str) -> dict[int, str]:
         start_time = time.perf_counter()
         logger.debug("Starting NIXL handshake with %s:%s", host, port)
 
-        url = build_uri("http", host, port, path="get_kv_connector_metadata")
+        protocol = "https" if (self.ssl_config
+                               and self.ssl_config.is_ssl_enabled) else "http"
+        url = build_uri(protocol, host, port, path="get_kv_connector_metadata")
 
         try:
-            req = URLRequest(url)
-            with urlopen(req,
-                         timeout=envs.VLLM_NIXL_HANDSHAKE_TIMEOUT) as response:
-                response_data = response.read().decode('utf-8')
-                res = json.loads(response_data)
-        except (URLError, HTTPError) as e:
+            http_client = HTTPConnection(ssl_config=self.ssl_config)
+            response = http_client.get_response(
+                url, timeout=envs.VLLM_NIXL_HANDSHAKE_TIMEOUT)
+            response.raise_for_status()
+            res = response.json()
+        except Exception as e:
             logger.error("Failed to fetch metadata from %s: %s", url, e)
             raise
 
@@ -816,8 +821,13 @@ class NixlConnectorWorker:
                 self.side_channel_port, self.engine_id, self.add_remote_agent)
         elif handshake_method == "http":
             self._handshake_strategy = HttpHandshakeStrategy(
-                self.nixl_wrapper, self.tp_rank, self.world_size,
-                self.side_channel_port, self.engine_id, self.add_remote_agent)
+                self.nixl_wrapper,
+                self.tp_rank,
+                self.world_size,
+                self.side_channel_port,
+                self.engine_id,
+                self.add_remote_agent,
+                ssl_config=self.vllm_config.ssl_config)
         else:
             raise ValueError(f"Unknown handshake method: {handshake_method}. "
                              "Supported methods: 'zmq', 'http'")
