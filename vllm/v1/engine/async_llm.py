@@ -104,7 +104,11 @@ class AsyncLLM(EngineClient):
             logger.info(
                 "AsyncLLM created with log_stats=False and non-empty custom "
                 "logger list; enabling logging without default stat loggers")
-
+        if client_count > 1:
+            logger.warning(
+                "AsyncLLM created with api_server_count more than 1; "
+                "disabling stats logging to avoid incomplete stats.")
+            log_stats = False
         if self.model_config.skip_tokenizer_init:
             self.tokenizer = None
         else:
