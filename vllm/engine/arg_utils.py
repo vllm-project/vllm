@@ -1230,17 +1230,17 @@ class EngineArgs:
             enable_multimodal_encoder_data_parallel,
         )
 
-        if model_config.is_multimodal_model:
-            dp_supports_mm_preprocessor_cache = (self.data_parallel_size == 1
-                                                 or data_parallel_external_lb)
-            if (not dp_supports_mm_preprocessor_cache
-                    and not model_config.disable_mm_preprocessor_cache):
-                logger.warning(
-                    "Multi-modal preprocessor cache is not compatible "
-                    "with data parallelism when there does not exist a "
-                    "one-to-one correspondance between API process and "
-                    "EngineCore process, so the cache will be disabled.")
-                model_config.set_disable_mm_preprocessor_cache(True)
+        supports_mm_preprocessor_cache = (self.data_parallel_size == 1
+                                          or data_parallel_external_lb)
+        if (not supports_mm_preprocessor_cache
+                and model_config.is_multimodal_model
+                and not model_config.disable_mm_preprocessor_cache):
+            logger.warning(
+                "Multi-modal preprocessor cache is not compatible "
+                "with data parallelism when there does not exist a "
+                "one-to-one correspondance between API process and "
+                "EngineCore process, so the cache will be disabled.")
+            model_config.set_disable_mm_preprocessor_cache(True)
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
