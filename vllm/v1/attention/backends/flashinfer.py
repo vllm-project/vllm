@@ -523,14 +523,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         head_dim = self.kv_cache_spec.head_size
 
         # currently prefill trtllm attention does not support fp8 kv cache
-        prefill_use_trtllm = not cache_dtype.startswith(
-            "fp8") and use_trtllm_attention(num_prefill_tokens, max_seq_len,
-                                            cache_dtype, num_qo_heads,
-                                            num_kv_heads, head_dim)
-        decode_use_trtllm = use_trtllm_attention(num_decode_tokens,
-                                                 max_seq_len, cache_dtype,
-                                                 num_qo_heads, num_kv_heads,
-                                                 head_dim)
+        # trtllm may not support sliding window
+        prefill_use_trtllm = (self.global_hyperparameters.window_left == -1
+                              and not cache_dtype.startswith("fp8")
+                              and use_trtllm_attention(
+                                num_prefill_tokens, max_seq_len, cache_dtype,
+                                num_qo_heads, num_kv_heads, head_dim))
+        decode_use_trtllm = (self.global_hyperparameters.window_left == -1
+                             and use_trtllm_attention(
+                                num_decode_tokens, max_seq_len, cache_dtype,
+                                num_qo_heads, num_kv_heads, head_dim))
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,

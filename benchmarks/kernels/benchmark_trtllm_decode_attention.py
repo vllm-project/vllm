@@ -41,7 +41,6 @@ def benchmark_decode(
     device = "cuda"
     torch.manual_seed(0)
 
-    # Currently only HEAD_GRP_SIZE == 8 is supported
     HEAD_GRP_SIZE = 8
     MAX_SEQ_LEN = max_seq_len
 
