@@ -586,7 +586,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.is_multimodal_raw_input_supported:  # noqa: SIM102
             # This model requires the raw multimodal data in input.
             if scheduler_output:
-                multi_modal_kwargs_list = []
+                multi_modal_kwargs_list = list[MultiModalKwargs]()
                 for req in scheduler_output.scheduled_new_reqs:
                     req_mm_inputs = req.mm_inputs
                     if not isinstance(req_mm_inputs, list):
