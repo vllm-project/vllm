@@ -29,12 +29,14 @@ class MinimaxToolParser(ToolParser):
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
 
+        # Initialize streaming state for tracking tool call progress
         self.streaming_state: dict[str, Any] = {
-            "current_tool_index": -1,
-            "tool_ids": [],
-            "sent_tools": [],
+            "current_tool_index": -1,  # Index of current tool being processed
+            "tool_ids": [],  # List of tool call IDs
+            "sent_tools": [],  # List of tools that have been sent
         }
 
+        # Define tool call tokens and patterns
         self.tool_call_start_token = "<tool_calls>"
         self.tool_call_end_token = "</tool_calls>"
         self.tool_call_regex = re.compile(
@@ -43,6 +45,7 @@ class MinimaxToolParser(ToolParser):
         self.tool_name_pattern = re.compile(r'"name":\s*"([^"]+)"')
         self.tool_args_pattern = re.compile(r'"arguments":\s*')
 
+        # Buffer for handling partial tool calls during streaming
         self.pending_buffer = ""
         self.in_thinking_tag = False
 
@@ -51,6 +54,7 @@ class MinimaxToolParser(ToolParser):
                 "The model tokenizer must be passed to the ToolParser "
                 "constructor during construction.")
 
+        # Get token IDs for tool call start/end tokens
         self.tool_call_start_token_id = self.vocab.get(
             self.tool_call_start_token)
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
@@ -62,6 +66,15 @@ class MinimaxToolParser(ToolParser):
                 "tokens in the tokenizer. Falling back to string matching.")
 
     def preprocess_model_output(self, model_output: str) -> str:
+        """
+        Preprocess model output by removing tool calls from thinking tags.
+        
+        Args:
+            model_output: Raw model output string
+            
+        Returns:
+            Preprocessed model output with tool calls removed from thinking tags
+        """
 
         def remove_tool_calls_from_think(match):
             think_content = match.group(1)
@@ -77,6 +90,15 @@ class MinimaxToolParser(ToolParser):
                       flags=re.DOTALL)
 
     def _clean_duplicate_braces(self, args_text: str) -> str:
+        """
+        Clean duplicate closing braces from arguments text.
+        
+        Args:
+            args_text: Raw arguments text
+            
+        Returns:
+            Cleaned arguments text with proper JSON formatting
+        """
         args_text = args_text.strip()
         if not args_text:
             return args_text
@@ -98,6 +120,15 @@ class MinimaxToolParser(ToolParser):
         return args_text
 
     def _clean_delta_braces(self, delta_text: str) -> str:
+        """
+        Clean delta text by removing excessive closing braces.
+        
+        Args:
+            delta_text: Delta text to clean
+            
+        Returns:
+            Cleaned delta text
+        """
         if not delta_text:
             return delta_text
 
@@ -115,6 +146,16 @@ class MinimaxToolParser(ToolParser):
         model_output: str,
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
+        """
+        Extract tool calls from model output for non-streaming mode.
+        
+        Args:
+            model_output: Complete model output
+            request: Chat completion request
+            
+        Returns:
+            ExtractedToolCallInformation containing tool calls and content
+        """
         processed_output = self.preprocess_model_output(model_output)
 
         if self.tool_call_start_token not in processed_output:
@@ -185,12 +226,27 @@ class MinimaxToolParser(ToolParser):
                                                 content=model_output)
 
     def _update_thinking_state(self, text: str) -> None:
+        """
+        Update the thinking tag state based on text content.
+        
+        Args:
+            text: Text to analyze for thinking tags
+        """
         open_count = text.count("<think>")
         close_count = text.count("</think>")
         self.in_thinking_tag = open_count > close_count or (
             open_count == close_count and text.endswith("</think>"))
 
     def _is_potential_tag_start(self, text: str) -> bool:
+        """
+        Check if text might be the start of a tool call tag.
+        
+        Args:
+            text: Text to check
+            
+        Returns:
+            True if text could be the start of a tool call tag
+        """
         for tag in [self.tool_call_start_token, self.tool_call_end_token]:
             if any(
                     tag.startswith(text[-i:])
@@ -199,6 +255,15 @@ class MinimaxToolParser(ToolParser):
         return False
 
     def _should_buffer_content(self, delta_text: str) -> bool:
+        """
+        Determine if content should be buffered for later processing.
+        
+        Args:
+            delta_text: Delta text to check
+            
+        Returns:
+            True if content should be buffered
+        """
         if self.in_thinking_tag:
             return False
         return bool(self.pending_buffer
@@ -207,6 +272,15 @@ class MinimaxToolParser(ToolParser):
                     or delta_text.startswith('<'))
 
     def _split_content_for_buffering(self, delta_text: str) -> tuple[str, str]:
+        """
+        Split delta text into safe content and potential tag content.
+        
+        Args:
+            delta_text: Delta text to split
+            
+        Returns:
+            Tuple of (safe_content, potential_tag_content)
+        """
         if self.in_thinking_tag:
             return delta_text, ""
 
@@ -219,6 +293,15 @@ class MinimaxToolParser(ToolParser):
         return delta_text, ""
 
     def _process_buffer(self, new_content: str) -> str:
+        """
+        Process buffered content and return output content.
+        
+        Args:
+            new_content: New content to add to buffer
+            
+        Returns:
+            Processed output content
+        """
         self.pending_buffer += new_content
         output_content = ""
 
@@ -248,6 +331,7 @@ class MinimaxToolParser(ToolParser):
         return output_content
 
     def _reset_streaming_state(self) -> None:
+        """Reset the streaming state to initial values."""
         self.streaming_state = {
             "current_tool_index": -1,
             "tool_ids": [],
@@ -255,16 +339,38 @@ class MinimaxToolParser(ToolParser):
         }
 
     def _advance_to_next_tool(self) -> None:
+        """Advance to the next tool in the streaming sequence."""
         self.streaming_state["current_tool_index"] = int(
             self.streaming_state["current_tool_index"]) + 1
 
     def _set_current_tool_index(self, index: int) -> None:
+        """
+        Set the current tool index.
+        
+        Args:
+            index: Tool index to set
+        """
         self.streaming_state["current_tool_index"] = index
 
     def _get_current_tool_index(self) -> int:
+        """
+        Get the current tool index.
+        
+        Returns:
+            Current tool index
+        """
         return int(self.streaming_state["current_tool_index"])
 
     def _get_next_unsent_tool_index(self, tool_count: int) -> int:
+        """
+        Get the index of the next unsent tool.
+        
+        Args:
+            tool_count: Total number of tools
+            
+        Returns:
+            Index of next unsent tool, or -1 if all tools sent
+        """
         sent_tools = list(self.streaming_state["sent_tools"])
         for i in range(tool_count):
             if i < len(sent_tools):
@@ -275,6 +381,12 @@ class MinimaxToolParser(ToolParser):
         return -1
 
     def _ensure_state_arrays(self, tool_count: int) -> None:
+        """
+        Ensure state arrays have sufficient capacity for tool_count tools.
+        
+        Args:
+            tool_count: Number of tools to prepare for
+        """
         sent_tools = list(self.streaming_state["sent_tools"])
         tool_ids = list(self.streaming_state["tool_ids"])
 
@@ -292,10 +404,28 @@ class MinimaxToolParser(ToolParser):
         self.streaming_state["tool_ids"] = tool_ids
 
     def _detect_tools_in_text(self, text: str) -> int:
+        """
+        Detect the number of tools in text by counting name patterns.
+        
+        Args:
+            text: Text to analyze
+            
+        Returns:
+            Number of tools detected
+        """
         matches = self.tool_name_pattern.findall(text)
         return len(matches)
 
     def _find_tool_boundaries(self, text: str) -> list[tuple[int, int]]:
+        """
+        Find the boundaries of tool calls in text.
+        
+        Args:
+            text: Text to analyze
+            
+        Returns:
+            List of (start, end) positions for tool calls
+        """
         boundaries = []
         i = 0
         while i < len(text):
@@ -332,6 +462,16 @@ class MinimaxToolParser(ToolParser):
         return boundaries
 
     def _extract_tool_args(self, tool_content: str, args_match) -> str:
+        """
+        Extract tool arguments from tool content.
+        
+        Args:
+            tool_content: Tool call content
+            args_match: Regex match for arguments pattern
+            
+        Returns:
+            Extracted arguments as string
+        """
         args_start_pos = args_match.end()
         remaining_content = tool_content[args_start_pos:]
 
@@ -354,6 +494,16 @@ class MinimaxToolParser(ToolParser):
     def _get_current_tool_content(
             self, text: str,
             tool_index: int) -> tuple[Optional[str], Optional[str]]:
+        """
+        Get the content of a specific tool by index.
+        
+        Args:
+            text: Text containing tool calls
+            tool_index: Index of tool to extract
+            
+        Returns:
+            Tuple of (tool_name, tool_arguments) or (None, None) if not found
+        """
         boundaries = self._find_tool_boundaries(text)
 
         if tool_index >= len(boundaries):
@@ -380,6 +530,16 @@ class MinimaxToolParser(ToolParser):
     def _handle_tool_name_streaming(
             self, tool_content: str,
             tool_count: int) -> Union[DeltaMessage, None]:
+        """
+        Handle streaming of tool names.
+        
+        Args:
+            tool_content: Content containing tool calls
+            tool_count: Total number of tools
+            
+        Returns:
+            DeltaMessage with tool name or None if no tool to stream
+        """
         next_idx = self._get_next_unsent_tool_index(tool_count)
 
         if next_idx == -1:
@@ -415,6 +575,16 @@ class MinimaxToolParser(ToolParser):
     def _handle_tool_args_streaming(
             self, tool_content: str,
             tool_count: int) -> Union[DeltaMessage, None]:
+        """
+        Handle streaming of tool arguments.
+        
+        Args:
+            tool_content: Content containing tool calls
+            tool_count: Total number of tools
+            
+        Returns:
+            DeltaMessage with tool arguments or None if no arguments to stream
+        """
         current_idx = self._get_current_tool_index()
 
         if current_idx < 0 or current_idx >= tool_count:
@@ -467,14 +637,14 @@ class MinimaxToolParser(ToolParser):
 
         return None
 
-    def _is_end_tool_calls(self, tool_content: str) -> bool:
-        if self.tool_call_end_token not in tool_content:
+    def _is_end_tool_calls(self, current_text: str) -> bool:
+        if self.tool_call_end_token not in current_text:
             return False
 
         end_token_positions = []
         search_start = 0
         while True:
-            pos = tool_content.find(self.tool_call_end_token, search_start)
+            pos = current_text.find(self.tool_call_end_token, search_start)
             if pos == -1:
                 break
             end_token_positions.append(pos)
@@ -482,7 +652,7 @@ class MinimaxToolParser(ToolParser):
 
         think_regions = []
         for match in re.finditer(self.thinking_tag_pattern,
-                                 tool_content,
+                                 current_text,
                                  flags=re.DOTALL):
             think_regions.append((match.start(), match.end()))
 
@@ -577,6 +747,15 @@ class MinimaxToolParser(ToolParser):
 
     def _find_tool_start_outside_thinking(self,
                                           current_text: str) -> Optional[int]:
+        """
+        Find the start position of tool calls outside of thinking tags.
+        
+        Args:
+            current_text: Current text to search
+            
+        Returns:
+            Position of tool call start or None if not found
+        """
         search_start = 0
         while True:
             pos = current_text.find(self.tool_call_start_token, search_start)
@@ -595,6 +774,17 @@ class MinimaxToolParser(ToolParser):
 
     def _extract_content_before_tools(self, current_text: str, delta_text: str,
                                       tool_start: int) -> Optional[str]:
+        """
+        Extract content that appears before tool calls.
+        
+        Args:
+            current_text: Current text
+            delta_text: Delta text
+            tool_start: Start position of tools
+            
+        Returns:
+            Content before tools or None
+        """
         if tool_start > 0:
             delta_start_pos = len(current_text) - len(delta_text)
             if delta_start_pos < tool_start:
@@ -605,6 +795,16 @@ class MinimaxToolParser(ToolParser):
         return None
 
     def _extract_tool_content(self, current_text: str, tool_start: int) -> str:
+        """
+        Extract tool content from current text starting at tool_start.
+        
+        Args:
+            current_text: Current text
+            tool_start: Start position of tool calls
+            
+        Returns:
+            Extracted tool content
+        """
         tool_content_start = tool_start + len(self.tool_call_start_token)
         tool_content = current_text[tool_content_start:]
 
