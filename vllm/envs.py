@@ -984,7 +984,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
 
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support. Both
-    # require CUDA 10.0 or above.
+    # require compute capability 10.0 or above.
     # Available options:
     # - "throughput":  [default]
     #     Uses CUTLASS kernels optimized for high-throughput batch inference.
