@@ -1881,34 +1881,34 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
-        # TODO(woosuk): Optimize.
-        draft_token_ids: list[list[int]] = []
+        assert type(self.drafter) is NgramProposer
+        num_req = len(sampled_token_ids)
+        draft_token_ids: list[list[int]] = [[] for _ in range(num_req)]
+        num_tokens_per_request = np.zeros(num_req, dtype=np.int32)
         for i, sampled_ids in enumerate(sampled_token_ids):
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
                 # Skip speculative decoding.
-                draft_token_ids.append([])
                 continue
 
             # Skip requests that require sampling parameters that are not
             # supported with speculative decoding.
             req_id = self.input_batch.req_ids[i]
             if req_id in self.input_batch.spec_decode_unsupported_reqs:
-                draft_token_ids.append([])
                 continue
 
             num_tokens = self.input_batch.num_tokens_no_spec[i]
             if num_tokens >= self.max_model_len:
                 # Skip requests that have already reached the max model length.
-                draft_token_ids.append([])
                 continue
 
-            drafter_output = self.drafter.propose(
-                self.input_batch.token_ids_cpu[i, :num_tokens])
-            if drafter_output is None or len(drafter_output) == 0:
-                draft_token_ids.append([])
-            else:
-                draft_token_ids.append(drafter_output.tolist())
+            num_tokens_per_request[i] = num_tokens
+
+        self.drafter.bulk_propose(
+            tokens_per_request=self.input_batch.token_ids_cpu,
+            num_tokens_per_request=num_tokens_per_request,
+            result_draft_tokens=draft_token_ids)
+
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:

@@ -6,6 +6,9 @@ import numpy as np
 from numba import jit
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class NgramProposer:
@@ -24,49 +27,27 @@ class NgramProposer:
 
         # Trigger Numba JIT compilation for N-gram proposer.
         # This usually takes less than 1 second.
-        self.propose(np.zeros(1024, dtype=np.int32))
+        fake_req_cnt = 32
+        fake_token_cnt = 1024
+        self.bulk_propose(
+            np.zeros((fake_req_cnt, fake_token_cnt), dtype=np.int32),
+            np.zeros(fake_token_cnt, dtype=np.int32),
+            [[] for _ in range(fake_req_cnt)])
 
-    def propose(
-        self,
-        context_token_ids: np.ndarray,
-    ) -> Optional[np.ndarray]:
-        """Proposes the next sequence of tokens based on n-gram pattern 
-        matching in the context. The function finds matches of the last n 
-        tokens in the previous context, and returns k tokens that followed 
-        that match.
-        
-        Args:
-            context_token_ids: Numpy array of token IDs representing the 
-                               context sequence.
-
-        Returns:
-            np.ndarray: The sequence of tokens that followed 
-                        the matched n-gram in the context.
-            None: If no matching n-gram pattern is found.
-
-        Example:
-            If context_token_ids = [1,2,3,4,2,3], min_n = 2, max_n = 3, and
-            k = 4:
-            - The last 3 (= max_n) tokens [4,2,3] cannot find a match.
-            - The last 2 tokens [2,3] will be matched against the previous 
-              4 tokens [1,2,3,4].
-            - Finding a match of [2,3] would return the tokens that 
-              followed that pattern. Here we will return [4,2,3] because 
-              we only have three tokens after the match.
-        """
-        # Do not generate draft tokens is context is shorter than minimum n-gram
-        if context_token_ids.shape[0] < self.min_n:
-            return None
-
-        # Do not generate draft tokens beyond the max model length.
-        k = min(self.k, self.max_model_len - context_token_ids.shape[0])
-        if k <= 0:
-            return None
-
-        return _find_longest_leftmost_ngram(origin_tokens=context_token_ids,
-                                            min_n=self.min_n,
-                                            max_n=self.max_n,
-                                            k=k)
+    def bulk_propose(self, tokens_per_request: np.ndarray,
+                     num_tokens_per_request: np.ndarray,
+                     result_draft_tokens: list[list[int]]) -> None:
+        draft_tokens_per_request = _bulk_find_longest_leftmost_ngram(
+            tokens_per_request=tokens_per_request,
+            num_tokens_per_request=num_tokens_per_request,
+            total_request=len(result_draft_tokens),
+            min_n=self.min_n,
+            max_n=self.max_n,
+            max_model_len=self.max_model_len,
+            k=self.k)
+        for i, draft_tokens in enumerate(draft_tokens_per_request):
+            if draft_tokens is not None:
+                result_draft_tokens[i].extend(draft_tokens.tolist())
 
     def load_model(self, *args, **kwargs):
         # No model to load.
@@ -74,8 +55,33 @@ class NgramProposer:
 
 
 @jit(nopython=True)
+def _bulk_find_longest_leftmost_ngram(tokens_per_request: np.ndarray,
+                                      num_tokens_per_request: np.ndarray,
+                                      total_request: int, min_n: int,
+                                      max_n: int, max_model_len: int,
+                                      k: int) -> list[Optional[np.ndarray]]:
+    return [
+        _find_longest_leftmost_ngram(
+            tokens_per_request[i, :num_tokens_per_request[i]], min_n, max_n,
+            max_model_len, k) if num_tokens_per_request[i] > 0 else None
+        for i in range(total_request)
+    ]
+
+
+@jit(nopython=True)
 def _find_longest_leftmost_ngram(origin_tokens: np.ndarray, min_n: int,
-                                 max_n: int, k: int) -> Optional[np.ndarray]:
+                                 max_n: int, max_model_len: int,
+                                 k: int) -> Optional[np.ndarray]:
+    # Do not generate draft tokens is context is shorter than minimum n-gram
+    total_token = origin_tokens.shape[0]
+    if total_token < min_n:
+        return None
+
+    # Do not generate draft tokens beyond the max model length.
+    k = min(k, max_model_len - total_token)
+    if k <= 0:
+        return None
+
     # Flip tokens, and the goal become to find longest ngram
     # on the rightmost position which matches the prefix with
     # length [min_n, max_n] (inclusive).
@@ -98,7 +104,6 @@ def _find_longest_leftmost_ngram(origin_tokens: np.ndarray, min_n: int,
     # lps[0] always equal to 0, we starts with index 1
     prev_lps = 0
     i = 1
-    total_token = origin_tokens.shape[0]
     while i < total_token:
         # tokens[:prev_lps] is the longest prefix as a suffix of tokens[:i]
         if tokens[prev_lps] == tokens[i]:
