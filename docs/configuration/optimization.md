@@ -189,8 +189,3 @@ llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
 llm = LLM(model="Qwen/Qwen2-Audio-7B-Instruct",
           mm_processor_kwargs={"device": "cuda"})
 ```
-
-!!! note
-    Multi-modal processor cache is disabled when using GPU multi-modal processing
-    because GPU operations work better with larger batch size, which happens less
-    frequently when the cache is enabled.
