@@ -73,14 +73,17 @@ class LoRAModelRunnerMixin:
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
     def set_active_loras(self, input_batch: InputBatch,
-                         num_scheduled_tokens: np.ndarray) -> None:
+                         num_scheduled_tokens: np.ndarray,
+                         num_sampled_tokens: np.ndarray) -> None:
 
-        prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs
+        prompt_lora_mapping: tuple[int,
+                                   ...]  # of size np.sum(num_sampled_tokens)
         token_lora_mapping: tuple[int,
                                   ...]  # of size np.sum(num_scheduled_tokens)
         lora_requests: set[LoRARequest]
         prompt_lora_mapping, token_lora_mapping, lora_requests = \
-                            input_batch.make_lora_inputs(num_scheduled_tokens)
+                            input_batch.make_lora_inputs(num_scheduled_tokens,
+                                                         num_sampled_tokens)
         return self._set_active_loras(prompt_lora_mapping, token_lora_mapping,
                                       lora_requests)
 
@@ -116,7 +119,8 @@ class LoRAModelRunnerMixin:
 
     @contextmanager
     def maybe_select_dummy_loras(self, lora_config: LoRAConfig,
-                                 num_scheduled_tokens: np.ndarray):
+                                 num_scheduled_tokens: np.ndarray,
+                                 num_sampled_tokens: np.ndarray):
         if lora_config is None:
             yield
         else:
@@ -131,6 +135,10 @@ class LoRAModelRunnerMixin:
             prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) %
                                    num_loras) + 1
 
+            # Make sample lora mapping
+            sample_lora_mapping = np.repeat(prompt_lora_mapping,
+                                            num_sampled_tokens)
+
             # Make token lora mapping
             token_lora_mapping = np.repeat(prompt_lora_mapping,
                                            num_scheduled_tokens)
@@ -143,17 +151,19 @@ class LoRAModelRunnerMixin:
                 for lora_id in range(1, num_loras + 1)
             }
 
-            self._set_active_loras(tuple(prompt_lora_mapping),
+            self._set_active_loras(tuple(sample_lora_mapping),
                                    tuple(token_lora_mapping), lora_requests)
 
             yield
 
     @contextmanager
     def maybe_dummy_run_with_lora(self, lora_config: LoRAConfig,
-                                  num_scheduled_tokens: np.ndarray):
+                                  num_scheduled_tokens: np.ndarray,
+                                  num_sampled_tokens: np.ndarray):
         with self.maybe_setup_dummy_loras(
                 lora_config), self.maybe_select_dummy_loras(
-                    lora_config, num_scheduled_tokens):
+                    lora_config, num_scheduled_tokens,
+                    num_sampled_tokens):
             yield
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
