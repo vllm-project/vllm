@@ -4,15 +4,9 @@ import random
 
 import pytest
 
-from vllm import LLM, envs
+from vllm import LLM
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-
-if not envs.VLLM_USE_V1:
-    pytest.skip(
-        "Skipping V1 tests. Rerun with `VLLM_USE_V1=1` to test.",
-        allow_module_level=True,
-    )
 
 
 @pytest.mark.parametrize("model_name", ["Qwen/Qwen2.5-1.5B-Instruct"])

@@ -90,15 +90,12 @@ class JinaVLForSequenceClassification(Qwen2VLForConditionalGeneration,
                          prefix=maybe_prefix(prefix, "qwen2_vl"))
         config = vllm_config.model_config.hf_config
         pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
 
         # logit bias for sigmoid normalization
         self.LOGIT_BIAS = 2.65
 
         self.score = JinaVLScorer(config)
-
-        pooler_config = vllm_config.model_config.pooler_config
-        assert pooler_config is not None
-
         self.pooler = DispatchPooler({
             "encode":
             Pooler.for_encode(pooler_config),

@@ -152,6 +152,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
+    VLLM_ENABLE_RESPONSES_API_STORE: bool = False
 
 
 def get_default_cache_root():
@@ -1031,9 +1032,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_CUDNN_PREFILL":
     lambda: bool(int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))),
 
-    # If set to 1, use the TRTLLM Decode Attention backend in flashinfer.
-    "VLLM_USE_TRTLLM_DECODE_ATTENTION":
-    lambda: os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", None),
+    # If set to 1, use the TRTLLM Attention backend in flashinfer.
+    "VLLM_USE_TRTLLM_ATTENTION":
+    lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
 
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
@@ -1061,6 +1062,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE":
     lambda: bool(int(os.getenv(\
             "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE", "0"))),
+
+    # Enables support for the "store" option in the OpenAI Responses API.
+    # When set to 1, vLLM's OpenAI server will retain the input and output
+    # messages for those requests in memory. By default, this is disabled (0),
+    # and the "store" option is ignored.
+    # NOTE/WARNING:
+    # 1. Messages are kept in memory only (not persisted to disk) and will be
+    #    lost when the vLLM server shuts down.
+    # 2. Enabling this option will cause a memory leak, as stored messages are
+    #    never removed from memory until the server terminates.
+    "VLLM_ENABLE_RESPONSES_API_STORE":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
