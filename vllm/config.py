@@ -204,15 +204,14 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
 
     try:
         cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
-    except (OSError, KeyError):
-        # inspect.getsource() may fail for Python 3.13+
-        # Try alternative approach using inspect.findsource()
-        try:
-            lines, _ = inspect.findsource(cls)
-            source = ''.join(lines)
-            cls_node = ast.parse(textwrap.dedent(source)).body[0]
-        except (OSError, TypeError):
-            # If all else fails, return empty dict
+    except (OSError, KeyError, TypeError):
+        # getsource() fails in Python 3.13+ - use dataclass introspection
+        if is_dataclass(cls):
+            docs = {}
+            for field_obj in fields(cls):
+                docs[field_obj.name] = f"Configuration for {field_obj.name}."
+            return docs
+        else:
             return {}
 
     if not isinstance(cls_node, ast.ClassDef):
