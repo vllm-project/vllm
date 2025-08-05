@@ -11,6 +11,7 @@ from openai.types.responses.response_function_tool_call import (
     ResponseFunctionToolCall)
 from openai.types.responses.response_function_web_search import (
     ActionFind, ActionOpenPage, ActionSearch, ResponseFunctionWebSearch)
+from openai.types.responses.tool import Tool
 from openai_harmony import (Author, Conversation, DeveloperContent,
                             HarmonyEncodingName, Message, ReasoningEffort,
                             Role, StreamableParser, SystemContent, TextContent,
@@ -19,7 +20,6 @@ from openai_harmony import (Author, Conversation, DeveloperContent,
 from vllm.entrypoints.openai.protocol import (ResponseInputOutputItem,
                                               ResponseReasoningItem,
                                               ResponseReasoningTextContent)
-from vllm.entrypoints.tool import Tool
 from vllm.utils import random_uuid
 
 REASONING_EFFORT = {

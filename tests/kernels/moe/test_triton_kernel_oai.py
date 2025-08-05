@@ -35,11 +35,13 @@ def deshuffle(w: torch.Tensor):
 
 def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
     randbits = [torch.randperm(E) for _ in range(M)]
-    x = [(-1)**i *
-         ((16384 +
-           ((i * 512) % 4096) + bits).to(torch.int16).view(torch.bfloat16))
-         for i, bits in enumerate(randbits)]
-    exp_data = torch.stack(x).to(
+    x_list = [
+        (-1)**i *
+        ((16384 +
+          ((i * 512) % 4096) + bits).to(torch.int16).view(torch.bfloat16))
+        for i, bits in enumerate(randbits)
+    ]
+    exp_data = torch.stack(x_list).to(
         device="cuda")  # simulating gate_output (M, E)
 
     # create input tensor

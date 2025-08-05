@@ -138,7 +138,9 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
               expert_map: Optional[torch.Tensor],
               w1_scale: Optional[torch.Tensor],
               w2_scale: Optional[torch.Tensor], w1_zp: Optional[torch.Tensor],
-              w2_zp: Optional[torch.Tensor], a1q_scale: Optional[torch.Tensor],
+              w2_zp: Optional[torch.Tensor], w1_bias: Optional[torch.Tensor],
+              w2_bias: Optional[torch.Tensor],
+              a1q_scale: Optional[torch.Tensor],
               a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
               workspace2: torch.Tensor,
               expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
@@ -149,6 +151,6 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert experts is not None
         experts.apply(output, hidden_states, w1, w2, topk_weights, topk_ids,
                       activation, global_num_experts, expert_map, w1_scale,
-                      w2_scale, w1_zp, w2_zp, a1q_scale, a2_scale, workspace13,
-                      workspace2, expert_tokens_meta,
+                      w2_scale, w1_zp, w2_zp, w1_bias, w2_bias, a1q_scale,
+                      a2_scale, workspace13, workspace2, expert_tokens_meta,
                       apply_router_weight_on_input, extra_expert_args)

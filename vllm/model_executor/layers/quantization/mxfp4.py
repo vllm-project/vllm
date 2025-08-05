@@ -54,9 +54,10 @@ class Mxfp4Config(QuantizationConfig):
         from vllm.attention.layer import Attention  # Avoid circular import
 
         if isinstance(layer, LinearBase):
-            if is_layer_skipped(prefix=prefix,
-                                ignored_layers=self.ignored_layers,
-                                fused_mapping=self.packed_modules_mapping):
+            if self.ignored_layers and is_layer_skipped(
+                    prefix=prefix,
+                    ignored_layers=self.ignored_layers,
+                    fused_mapping=self.packed_modules_mapping):
                 return UnquantizedLinearMethod()
             raise NotImplementedError("Mxfp4 linear layer is not implemented")
         elif isinstance(layer, FusedMoE):
@@ -203,6 +204,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 FusedMoEActivationFormat.BatchedExperts):
             max_num_tokens_per_rank = (
                 prepare_finalize.max_num_tokens_per_rank())
+            assert max_num_tokens_per_rank is not None
             return BatchedOAITritonExperts(
                 None,
                 max_num_tokens=max_num_tokens_per_rank,

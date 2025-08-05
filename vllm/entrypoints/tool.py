@@ -8,7 +8,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     # Avoid circular import.
-    from vllm.entrypoints.context import ConversationContext, HarmonyContext
+    from vllm.entrypoints.context import ConversationContext
 
 logger = init_logger(__name__)
 
@@ -43,7 +43,9 @@ class HarmonyBrowserTool(Tool):
         self.browser_tool = SimpleBrowserTool(backend=browser_backend)
         logger.info_once("Browser tool initialized")
 
-    async def get_result(self, context: "HarmonyContext") -> Any:
+    async def get_result(self, context: "ConversationContext") -> Any:
+        from vllm.entrypoints.context import HarmonyContext
+        assert isinstance(context, HarmonyContext)
         last_msg = context.messages[-1]
         tool_output_msgs = []
         async for msg in self.browser_tool.process(last_msg):
@@ -71,7 +73,9 @@ class HarmonyPythonTool(Tool):
         self.python_tool = PythonTool()
         logger.info_once("Code interpreter tool initialized")
 
-    async def get_result(self, context: "HarmonyContext") -> Any:
+    async def get_result(self, context: "ConversationContext") -> Any:
+        from vllm.entrypoints.context import HarmonyContext
+        assert isinstance(context, HarmonyContext)
         last_msg = context.messages[-1]
         tool_output_msgs = []
         async for msg in self.python_tool.process(last_msg):

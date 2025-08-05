@@ -154,6 +154,8 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             w2_scale,
             w1_zp,
             w2_zp,
+            w1_bias,
+            w2_bias,
             a1q_scale,
             a2_scale,
             workspace13,
