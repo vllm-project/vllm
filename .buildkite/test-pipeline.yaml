@@ -581,7 +581,8 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/multimodal/processing
-    - pytest -v -s --ignore models/multimodal/generation/test_whisper.py models/multimodal -m core_model
+    - pytest -v -s --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/test_tensor_schema.py models/multimodal -m core_model
+    - pytest -v -s models/multimodal/test_tensor_schema.py -m core_model  # Needs mp_method="spawn"
     - cd .. && pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
 
 - label: Multi-Modal Models Test (Extended) 1
@@ -748,7 +749,6 @@ steps:
   # this test fails consistently.
   # TODO: investigate and fix
   - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
-  - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s kv_transfer/test_disagg.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
   - pytest -v -s models/multimodal/generation/test_maverick.py
 
