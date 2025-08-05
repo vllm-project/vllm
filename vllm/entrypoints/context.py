@@ -68,7 +68,8 @@ class HarmonyContext(ConversationContext):
     def append_output(self, output) -> None:
         if isinstance(output, RequestOutput):
             output_token_ids = output.outputs[0].token_ids
-            output_msgs = parse_output_into_messages(output_token_ids)
+            parser = parse_output_into_messages(output_token_ids)
+            output_msgs = parser.messages
         else:
             # Tool output.
             output_msgs = output

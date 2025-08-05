@@ -282,8 +282,8 @@ def parse_output_message(message: Message):
     return output_items
 
 
-def parse_output_into_messages(token_ids: Iterable[int]) -> list[Message]:
+def parse_output_into_messages(token_ids: Iterable[int]):
     parser = get_streamable_parser_for_assistant()
     for token_id in token_ids:
         parser.process(token_id)
-    return parser.messages
+    return parser
