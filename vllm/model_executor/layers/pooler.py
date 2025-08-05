@@ -68,7 +68,7 @@ class Pooler(nn.Module, ABC):
 
     @staticmethod
     def for_encode(pooler_config: PoolerConfig, ):
-        if pooler_config.pooling_type == PoolingType.STEP:
+        if pooler_config.pooling_type == "STEP":
             return StepPooler()
 
         resolved_config = ResolvedPoolingConfig(task="encode",

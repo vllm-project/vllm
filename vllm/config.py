@@ -913,8 +913,9 @@ class ModelConfig:
                     if getattr(pooler_config, k) is None:
                         setattr(pooler_config, k, v)
 
+            default_pooling_type = self._model_info.default_pooling_type
             if pooler_config.pooling_type is None:
-                pooler_config.pooling_type = self._model_info.default_pooling_type
+                pooler_config.pooling_type = default_pooling_type
 
             return pooler_config
 
@@ -1756,8 +1757,12 @@ class ModelConfig:
         if self._model_info.default_pooling_type == "CLS" or not getattr(
                 self.hf_config, "is_causal", True):
             return "encoder_only"
-        else:
+        elif self._model_info.default_pooling_type == "LAST":
             return "decoder"
+        else:
+            # default_pooling_type == "ALL" and "STEP"
+            # is not supported temporarily
+            return None
 
     def get_and_verify_max_len(self, max_model_len: int):
         # Consider max_model_len in tokenizer_config only when

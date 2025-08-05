@@ -45,13 +45,8 @@ def test_decode_only_classify(
 @pytest.mark.parametrize(
     "model", ["intfloat/e5-small", "Alibaba-NLP/gte-Qwen2-1.5B-instruct"])
 @pytest.mark.parametrize("dtype", ["half"])
-def test_encode_only_classify(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str
-) -> None:
+def test_encode_only_classify(hf_runner, vllm_runner, example_prompts,
+                              model: str, dtype: str) -> None:
     with vllm_runner(model,
                      max_model_len=512,
                      dtype=dtype,

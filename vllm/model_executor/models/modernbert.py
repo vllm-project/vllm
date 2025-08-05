@@ -25,7 +25,8 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 
-from .interfaces import SupportsCrossEncoding, SupportsV0Only, default_pooling_type
+from .interfaces import (SupportsCrossEncoding, SupportsV0Only,
+                         default_pooling_type)
 from .utils import WeightsMapper, maybe_prefix
 
 
