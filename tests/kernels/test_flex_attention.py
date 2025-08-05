@@ -11,6 +11,8 @@ from packaging import version
 
 from vllm import LLM, SamplingParams
 
+from ...models.utils import check_embeddings_close
+
 TORCH_VERSION = version.parse(torch.__version__)
 MINIMUM_TORCH_VERSION = version.parse("2.7.0")
 
@@ -86,6 +88,64 @@ def test_flex_attention_vs_default_backend(monkeypatch):
             f"FlexAttention output doesn't match default for: {prompt!r}\n"
             f"FlexAttention: {flex_text!r}\n"
             f"Default: {default_text!r}")
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
+    reason="CUDA not available or PyTorch version < 2.7",
+)
+def test_encoder_flex_attention_vs_default_backend(monkeypatch):
+    """Test that FlexAttention produces the same outputs as the default backend.
+
+    This test compares the outputs from the FlexAttention backend with
+    the default backend for encoder models.
+    """
+    model_name = "BAAI/bge-base-en-v1.5"
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+    ]
+
+    # Run with flex attention
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
+
+        llm_flex = LLM(
+            model_name,
+            dtype=torch.bfloat16,
+            tensor_parallel_size=1,
+            max_model_len=100,
+            enforce_eager=True,
+        )
+        req_outputs = llm_flex.embed(prompts)
+        flex_outputs = [
+            req_output.outputs.embedding for req_output in req_outputs
+        ]
+
+    # Run with default backend
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        llm_default = LLM(
+            model_name,
+            dtype=torch.bfloat16,
+            tensor_parallel_size=1,
+            max_model_len=100,
+            enforce_eager=True,
+        )
+        req_outputs = llm_default.embed(prompts)
+        default_outputs = [
+            req_output.outputs.embedding for req_output in req_outputs
+        ]
+
+    check_embeddings_close(
+        embeddings_0_lst=flex_outputs,
+        embeddings_1_lst=default_outputs,
+        name_0="flex",
+        name_1="default",
+        tol=1e-2,
+    )
 
 
 if __name__ == "__main__":
