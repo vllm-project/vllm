@@ -37,7 +37,7 @@ def main(
     seed: int,
     do_profile: bool,
     device: str = "cuda",
-    kv_cache_dtype: Optional[str] = None,
+    kv_cache_dtype: Optional[str] = "auto",
 ) -> None:
     import copy
     current_platform.seed_everything(seed)
