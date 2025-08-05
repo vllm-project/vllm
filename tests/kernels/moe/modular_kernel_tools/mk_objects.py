@@ -11,7 +11,8 @@ from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts)
 from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
     BatchedTritonOrDeepGemmExperts)
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig, FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
+                                                         FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts, NaiveBatchedExperts)
@@ -20,10 +21,12 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts)
-from vllm.utils import has_deep_ep, has_pplx, has_deep_gemm
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    cutlass_fp4_supported)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    cutlass_fp8_supported)
+from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import cutlass_fp8_supported
-from vllm.model_executor.layers.quantization.utils.quant_utils import cutlass_fp4_supported
 
 
 @dataclass
@@ -45,7 +48,8 @@ class ExpertInfo:
     needs_deep_gemm: bool = False
 
 
-PREPARE_FINALIZE_INFO: dict[mk.FusedMoEPrepareAndFinalize, PrepareFinalizeInfo] = {}
+PREPARE_FINALIZE_INFO: dict[mk.FusedMoEPrepareAndFinalize,
+                            PrepareFinalizeInfo] = {}
 EXPERT_INFO: dict[mk.FusedMoEPermuteExpertsUnpermute, ExpertInfo] = {}
 MK_ALL_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalize] = []
 MK_MULTI_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalize] = []
@@ -54,7 +58,9 @@ MK_FUSED_EXPERT_TYPES: list[mk.FusedMoEPermuteExpertsUnpermute] = []
 
 standard_format = mk.FusedMoEActivationFormat.Standard
 batched_format = mk.FusedMoEActivationFormat.BatchedExperts
-common_float_types: list[Union[torch.dtype, str]]  = [torch.float8_e4m3fn, torch.bfloat16, torch.float16, torch.float32]
+common_float_types: list[Union[torch.dtype, str]] = [
+    torch.float8_e4m3fn, torch.bfloat16, torch.float16, torch.float32
+]
 common_float_and_int_types = common_float_types + [torch.int8]
 nv_fp4_types = ["nvfp4"]
 fp8_types = [torch.float8_e4m3fn]
@@ -130,7 +136,7 @@ register_prepare_and_finalize(
     standard_format,
     common_float_types,
     blocked_quantization_support=True,
-    backend=None, # naive?
+    backend=None,  # naive?
 )
 
 register_experts(
@@ -195,18 +201,17 @@ if has_pplx():
         backend="pplx",
     )
 
-
 if False and has_flashinfer_cutlass_fused_moe():
-    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-        FlashInferCutlassMoEPrepareAndFinalize)
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
         FlashInferExperts)
+    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
+        FlashInferCutlassMoEPrepareAndFinalize)
 
     register_prepare_and_finalize(
         FlashInferCutlassMoEPrepareAndFinalize,
         standard_format,
         nv_fp4_types,
-        blocked_quantization_support=True, # ?
+        blocked_quantization_support=True,  # ?
         backend=None,
     )
 
@@ -260,8 +265,8 @@ if has_deep_gemm():
     )
 
 if cutlass_fp8_supported():
-    from vllm.model_executor.layers.fused_moe import (CutlassExpertsFp8,
-                                                      CutlassBatchedExpertsFp8)
+    from vllm.model_executor.layers.fused_moe import (CutlassBatchedExpertsFp8,
+                                                      CutlassExpertsFp8)
     register_experts(
         CutlassExpertsFp8,
         standard_format,
@@ -280,7 +285,8 @@ if cutlass_fp8_supported():
     )
 
 if False and cutlass_fp4_supported():
-    from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp4
+    from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        CutlassExpertsFp4)
     register_experts(
         CutlassExpertsFp4,
         standard_format,
@@ -289,7 +295,6 @@ if False and cutlass_fp4_supported():
         supports_chunking=True,
         supports_expert_map=False,
     )
-
 
 MK_QUANT_CONFIGS = [
     None,
@@ -410,7 +415,7 @@ def make_fused_experts(
             "g2_alphas": 0,  #TBD
             "a1_gscale": 0,  #TBD
             "a2_gscale": 0,  #TBD
-            "device": 0, # TBD
+            "device": 0,  # TBD
             "max_experts_per_worker": num_experts,
             "out_dtype": moe.in_dtype,
             "per_act_token_quant": moe.per_act_token_quant,
@@ -423,10 +428,10 @@ def make_fused_experts(
     elif fused_experts_type == FlashInferExperts:
         print(f"Making FlashInferExperts {kwargs} ...")
         kwargs = {
-            "g1_alphas": 0, #TBD
-            "g2_alphas": 0, #TBD
-            "a1_gscale": 0, #TBD
-            "a2_gscale": 0, #TBD
+            "g1_alphas": 0,  #TBD
+            "g2_alphas": 0,  #TBD
+            "a1_gscale": 0,  #TBD
+            "a2_gscale": 0,  #TBD
             "out_dtype": moe.in_dtype,
             "use_nvfp4_w4a4": True,
             "ep_rank": moe.ep_rank,
@@ -436,7 +441,6 @@ def make_fused_experts(
         }
         experts = FlashInferExperts(**kwargs)
     else:
-        raise RuntimeError(
-            f"Unknown fused experts type: {fused_experts_type}")
+        raise RuntimeError(f"Unknown fused experts type: {fused_experts_type}")
 
     return experts

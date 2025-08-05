@@ -265,7 +265,8 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
 
         activation_callable = lambda o, i: self.activation(activation, o, i)
 
-        use_batched_format = self.activation_formats[0] == mk.FusedMoEActivationFormat.BatchedExperts
+        use_batched_format = self.activation_formats[
+            0] == mk.FusedMoEActivationFormat.BatchedExperts
 
         in_dtype = hidden_states.dtype
         run_cutlass_moe_fp8(
@@ -278,6 +279,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class CutlassExpertsFp8(CutlassExpertsFp8Base):
+
     def __init__(
         self,
         out_dtype: Optional[torch.dtype],
@@ -325,6 +327,7 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
 
 
 class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
+
     def __init__(
         self,
         max_experts_per_worker: int,
@@ -375,8 +378,7 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
         assert num_dp is not None
         workspace1 = (self.max_experts_per_worker, padded_M * num_dp,
                       max(N, K))
-        workspace2 = (self.max_experts_per_worker, padded_M * num_dp,
-                      (N // 2))
+        workspace2 = (self.max_experts_per_worker, padded_M * num_dp, (N // 2))
         output = (self.max_experts_per_worker, padded_M, K)
         return (workspace1, workspace2, output,
                 self.out_dtype if self.out_dtype is not None else a.dtype)

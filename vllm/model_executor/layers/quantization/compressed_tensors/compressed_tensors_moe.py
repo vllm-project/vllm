@@ -625,14 +625,14 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         # cutlass path
         if self.use_cutlass:
             from vllm.model_executor.layers.fused_moe import (
-                CutlassExpertsFp8,
-                CutlassBatchedExpertsFp8)
+                CutlassBatchedExpertsFp8, CutlassExpertsFp8)
 
             num_dispatchers = prepare_finalize.num_dispatchers()
 
             if (prepare_finalize.activation_format ==
-                FusedMoEActivationFormat.BatchedExperts):
-                logger.debug("CutlassBatchedExpertsFp8(%s)", self.__class__.__name__)
+                    FusedMoEActivationFormat.BatchedExperts):
+                logger.debug("CutlassBatchedExpertsFp8(%s)",
+                             self.__class__.__name__)
                 experts = CutlassBatchedExpertsFp8(
                     moe.num_local_experts,
                     num_dispatchers,
