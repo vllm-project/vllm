@@ -105,7 +105,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             detect_nvfp4_moe_support)
         _nvfp4 = detect_nvfp4_moe_support(self.__class__.__name__)
         self.cutlass_nvfp4_supported = _nvfp4.cutlass_supported
-        self.allow_flashinfer_cutlass = _nvfp4.allow_flashinfer_cutlass
+        self.allow_flashinfer_cutlass = _nvfp4.allow_flashinfer
         self.use_marlin = _nvfp4.use_marlin
         self.group_size = 16
         self.fused_experts = None  # type: ignore[assignment]
