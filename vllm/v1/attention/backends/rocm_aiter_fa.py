@@ -231,8 +231,8 @@ class AiterFlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[AiterFlashAttentionMetadata]):
     full_cudagraph_supported: ClassVar[bool] = True
 
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
@@ -250,9 +250,6 @@ class AiterFlashAttentionMetadataBuilder(
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
         self.total_tokens: int = 0
-
-    def reorder_batch(self, input_batch, scheduler_output) -> bool:
-        return False
 
     def build_for_cudagraph_capture(
             self, common_attn_metadata: CommonAttentionMetadata):

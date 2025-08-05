@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Callable
 import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_connector import (KVConnectorBase,
                                                        KVConnectorRole)
-from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -17,7 +16,7 @@ logger = init_logger(__name__)
 
 
 class KVConnectorFactory:
-    _registry: dict[str, Callable[[], type[KVConnectorBaseType]]] = {}
+    _registry: dict[str, Callable[[], type[KVConnectorBase]]] = {}
 
     @classmethod
     def register_connector(cls, name: str, module_path: str,
@@ -26,7 +25,7 @@ class KVConnectorFactory:
         if name in cls._registry:
             raise ValueError(f"Connector '{name}' is already registered.")
 
-        def loader() -> type[KVConnectorBaseType]:
+        def loader() -> type[KVConnectorBase]:
             module = importlib.import_module(module_path)
             return getattr(module, class_name)
 
@@ -55,7 +54,7 @@ class KVConnectorFactory:
             connector_cls = getattr(connector_module, connector_name)
         assert issubclass(connector_cls, KVConnectorBase)
         logger.info("Creating v1 connector with name: %s and engine_id: %s",
-                    connector_name, kv_transfer_config.engine_id)
+                    connector_cls.__name__, kv_transfer_config.engine_id)
         # NOTE(Kuntai): v1 connector is explicitly separated into two roles.
         # Scheduler connector:
         # - Co-locate with scheduler process
