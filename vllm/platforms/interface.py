@@ -63,6 +63,7 @@ class _Backend(enum.Enum):
     NO_ATTENTION = enum.auto()
     FLEX_ATTENTION = enum.auto()
     TREE_ATTN = enum.auto()
+    XFORMERS_VLLM_V1 = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
