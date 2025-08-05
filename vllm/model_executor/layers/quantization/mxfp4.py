@@ -6,6 +6,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE, FusedMoEActivationFormat, FusedMoEConfig, FusedMoEMethodBase,
     FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize)
@@ -27,6 +28,8 @@ if (envs.VLLM_USE_FLASHINFER_MXFP4_MOE
     # from flashinfer.fused_moe import cutlass_fused_moe
     from flashinfer import (mxfp8_quantize, shuffle_matrix_a,
                             shuffle_matrix_sf_a, trtllm_fp4_block_scale_moe)
+
+logger = init_logger(__name__)
 
 
 class Mxfp4Config(QuantizationConfig):
@@ -170,6 +173,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer):
         if (envs.VLLM_USE_FLASHINFER_MXFP4_MOE
                 or envs.VLLM_USE_FLASHINFER_MXFP4_BF16_MOE):
+            logger.info_once("Shuffling MoE weights, it might take a while...")
             layer.gemm1_alpha = Parameter(torch.tensor(
                 [1.702] * self.num_experts, dtype=torch.float32).cuda(),
                                           requires_grad=False)
