@@ -159,8 +159,8 @@ class SimpleModelWithTwoGraphs(ParentModel):
         self.hidden_states[:bsz].copy_(x)
         x = self.attn_one(self.hidden_states[:bsz])
         self.hidden_states[:bsz].copy_(x)
-        x = self.attn_two(self.hidden_states[:bsz])
-        return x
+        y = self.attn_two(self.hidden_states[:bsz])
+        return x + y
 
 
 @torch.inference_mode

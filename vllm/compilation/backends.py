@@ -294,7 +294,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
 
     def __init__(self, module: torch.fx.GraphModule,
                  compile_submod_names: list[str], vllm_config: VllmConfig,
-                 vllm_backend: "VllmBackend"):
+                 module_index: int, vllm_backend: "VllmBackend"):
         super().__init__(module)
         from torch._guards import detect_fake_mode
         self.fake_mode = detect_fake_mode()
@@ -304,6 +304,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         self.vllm_backend = vllm_backend
         # When True, it annoyingly dumps the torch.fx.Graph on errors.
         self.extra_traceback = False
+        self.module_index = module_index
 
     def run(self, *args):
         fake_args = [
@@ -342,7 +343,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             piecewise_backend = PiecewiseBackend(
                 submod, self.vllm_config, index,
                 len(self.compile_submod_names), sym_shape_indices,
-                compiled_graph_for_dynamic_shape, self.vllm_backend)
+                compiled_graph_for_dynamic_shape, self.module_index,
+                self.vllm_backend)
 
             if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
                 # resolve the static graph wrapper class (e.g. CUDAGraphWrapper
@@ -361,7 +363,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                     cudagraph_options=CUDAGraphOptions(
                         debug_log_enable=piecewise_backend.is_first_graph,
                         gc_disable=not piecewise_backend.is_first_graph,
-                        weak_ref_output=piecewise_backend.is_last_graph))
+                        weak_ref_output=piecewise_backend.is_last_graph_global))
             else:
                 self.module.__dict__[target] = piecewise_backend
 
@@ -441,6 +443,8 @@ class VllmBackend:
 
         self.compiler_manager: CompilerManager = CompilerManager(
             self.compilation_config)
+
+        self.module_index = compilation_counter.num_models_seen - 1
 
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
@@ -577,6 +581,7 @@ class VllmBackend:
         # compile submodules with symbolic shapes
         PiecewiseCompileInterpreter(self.split_gm, submod_names_to_compile,
                                     self.vllm_config,
+                                    self.module_index,
                                     self).run(*example_inputs)
 
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")
