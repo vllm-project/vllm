@@ -8,7 +8,7 @@ import re
 import shlex
 from importlib import util
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import pandas as pd
 import psutil
@@ -127,13 +127,13 @@ def _coerce(val: str) -> Any:
     return val
 
 
-def parse_client_command(cmd: str) -> Dict[str, Any]:
+def parse_client_command(cmd: str) -> dict[str, Any]:
     """Parse the client_command shell string into {executable, script, args}."""
     toks = shlex.split(cmd)
     if len(toks) < 2:
         raise ValueError("client_command must include an executable and a script")
     executable, script = toks[0], toks[1]
-    args: Dict[str, Any] = {}
+    args: dict[str, Any] = {}
 
     i = 2
     while i < len(toks):
@@ -219,7 +219,7 @@ if __name__ == "__main__":
                 continue
 
             # Parse Client Command Arg
-            out: Dict[str, Any] = {
+            out: dict[str, Any] = {
                 "client_command": parse_client_command(command["client_command"])
             }
             parse_args = [

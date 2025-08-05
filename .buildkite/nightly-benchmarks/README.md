@@ -141,18 +141,16 @@ When run, benchmark script generates results under `benchmark/results` folder, a
 `compare-json-results.py` compares two `benchmark_results.json` files and provides performance ratio e.g. for Output Tput, Median TTFT and Median TPOT.
 
 Here is an example using the script to compare result_a and result_b with Model, Dataset name, input/output lenght, max concurrency and qps.
-`python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json `
+`python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json`
 
 |   | Model | Dataset Name | Input Len | Output Len | # of max concurrency | qps  | results_a/benchmark_results.json | results_b/benchmark_results.json | perf_ratio        |
 |----|---------------------------------------|--------|-----|-----|------|-----|-----------|----------|----------|
 | 0  | meta-llama/Meta-Llama-3.1-8B-Instruct | random | 128 | 128 | 1000 | 1 | 142.633982                             | 156.526018                             | 1.097396 |
 | 1  | meta-llama/Meta-Llama-3.1-8B-Instruct | random | 128 | 128 | 1000 | inf| 241.620334                             | 294.018783                             | 1.216863 |
 
-
-A comparison diagram will be generated below the table. 
+A comparison diagram will be generated below the table.
 Here is an example to compare between 96c/results_gnr_96c_091_tp2pp3 and 128c/results_gnr_128c_091_tp2pp3
 <img width="1886" height="828" alt="image" src="https://github.com/user-attachments/assets/c02a43ef-25d0-4fd6-90e5-2169a28682dd" />
-
 
 ## Nightly test details
 

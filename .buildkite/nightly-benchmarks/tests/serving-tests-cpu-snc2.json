@@ -11,7 +11,7 @@
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 1,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -24,7 +24,7 @@
             "load_format": "dummy"
         },
         "client_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
@@ -43,7 +43,7 @@
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 2,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -56,7 +56,7 @@
             "load_format": "dummy"
         },
         "client_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
@@ -75,7 +75,7 @@
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 4,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -88,7 +88,7 @@
             "load_format": "dummy"
         },
         "client_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
@@ -107,7 +107,7 @@
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 1,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -121,7 +121,7 @@
             "load_format": "dummy"
         },
         "client_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "backend": "vllm",
             "dataset_name": "random",
 	    "random-input-len": 128,
@@ -142,7 +142,7 @@
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 2,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -156,7 +156,7 @@
             "load_format": "dummy"
         },
         "client_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "backend": "vllm",
             "dataset_name": "random",
 	    "random-input-len": 128,
@@ -177,7 +177,7 @@
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 4,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -191,7 +191,7 @@
             "load_format": "dummy"
         },
         "client_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "backend": "vllm",
             "dataset_name": "random",
 	    "random-input-len": 128,
