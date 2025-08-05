@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 
@@ -23,15 +23,9 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self,
         use_dp: bool,
         a1_gscale: Optional[torch.Tensor],
-        quant_dtype: Union[torch.dtype, str, None] = None,
-        per_channel_quant: bool = False,
-        block_shape: Optional[list[int]] = None,
         num_dispatchers: int = 1,
     ):
         super().__init__()
-        self.per_channel_quant = per_channel_quant
-        self.block_shape = block_shape
-        self.quant_dtype = quant_dtype
         self.num_dispatchers_ = num_dispatchers
         self.use_dp = use_dp
         self.a1_gscale = a1_gscale
@@ -60,7 +54,8 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-        quant_config: FusedMoEQuantConfig,
+        quant_config:
+        FusedMoEQuantConfig,  # TODO(bnell): use instead of ctor args
     ) -> tuple[torch.Tensor, Optional[torch.Tensor],
                Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
                Optional[torch.Tensor]]:
@@ -76,10 +71,10 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1,
             self.a1_gscale,
             quant_config.quant_dtype,
-            self.per_channel_quant,
-            self.block_shape,
-            is_fp4_scale_swizzled=not self.
-            use_dp  # Swizzling after communication
+            quant_config.per_act_token_quant,
+            quant_config.block_shape,
+            # Swizzling after communication
+            is_fp4_scale_swizzled=not self.use_dp,
         )
         if self.use_dp:
             topk_weights, topk_ids, a1q, a1q_scale = \

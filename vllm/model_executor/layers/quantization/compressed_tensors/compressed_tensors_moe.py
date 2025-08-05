@@ -386,7 +386,6 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             n=layer.w2_weight.shape[2] * 2,
             k=x.shape[1],
             e=layer.w13_weight.shape[0],
-            device=x.device,
             apply_router_weight_on_input=apply_router_weight_on_input).to(
                 x.dtype)
 

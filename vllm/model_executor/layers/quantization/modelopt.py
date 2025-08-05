@@ -952,8 +952,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         return FlashInferCutlassMoEPrepareAndFinalize(
             use_dp,
             a1_gscale=self.layer.w13_input_scale_quant,
-            quant_dtype="nvfp4",
-            #meaning 2x e2m1 packed in one, kernel requirement
         )
 
     # This method update self.fused_experts
@@ -988,7 +986,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 a1_gscale=self.layer.w13_input_scale_quant,
                 a2_gscale=self.layer.w2_input_scale_quant,
                 out_dtype=moe.in_dtype,
-                use_nvfp4_w4a4=True,
+                quant_dtype="nvfp4",
                 ep_rank=moe.moe_parallel_config.ep_rank,
                 ep_size=moe.moe_parallel_config.ep_size,
                 tp_rank=moe.moe_parallel_config.tp_rank,
@@ -1435,7 +1433,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 n=layer.w2_weight.shape[2] * 2,
                 k=x.shape[1],
                 e=layer.w13_weight.shape[0],
-                device=x.device,
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         else:

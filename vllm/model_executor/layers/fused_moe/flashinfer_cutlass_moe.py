@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -46,8 +46,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         g2_alphas: torch.Tensor,
         a1_gscale: torch.Tensor,
         a2_gscale: torch.Tensor,
-        out_dtype: torch.dtype,  # Optional?
-        use_nvfp4_w4a4: bool = False,  # undo defaults?
+        out_dtype: torch.dtype,
+        quant_dtype: Union[torch.dtype, str, None],
         ep_rank: int = 0,
         ep_size: int = 1,
         tp_rank: int = 0,
@@ -55,11 +55,12 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         super().__init__(
             FusedMoEQuantConfig(
-                quant_dtype="nvfp4",
+                quant_dtype=quant_dtype,
                 per_act_token_quant=False,
                 block_shape=None,
             ))
-        self.use_nvfp4_w4a4 = use_nvfp4_w4a4
+        assert quant_dtype == "nvfp4", ("Only nvfp4 quantization is "
+                                        "currently supported.")
         self.ep_rank = ep_rank
         self.ep_size = ep_size
         self.tp_rank = tp_rank
@@ -118,8 +119,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         - Note: in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens.
         """
-        assert self.use_nvfp4_w4a4 is True, ("Only nvfp4 quantization is "
-                                             "currently supported.")
         aq_m, aq_n = aq.shape
         workspace2 = ()
         output_shape = (aq_m, aq_n * 2)
@@ -153,8 +152,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         # Flashinfer CUTLASS kernel takes scalar global scales,
         # min because inv_scale.
-        assert self.use_nvfp4_w4a4 is True, ("Only nvfp4 quantization is "
-                                             "currently supported.")
 
         # Ensure w1_scale and w2_scale are not None before calling view
         assert w1_scale is not None and w2_scale is not None, (

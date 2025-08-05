@@ -617,7 +617,6 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         g2_alphas: torch.Tensor,
         a1_gscale: torch.Tensor,
         a2_gscale: torch.Tensor,
-        device: torch.device,  # TODO(bnell): is this needed?
         max_experts_per_worker: int,
         out_dtype: torch.dtype,
         per_act_token_quant: bool,
@@ -641,7 +640,6 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         self.g2_alphas = g2_alphas
         self.a1_gscale = a1_gscale
         self.a2_gscale = a2_gscale
-        self.device = device
 
     @property
     def activation_formats(
@@ -736,7 +734,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
             n=n,
             k=k,
             e=e,
-            device=self.device,
+            device=hidden_states.device,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
@@ -757,7 +755,6 @@ def cutlass_moe_fp4(
         n: int,
         k: int,
         e: int,
-        device: torch.device,
         expert_map: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False) -> torch.Tensor:
     assert expert_map is None, ("Expert Parallelism / expert_map "
@@ -770,7 +767,6 @@ def cutlass_moe_fp4(
             g2_alphas,
             a1_gscale,
             a2_gscale,
-            device,
             max_experts_per_worker=e,
             out_dtype=a.dtype,
             per_act_token_quant=False,
