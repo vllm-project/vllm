@@ -160,7 +160,7 @@ def use_trtllm_decode_attention(
     # Check if the dimensions are supported by TRTLLM decode attention
     if (attn_head_size is None or num_qo_heads is None or num_kv_heads is None
             or num_qo_heads // num_kv_heads > 8
-            or num_qo_heads % num_kv_heads != 0 or attn_head_size != 128):
+            or num_qo_heads % num_kv_heads != 0):
         return False
 
     env_value = envs.VLLM_USE_TRTLLM_DECODE_ATTENTION
@@ -183,6 +183,43 @@ def use_trtllm_decode_attention(
             logger.warning_once(
                 "Using TRTLLM decode attention (auto-detected).")
         return use_trtllm
+
+
+def use_trtllm_context_attention(
+    num_tokens: int,
+    max_seq_len: int,
+    kv_cache_dtype: str,
+    num_qo_heads: Optional[int],
+    num_kv_heads: Optional[int],
+    attn_head_size: Optional[int],
+) -> bool:
+    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
+    if not (current_platform.is_device_capability(100)
+            and has_nvidia_artifactory()):
+        return False
+
+    # TODO: update the check to compatible with latest trtllm-gen kernel
+    # Check if the dimensions are supported by TRTLLM decode attention
+    if (attn_head_size is None or num_qo_heads is None or num_kv_heads is None
+            or num_qo_heads // num_kv_heads > 8
+            or num_qo_heads % num_kv_heads != 0):
+        return False
+
+    env_value = envs.VLLM_USE_TRTLLM_CONTEXT_ATTENTION
+    if env_value is not None:
+        logger.info_once("VLLM_USE_TRTLLM_CONTEXT_ATTENTION is set to %s",
+                         env_value)
+        # Environment variable is set - respect it
+        # Making the conditional check for zero because
+        # the path is automatically enabled if the batch size condition
+        # is satisfied.
+        no_use_trtllm = (env_value == "0")
+        if not no_use_trtllm:
+            logger.info_once("Using TRTLLM context attention.")
+        return not no_use_trtllm
+
+    # TODO: add heuristic
+    return False
 
 
 __all__ = [

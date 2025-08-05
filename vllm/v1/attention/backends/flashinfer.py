@@ -19,7 +19,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv, is_pin_memory_available
-from vllm.utils.flashinfer import use_trtllm_decode_attention
+from vllm.utils.flashinfer import (use_trtllm_context_attention,
+                                   use_trtllm_decode_attention)
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -249,10 +250,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 device=self.device)
         return self._workspace_buffer
 
-    def _get_prefill_wrapper(self):
+    def _get_prefill_wrapper(self, backend = 'auto'):
         if self._prefill_wrapper is None:
             self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), get_kv_cache_layout())
+                self._get_workspace_buffer(),
+                get_kv_cache_layout(),
+                backend=backend)
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self,
@@ -344,7 +347,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if num_prefills > 0:
                 # Decodes are first so prefills start after the last decode
                 prefill_start = num_decodes
-                attn_metadata.prefill_wrapper = self._get_prefill_wrapper()
+                use_trtllm_context_attention_ = use_trtllm_context_attention(
+                    num_prefills, attn_metadata.max_seq_len,
+                    self.cache_config.cache_dtype,
+                    attn_metadata.num_qo_heads, attn_metadata.num_kv_heads,
+                    attn_metadata.head_dim)
+                backend = ("trtllm-gen" if use_trtllm_context_attention_
+                           else 'auto')
+                attn_metadata.prefill_wrapper = \
+                    self._get_prefill_wrapper(backend=backend)
                 assert attn_metadata.qo_indptr_cpu[prefill_start:].shape[
                     0] == num_prefills + 1
                 assert attn_metadata.paged_kv_indptr_cpu[prefill_start:].shape[
@@ -372,6 +383,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     logits_soft_cap,
                     q_data_type=attn_metadata.q_data_type,
                     kv_data_type=attn_metadata.kv_data_type,
+                    seq_lens=attn_metadata.seq_lens[prefill_start:],
+                    block_tables=attn_metadata.block_table_tensor[prefill_start:],
                 )
 
             if num_decodes > 0:
@@ -578,6 +591,7 @@ class FlashInferImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
+        sinks: Optional[torch.Tensor] = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -601,6 +615,14 @@ class FlashInferImpl(AttentionImpl):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "FlashInferImpl")
+        self.sinks: Optional[torch.Tensor] = None
+        if sinks is not None:
+            assert sinks.shape[0] == num_heads, (
+                "Sinks must have the same number of heads "
+                "as the number of heads in the layer"
+            )
+            assert sinks.dtype == torch.float32, "Sinks must be of type float32"
+            self.sinks = sinks
 
     def forward(
         self,
@@ -703,13 +725,19 @@ class FlashInferImpl(AttentionImpl):
             assert prefill_query.shape[0] == num_prefill_tokens
             assert prefill_wrapper is not None
             assert prefill_wrapper._causal
-            assert prefill_wrapper._window_left == window_left
-            assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap
-                                                        or 0.0)
-            assert prefill_wrapper._sm_scale == self.scale
+            if not use_trtllm_context_attention(
+                    attn_metadata.num_prefills, attn_metadata.max_seq_len,
+                    self.kv_cache_dtype, attn_metadata.num_qo_heads,
+                    attn_metadata.num_kv_heads, attn_metadata.head_dim):
+                assert prefill_wrapper._window_left == window_left
+                assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap
+                                                            or 0.0)
+                assert prefill_wrapper._sm_scale == self.scale
             prefill_wrapper.run(
                 prefill_query,
                 kv_cache_permute,
+                window_left=window_left,
+                sinks=self.sinks,
                 k_scale=layer._k_scale_float,
                 v_scale=layer._v_scale_float,
                 out=output[num_decode_tokens:],
@@ -729,6 +757,7 @@ class FlashInferImpl(AttentionImpl):
                 decode_wrapper.run(
                     decode_query,
                     kv_cache_permute,
+                    window_left=window_left,
                     k_scale=layer._k_scale_float,
                     v_scale=layer._v_scale_float,
                     out=output[:num_decode_tokens],
@@ -760,6 +789,8 @@ class FlashInferImpl(AttentionImpl):
                         max_seq_len=attn_metadata.max_seq_len,
                         bmm1_scale=layer._k_scale_float * self.scale,
                         bmm2_scale=layer._v_scale_float,
+                        window_left=window_left,
+                        sinks=self.sinks,
                         out=output[:num_decode_tokens],
                     )
         return output_padded

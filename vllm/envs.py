@@ -151,6 +151,7 @@ if TYPE_CHECKING:
     VLLM_USE_CUDNN_PREFILL: bool = False
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
+    VLLM_NSYS_PROFILE_START_STOP: str = "None"
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_PRINT_LOGO: bool = True
@@ -1035,6 +1036,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_CUDNN_PREFILL":
     lambda: bool(int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))),
 
+    # If set to 1, use the TRTLLM Context Attention backend in flashinfer.
+    "VLLM_USE_TRTLLM_CONTEXT_ATTENTION":
+    lambda: os.getenv("VLLM_USE_TRTLLM_CONTEXT_ATTENTION", None),
+
     # If set to 1, use the TRTLLM Decode Attention backend in flashinfer.
     "VLLM_USE_TRTLLM_DECODE_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", None),
@@ -1045,9 +1050,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_CUDAGRAPH_GC":
     lambda: bool(int(os.getenv("VLLM_ENABLE_CUDAGRAPH_GC", "0"))),
 
+    # If set to 1, use the FlashInfer MXFP4 x MXFP8 MoE backend.
+    "VLLM_USE_FLASHINFER_MXFP4_MOE":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MXFP4_MOE", "0"))),
+
+    # If set to 1, use the FlashInfer MXFP4 x BF16 MoE backend.
+    "VLLM_USE_FLASHINFER_MXFP4_BF16_MOE":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MXFP4_BF16_MOE", "0"))),
+
     # Used to force set up loopback IP
     "VLLM_LOOPBACK_IP":
     lambda: os.getenv("VLLM_LOOPBACK_IP", ""),
+
+    # Used to set the start and stop iteration for nsys profile
+    "VLLM_NSYS_PROFILE_START_STOP":
+    lambda: os.getenv("VLLM_NSYS_PROFILE_START_STOP", "None"),
 
     # Used to set the process name prefix for vLLM processes.
     # This is useful for debugging and monitoring purposes.
