@@ -95,7 +95,7 @@ clone_repo "https://github.com/ppl-ai/pplx-kernels" "pplx-kernels" "setup.py"
 cd pplx-kernels
 # see https://github.com/pypa/pip/issues/9955#issuecomment-838065925
 # PIP_NO_BUILD_ISOLATION=0 disables build isolation
-PIP_NO_BUILD_ISOLATION=0 TORCH_CUDA_ARCH_LIST=9.0a+PTX pip install -vvv -e  .
+PIP_NO_BUILD_ISOLATION=0 TORCH_CUDA_ARCH_LIST="9.0 10.0" pip install -vvv -e  .
 popd
 
 # build and install deepep, require pytorch installed
@@ -103,5 +103,6 @@ pushd $WORKSPACE
 clone_repo "https://github.com/deepseek-ai/DeepEP" "DeepEP" "setup.py"
 cd DeepEP
 export NVSHMEM_DIR=$WORKSPACE/nvshmem_install
+export TORCH_CUDA_ARCH_LIST="9.0 10.0"
 PIP_NO_BUILD_ISOLATION=0 pip install -vvv -e  .
 popd
