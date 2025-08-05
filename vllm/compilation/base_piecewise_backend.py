@@ -18,8 +18,7 @@ class AbstractPiecewiseBackend(Protocol):
     def __init__(self, graph: fx.GraphModule, vllm_config: VllmConfig,
                  graph_pool: Any, piecewise_compile_index: int,
                  total_piecewise_compiles: int, sym_shape_indices: list[int],
-                 compiled_graph_for_general_shape: Callable,
-                 module_index: int,
+                 compiled_graph_for_general_shape: Callable, module_index: int,
                  vllm_backend: VllmBackend, model_index: int, **kwargs):
         """
         Initializes the PiecewiseBackend class with compilation and 
