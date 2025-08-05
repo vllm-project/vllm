@@ -1423,9 +1423,12 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
         # Dispatch class based on version
         instance_cls = _SUPPORT_VERSION.get(version)
         if instance_cls is None:
-            supported_versions = ", ".join([f"{v[0]}.{v[1]}" for v in sorted(_SUPPORT_VERSION.keys())])
+            supported_versions = ", ".join([
+                f"{v[0]}.{v[1]}" for v in sorted(_SUPPORT_VERSION.keys())
+            ])
             raise ValueError(
-                f"Currently, MiniCPMV only supports versions {supported_versions}. Got version: {version}")
+                f"Currently, MiniCPMV only supports versions "
+                f"{supported_versions}. Got version: {version}")
 
         # quant_config references base class members,
         # so update values before init is called
