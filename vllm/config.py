@@ -4374,12 +4374,20 @@ class CompilationConfig:
             "disabled_custom_ops": True,
             "compilation_time": True,
             "bs_to_padded_graph_size": True,
-            "pass_config": True,
             "traced_files": True,
             "inductor_compile_config": {
                 "post_grad_custom_post_pass": True,
             },
         }
+
+        # exclude default attr in pass_config
+        pass_config_exclude = {}
+        for attr, default_val in vars(PassConfig()).items():
+            if getattr(self.pass_config, attr) == default_val:
+                pass_config_exclude[attr] = True
+        if pass_config_exclude:
+            exclude["pass_config"] = pass_config_exclude
+
         # The cast to string is necessary because Pydantic is mocked in docs
         # builds and sphinx-argparse doesn't know the return type of decode()
         return str(
