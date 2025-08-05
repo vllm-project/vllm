@@ -55,7 +55,7 @@ def _merge_mm_kwargs(
     **kwargs,
 ):
     mm_config = model_config.get_multimodal_config()
-    merged_kwargs = {**(mm_config.mm_processor_kwargs or {}), **kwargs}
+    merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
 
     factory = _get_processor_factory_fn(processor_cls)
     allowed_kwargs = get_allowed_kwarg_only_overrides(
