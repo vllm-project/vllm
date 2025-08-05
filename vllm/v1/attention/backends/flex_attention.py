@@ -456,7 +456,7 @@ class FlexAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        if attn_metadata.causal:
+        if not attn_metadata.causal:
             assert self.attn_type == AttentionType.ENCODER_ONLY
 
             query, key_tensor, value_tensor = map(

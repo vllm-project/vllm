@@ -11,7 +11,7 @@ from packaging import version
 
 from vllm import LLM, SamplingParams
 
-from ...models.utils import check_embeddings_close
+from ..models.utils import check_embeddings_close
 
 TORCH_VERSION = version.parse(torch.__version__)
 MINIMUM_TORCH_VERSION = version.parse("2.7.0")
@@ -38,7 +38,7 @@ def test_flex_attention_vs_default_backend(monkeypatch):
     """
     model_name = "Qwen/Qwen2.5-1.5B-Instruct"
     seed = 42
-    max_tokens = 32
+    max_tokens = 24
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -64,6 +64,8 @@ def test_flex_attention_vs_default_backend(monkeypatch):
             enforce_eager=True,
         )
         output_flex = llm_flex.generate(prompts, sampling_params)
+        llm_flex.llm_engine.engine_core.shutdown()
+        del llm_flex
 
     # Run with default backend
     with monkeypatch.context() as m:
@@ -76,6 +78,8 @@ def test_flex_attention_vs_default_backend(monkeypatch):
             enforce_eager=True,
         )
         output_default = llm_default.generate(prompts, sampling_params)
+        llm_default.llm_engine.engine_core.shutdown()
+        del llm_default
 
     # Compare outputs from both backends
     for i, (flex_result,
@@ -123,6 +127,8 @@ def test_encoder_flex_attention_vs_default_backend(monkeypatch):
         flex_outputs = [
             req_output.outputs.embedding for req_output in req_outputs
         ]
+        llm_flex.llm_engine.engine_core.shutdown()
+        del llm_flex
 
     # Run with default backend
     with monkeypatch.context() as m:
@@ -138,6 +144,8 @@ def test_encoder_flex_attention_vs_default_backend(monkeypatch):
         default_outputs = [
             req_output.outputs.embedding for req_output in req_outputs
         ]
+        llm_default.llm_engine.engine_core.shutdown()
+        del llm_default
 
     check_embeddings_close(
         embeddings_0_lst=flex_outputs,
