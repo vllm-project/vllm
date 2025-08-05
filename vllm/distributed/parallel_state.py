@@ -1125,14 +1125,14 @@ def ensure_model_parallel_initialized(
 
     assert (
         get_tensor_model_parallel_world_size() == tensor_model_parallel_size
-    ), ("tensor parallel group already initialized, but of unexpected size: "
-        f"{get_tensor_model_parallel_world_size()=} vs. "
-        f"{tensor_model_parallel_size=}")
+    ), ("tensor parallel group already initialized, but of unexpected size. "
+        f"got: {get_tensor_model_parallel_world_size()=} vs. "
+        f"wanted: {tensor_model_parallel_size=}")
     pp_world_size = get_pp_group().world_size
     assert (pp_world_size == pipeline_model_parallel_size), (
-        "pipeline parallel group already initialized, but of unexpected size: "
-        f"{pp_world_size=} vs. "
-        f"{pipeline_model_parallel_size=}")
+        "pipeline parallel group already initialized, but of unexpected size. "
+        f"got: {pp_world_size=} vs. "
+        f"wanted: {pipeline_model_parallel_size=}")
 
 
 def prepare_communication_buffer_for_model(model: torch.nn.Module):
