@@ -4,7 +4,7 @@ vLLM's **Sleep Mode** allows you to temporarily release most GPU memory used b
 
 ## **Benefits**
 
-- **Frees GPU memory**: Offloads model weights and discards KV cache, releasing up to 90%+ of GPU memory for other tasks.
+- **Frees GPU memory**: Offloads model weights to CPU RAM and discards KV cache, releasing up to 90%+ of GPU memory for other tasks.
 - **Fast resume**: Quickly wake up the engine and resume inference without full model reload.
 - **API endpoints**: Control sleep/wake state via HTTP endpoints or Python API.
 - **Supports distributed workloads**: Works with tensor parallelism.
@@ -23,7 +23,7 @@ llm = LLM("Qwen/Qwen3-0.6B", enable_sleep_mode=True)
 ### **Python API**
 
 ```python
-# Put the engine to sleep (level=1: offload weights, discard KV cache)
+# Put the engine to sleep (level=1: offload weights to CPU RAM, discard KV cache)
 llm.sleep(level=1)
 
 # Wake up the engine (restore weights)
@@ -53,5 +53,5 @@ These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`
 
 ### Notes
 
-- **Sleep levels**: `level=1 (default)` offloads weights and discards KV cache,`level=2` discards both but retain the buffers.
+- **Sleep levels**: `level=1 (default)` offloads weights to CPU RAM and discards KV cache,`level=2` discards both but retain the buffers.
 - **Platform support**: Supported on CUDA platform.
