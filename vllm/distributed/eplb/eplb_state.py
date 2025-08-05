@@ -567,10 +567,9 @@ class EplbState:
                     is_profile=is_profile, 
                     rank_mapping=rank_mapping))
             except Exception as e:
-                logger.error("async loop error (Rank %d): %s", 
+                logger.exception("async loop error (Rank %d): %s", 
                 rank, 
-                str(e), 
-                exc_info=True
+                str(e)
             )
             finally:
                 loop.close()
