@@ -283,12 +283,17 @@ def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,
 
     Returns the sliced target tensor.
     """
-    # Optimize memory allocation by using narrow() instead of slicing
-    # This avoids creating new tensor views and reduces memory fragmentation
-    if length == 0:
-        return to_tensor[:0]  # Return empty slice for zero length
+    if length <= 0:
+        # For length=0, this is a no-op. For negative length, this preserves
+        # the original slicing behavior from the end of the tensor.
+        return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)
     
-    # Use narrow() for better memory efficiency than slicing
+    # Check if narrow() can be safely used (both tensors have sufficient size)
+    # If not, fall back to original slicing to preserve error behavior
+    if length > from_tensor.shape[0] or length > to_tensor.shape[0]:
+        return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)
+    
+    # Use narrow() for better memory efficiency when safe to do so
     to_slice = to_tensor.narrow(0, 0, length)
     from_slice = from_tensor.narrow(0, 0, length)
     
