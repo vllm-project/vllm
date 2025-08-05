@@ -754,7 +754,11 @@ class CompilationConfig:
         if self.backend == "":
             self.backend = current_platform.simple_compile_backend
 
-    def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
+    def init_backend(
+        self,
+        vllm_config: "VllmConfig",
+        no_weak_ref_output: bool = False,
+    ) -> str | Callable:
         """
         Initialize the backend for the compilation config from a vllm config.
         Arguments:
@@ -792,7 +796,7 @@ class CompilationConfig:
 
         # TODO[@lucaskabela]: See if we can forward prefix
         # https://github.com/vllm-project/vllm/issues/27045
-        return VllmBackend(vllm_config)
+        return VllmBackend(vllm_config, no_weak_ref_output)
 
     def post_init_cudagraph_sizes(self) -> None:
         """To complete the initialization after cudagraph related
