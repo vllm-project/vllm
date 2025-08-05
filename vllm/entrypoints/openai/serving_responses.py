@@ -28,7 +28,7 @@ from vllm.entrypoints.context import (ConversationContext, HarmonyContext,
 from vllm.entrypoints.harmony_utils import (
     get_developer_message, get_stop_tokens_for_assistant_actions,
     get_system_message, get_user_message, parse_output_message,
-    parse_response_input, render_for_completion)
+    parse_remaining_state, parse_response_input, render_for_completion)
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -503,6 +503,10 @@ class OpenAIServingResponses(OpenAIServing):
         num_init_messages = context.num_init_messages
         for msg in context.messages[num_init_messages:]:
             output_items.extend(parse_output_message(msg))
+        # Handle the generation stopped in the middle (if any).
+        last_items = parse_remaining_state(context.parser)
+        if last_items:
+            output_items.extend(last_items)
         return output_items
 
     def _construct_input_messages(

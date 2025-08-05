@@ -6,8 +6,7 @@ from typing import TYPE_CHECKING, Optional
 from openai_harmony import Role, StreamState
 
 from vllm.entrypoints.harmony_utils import (
-    get_encoding, get_streamable_parser_for_assistant,
-    parse_output_into_messages, render_for_completion)
+    get_encoding, get_streamable_parser_for_assistant, render_for_completion)
 from vllm.outputs import RequestOutput
 
 if TYPE_CHECKING:
@@ -58,6 +57,7 @@ class HarmonyContext(ConversationContext):
         self.browser_tool = browser_tool
         self.python_tool = python_tool
 
+        self.parser = get_streamable_parser_for_assistant()
         self.num_init_messages = len(messages)
         # TODO
         self.num_prompt_tokens = 0
@@ -68,8 +68,9 @@ class HarmonyContext(ConversationContext):
     def append_output(self, output) -> None:
         if isinstance(output, RequestOutput):
             output_token_ids = output.outputs[0].token_ids
-            parser = parse_output_into_messages(output_token_ids)
-            output_msgs = parser.messages
+            for token_id in output_token_ids:
+                self.parser.process(token_id)
+            output_msgs = self.parser.messages
         else:
             # Tool output.
             output_msgs = output
@@ -80,6 +81,8 @@ class HarmonyContext(ConversationContext):
         return self._messages
 
     def get_tool_call(self) -> Optional["Tool"]:
+        if not self.messages:
+            return None
         last_msg = self.messages[-1]
         recipient = last_msg.recipient
         if recipient is not None:

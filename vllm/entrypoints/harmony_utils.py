@@ -282,6 +282,42 @@ def parse_output_message(message: Message):
     return output_items
 
 
+def parse_remaining_state(parser: StreamableParser):
+    if not parser.current_content:
+        return []
+    if parser.current_role != Role.ASSISTANT:
+        return []
+    current_recipient = parser.current_recipient
+    if (current_recipient is not None
+            and current_recipient.startswith("browser.")):
+        return []
+
+    if parser.current_channel == "analysis":
+        reasoning_item = ResponseReasoningItem(
+            content=[
+                ResponseReasoningTextContent(text=parser.current_content)
+            ],
+            status=None,
+        )
+        return [reasoning_item]
+    elif parser.current_channel == "final":
+        output_text = ResponseOutputText(
+            text=parser.current_content,
+            annotations=[],  # TODO
+            type="output_text",
+            logprobs=None,  # TODO
+        )
+        text_item = ResponseOutputMessage(
+            id=f"msg_{random_uuid()}",
+            content=[output_text],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        return [text_item]
+    return []
+
+
 def parse_output_into_messages(token_ids: Iterable[int]):
     parser = get_streamable_parser_for_assistant()
     for token_id in token_ids:
