@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from typing import Any
 
 import openai
 import pytest
@@ -90,7 +91,7 @@ async def test_custom_logitsprocs_online(client: openai.AsyncOpenAI,
     use_dummy_logitproc = True
     for prompt in prompts:
         # Build request arguments
-        request_keyword_args = {
+        request_keyword_args: dict[str, Any] = {
             **api_keyword_args,
         }
         if use_dummy_logitproc:
