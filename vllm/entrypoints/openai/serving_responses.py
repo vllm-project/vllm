@@ -239,6 +239,7 @@ class OpenAIServingResponses(OpenAIServing):
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
 
+                context: ConversationContext
                 if self.use_harmony:
                     context = HarmonyContext(messages, self.browser_tool,
                                              self.python_tool)
@@ -306,16 +307,18 @@ class OpenAIServingResponses(OpenAIServing):
             raise NotImplementedError("Streaming responses are not supported")
 
         try:
-            response = await self.responses_full_generator(
-                request,
-                sampling_params,
-                result_generator,
-                context,
-                model_name,
-                tokenizer,
-                request_metadata,
-            )
-            return response
+            result: Union[
+                ErrorResponse,
+                ResponsesResponse] = await self.responses_full_generator(
+                    request,
+                    sampling_params,
+                    result_generator,
+                    context,
+                    model_name,
+                    tokenizer,
+                    request_metadata,
+                )
+            return result
         except Exception as e:
             return self.create_error_response(str(e))
 
@@ -375,11 +378,13 @@ class OpenAIServingResponses(OpenAIServing):
             return self.create_error_response(str(e))
 
         if self.use_harmony:
+            assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
             num_prompt_tokens = context.num_prompt_tokens
             num_generated_tokens = context.num_output_tokens
             num_cached_tokens = context.num_cached_tokens
         else:
+            assert isinstance(context, SimpleContext)
             final_res = context.last_output
             assert final_res is not None
             assert len(final_res.outputs) == 1
@@ -547,16 +552,21 @@ class OpenAIServingResponses(OpenAIServing):
             prev_msgs = self.msg_store[prev_response.id]
             # Remove the previous chain-of-thoughts if there is a new "final"
             # message.
-            if len(prev_msgs) > 0 and prev_msgs[-1].channel == "final":
+            if len(prev_msgs) > 0 and hasattr(
+                    prev_msgs[-1], 'channel'
+            ) and prev_msgs[-1].channel == "final":  # type: ignore[union-attr]
                 prev_final_msg_idx = -1
                 for i in range(len(prev_msgs) - 2, -1, -1):
-                    if prev_msgs[i].channel == "final":
+                    if hasattr(prev_msgs[i], 'channel') and prev_msgs[
+                            i].channel == "final":  # type: ignore[union-attr]
                         prev_final_msg_idx = i
                         break
                 recent_turn_msgs = prev_msgs[prev_final_msg_idx + 1:]
                 del prev_msgs[prev_final_msg_idx + 1:]
                 for msg in recent_turn_msgs:
-                    if msg.channel != "analysis":
+                    if hasattr(
+                            msg, 'channel'
+                    ) and msg.channel != "analysis":  # type: ignore[union-attr]
                         prev_msgs.append(msg)
             messages.extend(prev_msgs)
         # Append the new input.

@@ -720,7 +720,7 @@ class FusedMoE(torch.nn.Module):
 
         self.global_num_experts = num_experts + num_redundant_experts
 
-        if quant_config.get_name() == "mxfp4":
+        if quant_config is not None and quant_config.get_name() == "mxfp4":
             if has_triton_kernels:
                 self.use_triton_kernels = True
                 if current_platform.is_rocm(
@@ -1082,7 +1082,7 @@ class FusedMoE(torch.nn.Module):
                 dim1 = loaded_weight.shape[1]
                 dim2 = loaded_weight.shape[2]
                 param.data[:, :dim1, :dim2].copy_(loaded_weight)
-            return
+            return True if return_success else None
 
         expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
         if expert_id == -1:
