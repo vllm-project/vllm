@@ -431,14 +431,6 @@ class OpenAIServingResponses(OpenAIServing):
             output_tokens_details=OutputTokensDetails(
                 reasoning_tokens=num_reasoning_tokens),
         )
-        # Convert ResponseUsage to UsageInfo for metadata
-        from vllm.entrypoints.openai.protocol import UsageInfo
-        usage_info = UsageInfo(
-            prompt_tokens=usage.input_tokens,
-            completion_tokens=usage.output_tokens,
-            total_tokens=usage.total_tokens,
-        )
-        request_metadata.final_usage_info = usage_info
 
         response = ResponsesResponse.from_request(
             request,
@@ -447,7 +439,7 @@ class OpenAIServingResponses(OpenAIServing):
             created_time=created_time,
             output=output,
             status="completed",
-            usage=usage_info,  # type: ignore[arg-type]
+            usage=usage,
         )
 
         if request.store:
