@@ -160,7 +160,7 @@ async def build_async_engine_client(
         # Pre-import heavy modules in the forkserver process
         logger.debug("Setup forkserver with pre-imports")
         multiprocessing.set_start_method('forkserver')
-        multiprocessing.set_forkserver_preload(["vllm.entrypoints.llm"])
+        multiprocessing.set_forkserver_preload(["vllm.v1.engine.async_llm"])
         forkserver.ensure_running()
         logger.debug("Forkserver setup complete!")
 
