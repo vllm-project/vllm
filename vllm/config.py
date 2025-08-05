@@ -11,10 +11,11 @@ import textwrap
 import uuid
 import warnings
 from collections import Counter
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
                          replace)
-from functools import cached_property
+from functools import cached_property, lru_cache
 from importlib.util import find_spec
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args)
@@ -38,8 +39,8 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    try_get_generation_config, try_get_safetensors_metadata,
-    try_get_tokenizer_config, uses_mrope)
+    maybe_override_with_speculators_target_model, try_get_generation_config,
+    try_get_safetensors_metadata, try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 # yapf conflicts with isort for this block
@@ -56,6 +57,7 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
+    from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
     from transformers.configuration_utils import PretrainedConfig
 
@@ -73,6 +75,7 @@ if TYPE_CHECKING:
 else:
     DataclassInstance = Any
     PlacementGroup = Any
+    RuntimeEnv = Any
     PretrainedConfig = Any
     ExecutorBase = Any
     QuantizationConfig = Any
@@ -374,7 +377,8 @@ class ModelConfig:
     max_logprobs: int = 20
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
-    OpenAI Chat Completions API."""
+    OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
+    vocab_size) logprobs are allowed to be returned and it may cause OOM."""
     logprobs_mode: LogprobsMode = "raw_logprobs"
     """Indicates the content returned in the logprobs and prompt_logprobs.
     Supported mode:
@@ -534,6 +538,15 @@ class ModelConfig:
                     "affect the random state of the Python process that "
                     "launched vLLM.", self.seed)
 
+        if self.runner != "draft":
+            # If we're not running the draft model, check for speculators config
+            # If speculators config, set model / tokenizer to be target model
+            self.model, self.tokenizer = maybe_override_with_speculators_target_model(  # noqa: E501
+                model=self.model,
+                tokenizer=self.tokenizer,
+                revision=self.revision,
+                trust_remote_code=self.trust_remote_code)
+
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(self.model,
                                                        self.served_model_name)
@@ -605,8 +618,8 @@ class ModelConfig:
                                self.config_format,
                                hf_overrides_kw=hf_overrides_kw,
                                hf_overrides_fn=hf_overrides_fn)
-        self.hf_config = hf_config
 
+        self.hf_config = hf_config
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.attention_chunk_size = getattr(self.hf_text_config,
                                             "attention_chunk_size", None)
@@ -723,10 +736,15 @@ class ModelConfig:
         )
 
         # Workaround for Gemma 2 which uses interleaved sliding window
-        # attention, but it's not specified in its config. TODO: remove this
-        # when Gemma 2 is fixed in Transformers.
+        # attention, but it's not specified in its config.
+        # TODO: remove this when Gemma 2 config updated in HuggingFace.
         if self.hf_text_config.model_type == "gemma2":
             self.hf_text_config.sliding_window_pattern = 2
+
+        # TODO: remove this when Gemma 3n config updated in HuggingFace.
+        if self.hf_text_config.model_type == "gemma3n_text":
+            # 4 sliding window attention followed by 1 full attention
+            self.hf_text_config.sliding_window_pattern = "LLLLG"
 
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
         sliding_window_pattern = getattr(self.hf_text_config,
@@ -735,8 +753,8 @@ class ModelConfig:
             isinstance(sliding_window, list))
 
         if not self.disable_sliding_window and has_interleaved_attention:
-            if (backend :=
-                    envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER"):
+            if not envs.VLLM_USE_V1 and (backend := envs.VLLM_ATTENTION_BACKEND
+                                         ) in ("XFORMERS", "FLASHINFER"):
                 sliding_window_len_min = get_min_sliding_window(
                     self.hf_text_config.sliding_window)
 
@@ -771,6 +789,9 @@ class ModelConfig:
             raise ValueError(
                 "`override_neuron_config` is only supported on Neuron.")
 
+        # Avoid running try_verify_and_update_config multiple times
+        self.config_updated = False
+
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
@@ -794,12 +815,17 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
+        if getattr(self, "runner_type", self.runner) == "pooling":
+            return "TransformersModel"
         if self.hf_config != self.hf_text_config:
             # If 'hf_text_config' is the same as 'hf_config'. If not, it is
             # probably a composite config, i.e. multimodal
             return "TransformersForMultimodalLM"
-        else:
-            return "TransformersForCausalLM"
+        return "TransformersForCausalLM"
+
+    def using_transformers_backend(self) -> bool:
+        """Check if the model is using the Transformers backend class."""
+        return self.architecture == self._get_transformers_backend_cls()
 
     @property
     def registry(self):
@@ -851,7 +877,7 @@ class ModelConfig:
             self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
-        if self.registry.is_multimodal_model(self.architectures, self):
+        if self._model_info.supports_multimodal:
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,
@@ -860,20 +886,13 @@ class ModelConfig:
                 disable_mm_preprocessor_cache,
                 interleave_mm_strings=self.interleave_mm_strings)
 
-        if self.limit_mm_per_prompt:
-            raise ValueError("`limit_mm_per_prompt` is only supported for "
-                             "multimodal models.")
-        if self.mm_processor_kwargs:
-            raise ValueError("`mm_processor_kwargs` is only supported for "
-                             "multimodal models.")
-        if self.disable_mm_preprocessor_cache:
-            raise ValueError("`disable_mm_preprocessor_cache` is only "
-                             "supported for multimodal models.")
-        if self.interleave_mm_strings:
-            raise ValueError("`interleave_mm_strings` is only "
-                             "supported for multimodal models.")
-
         return None
+
+    def set_disable_mm_preprocessor_cache(self, value: bool) -> None:
+        mm_config = self.get_multimodal_config()
+
+        self.disable_mm_preprocessor_cache = value
+        mm_config.disable_mm_preprocessor_cache = value
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -893,15 +912,6 @@ class ModelConfig:
                 for k, v in base_config.items():
                     if getattr(pooler_config, k) is None:
                         setattr(pooler_config, k, v)
-
-            if self.is_matryoshka:
-                if pooler_config.normalize is None:
-                    pooler_config.normalize = True
-                elif not pooler_config.normalize:
-                    raise ValueError(
-                        "`normalize` must be enabled (set to True) "
-                        "for models that are compatible with "
-                        "Matryoshka Representation.")
 
             return pooler_config
 
@@ -1089,6 +1099,21 @@ class ModelConfig:
         if quant_cfg is None:
             # compressed-tensors uses a "compression_config" key
             quant_cfg = getattr(self.hf_config, "compression_config", None)
+
+        else:
+            # Set quant_method for ModelOpt models.
+            producer_name = quant_cfg.get("producer", {}).get("name")
+            if producer_name == "modelopt":
+                quant_algo = quant_cfg.get("quantization",
+                                           {}).get("quant_algo")
+                if quant_algo == "FP8":
+                    quant_cfg["quant_method"] = "modelopt"
+                elif quant_algo == "NVFP4":
+                    quant_cfg["quant_method"] = "modelopt_fp4"
+                elif quant_algo is not None:
+                    raise ValueError(
+                        f"Unknown ModelOpt quant algo: {quant_algo}")
+
         return quant_cfg
 
     def _verify_quantization(self) -> None:
@@ -1564,7 +1589,18 @@ class ModelConfig:
         return self.multimodal_config
 
     def try_get_generation_config(self) -> dict[str, Any]:
-        if self.generation_config in ("auto", "vllm"):
+        """
+        This method attempts to retrieve the non-default values of the
+        generation config for this model.
+
+        The generation config can contain information about special tokens, as
+        well as sampling parameters. Which is why this method exists separately
+        to `get_diff_sampling_param`.
+
+        Returns:
+            A dictionary containing the non-default generation config.
+        """
+        if self.generation_config in {"auto", "vllm"}:
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
@@ -1583,13 +1619,18 @@ class ModelConfig:
 
     def get_diff_sampling_param(self) -> dict[str, Any]:
         """
-        This method returns a dictionary containing the parameters
-        that differ from the default sampling parameters. If
-        `generation_config` is `"vllm"`, an empty dictionary is returned.
+        This method returns a dictionary containing the non-default sampling
+        parameters with `override_generation_config` applied.
+
+        The default sampling parameters are:
+
+        - vLLM's neutral defaults if `self.generation_config="vllm"`
+        - the model's defaults if `self.generation_config="auto"`
+        - as defined in `generation_config.json` if
+            `self.generation_config="path/to/generation_config/dir"`
 
         Returns:
-            dict[str, Any]: A dictionary with the differing sampling
-            parameters, if `generation_config` is `"vllm"` an empty dictionary.
+            A dictionary containing the non-default sampling parameters.
         """
         if self.generation_config == "vllm":
             config = {}
@@ -1774,8 +1815,8 @@ class CacheConfig:
     - "builtin" is Python's built-in hash.\n
     - "sha256" is collision resistant but with certain overheads.
     This option uses Pickle for object serialization before hashing.\n
-    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible 
-    hash. It serializes objects using canonical CBOR and hashes them with 
+    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible
+    hash. It serializes objects using canonical CBOR and hashes them with
     SHA-256. The resulting hash consists of the lower 64 bits of the SHA-256
     digest."""
     cpu_offload_gb: float = 0
@@ -1802,6 +1843,16 @@ class CacheConfig:
     """The number of blocks to allocate for GPU memory."""
     num_cpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
+
+    kv_sharing_fast_prefill: bool = False
+    """This feature is work in progress and no prefill optimization takes place
+    with this flag enabled currently.
+
+    In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
+    some layers can skip tokens corresponding to prefill. This flag enables
+    attention metadata for eligible layers to be overriden with metadata
+    necessary for implementating this optimization in some models (e.g. Gemma3n)
+    """
 
     def compute_hash(self) -> str:
         """
@@ -1843,6 +1894,11 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
+
+        if self.kv_sharing_fast_prefill:
+            logger.warning_once(
+                "--kv-sharing-fast-prefill is currently work in progress "
+                "and not functional yet (i.e. no prefill savings)")
 
         return self
 
@@ -2017,7 +2073,7 @@ class ParallelConfig:
     and when data_parallel_size > 0. Enables running an AsyncLLM
     and API server on a "per-node" basis where vLLM load balances
     between local data parallel ranks, but an external LB balances
-    between vLLM nodes/replicas. Set explicitly in conjunction with 
+    between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
@@ -2050,6 +2106,9 @@ class ParallelConfig:
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
+
+    ray_runtime_env: Optional["RuntimeEnv"] = None
+    """Ray runtime environment to pass to distributed workers."""
 
     placement_group: Optional["PlacementGroup"] = None
     """ray distributed model workers placement group."""
@@ -2963,10 +3022,13 @@ class SpeculativeConfig:
                             "Chunked prefill and EAGLE are not compatible "
                             "when using V0.")
 
+                    from vllm.transformers_utils.configs import (
+                        SpeculatorsConfig)
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
+
                     if isinstance(self.draft_model_config.hf_config,
-                                  EAGLEConfig):
+                                  (EAGLEConfig, SpeculatorsConfig)):
                         pass
                     else:
                         eagle_config = EAGLEConfig(
@@ -2993,6 +3055,19 @@ class SpeculativeConfig:
                         raise ValueError(
                             f"num_speculative_tokens:{self.num_speculative_tokens}"
                             f" must be divisible by {n_predict=}")
+
+                if self.speculative_token_tree is None:
+                    # Generate chain of tokens.
+                    self.speculative_token_tree = str([
+                        (i + 1) * (0, )
+                        for i in range(self.num_speculative_tokens)
+                    ])
+                else:
+                    # Sort the token tree breadth-first.
+                    tree_choices = ast.literal_eval(
+                        self.speculative_token_tree)
+                    self.speculative_token_tree = str(
+                        sorted(tree_choices, key=lambda t: (len(t), t)))
 
                 self.draft_tensor_parallel_size = \
                     SpeculativeConfig._verify_and_get_draft_tp(
@@ -3125,10 +3200,19 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        if self.method == "eagle3" and self.target_model_config and \
-            "llama" not in self.target_model_config.hf_text_config.model_type:
+        from vllm.transformers_utils.configs import SpeculatorsConfig
+
+        eagle3_target_supported = ["llama"]
+        if self.draft_model_config and isinstance(
+                self.draft_model_config.hf_config, SpeculatorsConfig):
+            eagle3_target_supported.append("qwen")
+
+        if self.method == "eagle3" and self.target_model_config and not any(
+                supported_model in
+                self.target_model_config.hf_text_config.model_type
+                for supported_model in eagle3_target_supported):
             raise ValueError(
-                "Eagle3 is only supported for Llama models. "
+                f"Eagle3 is only supported for {eagle3_target_supported} models. "  # noqa: E501
                 f"Got {self.target_model_config.hf_text_config.model_type=}")
 
         return self
@@ -3322,7 +3406,16 @@ class MultiModalConfig:
             999 if envs.VLLM_USE_V1 else 1,
         )
 
-    # TODO: Add configs to init vision tower or not.
+    def merge_mm_processor_kwargs(
+        self,
+        inference_kwargs: Mapping[str, object],
+    ) -> dict[str, object]:
+        """
+        Get the keyword arguments to pass to the multi-modal processor
+        according to the extra arguments passed during inference.
+        """
+        kwargs = self.mm_processor_kwargs or {}
+        return kwargs | dict(inference_kwargs)
 
 
 @config
@@ -3336,25 +3429,34 @@ class PoolerConfig:
     [`vllm.model_executor.layers.pooler.PoolingType`][].
     """
 
+    ## for embeddings models
     normalize: Optional[bool] = None
     """
-    Whether to normalize the pooled outputs. Usually, this should be set to
-    ``True`` for embedding outputs.
+    Whether to normalize the embeddings outputs. 
+    """
+    dimensions: Optional[int] = None
+    """
+    Reduce the dimensions of embeddings if model 
+    support matryoshka representation.
     """
 
+    ## for classification models
+    activation: Optional[bool] = None
+    """
+    Whether to apply activation function to the classification outputs. 
+    """
+
+    ## for reward models
     softmax: Optional[bool] = None
     """
-    Whether to apply softmax to the pooled outputs. Usually, this should be set
-    to ``True`` for classification outputs.
+    Whether to apply softmax to the reward outputs. 
     """
-
     step_tag_id: Optional[int] = None
     """
     If set, only the score corresponding to the ``step_tag_id`` in the
     generated sentence should be returned. Otherwise, the scores for all tokens
     are returned.
     """
-
     returned_token_ids: Optional[list[int]] = None
     """
     A list of indices for the vocabulary dimensions to be extracted,
@@ -3721,12 +3823,7 @@ def get_served_model_name(model: str,
     return served_model_name
 
 
-GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
-                                  "xgrammar", "guidance"]
-
-GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance", "outlines"]
-GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
-                                GuidedDecodingBackendV1]
+GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines"]
 
 
 @config
@@ -3734,7 +3831,7 @@ GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
 class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine."""
 
-    backend: GuidedDecodingBackend = "auto" if envs.VLLM_USE_V1 else "xgrammar"
+    backend: GuidedDecodingBackend = "auto"
     """Which engine will be used for guided decoding (JSON schema / regex etc)
     by default. With "auto", we will make opinionated choices based on request
     contents and what the backend libraries currently support, so the behavior
@@ -3776,13 +3873,6 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        if envs.VLLM_USE_V1:
-            valid_guided_backends = get_args(GuidedDecodingBackendV1)
-        else:
-            valid_guided_backends = get_args(GuidedDecodingBackendV0)
-        if self.backend not in valid_guided_backends:
-            raise ValueError(f"Invalid backend '{self.backend}',"
-                             f" must be one of {valid_guided_backends}")
         if (self.disable_any_whitespace
                 and self.backend not in ("xgrammar", "guidance")):
             raise ValueError("disable_any_whitespace is only supported for "
@@ -4171,7 +4261,7 @@ class PassConfig:
     """Whether to enable async TP."""
     enable_fi_allreduce_fusion: bool = False
     """Whether to enable flashinfer allreduce fusion."""
-    fi_allreduce_fusion_max_token_num: int = 1024
+    fi_allreduce_fusion_max_token_num: int = 16384
     """Max number of tokens to used in flashinfer allreduce fusion."""
 
     # TODO(luka) better pass enabling system.
@@ -4236,9 +4326,11 @@ class CompilationConfig:
         certain small batchsizes, where inductor is good at optimizing.
     """
     # Top-level Compilation control
-    level: int = 0
+    level: Optional[int] = None
     """The level of compilation:
 
+    - None: If None, we will select the default compilation level.
+      For V1 engine this is 3, for V0 engine this is 0.
     - 0: no compilation.
     - 1: dynamo as is.
     - 2: dynamo once.
@@ -4400,12 +4492,20 @@ class CompilationConfig:
             "disabled_custom_ops": True,
             "compilation_time": True,
             "bs_to_padded_graph_size": True,
-            "pass_config": True,
             "traced_files": True,
             "inductor_compile_config": {
                 "post_grad_custom_post_pass": True,
             },
         }
+
+        # exclude default attr in pass_config
+        pass_config_exclude = {}
+        for attr, default_val in vars(PassConfig()).items():
+            if getattr(self.pass_config, attr) == default_val:
+                pass_config_exclude[attr] = True
+        if pass_config_exclude:
+            exclude["pass_config"] = pass_config_exclude
+
         # The cast to string is necessary because Pydantic is mocked in docs
         # builds and sphinx-argparse doesn't know the return type of decode()
         return str(
@@ -4800,6 +4900,22 @@ class VllmConfig:
                 "To workaround this limitation, vLLM will set 'ieee' input "
                 "precision for chunked prefill triton kernels.")
 
+        # If the user does not explicitly set a compilation level, then
+        # we use the default level. The default level depends on other
+        # settings (see the below code).
+        if self.compilation_config.level is None:
+            if envs.VLLM_USE_V1:
+                if (self.model_config is not None
+                        and not self.model_config.enforce_eager):
+                    self.compilation_config.level = CompilationLevel.PIECEWISE
+                else:
+                    self.compilation_config.level = \
+                            CompilationLevel.NO_COMPILATION
+            else:
+                # NB: Passing both --enforce-eager and a compilation level
+                # in V0 means the compilation level wins out.
+                self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
         if self.compilation_config.pass_config.enable_async_tp:
@@ -4812,7 +4928,6 @@ class VllmConfig:
             # By default, V1 uses piecewise CUDA graphs. If full_cuda_graph
             # is set to True, full CUDA graphs will be used.
             self.compilation_config.cudagraph_num_of_warmups = 1
-            self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
 
         self._set_cudagraph_sizes()
@@ -5026,6 +5141,11 @@ class VllmConfig:
         if self.model_config is None:
             return
 
+        # Avoid running try_verify_and_update_config multiple times
+        if getattr(self.model_config, "config_updated", False):
+            return
+        self.model_config.config_updated = True
+
         architecture = self.model_config.architecture
         if architecture is None:
             return
@@ -5127,6 +5247,14 @@ def set_current_vllm_config(vllm_config: VllmConfig,
     finally:
         _current_vllm_config = old_vllm_config
         _current_prefix = old_prefix
+        # Clear the compilation config cache when context changes
+        get_cached_compilation_config.cache_clear()
+
+
+@lru_cache(maxsize=1)
+def get_cached_compilation_config():
+    """Cache config to avoid repeated calls to get_current_vllm_config()"""
+    return get_current_vllm_config().compilation_config
 
 
 def get_current_vllm_config() -> VllmConfig:
@@ -5179,13 +5307,29 @@ def assert_hashable(text):
 T = TypeVar("T")
 
 
-def get_layers_from_vllm_config(vllm_config: VllmConfig,
-                                layer_type: type[T]) -> dict[str, T]:
+def get_layers_from_vllm_config(
+        vllm_config: VllmConfig,
+        layer_type: type[T],
+        layer_names: Optional[list[str]] = None) -> dict[str, T]:
+    """
+    Get layers from the vLLM config.
+
+    Args:
+        vllm_config: The vLLM config.
+        layer_type: The type of the layer to get.
+        layer_names: The names of the layers to get. If None, return all layers.
+    """
+
+    if layer_names is None:
+        layer_names = list(
+            vllm_config.compilation_config.static_forward_context.keys())
+
+    forward_context = vllm_config.compilation_config.static_forward_context
+
     return {
-        layer_name: layer
-        for layer_name, layer in
-        vllm_config.compilation_config.static_forward_context.items()
-        if isinstance(layer, layer_type)
+        layer_name: forward_context[layer_name]
+        for layer_name in layer_names
+        if isinstance(forward_context[layer_name], layer_type)
     }
 
 

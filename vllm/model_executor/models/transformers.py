@@ -48,7 +48,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import is_list_of
 
 from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
@@ -188,10 +187,6 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             image_sizes=([height, width], ), **mm_processor_kwargs)
         image_tokens = mm_tokens["num_image_tokens"][0]
         return image_tokens
-
-    def get_hf_processor(self):
-        processor = cached_get_processor(self.ctx.model_config.model)
-        return processor
 
     def get_max_image_size(self):
         return 10_000, 10_000  # hardcode for arbitrary very large size
@@ -654,6 +649,18 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=self.skip_prefixes)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+
+@support_torch_compile
+class TransformersModel(TransformersBase):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # Add `model.` prefix for base model checkpoints
+            "": "model.",
+            # Remove `model.` from places it should not be
+            "model.model.": "model.",
+            "model.score": "score",
+        })
 
 
 @support_torch_compile
