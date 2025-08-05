@@ -19,8 +19,8 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import round_up
 from vllm.platforms import current_platform
+from vllm.utils import round_up
 
 
 class Mxfp4Config(QuantizationConfig):

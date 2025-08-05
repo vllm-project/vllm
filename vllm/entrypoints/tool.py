@@ -54,6 +54,7 @@ class HarmonyBrowserTool(Tool):
     def tool_config(self) -> Any:
         return self.browser_tool.tool_config
 
+
 class HarmonyPythonTool(Tool):
 
     def __init__(self):

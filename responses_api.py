@@ -1,13 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-vllm serve /data/woosuk/os-mini-weights/pytorch-rc-20b --tokenizer /data/xmo/os-mini/models/hf-converted --enforce-eager
+vllm serve /data/woosuk/os-mini-weights/pytorch-rc-20b --enforce-eager
 """
+import argparse
 import json
 import time
-from openai import BadRequestError, NotFoundError, OpenAI
-import argparse
 
-import ast
 import requests
+from openai import BadRequestError, NotFoundError, OpenAI
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model",
@@ -494,7 +495,7 @@ def test_function_calling_required():
         "strict": True
     }]
     try:
-        response = client.responses.create(
+        _response = client.responses.create(
             model=MODEL,
             input="What's the weather like in Paris today?",
             tools=tools,

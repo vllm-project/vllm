@@ -16,19 +16,17 @@ prompts = [
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0, max_tokens=100)
 
-MODEL_PATH = os.environ.get(
-    "MODEL_PATH", "/data/xmo/os-mini/models/gpt-oss-20b-hf"
-)
-TP=os.environ.get("VLLM_TENSOR_PARALLEL_SIZE", "4")
+MODEL_PATH = os.environ.get("MODEL_PATH", "/data/xmo/os-mini/models/gpt-oss-20b-hf")
+TP = os.environ.get("VLLM_TENSOR_PARALLEL_SIZE", "4")
+
 
 def main():
-    
     # Create an LLM.
     llm = LLM(
         model=MODEL_PATH,
-        tensor_parallel_size=int(TP), #use TP from env variable,
+        tensor_parallel_size=int(TP),  # use TP from env variable,
         # Set these to make dummy run faster
-        enforce_eager=False, #enable cuda graph mode after torch.compile is supported
+        enforce_eager=False,  # enable cuda graph mode after torch.compile is supported
         # max_num_seqs=1,
         # max_num_batched_tokens=100,
     )
