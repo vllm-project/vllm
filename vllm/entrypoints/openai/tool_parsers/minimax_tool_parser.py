@@ -227,17 +227,14 @@ class MinimaxToolParser(ToolParser):
             return output_content
 
         while self.pending_buffer:
-            # 查找标签位置
             start_pos = self.pending_buffer.find(self.tool_call_start_token)
             end_pos = self.pending_buffer.find(self.tool_call_end_token)
 
-            # 确定要处理的标签
             if start_pos != -1 and (end_pos == -1 or start_pos < end_pos):
                 tag_pos, tag_len = start_pos, len(self.tool_call_start_token)
             elif end_pos != -1:
                 tag_pos, tag_len = end_pos, len(self.tool_call_end_token)
             else:
-                # 检查是否有潜在的标签开始
                 if self._is_potential_tag_start(self.pending_buffer):
                     break
                 output_content += self.pending_buffer
@@ -255,6 +252,24 @@ class MinimaxToolParser(ToolParser):
             "tool_ids": [],
             "sent_tools": [],
         }
+
+    def _advance_to_next_tool(self) -> None:
+        self.streaming_state["current_tool_index"] += 1
+
+    def _set_current_tool_index(self, index: int) -> None:
+        self.streaming_state["current_tool_index"] = index
+
+    def _get_current_tool_index(self) -> int:
+        return self.streaming_state["current_tool_index"]
+
+    def _get_next_unsent_tool_index(self, tool_count: int) -> int:
+        for i in range(tool_count):
+            if i < len(self.streaming_state["sent_tools"]):
+                if not self.streaming_state["sent_tools"][i]["sent_name"]:
+                    return i
+            else:
+                return i
+        return -1
 
     def _ensure_state_arrays(self, tool_count: int) -> None:
         while len(self.streaming_state["sent_tools"]) < tool_count:
@@ -281,6 +296,9 @@ class MinimaxToolParser(ToolParser):
             if text[i] == '{':
                 start = i
                 depth = 0
+                has_name = False
+                has_arguments = False
+
                 while i < len(text):
                     if text[i] == '{':
                         depth += 1
@@ -292,7 +310,17 @@ class MinimaxToolParser(ToolParser):
                             if '"name"' in segment and '"arguments"' in segment:
                                 boundaries.append((start, end))
                             break
+
+                    if not has_name and '"name"' in text[start:i + 1]:
+                        has_name = True
+                    if not has_arguments and '"arguments"' in text[start:i +
+                                                                   1]:
+                        has_arguments = True
+
                     i += 1
+
+                if depth > 0 and has_name:
+                    boundaries.append((start, i))
             else:
                 i += 1
         return boundaries
@@ -345,41 +373,36 @@ class MinimaxToolParser(ToolParser):
     def _handle_tool_name_streaming(
             self, tool_content: str,
             tool_count: int) -> Union[DeltaMessage, None]:
-        current_idx = self.streaming_state["current_tool_index"]
+        next_idx = self._get_next_unsent_tool_index(tool_count)
 
-        if current_idx == -1 or current_idx < tool_count - 1:
-            next_idx = current_idx + 1
+        if next_idx == -1:
+            return None
 
-            if (next_idx < tool_count
-                    and not self.streaming_state["sent_tools"][next_idx]
-                ["sent_name"]):
+        boundaries = self._find_tool_boundaries(tool_content)
+        if next_idx >= len(boundaries):
+            return None
 
-                tool_name, _ = self._get_current_tool_content(
-                    tool_content, next_idx)
-                if not tool_name:
-                    return None
+        tool_name, _ = self._get_current_tool_content(tool_content, next_idx)
+        if not tool_name:
+            return None
 
-                self.streaming_state["current_tool_index"] = next_idx
-                tool_id = self.streaming_state["sent_tools"][next_idx]["id"]
-                self.streaming_state["tool_ids"][next_idx] = tool_id
-                self.streaming_state["sent_tools"][next_idx][
-                    "sent_name"] = True
+        self._set_current_tool_index(next_idx)
+        tool_id = self.streaming_state["sent_tools"][next_idx]["id"]
+        self.streaming_state["tool_ids"][next_idx] = tool_id
+        self.streaming_state["sent_tools"][next_idx]["sent_name"] = True
 
-                return DeltaMessage(tool_calls=[
-                    DeltaToolCall(index=next_idx,
-                                  type="function",
-                                  id=tool_id,
-                                  function=DeltaFunctionCall(
-                                      name=tool_name).model_dump(
-                                          exclude_none=True))
-                ])
-
-        return None
+        return DeltaMessage(tool_calls=[
+            DeltaToolCall(index=next_idx,
+                          type="function",
+                          id=tool_id,
+                          function=DeltaFunctionCall(
+                              name=tool_name).model_dump(exclude_none=True))
+        ])
 
     def _handle_tool_args_streaming(
             self, tool_content: str,
             tool_count: int) -> Union[DeltaMessage, None]:
-        current_idx = self.streaming_state["current_tool_index"]
+        current_idx = self._get_current_tool_index()
 
         if current_idx < 0 or current_idx >= tool_count:
             return None
@@ -405,7 +428,7 @@ class MinimaxToolParser(ToolParser):
                         "sent_arguments"] = clean_args
 
                     if clean_args.endswith('}'):
-                        self.streaming_state["current_tool_index"] += 1
+                        self._advance_to_next_tool()
 
                     return DeltaMessage(tool_calls=[
                         DeltaToolCall(index=current_idx,
@@ -419,7 +442,7 @@ class MinimaxToolParser(ToolParser):
                     "sent_arguments"] = clean_args
 
                 if clean_args.endswith('}'):
-                    self.streaming_state["current_tool_index"] += 1
+                    self._advance_to_next_tool()
 
                 return DeltaMessage(tool_calls=[
                     DeltaToolCall(index=current_idx,
@@ -429,6 +452,33 @@ class MinimaxToolParser(ToolParser):
                 ])
 
         return None
+
+    def _is_end_tool_calls(self, tool_content: str) -> bool:
+        if self.tool_call_end_token not in tool_content:
+            return False
+
+        end_token_positions = []
+        search_start = 0
+        while True:
+            pos = tool_content.find(self.tool_call_end_token, search_start)
+            if pos == -1:
+                break
+            end_token_positions.append(pos)
+            search_start = pos + 1
+
+        think_regions = []
+        for match in re.finditer(self.thinking_tag_pattern,
+                                 tool_content,
+                                 flags=re.DOTALL):
+            think_regions.append((match.start(), match.end()))
+
+        for pos in end_token_positions:
+            in_think = any(pos >= t_start and pos < t_end
+                           for t_start, t_end in think_regions)
+            if not in_think:
+                return True
+
+        return False
 
     def extract_tool_calls_streaming(
         self,
@@ -450,6 +500,9 @@ class MinimaxToolParser(ToolParser):
             return DeltaMessage(
                 content=buffered_output) if buffered_output else None
 
+        if self._is_end_tool_calls(current_text):
+            return DeltaMessage(content=delta_text)
+
         safe_content, potential_tag = self._split_content_for_buffering(
             delta_text)
         if potential_tag:
@@ -465,7 +518,7 @@ class MinimaxToolParser(ToolParser):
             if delta_text.strip(
             ) == '' and self.tool_call_start_token in current_text:
                 return None
-            if (self.streaming_state["current_tool_index"] != -1
+            if (self._get_current_tool_index() != -1
                     and self.tool_call_end_token in current_text):
                 self._reset_streaming_state()
             return DeltaMessage(content=delta_text)
@@ -493,9 +546,8 @@ class MinimaxToolParser(ToolParser):
             if current_tools_count == 0:
                 return None
 
-            if self.streaming_state["current_tool_index"] == -1:
+            if self._get_current_tool_index() == -1:
                 self._reset_streaming_state()
-                self.streaming_state["current_tool_index"] = -1
 
             self._ensure_state_arrays(current_tools_count)
 
