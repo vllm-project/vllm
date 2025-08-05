@@ -25,7 +25,7 @@ def to_float8(x, dtype=torch.float8_e4m3fn):
 
 
 @torch.no_grad()
-def benchmark_decode(
+def benchmark_prefill(
     num_seqs,
     max_seq_len,
     page_size=16,
@@ -38,34 +38,46 @@ def benchmark_decode(
     trials=20,
 ):
     torch.set_default_device("cuda")
-    device = "cuda"
     torch.manual_seed(0)
 
-    # Currently only HEAD_GRP_SIZE == 8 is supported
     HEAD_GRP_SIZE = 8
     MAX_SEQ_LEN = max_seq_len
 
     # large number to reduce kv_cache reuse
     NUM_BLOCKS = int(256000 / page_size)
 
-    workspace_buffer = torch.empty(1024 * 1024 * 1024, dtype=torch.int8, device=device)
+    workspace_buffer = torch.empty(1024 * 1024 * 1024, dtype=torch.int8)
 
-    # For decode, batch_size is num_decode_token
     num_qo_heads = num_kv_heads * HEAD_GRP_SIZE
     sm_scale = float(1.0 / (head_dim**0.5))
-    q = torch.randn(num_seqs, num_qo_heads, head_dim, device=device, dtype=dtype)
-    kv_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
 
-    max_kv_len = max(kv_lens)
-    kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int, device=device)
-    max_num_blocks_per_seq = (max_kv_len + page_size - 1) // page_size
+    q_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
+    q_lens[-1] = MAX_SEQ_LEN
+    max_q_len = max(q_lens)
+    q_indptr = torch.cat(
+        [
+            torch.tensor([0], dtype=torch.int32),
+            torch.cumsum(
+                torch.tensor(q_lens, dtype=torch.int32), dim=0, dtype=torch.int32
+            ),
+        ]
+    )
+    q = torch.randn(sum(q_lens), num_qo_heads, head_dim, dtype=dtype)
 
+    kv_lens = [random.randint(0, MAX_SEQ_LEN) for _ in range(num_seqs)]
+    kv_lens[-1] = MAX_SEQ_LEN
+
+    seq_lens = [q_len + kv_len for q_len, kv_len in zip(q_lens, kv_lens)]
+    max_seq_len = max(seq_lens)
+    seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int32)
+
+    max_num_blocks_per_seq = (max_seq_len + page_size - 1) // page_size
     block_tables = torch.randint(
         0, NUM_BLOCKS, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
     )
 
     kv_cache_shape = (NUM_BLOCKS, 2, num_kv_heads, page_size, head_dim)
-    kv_cache = torch.randn(size=kv_cache_shape, device=device, dtype=dtype)
+    kv_cache = torch.randn(size=kv_cache_shape, dtype=dtype)
     k_scale = v_scale = 1.0
 
     if kv_cache_dtype.startswith("fp8"):
@@ -73,19 +85,43 @@ def benchmark_decode(
 
     output_trtllm = torch.empty(q.shape, dtype=dtype)
 
-    # Benchmark TRT decode
-    def trt_decode():
-        return flashinfer.decode.trtllm_batch_decode_with_kv_cache(
-            q,
-            kv_cache,
-            workspace_buffer,
-            block_tables,
-            kv_lens_tensor,
-            max_kv_len,
-            bmm1_scale=k_scale * sm_scale,
-            bmm2_scale=v_scale,
-            out=output_trtllm,
-        )
+    kv_indptr = [0]
+    kv_indices = []
+    kv_last_page_lens = []
+    for i in range(num_seqs):
+        seq_len = seq_lens[i]
+        assert seq_len > 0
+        num_blocks = (seq_len + page_size - 1) // page_size
+        kv_indices.extend(block_tables[i, :num_blocks])
+        kv_indptr.append(kv_indptr[-1] + num_blocks)
+        kv_last_page_len = seq_len % page_size
+        if kv_last_page_len == 0:
+            kv_last_page_len = page_size
+        kv_last_page_lens.append(kv_last_page_len)
+
+    kv_indptr = torch.tensor(kv_indptr, dtype=torch.int32)
+    kv_indices = torch.tensor(kv_indices, dtype=torch.int32)
+    kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32)
+
+    output_baseline = torch.empty(q.shape, dtype=dtype)
+
+    wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+        workspace_buffer, kv_layout
+    )
+    wrapper.plan(
+        q_indptr,
+        kv_indptr,
+        kv_indices,
+        kv_last_page_lens,
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        page_size,
+        causal=True,
+        sm_scale=sm_scale,
+        q_data_type=dtype,
+        kv_data_type=kv_cache.dtype,
+    )
 
     def time_fn(fn, warmup=10, trials=20):
         torch.cuda.synchronize()
@@ -102,59 +138,37 @@ def benchmark_decode(
             times.append(start.elapsed_time(end))  # ms
         return sum(times) / len(times), torch.std(torch.tensor(times))
 
-    # TRT Decode
-    trt_mean, trt_std = time_fn(trt_decode)
+    def baseline_prefill():
+        return wrapper.run(
+            q, kv_cache, k_scale=k_scale, v_scale=v_scale, out=output_baseline
+        )
 
-    kv_indptr = [0]
-    kv_indices = []
-    kv_last_page_lens = []
-    for i in range(num_seqs):
-        seq_len = kv_lens[i]
-        assert seq_len > 0
-        num_blocks = (seq_len + page_size - 1) // page_size
-        kv_indices.extend(block_tables[i, :num_blocks])
-        kv_indptr.append(kv_indptr[-1] + num_blocks)
-        kv_last_page_len = seq_len % page_size
-        if kv_last_page_len == 0:
-            kv_last_page_len = page_size
-        kv_last_page_lens.append(kv_last_page_len)
+    def trt_prefill():
+        return flashinfer.prefill.trtllm_batch_context_with_kv_cache(
+            query=q,
+            kv_cache=kv_cache,
+            workspace_buffer=workspace_buffer,
+            block_tables=block_tables,
+            seq_lens=seq_lens_tensor,
+            max_q_len=max_q_len,
+            max_kv_len=max_seq_len,
+            bmm1_scale=k_scale * sm_scale,
+            bmm2_scale=v_scale,
+            batch_size=num_seqs,
+            cum_seq_lens_q=q_indptr,
+            cum_seq_lens_kv=kv_indptr,
+            out=output_trtllm,
+        )
 
-    kv_indptr = torch.tensor(kv_indptr, dtype=torch.int32)
-    kv_indices = torch.tensor(kv_indices, dtype=torch.int32)
-    kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32)
-
-    output_baseline = torch.empty(q.shape, dtype=dtype)
-
-    wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-        workspace_buffer,
-        kv_layout,
-        use_tensor_cores=((num_qo_heads // num_kv_heads) > 4),
-    )
-
-    wrapper.plan(
-        kv_indptr,
-        kv_indices,
-        kv_last_page_lens,
-        num_qo_heads,
-        num_kv_heads,
-        head_dim,
-        page_size,
-        "NONE",
-        q_data_type=dtype,
-        kv_data_type=torch.float8_e4m3fn if kv_cache_dtype.startswith("fp8") else dtype,
-    )
-
-    def baseline_decode():
-        return wrapper.run(q, kv_cache, sm_scale, k_scale, v_scale, output_baseline)
-
-    baseline_mean, baseline_std = time_fn(baseline_decode)
+    trt_mean, trt_std = time_fn(trt_prefill)
+    baseline_mean, baseline_std = time_fn(baseline_prefill)
 
     # Calculate percentage speedup (positive means TRT is faster)
     speedup_percent = (baseline_mean - trt_mean) / baseline_mean
 
     print(
-        f"\t{num_seqs}\t{max_seq_len}\t{trt_mean:.3f}\t{trt_std.item():.3f}"
-        f"\t{baseline_mean:.3f}\t{baseline_std.item():.3f}\t{speedup_percent:.3f}"
+        f"\t{num_seqs}\t{max_seq_len}\t{trt_mean:.5f}\t{trt_std.item():.5f}"
+        f"\t{baseline_mean:.5f}\t{baseline_std.item():.5f}\t{speedup_percent:.5f}"
     )
 
     # Return results for CSV writing
@@ -224,29 +238,11 @@ if __name__ == "__main__":
     )
     for max_seq_len in max_seq_lens:
         for bs in num_seqs:
-            result = benchmark_decode(
+            result = benchmark_prefill(
                 bs,
                 max_seq_len,
                 dtype=torch.bfloat16,
                 kv_cache_dtype="auto",
-            )
-            all_results.append(result)
-
-    print(
-        "Running benchmark for q_dtype = bfloat16, kv_cache_dtype: fp8, "
-        "output_dtype: bfloat16"
-    )
-    print(
-        "\tnum_seqs\tmax_seq_len\ttrt_mean\ttrt_std\tbaseline_mean\t"
-        "baseline_std\tspeedup_percent"
-    )
-    for max_seq_len in max_seq_lens:
-        for bs in num_seqs:
-            result = benchmark_decode(
-                bs,
-                max_seq_len,
-                dtype=torch.bfloat16,
-                kv_cache_dtype="fp8",
             )
             all_results.append(result)
 

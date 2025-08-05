@@ -124,7 +124,7 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
 @functools.cache
 def has_nvidia_artifactory() -> bool:
     """Return ``True`` if NVIDIA's artifactory is accessible.
-    
+
     This checks connectivity to the kernel inference library artifactory
     which is required for downloading certain cubin kernels like TRTLLM FHMA.
     """
@@ -144,7 +144,7 @@ def has_nvidia_artifactory() -> bool:
         return False
 
 
-def use_trtllm_decode_attention(
+def use_trtllm_attention(
     num_tokens: int,
     max_seq_len: int,
     kv_cache_dtype: str,
@@ -159,29 +159,26 @@ def use_trtllm_decode_attention(
 
     # Check if the dimensions are supported by TRTLLM decode attention
     if (attn_head_size is None or num_qo_heads is None or num_kv_heads is None
-            or num_qo_heads // num_kv_heads > 8
             or num_qo_heads % num_kv_heads != 0 or attn_head_size != 128):
         return False
 
-    env_value = envs.VLLM_USE_TRTLLM_DECODE_ATTENTION
+    env_value = envs.VLLM_USE_TRTLLM_ATTENTION
     if env_value is not None:
-        logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to %s",
-                         env_value)
+        logger.info_once("VLLM_USE_TRTLLM_ATTENTION is set to %s", env_value)
         # Environment variable is set - respect it
         # Making the conditional check for zero because
         # the path is automatically enabled if the batch size condition
         # is satisfied.
         no_use_trtllm = (env_value == "0")
         if not no_use_trtllm:
-            logger.info_once("Using TRTLLM decode attention.")
+            logger.info_once("Using TRTLLM attention.")
         return not no_use_trtllm
     else:
         # Environment variable not set - use auto-detection
         use_trtllm = (num_tokens <= 256 and max_seq_len < 131072
                       and kv_cache_dtype == "auto")
         if use_trtllm:
-            logger.warning_once(
-                "Using TRTLLM decode attention (auto-detected).")
+            logger.warning_once("Using TRTLLM attention (auto-detected).")
         return use_trtllm
 
 
@@ -195,5 +192,5 @@ __all__ = [
     "has_flashinfer_moe",
     "has_flashinfer_cutlass_fused_moe",
     "has_nvidia_artifactory",
-    "use_trtllm_decode_attention",
+    "use_trtllm_attention",
 ]
