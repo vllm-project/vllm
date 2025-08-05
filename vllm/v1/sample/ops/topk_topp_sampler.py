@@ -5,6 +5,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+from packaging.version import Version
 
 from vllm import envs
 from vllm.logger import init_logger
@@ -31,8 +32,8 @@ class TopKTopPSampler(nn.Module):
         super().__init__()
         if current_platform.is_cuda():
             if is_flashinfer_available:
-                flashinfer_version = flashinfer.__version__
-                if flashinfer_version < "0.2.3":
+                flashinfer_version = Version(flashinfer.__version__)
+                if flashinfer_version < Version("0.2.3"):
                     logger.warning_once(
                         "FlashInfer version >= 0.2.3 required. "
                         "Falling back to default sampling implementation.")
