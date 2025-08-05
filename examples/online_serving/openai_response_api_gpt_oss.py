@@ -3,6 +3,7 @@
 """
 vllm serve /data/woosuk/os-mini-weights/pytorch-rc-20b --enforce-eager
 """
+
 import argparse
 import json
 import time
@@ -11,10 +12,7 @@ import requests
 from openai import BadRequestError, NotFoundError, OpenAI
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--model",
-                    type=str,
-                    required=False,
-                    choices=["gpt-4.1", "o4-mini"])
+parser.add_argument("--model", type=str, required=False, choices=["gpt-4.1", "o4-mini"])
 parser.add_argument("--port", type=int, required=False, default=8000)
 args = parser.parse_args()
 
@@ -60,22 +58,10 @@ def test_chat():
     response = client.responses.create(
         model=MODEL,
         input=[
-            {
-                "role": "system",
-                "content": "Respond in Korean."
-            },
-            {
-                "role": "user",
-                "content": "Hello!"
-            },
-            {
-                "role": "assistant",
-                "content": "Hello! How can I help you today?"
-            },
-            {
-                "role": "user",
-                "content": "What is 13 * 24? Explain your answer."
-            },
+            {"role": "system", "content": "Respond in Korean."},
+            {"role": "user", "content": "Hello!"},
+            {"role": "assistant", "content": "Hello! How can I help you today?"},
+            {"role": "user", "content": "What is 13 * 24? Explain your answer."},
         ],
     )
     print(response)
@@ -87,10 +73,7 @@ def test_chat_with_input_type():
         input=[
             {
                 "role": "user",
-                "content": [{
-                    "type": "input_text",
-                    "text": "What is 13*24?"
-                }],
+                "content": [{"type": "input_text", "text": "What is 13*24?"}],
             },
         ],
     )
@@ -101,14 +84,10 @@ def test_structured_output():
     response = client.responses.create(
         model=MODEL,
         input=[
-            {
-                "role": "system",
-                "content": "Extract the event information."
-            },
+            {"role": "system", "content": "Extract the event information."},
             {
                 "role": "user",
-                "content":
-                "Alice and Bob are going to a science fair on Friday.",
+                "content": "Alice and Bob are going to a science fair on Friday.",
             },
         ],
         text={
@@ -118,18 +97,9 @@ def test_structured_output():
                 "schema": {
                     "type": "object",
                     "properties": {
-                        "name": {
-                            "type": "string"
-                        },
-                        "date": {
-                            "type": "string"
-                        },
-                        "participants": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        },
+                        "name": {"type": "string"},
+                        "date": {"type": "string"},
+                        "participants": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["name", "date", "participants"],
                     "additionalProperties": False,
@@ -143,7 +113,6 @@ def test_structured_output():
 
 
 def test_structured_output_with_parse():
-
     from pydantic import BaseModel
 
     class CalendarEvent(BaseModel):
@@ -233,7 +202,7 @@ def test_streaming():
     promts = [
         "tell me a story about a cat in 20 words",
         "What is 13 * 24? Use python to calculate the result.",
-        "When did Jensen found NVIDIA? Search it and answer the year only."
+        "When did Jensen found NVIDIA? Search it and answer the year only.",
     ]
     for prompt in promts:
         print(f"\n{prompt}\n")
@@ -241,14 +210,10 @@ def test_streaming():
             model=MODEL,
             input=prompt,
             reasoning={"effort": "low"},
-            tools=[{
-                "type": "web_search_preview"
-            }, {
-                "type": "code_interpreter",
-                "container": {
-                    "type": "auto"
-                }
-            }],
+            tools=[
+                {"type": "web_search_preview"},
+                {"type": "code_interpreter", "container": {"type": "auto"}},
+            ],
             stream=True,
         )
 
@@ -266,8 +231,10 @@ def test_streaming():
                 print(f"{event.delta}", end="", flush=True)
             elif "response.code_interpreter_call_code.done" in event.type:
                 print(f"Code: {event.code}", end="", flush=True)
-            elif ("response.output_item.added" in event.type
-                  and event.item.type == "web_search_call"):
+            elif (
+                "response.output_item.added" in event.type
+                and event.item.type == "web_search_call"
+            ):
                 print(f"Web search: {event.item.action}", end="", flush=True)
             events.append(event)
 
@@ -278,9 +245,7 @@ def test_web_search():
     response = client.responses.create(
         model=MODEL,
         input="Who is the president of South Korea as of now?",
-        tools=[{
-            "type": "web_search_preview"
-        }],
+        tools=[{"type": "web_search_preview"}],
     )
     print(response)
 
@@ -289,22 +254,17 @@ def test_code_interpreter():
     response = client.responses.create(
         model=MODEL,
         input="Multiply 643258029438.6132 * 23516705917230.84279 using Python.",
-        tools=[{
-            "type": "code_interpreter",
-            "container": {
-                "type": "auto"
-            }
-        }],
+        tools=[{"type": "code_interpreter", "container": {"type": "auto"}}],
     )
     print(response)
 
 
 def get_weather(latitude, longitude):
     response = requests.get(
-        f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,wind_speed_10m&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m"
+        f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,wind_speed_10m&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m"  # noqa
     )
     data = response.json()
-    return data['current']['temperature_2m']
+    return data["current"]["temperature_2m"]
 
 
 def get_place_to_travel():
@@ -321,26 +281,23 @@ def call_function(name, args):
 
 
 def test_function_calling():
-    tools = [{
-        "type": "function",
-        "name": "get_weather",
-        "description":
-        "Get current temperature for provided coordinates in celsius.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "latitude": {
-                    "type": "number"
+    tools = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get current temperature for provided coordinates in celsius.",  # noqa
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "latitude": {"type": "number"},
+                    "longitude": {"type": "number"},
                 },
-                "longitude": {
-                    "type": "number"
-                }
+                "required": ["latitude", "longitude"],
+                "additionalProperties": False,
             },
-            "required": ["latitude", "longitude"],
-            "additionalProperties": False
-        },
-        "strict": True
-    }]
+            "strict": True,
+        }
+    ]
 
     response = client.responses.create(
         model=MODEL,
@@ -368,11 +325,13 @@ def test_function_calling():
 
     response_2 = client.responses.create(
         model=MODEL,
-        input=[{
-            "type": "function_call_output",
-            "call_id": tool_call.call_id,
-            "output": str(result)
-        }],
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": tool_call.call_id,
+                "output": str(result),
+            }
+        ],
         tools=tools,
         previous_response_id=response.id,
     )
@@ -401,42 +360,39 @@ def test_function_calling():
 
 
 def test_function_calling_multi_turn():
-    tools = [{
-        "type": "function",
-        "name": "get_place_to_travel",
-        "description": "Get a random place to travel",
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": False
-        },
-        "strict": True
-    }, {
-        "type": "function",
-        "name": "get_weather",
-        "description":
-        "Get current temperature for provided coordinates in celsius.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "latitude": {
-                    "type": "number"
-                },
-                "longitude": {
-                    "type": "number"
-                }
+    tools = [
+        {
+            "type": "function",
+            "name": "get_place_to_travel",
+            "description": "Get a random place to travel",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
             },
-            "required": ["latitude", "longitude"],
-            "additionalProperties": False
+            "strict": True,
         },
-        "strict": True
-    }]
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get current temperature for provided coordinates in celsius.",  # noqa
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "latitude": {"type": "number"},
+                    "longitude": {"type": "number"},
+                },
+                "required": ["latitude", "longitude"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+    ]
 
     response = client.responses.create(
         model=MODEL,
-        input=
-        "Help me plan a trip to a random place. And tell me the weather there.",
+        input="Help me plan a trip to a random place. And tell me the weather there.",
         tools=tools,
     )
     print("The first response:")
@@ -460,11 +416,13 @@ def test_function_calling_multi_turn():
 
     response_2 = client.responses.create(
         model=MODEL,
-        input=[{
-            "type": "function_call_output",
-            "call_id": tool_call.call_id,
-            "output": str(result)
-        }],
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": tool_call.call_id,
+                "output": str(result),
+            }
+        ],
         tools=tools,
         previous_response_id=response.id,
     )
@@ -488,11 +446,13 @@ def test_function_calling_multi_turn():
 
     response_3 = client.responses.create(
         model=MODEL,
-        input=[{
-            "type": "function_call_output",
-            "call_id": tool_call.call_id,
-            "output": str(result)
-        }],
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": tool_call.call_id,
+                "output": str(result),
+            }
+        ],
         tools=tools,
         previous_response_id=response_2.id,
     )
@@ -506,26 +466,23 @@ def test_function_calling_multi_turn():
 
 
 def test_function_calling_required():
-    tools = [{
-        "type": "function",
-        "name": "get_weather",
-        "description":
-        "Get current temperature for provided coordinates in celsius.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "latitude": {
-                    "type": "number"
+    tools = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get current temperature for provided coordinates in celsius.",  # noqa
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "latitude": {"type": "number"},
+                    "longitude": {"type": "number"},
                 },
-                "longitude": {
-                    "type": "number"
-                }
+                "required": ["latitude", "longitude"],
+                "additionalProperties": False,
             },
-            "required": ["latitude", "longitude"],
-            "additionalProperties": False
-        },
-        "strict": True
-    }]
+            "strict": True,
+        }
+    ]
     try:
         _response = client.responses.create(
             model=MODEL,
@@ -541,31 +498,27 @@ def test_function_calling_required():
 
 
 def test_function_calling_full_history():
-    tools = [{
-        "type": "function",
-        "name": "get_weather",
-        "description":
-        "Get current temperature for provided coordinates in celsius.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "latitude": {
-                    "type": "number"
+    tools = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get current temperature for provided coordinates in celsius.",  # noqa
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "latitude": {"type": "number"},
+                    "longitude": {"type": "number"},
                 },
-                "longitude": {
-                    "type": "number"
-                }
+                "required": ["latitude", "longitude"],
+                "additionalProperties": False,
             },
-            "required": ["latitude", "longitude"],
-            "additionalProperties": False
-        },
-        "strict": True
-    }]
+            "strict": True,
+        }
+    ]
 
-    input_messages = [{
-        "role": "user",
-        "content": "What's the weather like in Paris today?"
-    }]
+    input_messages = [
+        {"role": "user", "content": "What's the weather like in Paris today?"}
+    ]
 
     response = client.responses.create(
         model=MODEL,
@@ -586,13 +539,14 @@ def test_function_calling_full_history():
     result = call_function(name, args)
     print("tool call result: ", result, type(result))
 
-    input_messages.extend(
-        response.output)  # append model's function call message
-    input_messages.append({  # append result message
-        "type": "function_call_output",
-        "call_id": tool_call.call_id,
-        "output": str(result)
-    })
+    input_messages.extend(response.output)  # append model's function call message
+    input_messages.append(
+        {  # append result message
+            "type": "function_call_output",
+            "call_id": tool_call.call_id,
+            "output": str(result),
+        }
+    )
 
     print("input_messages: ", input_messages)
 
