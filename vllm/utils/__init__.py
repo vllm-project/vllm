@@ -3265,14 +3265,6 @@ def set_process_title(name: str,
 
 
 def print_logo():
-    from colorama import Style, init
-
-    init()
-
-    def rgb(r, g, b):
-        return f"\033[38;2;{r};{g};{b}m"
-
-    reset = "\033[0m"
 
     logo = """
              LL          LL          MMM       MMM 
@@ -3285,12 +3277,19 @@ vvvv VVVV    LL          LL          MM   MMM   MM
     VVVV     LLLLLLLLLL  LLLLLLLLL   M           M
 """
 
-    colored_logo = (
-        logo.replace("v", rgb(255, 187, 29) + "v" + reset)
-        .replace("V", rgb(256, 169, 255) + "V" + reset)
-    )
+    if sys.stdout.isatty():
 
-    print(colored_logo + Style.RESET_ALL)
+        def color256(index):
+            return f"\033[38;5;{index}m"
+
+        reset = "\033[0m"
+        colored_logo = (
+            logo.replace("v", color256(214) + "v" + reset) \
+            .replace("V", color256(33) + "V" + reset)
+        )
+        print(colored_logo)
+    else:
+        print(logo)
 
 
 def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
