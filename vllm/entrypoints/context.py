@@ -67,6 +67,7 @@ class HarmonyContext(ConversationContext):
             output_token_ids = output.outputs[0].token_ids
             output_msgs = parse_output_into_messages(output_token_ids)
         else:
+            # Tool output.
             output_msgs = output
         self.messages.extend(output_msgs)
 

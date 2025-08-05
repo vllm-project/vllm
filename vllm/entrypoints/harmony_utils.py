@@ -169,6 +169,18 @@ def parse_response_output(output: ResponseOutputItem) -> Message:
         raise ValueError(f"Unknown output type: {type(output)}")
 
 
+def parse_chat_input(chat_msg) -> Message:
+    role = chat_msg["role"]
+    content = chat_msg["content"]
+    if isinstance(content, str):
+        contents = [TextContent(text=content)]
+    else:
+        # TODO: Support refusal.
+        contents = [TextContent(text=c["text"]) for c in content]
+    msg = Message.from_role_and_contents(role, contents)
+    return msg
+
+
 def render_for_completion(messages: list[Message]) -> list[int]:
     conversation = Conversation.from_messages(messages)
     token_ids = get_encoding().render_conversation_for_completion(
