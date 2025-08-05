@@ -785,6 +785,7 @@ class CompletionRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     allowed_token_ids: Optional[list[int]] = None
     prompt_logprobs: Optional[int] = None
+    additional_heads: Optional[bool] = None
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
@@ -887,6 +888,13 @@ class CompletionRequest(OpenAIBaseModel):
         ("If set to True, chunkwise beam search will be used for the "
          "completion request. If the model does not support chunkwise beam search, it will raise 400"
          ))
+    additional_heads: Optional[bool] = Field(
+        default=None,
+         description=
+        ("If set to True, will run additional heads. "
+         "If the model does not implement compute_additional_head(), this input will be ignored, "
+         )       
+    )
     # doc: end-completion-extra-params
 
     # Default sampling parameters for completion requests
@@ -1004,7 +1012,7 @@ class CompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
-            additional_heads=self.use_chunkwise_beam_search,
+            additional_heads=self.use_chunkwise_beam_search or self.additional_heads,
             )
 
     def to_streaming_params(self, ) -> StreamingParams:
