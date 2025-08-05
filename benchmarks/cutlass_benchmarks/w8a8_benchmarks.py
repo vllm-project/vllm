@@ -329,7 +329,7 @@ Benchmark Cutlass GEMM.
     )
     parser.add_argument(
         "--kernels",
-        type=lambda s: s.split(','),
+        type=lambda s: [k.strip() for k in s.split(',') if k.strip()],
         default=None,
         help="Comma-separated list of the kernels to benchmark. If not set, runs all kernels.",
     )
