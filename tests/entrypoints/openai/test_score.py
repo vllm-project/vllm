@@ -221,6 +221,8 @@ class TestModel:
             assert score_data.keys() == invocation_data.keys()
             assert score_data["score"] == pytest.approx(
                 invocation_data["score"], rel=0.05)
+            # TODO: reset this tolerance to 0.01 once we find
+            # an alternative to flash_attn with bfloat16
 
     def test_activation(self, server: RemoteOpenAIServer, model: dict[str,
                                                                       Any]):

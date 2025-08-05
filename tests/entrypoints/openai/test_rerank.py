@@ -127,6 +127,8 @@ def test_invocations(server: RemoteOpenAIServer):
         assert rerank_result.keys() == invocations_result.keys()
         assert rerank_result["relevance_score"] == pytest.approx(
             invocations_result["relevance_score"], rel=0.05)
+        # TODO: reset this tolerance to 0.01 once we find
+        # an alternative to flash_attn with bfloat16
 
 
 @pytest.mark.asyncio
