@@ -1077,7 +1077,7 @@ class FusedMoE(torch.nn.Module):
                       return_success: bool = False) -> Optional[bool]:
         # if expert_id is None, then
         # all the experts are loaded at the same time
-        if not expert_id:
+        if not expert_id and self.quant_config.get_name() == "mxfp4":
             if "bias" in weight_name:
                 dim1 = loaded_weight.shape[1]
                 param.data[:, :dim1].copy_(loaded_weight)
