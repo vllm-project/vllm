@@ -335,6 +335,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else None)
 
         self.reorder_batch_threshold: Optional[int] = None
+        # Cache spec token ids and num rejected tokens from previous round,
+        # used when async scheduling and spec decoding are both enabled
+        self.cached_spec_token_ids = {}
+        self.cached_num_rejected_tokens = {}
 
     def _init_model_kwargs(self, num_tokens: int):
         model_kwargs = dict[str, Any]()
@@ -420,6 +424,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.encoder_cache.pop(req_id, None)
+            self.cached_spec_token_ids.pop(req_id, None)
+            self.cached_num_rejected_tokens.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -533,6 +539,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
+            if req_id in self.cached_num_rejected_tokens:
+                num_computed_tokens -= self.cached_num_rejected_tokens[req_id]
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_data.resumed_from_preemption[i]
 
@@ -593,8 +601,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch.num_tokens[req_index] = end_token_index
 
             # Add spec_token_ids to token_ids_cpu.
-            spec_token_ids = (
-                scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
+            if req_id in self.cached_spec_token_ids:
+                spec_token_ids = self.cached_spec_token_ids[req_id]
+            else:
+                spec_token_ids = (
+                    scheduler_output.scheduled_spec_decode_tokens.get(
+                        req_id, ()))
             if spec_token_ids:
                 num_spec_tokens = len(spec_token_ids)
                 start_index = self.input_batch.num_tokens_no_spec[req_index]
@@ -1765,6 +1777,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         self.eplb_step()
+
+        if self.speculative_config and self.scheduler_config.async_scheduling:
+            assert spec_token_ids
+            for idx, req_id in enumerate(self.input_batch.req_ids):
+                self.cached_spec_token_ids[req_id] = spec_token_ids[idx]
+                self.cached_num_rejected_tokens[req_id] = max_gen_len - len(
+                    valid_sampled_token_ids[idx])
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,

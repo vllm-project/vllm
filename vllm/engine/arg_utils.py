@@ -1198,13 +1198,6 @@ class EngineArgs:
                 raise ValueError("Async scheduling is not supported with "
                                  "pipeline-parallel-size > 1.")
 
-            # Currently, async scheduling does not support speculative decoding.
-            # TODO(woosuk): Support it.
-            if self.speculative_config is not None:
-                raise ValueError(
-                    "Currently, speculative decoding is not supported with "
-                    "async scheduling.")
-
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
