@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+from copy import copy
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from http import HTTPStatus
@@ -12,7 +13,8 @@ from fastapi import Request
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 import openai.types.responses as openai_responses_tyes
 from openai_harmony import Message as OpenAIMessage
-
+from openai.types.responses.response_function_tool_call import (
+    ResponseFunctionToolCall)
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
@@ -117,6 +119,17 @@ class OpenAIServingResponses(OpenAIServing):
             self.supports_browsing = self.browser_tool.enabled
             self.python_tool = HarmonyPythonTool()
             self.supports_code_interpreter = self.python_tool.enabled
+
+        # set up tool use
+        self.enable_auto_tools: bool = enable_auto_tools
+        if self.enable_auto_tools:
+            logger.info(
+                "\"auto\" tool choice has been enabled please note that while"
+                " the parallel_tool_calls client option is preset for "
+                "compatibility reasons, it will be ignored.")
+            if not self.use_harmony:
+                raise NotImplementedError("Auto tool choice is not supported "
+                                          "yet unless using Harmony")
 
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: This causes a memory leak since we never remove responses
@@ -242,6 +255,7 @@ class OpenAIServingResponses(OpenAIServing):
                     request,
                     sampling_params,
                     result_generator,
+                    context,
                     model_name,
                     tokenizer,
                     request_metadata,
@@ -261,7 +275,7 @@ class OpenAIServingResponses(OpenAIServing):
             raise NotImplementedError("Streaming responses are not supported")
 
         try:
-            return await self.responses_full_generator(
+            response = await self.responses_full_generator(
                 request,
                 sampling_params,
                 result_generator,
@@ -270,6 +284,7 @@ class OpenAIServingResponses(OpenAIServing):
                 tokenizer,
                 request_metadata,
             )
+            return response
         except Exception as e:
             return self.create_error_response(str(e))
 
@@ -295,6 +310,10 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         prev_response: Optional[ResponsesResponse],
     ):
+        if request.tool_choice != "auto":
+            raise NotImplementedError(
+                "Only 'auto' tool_choice is supported in "
+                "response API")
         messages = self._construct_input_messages_with_harmony(
             request, prev_response)
         prompt_token_ids = render_for_completion(messages)
@@ -424,7 +443,6 @@ class OpenAIServingResponses(OpenAIServing):
         output_items = []
         num_init_messages = context.num_init_messages
         for msg in context.messages[num_init_messages:]:
-            print(msg)
             output_items.extend(parse_output_message(msg))
         return output_items
 
@@ -488,29 +506,42 @@ class OpenAIServingResponses(OpenAIServing):
                 python_tool=self.python_tool,
             )
             messages.append(sys_msg)
-            dev_msg = get_developer_message(request.instructions)
+            dev_msg = get_developer_message(request.instructions,
+                                            request.tools)
             messages.append(dev_msg)
         else:
             # Continue the previous conversation.
             # FIXME(woosuk): Currently, request params like reasoning and
             # instructions are ignored.
             prev_msgs = self.msg_store[prev_response.id]
+            # Remove the previous chain-of-thoughts if there is a new "final"
+            # message.
+            if len(prev_msgs) > 0 and prev_msgs[-1].channel == "final":
+                prev_final_msg_idx = -1
+                for i in range(len(prev_msgs) - 2, -1, -1):
+                    if prev_msgs[i].channel == "final":
+                        prev_final_msg_idx = i
+                        break
+                recent_turn_msgs = prev_msgs[prev_final_msg_idx + 1:]
+                del prev_msgs[prev_final_msg_idx + 1:]
+                for msg in recent_turn_msgs:
+                    if msg.channel != "analysis":
+                        prev_msgs.append(msg)
             messages.extend(prev_msgs)
-
-            # Append the previous output.
-            for output_item in prev_response.output:
-                # NOTE: We skip the reasoning output of the previous response.
-                if isinstance(output_item, ResponseReasoningItem):
-                    continue
-                messages.append(parse_response_output(output_item))
-
         # Append the new input.
         # Reponses API supports simple text inputs without chat format.
         if isinstance(request.input, str):
             messages.append(get_user_message(request.input))
         else:
+            if prev_response is not None:
+                prev_outputs = copy(prev_response.output)
+            else:
+                prev_outputs = []
             for response_msg in request.input:
-                messages.append(parse_response_input(response_msg))
+                messages.append(
+                    parse_response_input(response_msg, prev_outputs))
+                if isinstance(response_msg, ResponseFunctionToolCall):
+                    prev_outputs.append(response_msg)
         return messages
 
     async def _run_background_request(
