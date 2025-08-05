@@ -1725,6 +1725,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         common_attn_metadata: CommonAttentionMetadata,
     ) -> list[list[int]]:
+        return [[77] if x else [] for x in sampled_token_ids]
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
@@ -1812,7 +1813,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()
-        # return [[x[-1]] if x else [] for x in sampled_token_ids]
         return spec_token_ids
 
     def propose_ngram_draft_token_ids(
