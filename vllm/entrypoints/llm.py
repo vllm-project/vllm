@@ -1189,6 +1189,8 @@ class LLM:
         /,
         *,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[Union[PoolingParams,
+                                       Sequence[PoolingParams]]] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[ClassificationRequestOutput]:
         """
@@ -1207,7 +1209,8 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-
+            pooling_params: The pooling parameters for pooling. If None, we
+                use the default pooling parameters.
         Returns:
             A list of `ClassificationRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
@@ -1220,6 +1223,7 @@ class LLM:
         items = self.encode(
             prompts,
             use_tqdm=use_tqdm,
+            pooling_params=pooling_params,
             lora_request=lora_request,
             pooling_task="classify",
         )
@@ -1272,6 +1276,7 @@ class LLM:
         text_2: list[Union[str, TextPrompt, TokensPrompt]],
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[ScoringRequestOutput]:
 
@@ -1280,6 +1285,7 @@ class LLM:
             truncate_prompt_tokens=truncate_prompt_tokens,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            pooling_params=pooling_params,
             pooling_task="embed",
         )
 
@@ -1306,6 +1312,7 @@ class LLM:
         data_2: Union[list[str], list[ScoreContentPartParam]],
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[ScoringRequestOutput]:
         model_config = self.llm_engine.model_config
@@ -1317,7 +1324,12 @@ class LLM:
         if len(data_1) == 1:
             data_1 = data_1 * len(data_2)
 
-        pooling_params = PoolingParams(task="score")
+        if pooling_params is None:
+            pooling_params = PoolingParams(task="score")
+
+        model_config = self.llm_engine.model_config
+        pooling_params.verify("score", model_config)
+
         tokenization_kwargs: dict[str, Any] = {}
 
         _validate_truncation_size(model_config.max_model_len,
@@ -1379,6 +1391,7 @@ class LLM:
         *,
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
@@ -1410,7 +1423,8 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-
+            pooling_params: The pooling parameters for pooling. If None, we
+                use the default pooling parameters.
         Returns:
             A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
@@ -1494,6 +1508,7 @@ class LLM:
                 data_2,  # type: ignore[arg-type]
                 truncate_prompt_tokens,
                 use_tqdm,
+                pooling_params,
                 lora_request)
         else:
             return self._embedding_score(
@@ -1502,6 +1517,7 @@ class LLM:
                 data_2,  # type: ignore[arg-type]
                 truncate_prompt_tokens,
                 use_tqdm,
+                pooling_params,
                 lora_request)
 
     def start_profile(self) -> None:
