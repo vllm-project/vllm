@@ -287,7 +287,6 @@ steps:
     - python3 offline_inference/vision_language_pooling.py --seed 0
     - python3 offline_inference/vision_language_multi_image.py --seed 0
     - VLLM_USE_V1=0 python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
-    - python3 offline_inference/encoder_decoder.py
     - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
     - python3 offline_inference/basic/classify.py
     - python3 offline_inference/basic/embed.py
@@ -489,7 +488,7 @@ steps:
   - vllm/
   - tests/encoder_decoder
   commands:
-    - pytest -v -s encoder_decoder
+  - echo TODO # TODO: bart is not yet supported in V1
 
 - label: OpenAI-Compatible Tool Use # 20 min
   mirror_hardwares: [amdexperimental]

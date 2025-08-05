@@ -3,6 +3,8 @@
 """
 Demonstrate prompting of text-to-text
 encoder/decoder models, specifically BART
+
+NOTE: This example is not yet supported in V1.
 """
 
 from vllm import LLM, SamplingParams
