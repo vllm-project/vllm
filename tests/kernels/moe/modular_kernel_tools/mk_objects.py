@@ -16,7 +16,8 @@ from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts, NaiveBatchedExperts)
-from vllm.model_executor.layers.fused_moe.layer import TritonExperts
+from vllm.model_executor.layers.fused_moe.layer import (FusedMoEMethodBase,
+                                                        TritonExperts)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
@@ -136,7 +137,7 @@ register_prepare_and_finalize(
     standard_format,
     common_float_types,
     blocked_quantization_support=True,
-    backend=None,  # naive?
+    backend=None,
 )
 
 register_experts(
@@ -201,7 +202,7 @@ if has_pplx():
         backend="pplx",
     )
 
-if False and has_flashinfer_cutlass_fused_moe():
+if has_flashinfer_cutlass_fused_moe():
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
         FlashInferExperts)
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
@@ -211,7 +212,7 @@ if False and has_flashinfer_cutlass_fused_moe():
         FlashInferCutlassMoEPrepareAndFinalize,
         standard_format,
         nv_fp4_types,
-        blocked_quantization_support=True,  # ?
+        blocked_quantization_support=True,
         backend=None,
     )
 
@@ -284,7 +285,7 @@ if cutlass_fp8_supported():
         supports_expert_map=False,
     )
 
-if False and cutlass_fp4_supported():
+if cutlass_fp4_supported():
     from vllm.model_executor.layers.fused_moe.cutlass_moe import (
         CutlassExpertsFp4)
     register_experts(
@@ -328,13 +329,31 @@ MK_QUANT_CONFIGS = [
     # block-quantized weights and per-tensor activations
 ]
 
-if False and (cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe()):
+if cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe():
     MK_QUANT_CONFIGS += [
         FusedMoEQuantConfig(quant_dtype="nvfp4",
                             per_out_ch_quant=False,
                             per_act_token_quant=False,
                             block_shape=None),
     ]
+
+
+def make_prepare_finalize(
+    prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
+    backend: Optional[str],
+    moe: FusedMoEConfig,
+) -> mk.FusedMoEPrepareAndFinalize:
+    if backend != "naive":
+        prepare_finalize = FusedMoEMethodBase._maybe_make_prepare_finalize(moe)
+        assert prepare_finalize is not None
+        return prepare_finalize
+    elif prepare_finalize_type == FlashInferCutlassMoEPrepareAndFinalize:
+        return FlashInferCutlassMoEPrepareAndFinalize(
+            use_dp=moe.moe_parallel_config.dp_size > 1,
+            a1_gscale=0,  #TBD
+        )
+    else:
+        return MoEPrepareAndFinalizeNoEP()
 
 
 def make_fused_experts(
@@ -415,7 +434,6 @@ def make_fused_experts(
             "g2_alphas": 0,  #TBD
             "a1_gscale": 0,  #TBD
             "a2_gscale": 0,  #TBD
-            "device": 0,  # TBD
             "max_experts_per_worker": num_experts,
             "out_dtype": moe.in_dtype,
             "per_act_token_quant": moe.per_act_token_quant,
@@ -433,7 +451,7 @@ def make_fused_experts(
             "a1_gscale": 0,  #TBD
             "a2_gscale": 0,  #TBD
             "out_dtype": moe.in_dtype,
-            "use_nvfp4_w4a4": True,
+            "quant_dtype": "nvfp4",
             "ep_rank": moe.ep_rank,
             "ep_size": moe.ep_size,
             "tp_rank": moe.tp_rank,

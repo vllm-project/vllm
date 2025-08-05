@@ -14,12 +14,10 @@ from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEParallelConfig, FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
-from vllm.model_executor.layers.fused_moe.layer import FusedMoEMethodBase
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP)
 from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
 
-from .mk_objects import expert_info, make_fused_experts, prepare_finalize_info
+from .mk_objects import (expert_info, make_fused_experts,
+                         make_prepare_finalize, prepare_finalize_info)
 from .parallel_utils import ProcessGroupInfo
 
 
@@ -184,10 +182,6 @@ class Config:
     def all2all_backend(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
         return info.backend
-
-    def needs_all2all(self):
-        info = prepare_finalize_info(self.prepare_finalize_type)
-        return info.backend is not None and info.backend != "naive"
 
     def is_valid(self):
         # Check prepare-finalize and fused-experts compatibility
@@ -446,12 +440,8 @@ def make_modular_kernel(config: Config,
     print(config.prepare_finalize_type)
 
     # make modular kernel
-    prepare_finalize = None
-    if config.needs_all2all():
-        prepare_finalize = FusedMoEMethodBase._maybe_make_prepare_finalize(moe)
-        assert prepare_finalize is not None
-    else:
-        prepare_finalize = MoEPrepareAndFinalizeNoEP()
+    prepare_finalize = make_prepare_finalize(config.prepare_finalize_type,
+                                             config.all2all_backend(), moe)
 
     fused_experts = make_fused_experts(config.fused_experts_type, moe,
                                        prepare_finalize.num_dispatchers())
