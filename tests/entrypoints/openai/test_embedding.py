@@ -8,6 +8,8 @@ import openai
 import pytest
 import pytest_asyncio
 import requests
+import torch
+import torch.nn.functional as F
 
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -33,8 +35,8 @@ def v1(run_with_both_engines):
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task",
-        "embed",
+        "--runner",
+        "pooling",
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         DTYPE,
@@ -369,3 +371,35 @@ async def test_invocations_conversation(server: RemoteOpenAIServer):
                                embeddings_1_lst=[invocation_data["embedding"]],
                                name_0="chat",
                                name_1="invocation")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_normalize(server: RemoteOpenAIServer, model_name: str):
+    input_text = ["The chef prepared a delicious meal."]
+
+    async def get_outputs(normalize):
+        request_args = {
+            "model": MODEL_NAME,
+            "input": input_text,
+            "encoding_format": "float",
+            "normalize": normalize
+        }
+
+        response = requests.post(server.url_for("v1/embeddings"),
+                                 json=request_args)
+        outputs = response.json()
+
+        return torch.tensor([x['embedding'] for x in outputs["data"]])
+
+    default = await get_outputs(normalize=None)
+    w_normal = await get_outputs(normalize=True)
+    wo_normal = await get_outputs(normalize=False)
+
+    assert torch.allclose(default, w_normal,
+                          atol=1e-2), "Default should use normal."
+    assert not torch.allclose(w_normal, wo_normal,
+                              atol=1e-2), "wo_normal should not use normal."
+    assert torch.allclose(
+        w_normal, F.normalize(wo_normal, p=2, dim=-1),
+        atol=1e-2), "w_normal should be close to normal(wo_normal)."

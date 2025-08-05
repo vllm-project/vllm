@@ -50,11 +50,12 @@ def decode_tokens(
     `skip_special_tokens=None` means to use the backend's default
     settings.
     """
+    decode_method = getattr(tokenizer, "_decode", tokenizer.decode)
     if skip_special_tokens is not None:
-        return tokenizer.decode(token_ids,
-                                skip_special_tokens=skip_special_tokens)
+        return decode_method(token_ids,
+                             skip_special_tokens=skip_special_tokens)
 
-    return tokenizer.decode(token_ids)
+    return decode_method(token_ids)
 
 
 def encode_tokens(
@@ -270,7 +271,7 @@ def get_tokenizer(
             }
             tokenizer.add_special_tokens(special_tokens_map)
 
-        # NOTE: We can remove this after https://github.com/THUDM/ChatGLM3/issues/1324
+        # NOTE: We can remove this after https://github.com/zai-org/ChatGLM3/issues/1324
         if type(tokenizer).__name__ in ("ChatGLMTokenizer",
                                         "ChatGLM4Tokenizer"):
             assert isinstance(tokenizer, PreTrainedTokenizer)
@@ -295,7 +296,7 @@ def cached_tokenizer_from_config(
     return cached_get_tokenizer(
         model_config.tokenizer,
         tokenizer_mode=model_config.tokenizer_mode,
-        tokenizer_revision=model_config.tokenizer_revision,
+        revision=model_config.tokenizer_revision,
         trust_remote_code=model_config.trust_remote_code,
         **kwargs,
     )

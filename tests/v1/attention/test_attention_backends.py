@@ -11,12 +11,13 @@ from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_vllm_config,
                                       get_attention_backend)
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
+                                              set_kv_cache_layout)
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
     _Backend.FLASH_ATTN_VLLM_V1, _Backend.FLASHINFER_VLLM_V1,
-    _Backend.FLEX_ATTENTION, _Backend.TRITON_ATTN_VLLM_V1
+    _Backend.FLEX_ATTENTION, _Backend.TRITON_ATTN_VLLM_V1, _Backend.TREE_ATTN
 ]
 
 # Remove flashinfer from the list if it's not available
@@ -197,7 +198,8 @@ class MockAttentionLayer:
 
 
 def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
-                          vllm_config, device: torch.device,
+                          layer_names: list[str], vllm_config,
+                          device: torch.device,
                           common_attn_metadata: CommonAttentionMetadata,
                           query: torch.Tensor, key: torch.Tensor,
                           value: torch.Tensor,
@@ -210,31 +212,33 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
     if backend == _Backend.FLASHINFER_VLLM_V1:
         import unittest.mock
 
-        from vllm.v1.attention.backends.flashinfer import PerLayerParameters
+        from vllm.v1.attention.backends.utils import PerLayerParameters
 
-        def mock_get_per_layer_parameters(vllm_config):
+        def mock_get_per_layer_parameters(vllm_config, layer_names, impl_cls):
             # Return mock parameters for a single layer
             head_size = vllm_config.model_config.get_head_size()
             return {
-                "mock_layer":
+                layer_name:
                 PerLayerParameters(
                     window_left=-1,  # No sliding window
                     logits_soft_cap=0.0,  # No soft cap
                     sm_scale=1.0 / (head_size**0.5)  # Standard scale
                 )
+                for layer_name in layer_names
             }
 
         with unittest.mock.patch(
                 'vllm.v1.attention.backends.flashinfer.get_per_layer_parameters',
                 mock_get_per_layer_parameters):
-            builder = builder_cls(kv_cache_spec, vllm_config, device)
+            builder = builder_cls(kv_cache_spec, layer_names, vllm_config,
+                                  device)
             attn_metadata = builder.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
             )
     else:
         # Build metadata
-        builder = builder_cls(kv_cache_spec, vllm_config, device)
+        builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
         attn_metadata = builder.build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
@@ -297,7 +301,8 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
     """
     batch_spec = BATCH_SPECS[batch_spec_name]
-    vllm_config = create_vllm_config(model_name=model)
+    vllm_config = create_vllm_config(model_name=model,
+                                     max_model_len=max(batch_spec.seq_lens))
     device = torch.device("cuda:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
@@ -419,9 +424,14 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         if backend_name == _Backend.FLASHINFER_VLLM_V1:
             kv_cache_for_backend = kv_cache.transpose(0, 1)
 
+            # For FlashInfer default to HND layout and
+            kv_cache_for_backend = kv_cache_for_backend.transpose(
+                2, 3).contiguous().transpose(2, 3)
+            set_kv_cache_layout("HND")
+
         backend_output = run_attention_backend(backend_name, kv_cache_spec,
-                                               vllm_config, device,
-                                               common_attn_metadata,
+                                               ["placeholder"], vllm_config,
+                                               device, common_attn_metadata,
                                                query_vllm, key_vllm,
                                                value_vllm,
                                                kv_cache_for_backend)
