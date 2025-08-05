@@ -43,8 +43,9 @@ class LlavaNextImagePixelInputs(TensorSchema):
     in which case the data is passed as a list instead of a batched tensor.
     """
     type: Literal["pixel_values"] = "pixel_values"
-    pixel_values: Annotated[Union[torch.Tensor, list[torch.Tensor]],
-                            TensorShape("bn", "np", 3, "h", "w")]
+    pixel_values: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "np", 3, "h", "w", dynamic_dims={"np"})]
 
     image_sizes: Annotated[Optional[torch.Tensor], TensorShape("bn", 2)]
     # This should be in `(height, width)` format.
