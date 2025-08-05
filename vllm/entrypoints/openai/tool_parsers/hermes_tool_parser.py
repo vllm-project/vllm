@@ -369,6 +369,7 @@ class Hermes2ProToolParser(ToolParser):
                 if cur_arguments_json[-2] in ('"', "'"):
                     # last argument is a string,
                     #   so remove the closing quote and brace.
+                    #   for example, cur_arguments_json = {"unit": "f"}
                     stripped_cur_arguments_json = cur_arguments_json[:-2]
                 else:
                     # last argument is not a string,
