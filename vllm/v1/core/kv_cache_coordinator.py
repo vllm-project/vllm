@@ -25,13 +25,16 @@ class KVCacheCoordinator(ABC):
         enable_caching: bool,
         caching_hash_fn: Callable,
         enable_kv_cache_events: bool,
+        enable_wa_policy: bool,
+        wa_offline_param_path: Optional[str],
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
 
         self.block_pool = BlockPool(kv_cache_config.num_blocks, enable_caching,
-                                    enable_kv_cache_events)
+                                    enable_kv_cache_events, enable_wa_policy,
+                                    wa_offline_param_path)
 
         # Needs special handling for find_longest_cache_hit if eagle is enabled
         self.use_eagle = use_eagle
@@ -81,8 +84,8 @@ class KVCacheCoordinator(ABC):
             manager.save_new_computed_blocks(request_id,
                                              new_computed_blocks[i])
 
-    def allocate_new_blocks(self, request_id: str,
-                            num_tokens: int) -> tuple[list[KVCacheBlock], ...]:
+    def allocate_new_blocks(self, request_id: str, num_tokens: int,
+                            type_info: str) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens` 
         token slots.
@@ -91,12 +94,13 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
             num_tokens: The total number of tokens that need a slot (including 
                 tokens that are already allocated).
+            type_info: The request type corresponding to these blocks
 
         Returns:
             The new allocated blocks.
         """
         return tuple(
-            manager.allocate_new_blocks(request_id, num_tokens)
+            manager.allocate_new_blocks(request_id, num_tokens, type_info)
             for manager in self.single_type_managers)
 
     def cache_blocks(self, request: Request, block_hashes: list[BlockHash],
@@ -186,8 +190,14 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
                  use_eagle: bool, caching_hash_fn: Callable,
                  enable_kv_cache_events: bool):
-        super().__init__(kv_cache_config, max_model_len, use_eagle, False,
-                         caching_hash_fn, enable_kv_cache_events)
+        super().__init__(kv_cache_config,
+                         max_model_len,
+                         use_eagle,
+                         False,
+                         caching_hash_fn,
+                         enable_kv_cache_events,
+                         enable_wa_policy=False,
+                         wa_offline_param_path=None)
         self.num_single_type_manager = len(self.single_type_managers)
 
     def get_num_common_prefix_blocks(self, request_id: str,
@@ -213,10 +223,12 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
 
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
                  use_eagle: bool, enable_caching: bool,
-                 caching_hash_fn: Callable, enable_kv_cache_events: bool):
+                 caching_hash_fn: Callable, enable_kv_cache_events: bool,
+                 enable_wa_policy: bool, wa_offline_param_path: Optional[str]):
         super().__init__(kv_cache_config, max_model_len, use_eagle,
                          enable_caching, caching_hash_fn,
-                         enable_kv_cache_events)
+                         enable_kv_cache_events, enable_wa_policy,
+                         wa_offline_param_path)
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[
             0].kv_cache_spec
         self.block_size = self.kv_cache_spec.block_size
@@ -250,10 +262,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
                  use_eagle: bool, enable_caching: bool,
-                 caching_hash_fn: Callable, enable_kv_cache_events: bool):
+                 caching_hash_fn: Callable, enable_kv_cache_events: bool,
+                 enable_wa_policy: bool, wa_offline_param_path: Optional[str]):
         super().__init__(kv_cache_config, max_model_len, use_eagle,
                          enable_caching, caching_hash_fn,
-                         enable_kv_cache_events)
+                         enable_kv_cache_events, enable_wa_policy,
+                         wa_offline_param_path)
         self.verify_and_split_kv_cache_groups()
 
     def verify_and_split_kv_cache_groups(self) -> None:
@@ -385,9 +399,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
 
 def get_kv_cache_coordinator(
-        kv_cache_config: KVCacheConfig, max_model_len: int, use_eagle: bool,
-        enable_caching: bool, caching_hash_fn: Callable,
-        enable_kv_cache_events: bool) -> KVCacheCoordinator:
+        kv_cache_config: KVCacheConfig,
+        max_model_len: int,
+        use_eagle: bool,
+        enable_caching: bool,
+        caching_hash_fn: Callable,
+        enable_kv_cache_events: bool,
+        enable_wa_policy: bool,
+        wa_offline_param_path: Optional[str] = "") -> KVCacheCoordinator:
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(kv_cache_config, max_model_len,
                                                use_eagle, caching_hash_fn,
@@ -396,7 +415,10 @@ def get_kv_cache_coordinator(
         return UnitaryKVCacheCoordinator(kv_cache_config, max_model_len,
                                          use_eagle, enable_caching,
                                          caching_hash_fn,
-                                         enable_kv_cache_events)
+                                         enable_kv_cache_events,
+                                         enable_wa_policy,
+                                         wa_offline_param_path)
     return HybridKVCacheCoordinator(kv_cache_config, max_model_len, use_eagle,
                                     enable_caching, caching_hash_fn,
-                                    enable_kv_cache_events)
+                                    enable_kv_cache_events, enable_wa_policy,
+                                    wa_offline_param_path)

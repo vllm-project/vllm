@@ -450,6 +450,8 @@ class EngineArgs:
 
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
+    enable_wa_policy: bool = CacheConfig.enable_wa_policy
+    wa_offline_param_path: str = CacheConfig.wa_offline_param_path
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1098,7 +1100,8 @@ class EngineArgs:
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
-        )
+            enable_wa_policy=self.enable_wa_policy,
+            wa_offline_param_path=self.wa_offline_param_path)
 
         ray_runtime_env = None
         if is_ray_initialized():

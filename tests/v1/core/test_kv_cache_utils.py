@@ -14,10 +14,11 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 # yapf: disable
 from vllm.v1.core.kv_cache_utils import (
     FreeKVCacheBlockQueue, KVCacheBlock, PrefixCachingMetrics,
-    estimate_max_model_len, generate_block_hash_extra_keys,
-    get_kv_cache_config, get_max_concurrency_for_kv_cache_config,
-    hash_block_tokens, hash_request_tokens, init_none_hash,
-    is_kv_cache_type_uniform, unify_kv_cache_configs)
+    WorkloadAwareFreeKVCacheBlockQueue, estimate_max_model_len,
+    generate_block_hash_extra_keys, get_kv_cache_config,
+    get_max_concurrency_for_kv_cache_config, hash_block_tokens,
+    hash_request_tokens, init_none_hash, is_kv_cache_type_uniform,
+    unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
                                         SlidingWindowSpec)
@@ -136,6 +137,15 @@ def test_free_kv_cache_block_queue_initialization():
     assert queue.fake_free_list_tail.prev_free_block is block
 
 
+def test_wa_free_kv_cache_block_queue_initialization():
+    block = KVCacheBlock(block_id=0)
+    queue = WorkloadAwareFreeKVCacheBlockQueue([block], "TEST")
+    assert queue.num_free_blocks == 1
+    assert queue.block_to_workload[0] == "default"
+    assert queue.workload_to_head_tail["default"][0] == block
+    assert queue.workload_to_head_tail["default"][1] == block
+
+
 def test_free_kv_cache_block_queue_operations():
     # Create a list of KVCacheBlock objects
     blocks = [KVCacheBlock(block_id=i) for i in range(5)]
@@ -182,6 +192,70 @@ def test_free_kv_cache_block_queue_operations():
     with pytest.raises(ValueError) as e:
         queue.popleft()
     assert str(e.value) == "No free blocks available"
+
+
+def test_wa_free_kv_cache_block_queue_operations():
+    # Create a list of KVCacheBlock objects
+    workload_list = ["text_1", "text_2", "text_2", "image_1", "search_1"]
+    blocks = [KVCacheBlock(block_id=i) for i in range(5)]
+
+    # Create a FreeKVCacheBlockQueue with these blocks
+    queue = WorkloadAwareFreeKVCacheBlockQueue(blocks, "TEST")
+
+    # Check initial state
+    assert queue.num_free_blocks == 5
+    assert queue.workload_to_head_tail["default"][0] == blocks[0]
+    assert queue.workload_to_head_tail["default"][1] == blocks[4]
+
+    # Pop the first block
+    block1 = queue.popleft()
+    assert block1 == blocks[0]
+    assert queue.num_free_blocks == 4
+    assert queue.workload_to_head_tail["default"][0] == blocks[1]
+    assert queue.workload_to_head_tail["default"][1] == blocks[4]
+
+    # 1->2->3->4
+    # Remove a block from the middle
+    block_to_remove = blocks[2]
+    queue.remove(block_to_remove)
+    assert queue.num_free_blocks == 3
+    assert blocks[1].next_free_block == blocks[3]
+    assert blocks[3].prev_free_block == blocks[1]
+
+    # default: 1->3->4
+    # Append a block and split the queue text_1
+    workload = workload_list[block_to_remove.block_id]
+    block_to_remove.type_info = workload
+    queue.append(block_to_remove)
+    assert queue.num_free_blocks == 4
+    assert workload in queue.workload_to_head_tail
+    assert queue.workload_to_head_tail[workload][0] == block_to_remove
+    assert queue.workload_to_head_tail[workload][1] == block_to_remove
+    assert block_to_remove.prev_free_block is None
+    assert block_to_remove.next_free_block is None
+
+    # default 1->3->4
+    # text_2 2
+    # Pop the first block and append
+    block2 = queue.popleft()
+    assert block2.block_id == 1
+    workload = workload_list[block2.block_id]
+    block2.type_info = workload
+    queue.append(block2)
+    assert queue.num_free_blocks == 4
+    assert workload in queue.workload_to_head_tail
+    assert queue.workload_to_head_tail[workload][1] == block2
+    assert block2.next_free_block is None
+    # check the double-link status
+    assert block2.prev_free_block == queue.workload_to_head_tail[workload][0]
+    assert queue.workload_to_head_tail[workload][0].next_free_block == block2
+    # default: 3->4
+    # text_2: 2->1
+
+    # Pop blocks until empty
+    for _ in range(4):
+        queue.popleft()
+    assert queue.num_free_blocks == 0
 
 
 def test_free_kv_cache_block_queue_append_n():

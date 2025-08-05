@@ -69,6 +69,7 @@ class EngineCoreRequest(
     # a wave finished notification is received.
     current_wave: int = 0
     priority: int = 0
+    type_info: str = ""
 
 
 class EngineCoreEventType(enum.IntEnum):

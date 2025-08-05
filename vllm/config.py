@@ -1847,6 +1847,12 @@ class CacheConfig:
     necessary for implementating this optimization in some models (e.g. Gemma3n)
     """
 
+    enable_wa_policy: bool = False
+    """This feature enable workload-aware policy for KVcache pool
+    """
+    wa_offline_param_path: Optional[str] = ""
+    """The offline parameter used by workload-aware policy"""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -1893,6 +1899,10 @@ class CacheConfig:
                 "--kv-sharing-fast-prefill is currently work in progress "
                 "and not functional yet (i.e. no prefill savings)")
 
+        if not self.enable_prefix_caching and self.enable_wa_policy:
+            raise ValueError(
+                "workload-aware policy must be enabled with prefix caching")
+
         return self
 
     def _verify_cache_dtype(self) -> None:
@@ -1922,6 +1932,14 @@ class CacheConfig:
                 "Unknown prefix caching hash algorithm: "
                 f"{self.prefix_caching_hash_algo}. Must be one of "
                 f"{get_args(PrefixCachingHashAlgo)}.")
+
+        if (self.enable_wa_policy and self.wa_offline_param_path == ""):
+            raise ValueError(
+                "Wa offline param must be specified when wa policy is enabled")
+
+        if (self.wa_offline_param_path != "" and not self.enable_wa_policy):
+            raise ValueError(
+                "Wa offline param must be specified when wa policy is enabled")
 
     def verify_with_parallel_config(
         self,

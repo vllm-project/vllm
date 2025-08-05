@@ -226,17 +226,17 @@ class AsyncLLM(EngineClient):
         return await self.engine_core.get_supported_tasks_async()
 
     async def add_request(
-        self,
-        request_id: str,
-        prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
-        arrival_time: Optional[float] = None,
-        lora_request: Optional[LoRARequest] = None,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        priority: int = 0,
-        data_parallel_rank: Optional[int] = None,
-    ) -> RequestOutputCollector:
+            self,
+            request_id: str,
+            prompt: PromptType,
+            params: Union[SamplingParams, PoolingParams],
+            arrival_time: Optional[float] = None,
+            lora_request: Optional[LoRARequest] = None,
+            tokenization_kwargs: Optional[dict[str, Any]] = None,
+            trace_headers: Optional[Mapping[str, str]] = None,
+            priority: int = 0,
+            data_parallel_rank: Optional[int] = None,
+            type_info: Optional[str] = "") -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
         if self.errored:
@@ -250,7 +250,8 @@ class AsyncLLM(EngineClient):
         # Convert Input --> Request.
         prompt_str, request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, priority, data_parallel_rank)
+            tokenization_kwargs, trace_headers, priority, type_info,
+            data_parallel_rank)
 
         if is_pooling or params.n == 1:
             await self._add_request(request, prompt_str, None, 0, queue)
