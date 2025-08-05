@@ -1,0 +1,12 @@
+model_name: "/mnt/weka/llm/google/gemma-3-4b-it"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.700
+  - name: "exact_match,flexible-extract"
+    value: 0.700
+limit: 256
+num_fewshot: 8
+dtype: "bfloat16"
+trust_remote_code: True

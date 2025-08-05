@@ -1,6 +1,7 @@
 # vLLM for Gaudi – Quick Start
 
-This guide explains how to quickly run vLLM with multi-model support on Gaudi using a prebuilt Docker image.
+This guide explains how to quickly run vLLM on Gaudi using a prebuilt Docker image and Docker Compose, with options for custom parameters and benchmarking.
+Supports a wide range of validated models including LLaMa, Mistral, and Qwen families, with flexible configuration via environment variables or YAML files.
 
 ## Supported Models
 
@@ -22,116 +23,160 @@ This guide explains how to quickly run vLLM with multi-model support on Gaudi us
 | Qwen/Qwen2.5-7B-Instruct                  | 1 |
 | meta-llama/Llama-3.2-11B-Vision-Instruct  | 1 |
 | meta-llama/Llama-3.2-90B-Vision-Instruct  | 4 |
+| ibm-granite/granite-8b-code-instruct-4k   | 1 |
+| ibm-granite/granite-20b-code-instruct-8k  | 1 |
 
 ## How to Use
 
-1. **Use the prebuilt vLLM container**
+### 1. Run the server using Docker Compose
 
-   You do **not** need to build the Docker image yourself.  
-   Use the ready-to-use image from an image registry:
+   The recommended and easiest way to start the vLLM server is with Docker Compose. At a minimum, set the following environment variables:
+
+   - `MODEL` - Select a model from the table above.
+   - `HF_TOKEN` - Your Hugging Face token (generate one at <https://huggingface.co>).
+   - `DOCKER_IMAGE` - The vLLM Docker image URL from Gaudi or local repository.
+
+   **Example usage:**
 
    ```bash
-   docker pull <path to a docker image>
+   cd vllm-fork/.cd/
+   MODEL="Qwen/Qwen2.5-14B-Instruct" \
+   HF_TOKEN="<your huggingface token>" \
+   DOCKER_IMAGE="<docker image url>" \
+   docker compose up
    ```
 
-2. **Set required environment variables**
+### 2. Running the Server with a Benchmark
 
-   - `export MODEL=` (choose from the table above)
-   - `export HF_TOKEN=` (your huggingface token, can be generated from https://huggingface.co)
+   To easily initiate benchmark dedicated for a specific model using default parameters, use the `--profile benchmark up` option with Docker Compose:
 
-   Tips:
-   - Model files can be large. For best performance, use an external disk for the Huggingface cache and set `HF_HOME` accordingly.  
-   Example: `-e HF_HOME=/mnt/huggingface -v /mnt/huggingface:/mnt`\
-   - For a quick startup and to skip the initial model warmup (useful for development testing), you can add:  
-   `-e VLLM_SKIP_WARMUP=true`
+   ```bash
+   cd vllm-fork/.cd/
+   MODEL="Qwen/Qwen2.5-14B-Instruct" \
+   HF_TOKEN="<your huggingface token>" \
+   DOCKER_IMAGE="<docker image url>" \
+   docker compose --profile benchmark up
+   ```
 
-3. **Run the vLLM server**
+   This launches the vLLM server and runs the benchmark suite automatically.
+
+### 3. Run the server using Docker Compose with custom parameters
+
+   To override default settings, you can provide additional parameters when starting the server. This is a more advanced approach:
+
+   - `PT_HPU_LAZY_MODE` - Enables lazy execution mode for HPU (Habana Processing Unit), which may improve performance by batching operations.
+   - `VLLM_SKIP_WARMUP` - If enabled, skips the model warmup phase, which can reduce startup time but may affect initial performance.
+   - `MAX_MODEL_LEN` - Specifies the maximum sequence length the model can handle.
+   - `MAX_NUM_SEQS` - Sets the maximum number of sequences that can be processed simultaneously.
+   - `TENSOR_PARALLEL_SIZE` - Defines the number of parallel tensor partitions.
+   - `VLLM_EXPONENTIAL_BUCKETING` - Controls enabling/disabling of exponential bucketing warmup strategy.
+   - `VLLM_DECODE_BLOCK_BUCKET_STEP` - Sets the step size for allocating decode blocks during inference, affecting memory allocation granularity.
+   - `VLLM_DECODE_BS_BUCKET_STEP` - Determines the batch size step for decode operations, influencing how batches are grouped and processed.
+   - `VLLM_PROMPT_BS_BUCKET_STEP` - Sets the batch size step for prompt processing, impacting how prompt batches are handled.
+   - `VLLM_PROMPT_SEQ_BUCKET_STEP` - Controls the step size for prompt sequence allocation, affecting how sequences are bucketed for processing.
+
+   **Example usage:**
+
+   ```bash
+   cd vllm-fork/.cd/
+   MODEL="Qwen/Qwen2.5-14B-Instruct" \
+   HF_TOKEN="<your huggingface token>" \
+   DOCKER_IMAGE="<docker image url>" \
+   TENSOR_PARALLEL_SIZE=1 \
+   MAX_MODEL_LEN=2048 \
+   docker compose up
+   ```
+
+### 4. Running the Server and Benchmark with Custom Parameters
+
+   You can customize benchmark parameters using:
+
+   - `INPUT_TOK` – Number of input tokens per prompt.
+   - `OUTPUT_TOK` – Number of output tokens to generate per prompt.
+   - `CON_REQ` – Number of concurrent requests to send during benchmarking.
+   - `NUM_PROMPTS` – Total number of prompts to use in the benchmark.
+
+   **Example usage:**
+
+   ```bash
+   cd vllm-fork/.cd/
+   MODEL="Qwen/Qwen2.5-14B-Instruct" \
+   HF_TOKEN="<your huggingface token>" \
+   DOCKER_IMAGE="<docker image url>" \
+   INPUT_TOK=128 \
+   OUTPUT_TOK=128 \
+   CON_REQ=16 \
+   NUM_PROMPTS=64 \
+   docker compose --profile benchmark up
+   ```
+
+   This will launch the vLLM server and run the benchmark suite using your specified parameters.
+
+### 5. Running the Server and Benchmark, both with Custom Parameters
+
+   You can launch the vLLM server and benchmark together, specifying any combination of optional parameters for both the server and the benchmark. Set the desired environment variables before running Docker Compose.
+
+   **Example usage:**
+
+   ```bash
+   cd vllm-fork/.cd/
+   MODEL="Qwen/Qwen2.5-14B-Instruct" \
+   HF_TOKEN="<your huggingface token>" \
+   DOCKER_IMAGE="<docker image url>" \
+   VTENSOR_PARALLEL_SIZE=1 \
+   MAX_MODEL_LEN=2048 \
+   INPUT_TOK=128 \
+   OUTPUT_TOK=128 \
+   CON_REQ=16 \
+   NUM_PROMPTS=64 \
+   docker compose --profile benchmark up
+   ```
+
+   This command will start the vLLM server and run the benchmark suite using your specified custom parameters.
+
+### 6. Running the Server and Benchmark Using Configuration Files
+
+   You can also configure the server and benchmark by specifying parameters in configuration files. To do this, set the following environment variables:
+
+   - `VLLM_SERVER_CONFIG_FILE` – Path to the server configuration file inside the Docker container.
+   - `VLLM_SERVER_CONFIG_NAME` – Name of the server configuration section.
+   - `VLLM_BENCHMARK_CONFIG_FILE` – Path to the benchmark configuration file inside the Docker container.
+   - `VLLM_BENCHMARK_CONFIG_NAME` – Name of the benchmark configuration section.
+
+   **Example:**
+
+   ```bash
+   HF_TOKEN=<your huggingface token> \
+   VLLM_SERVER_CONFIG_FILE=server_configurations/server_text.yaml \
+   VLLM_SERVER_CONFIG_NAME=llama31_8b_instruct \
+   VLLM_BENCHMARK_CONFIG_FILE=benchmark_configurations/benchmark_text.yaml \
+   VLLM_BENCHMARK_CONFIG_NAME=llama31_8b_instruct \
+   docker compose --profile benchmark up
+   ```
+
+   > [!NOTE]
+   > When using configuration files, you do not need to set the `MODEL` environment variable, as the model name is specified within the configuration file. However, you must still provide your `HF_TOKEN`.
+
+### 7. Running the Server Directly with Docker
+
+   For full control, you can run the server using the `docker run` command. This approach allows you to specify any native Docker parameters as needed.
+
+   **Example:**
 
    ```bash
    docker run -it --rm \
      -e MODEL=$MODEL \
-     -e http_proxy=$http_proxy -e https_proxy=$https_proxy -e no_proxy=$no_proxy \
+     -e HF_TOKEN=$HF_TOKEN \
+     -e http_proxy=$http_proxy \
+     -e https_proxy=$https_proxy \
+     -e no_proxy=$no_proxy \
      --cap-add=sys_nice \
      --ipc=host \
      --runtime=habana \
-     -e HF_TOKEN=$HF_TOKEN \
      -e HABANA_VISIBLE_DEVICES=all \
      -p 8000:8000 \
      --name vllm-server \
      <docker image name>
    ```
 
-4. **(Optional) Test the server**
-
-   In a separate terminal:
-
-   ```bash
-   MODEL= # choose from the table above
-   target=localhost
-   curl_query="What is DeepLearning?"
-   payload="{ \"model\": \"${MODEL}\", \"prompt\": \"${curl_query}\", \"max_tokens\": 128, \"temperature\": 0 }"
-   curl -s --noproxy '*' http://${target}:8000/v1/completions -H 'Content-Type: application/json' -d "$payload"
-   ```
-
-5. **Customizing server parameters**
-
-   You can override defaults with additional `-e` variables, for example:
-
-   ```bash
-   docker run -it --rm \
-     -e MODEL=$MODEL \
-     -e TENSOR_PARALLEL_SIZE=8 \
-     -e MAX_MODEL_LEN=8192 \
-     -e HABANA_VISIBLE_DEVICES=all \
-     -e HF_TOKEN=$HF_TOKEN \
-     -e http_proxy=$http_proxy -e https_proxy=$https_proxy -e no_proxy=$no_proxy \
-     --runtime=habana \
-     --cap-add=sys_nice \
-     --ipc=host \
-     -p 8000:8000 \
-     --name vllm-server \
-     <docker image name>
-   ```
-
-6. **Running multiple instances**
-
-   Each instance should have unique values for `HABANA_VISIBLE_DEVICES`, host port, and container name.  
-   See [docs.habana.ai - Multiple Tenants](https://docs.habana.ai/en/latest/Orchestration/Multiple_Tenants_on_HPU/Multiple_Dockers_each_with_Single_Workload.html) for details.
-
-   Example for two instances:
-
-   ```bash
-   # Instance 1
-   docker run -it --rm \
-     -e MODEL=$MODEL \
-     -e TENSOR_PARALLEL_SIZE=4 \
-     -e HABANA_VISIBLE_DEVICES=0,1,2,3 \
-     -e MAX_MODEL_LEN=8192 \
-     -e http_proxy=$http_proxy -e https_proxy=$https_proxy -e no_proxy=$no_proxy \
-     --runtime=habana \
-     --cap-add=sys_nice \
-     --ipc=host \
-     -p 8000:8000 \
-     --name vllm-server1 \
-     <docker image name>
-
-   # Instance 2 (in another terminal)
-   docker run -it --rm \
-     -e MODEL=$MODEL \
-     -e TENSOR_PARALLEL_SIZE=4 \
-     -e HABANA_VISIBLE_DEVICES=4,5,6,7 \
-     -e MAX_MODEL_LEN=8192 \
-     -e http_proxy=$http_proxy -e https_proxy=$https_proxy -e no_proxy=$no_proxy \
-     --runtime=habana \
-     --cap-add=sys_nice \
-     --ipc=host \
-     -p 9222:8000 \
-     --name vllm-server2 \
-     <docker image name>
-   ```
-
-7. **Viewing logs**
-
-   ```bash
-   docker logs -f vllm-server
-   ```
+   This method gives you full flexibility over Docker runtime options.

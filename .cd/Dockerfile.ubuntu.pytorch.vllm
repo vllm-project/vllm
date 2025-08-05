@@ -30,18 +30,17 @@ RUN mkdir -p $VLLM_PATH && \
 
 # Install vllm-fork inside the container
 ENV VLLM_TARGET_DEVICE=hpu
-RUN pip install -v -e $VLLM_PATH
-RUN pip install -v -e $VLLM_PATH/tests/vllm_test_utils
-
-# Install additional Python packages
-RUN pip install datasets && \
-    pip install pandas
+RUN pip install -v -r $VLLM_PATH/requirements-hpu.txt
+RUN pip install -v -e $VLLM_PATH --no-build-isolation
+RUN pip install -v -e $VLLM_PATH/tests/vllm_test_utils --no-build-isolation
 
 # Copy utility scripts and configuration
-RUN mkdir -p /root/scripts/settings/
-COPY entrypoint.py vllm_autocalc.py vllm_autocalc_rules.py /root/scripts/
-COPY settings/settings_vllm.csv settings/defaults.yaml settings/varlist_conf.yaml settings/template_vllm_server.sh /root/scripts/settings/
+RUN mkdir -p /root/scripts/
+COPY templates /root/scripts/templates/
+COPY entrypoints /root/scripts/entrypoints/
+COPY server /root/scripts/server/
+COPY benchmark /root/scripts/benchmark/
 WORKDIR /root/scripts
 
 # Set entrypoint script
-ENTRYPOINT ["python3", "/root/scripts/entrypoint.py"]
+ENTRYPOINT ["python3", "-m", "entrypoints.entrypoint_main"]

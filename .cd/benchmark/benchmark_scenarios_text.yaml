@@ -1,0 +1,50 @@
+deepSeek-R1-Distill-Llama-70B:
+  MODEL: deepseek-ai/DeepSeek-R1-Distill-Llama-70B
+
+llama31_8b_instruct:
+  MODEL: meta-llama/Llama-3.1-8B-Instruct
+
+llama31_70b_instruct:
+  MODEL: meta-llama/Llama-3.1-70B-Instruct
+
+llama31_405b_instruct:
+  MODEL: meta-llama/Llama-3.1-405B-Instruct
+
+llama32_1b_instruct:
+  MODEL: meta-llama/Llama-3.2-1B-Instruct
+
+llama32_3b_instruct:
+  MODEL: meta-llama/Llama-3.2-3B-Instruct
+
+llama33_70b_instruct:
+  MODEL: meta-llama/Llama-3.3-70B-Instruct
+
+mistral_7b_instruct_v02:
+  MODEL: mistralai/Mistral-7B-Instruct-v0.2
+
+mixtral_8x22b_instruct_v01:
+  MODEL: mistralai/Mixtral-8x22B-Instruct-v0.1
+
+mixtral_8x7b_instruct_v01:
+  MODEL: mistralai/Mixtral-8x7B-Instruct-v0.1
+
+qwen25_14b_instruct:
+  MODEL: Qwen/Qwen2.5-14B-Instruct
+
+qwen25_32b_instruct:
+  MODEL: Qwen/Qwen2.5-32B-Instruct
+
+qwen25_72b_instruct:
+  MODEL: Qwen/Qwen2.5-72B-Instruct
+
+qwen25_7b_instruct:
+  MODEL: Qwen/Qwen2.5-7B-Instruct
+
+granite_8b_code_instruct_4k:
+  MODEL: ibm-granite/granite-8b-code-instruct-4k
+
+granite_20b_code_instruct_8k:
+  MODEL: ibm-granite/granite-20b-code-instruct-8k
+   
+
+

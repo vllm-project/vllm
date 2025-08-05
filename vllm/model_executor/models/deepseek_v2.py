@@ -514,9 +514,13 @@ class DeepseekV2MLAAttention(nn.Module):
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
 
-        q = q.view(-1, self.num_local_heads, self.qk_head_dim)
         # Add head dim of 1 to k_pe
-        k_pe = k_pe.unsqueeze(1)
+        if is_hpu:
+            k_pe = k_pe.unsqueeze(2)
+            q = q.view(*q.shape[:2], self.num_local_heads, self.qk_head_dim)
+        else:
+            k_pe = k_pe.unsqueeze(1)
+            q = q.view(-1, self.num_local_heads, self.qk_head_dim)
 
         q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
             positions, q[..., self.qk_nope_head_dim:], k_pe)
@@ -790,6 +794,12 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts)
+        if current_platform.is_hpu():
+            old_num_threads = torch.get_num_threads()
+            import os
+            num_cores = os.cpu_count()
+            os.environ["OMP_NUM_THREADS"] = str(max(1, num_cores // 4))
+            torch.set_num_threads(max(1, num_cores // 8))
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -861,6 +871,10 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
+        if current_platform.is_hpu():
+            # Restore the number of threads for HPU.
+            torch.set_num_threads(old_num_threads)
+            os.environ["OMP_NUM_THREADS"] = str(old_num_threads)
         return loaded_params
 
 

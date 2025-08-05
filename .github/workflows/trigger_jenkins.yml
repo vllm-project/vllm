@@ -239,7 +239,8 @@ jobs:
             fi
             echo "Using SynapseAI version ${synapse_version}"
             synapse_build=$(curl "${synapse_build_endpoint}" | jq -r ".release_id")
-            pt_version=${{ vars.PT_VERSION }}
+            pt_version=$(curl -sH "Authorization: token ${{ secrets.GH_PAT_INTERNAL }}" https://raw.githubusercontent.com/${{ secrets.PYTORCH_INTEGRATION_ORG_REPO }}/refs/heads/v${synapse_version}/${{ secrets.PYTORCH_INTEGRATION_PROFILES_JSON_PATH }} | jq -r '.pt_versions.current.version')
+            echo "using torch version ${pt_version}"
             BUILD_TAG="Github-vLLM-Fork-${{ github.event.number }}-${{github.run_number}}"
             safe_cmd=${TEST_COMMAND//&/\\&}
             echo "Writing Pod Template To File"

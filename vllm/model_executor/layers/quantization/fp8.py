@@ -13,6 +13,7 @@ from torch.nn.parameter import Parameter
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
@@ -226,6 +227,8 @@ class Fp8LinearMethod(LinearMethodBase):
         layer.output_size_per_partition = output_size_per_partition
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
+        if current_platform.is_hpu() and envs.VLLM_HPU_CONVERT_TO_FP8UZ:
+            weight_loader = self._gaudi_weight_wrapper(weight_loader)
 
         if self.block_quant:
             tp_size = get_tensor_model_parallel_world_size()
@@ -308,6 +311,25 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.register_parameter("input_scale", scale)
             else:
                 layer.register_parameter("input_scale", None)
+
+    def _gaudi_weight_wrapper(self, weight_loader):
+        """Wrapper for Gaudi weight conversion."""
+
+        def wrapper(*args, **kwargs):
+            # args[0] is parameter, args[1] is loaded_weight
+            # weights will be always in fp8, but scales will be in fp32,
+            # so we can detect it by dtype
+            loaded_weight = args[1]
+            if loaded_weight.dtype == torch.float8_e4m3fn:
+                loaded_weight = (loaded_weight.float() * 0.5).to(
+                    torch.float8_e4m3fn)
+            else:
+                loaded_weight = (loaded_weight.data * 2.0)
+            args = (args[0], loaded_weight) + args[2:]
+
+            weight_loader(*args, **kwargs)
+
+        return wrapper
 
     def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
@@ -451,7 +473,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
 
-        if current_platform.is_hpu():
+        if self.block_quant and current_platform.is_hpu():
             if layer.weight_scale.dim() > 1:
                 weight_scale = layer.weight_scale.transpose(0, 1)
             else:
@@ -528,7 +550,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
-
+        layer.weight_block_size = None
+        if current_platform.is_hpu() and envs.VLLM_HPU_CONVERT_TO_FP8UZ:
+            extra_weight_attrs["weight_loader"] = self._gaudi_weight_wrapper(
+                extra_weight_attrs.get("weight_loader"))
         layer.quant_config = self.quant_config
         if self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
@@ -647,6 +672,24 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         else:
             layer.w13_input_scale = None
             layer.w2_input_scale = None
+
+    def _gaudi_weight_wrapper(self, weight_loader):
+        """Wrapper for Gaudi weight conversion."""
+
+        def wrapper(*args, **kwargs):
+            # args[0] is parameter, args[1] is loaded_weight
+            # weights will be always in fp8, but scales will be in fp32,
+            # so we can detect it by dtype
+            loaded_weight = args[1]
+            if loaded_weight.dtype == torch.float8_e4m3fn:
+                loaded_weight.data = (loaded_weight.data.float() * 0.5).to(
+                    torch.float8_e4m3fn)
+            else:
+                loaded_weight.data = (loaded_weight.data * 2.0)
+            args = (args[0], loaded_weight) + args[2:]
+            weight_loader(*args, **kwargs)
+
+        return wrapper
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
@@ -1013,13 +1056,28 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
             topk_weights, topk_ids = torch.topk(topk_weights, top_k, dim=-1)
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
-            topk_weights = topk_weights.to(x.dtype)
+        topk_ids = topk_ids.to(torch.int64)
+        topk_weights = topk_weights.to(x.dtype)
+        if layer.dp_size > 1:
+            cu_tokens_across_dp_cpu = get_forward_context(
+            ).dp_metadata.cu_tokens_across_dp_cpu
+
+            topk_ids_across_dp = get_forward_context(
+            ).dp_metadata.topk_ids_across_dp
+            topk_ids = layer.multicast_fn(topk_ids, cu_tokens_across_dp_cpu,
+                                          topk_ids_across_dp)
+
+            topk_weights_across_dp = get_forward_context(
+            ).dp_metadata.topk_weights_across_dp
+            topk_weights = layer.multicast_fn(topk_weights,
+                                              cu_tokens_across_dp_cpu,
+                                              topk_weights_across_dp)
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
         output = layer.moe_op(
             x,
-            topk_ids.to(torch.int64),
-            topk_weights.to(x.dtype),
+            topk_ids,
+            topk_weights,
             permuted_weights=True,
             activation=activation,
         )

@@ -40,8 +40,8 @@ _PAD_BLOCK_ID = 0
 
 class HpuModelAdapterEncoderDecoder(HpuModelAdapter):
 
-    def __init__(self, model, vllm_config, layer_names, is_causal, sampler):
-        super().__init__(model, vllm_config, layer_names, is_causal, sampler)
+    def __init__(self, model, vllm_config, is_causal, sampler):
+        super().__init__(model, vllm_config, is_causal, sampler)
 
         # We only wrap the language model in HPU graph because some Ops in
         # vision model will fallback to CPU and cause the graph building fail.
@@ -242,7 +242,7 @@ class HPUEncoderDecoderModelRunner(
             self.vllm_config.compilation_config.static_forward_context,
             [kv_caches] * self.parallel_config.pipeline_parallel_size)
         max_batch_size = self.max_num_prefill_seqs
-        _, max_seq_len = self.bucketing_ctx.get_max_prompt_shape()
+        max_seq_len = self.bucketing_manager.get_max_prompt_shape()
         max_seq_len = min(self.max_num_batched_tokens // max_batch_size,
                           max_seq_len)
 
@@ -259,6 +259,8 @@ class HPUEncoderDecoderModelRunner(
         kv_caches,
         is_pt_profiler_run=False,
         temperature=0,
+        num_iters=3,
+        align_worker=False,
     ) -> None:
         phase = 'prompt' if is_prompt else 'decode'
         use_graphs = self._use_graphs()
@@ -269,7 +271,7 @@ class HPUEncoderDecoderModelRunner(
                          f"ctx{ctx}_"
                          f"graphs{'T' if use_graphs else 'F'}")
         self.profiler.start('internal', scenario_name)
-        times = 3 if use_graphs or is_pt_profiler_run else 1
+        times = num_iters if use_graphs or is_pt_profiler_run else 1
         if is_prompt:
             seqs = [
                 self.create_dummy_seq_group_metadata(i,
@@ -299,7 +301,10 @@ class HPUEncoderDecoderModelRunner(
             is_single_step = \
                 self.vllm_config.scheduler_config.num_scheduler_steps == 1
             if is_prompt or is_single_step:
-                self.execute_model(inputs, kv_caches, warmup_mode=True)
+                self.execute_model(inputs,
+                                   kv_caches,
+                                   warmup_mode=True,
+                                   ctx_blocks=ctx)
             else:  # decode with multi-step
                 inputs = dataclasses.replace(inputs,
                                              is_first_multi_step=True,
@@ -362,8 +367,9 @@ class HPUEncoderDecoderModelRunner(
         else:
             output_len = 1
             block_tables = {group_id: [_PAD_BLOCK_ID] * num_blocks}
+            computed_block_nums = ([1] * ctx)
             # limit cross blocks to the number of available blocks
-            num_cross_blocks = min(self.bucketing_ctx.num_hpu_blocks,
+            num_cross_blocks = min(self.bucketing_manager.num_hpu_blocks,
                                    max_mm_tokens) // self.block_size
             cross_block_table = [_PAD_BLOCK_ID] * num_cross_blocks
         output_token_ids = [1] * output_len
@@ -452,8 +458,19 @@ class HPUEncoderDecoderModelRunner(
 
     def add_dummy_seq(self, seq_group_metadata_list, is_prompt):
         real_batch_size = len(seq_group_metadata_list)
-        batch_size_padded = self.bucketing_ctx.get_padded_batch_size(
-            real_batch_size, is_prompt)
+        ctx = seq_group_metadata_list[0].computed_block_nums
+        ctx = 0 if ctx is None else sum(ctx)
+        batch_size_padded = real_batch_size
+        if is_prompt:
+            first_key = next(iter(seq_group_metadata_list[0].seq_data))
+            seq_len = len(seq_group_metadata_list[0].seq_data[first_key].
+                          prompt_token_ids)
+            query_len = seq_len - ctx * self.block_size
+            batch_size_padded = self.bucketing_manager.find_prompt_bucket(
+                real_batch_size, query_len, ctx)[0]
+        else:
+            batch_size_padded = self.bucketing_manager.find_decode_bucket(
+                real_batch_size, ctx)[0]
         batch_size_padding = batch_size_padded - real_batch_size
         seq_group_metadata_list = seq_group_metadata_list.copy()
         if batch_size_padding > 0:

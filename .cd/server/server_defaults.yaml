@@ -1,4 +1,4 @@
-defaults:
+hw_defaults:
   HPU_MEM:
     GAUDI2: 96
     GAUDI3: 128

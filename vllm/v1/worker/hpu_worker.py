@@ -3,13 +3,17 @@
 import contextlib
 import gc
 import os
+import queue
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.distributed
 import torch.nn as nn
-from vllm_hpu_extension.profiler import HabanaMemoryProfiler, format_bytes
+from vllm_hpu_extension.debug import init_debug_logger
+from vllm_hpu_extension.profiler import (HabanaMemoryProfiler, format_bytes,
+                                         setup_profiler)
+from vllm_hpu_extension.runtime import get_config
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -29,6 +33,14 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
+
+
+def setup_step_profiler(steps):
+    if steps is None:
+        return None
+    step_start, step_end = steps
+    active = step_end - step_start + 1
+    return setup_profiler(warmup=0, active=active)
 
 
 class HPUWorker:
@@ -59,6 +71,7 @@ class HPUWorker:
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
+        self.is_driver_worker = is_driver_worker
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
@@ -70,25 +83,54 @@ class HPUWorker:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
-        # Torch profiler. Enabled and configured through env vars:
-        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+
+        self.gc_track_recompiles = bool(
+            "PT_HPU_METRICS_GC_DETAILS" in os.environ
+            and bool_helper(os.getenv("PT_HPU_METRICS_GC_DETAILS")))
+        self.step = 0
+        self.profile_steps = get_config().VLLM_PROFILE_STEPS
+        self.step_profiler = setup_step_profiler(self.profile_steps)
+        self.step_debug = init_debug_logger('steps')
+
+    def init_profiler(self):
+        """Initialize the profiler."""
         if envs.VLLM_TORCH_PROFILER_DIR:
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
+            if os.getenv('VLLM_PROFILER_ENABLED') == 'full':
+                fn = self.model_runner.profiler.full_trace_handler
+                with_stack = False
+            else:
+                fn = torch.profiler.tensorboard_trace_handler
+                with_stack = True
             self.profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
                     torch.profiler.ProfilerActivity.HPU,
                 ],
-                with_stack=True,
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    torch_profiler_trace_dir, use_gzip=True))
+                with_stack=with_stack,
+                on_trace_ready=fn(torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
-        self.gc_track_recompiles = bool(
-            "PT_HPU_METRICS_GC_DETAILS" in os.environ
-            and bool_helper(os.getenv("PT_HPU_METRICS_GC_DETAILS")))
+
+    def start_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        high_level_profiler = self.model_runner.profiler
+        with high_level_profiler.record_event('internal', 'start_profiler'):
+            # Clean up the queue
+            while True:
+                try:
+                    high_level_profiler.profiling_trace_events.get_nowait()
+                except queue.Empty:
+                    break
+            self.profiler.start()
+
+    def stop_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        self.profiler.stop()
 
     def init_device(self):
         # Initialize the distributed environment.
@@ -97,7 +139,10 @@ class HPUWorker:
                                             self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
-        self.model_runner = HPUModelRunner(self.vllm_config)
+        self.model_runner = HPUModelRunner(
+            vllm_config=self.vllm_config,
+            is_driver_worker=self.is_driver_worker)
+        self.init_profiler()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
@@ -224,12 +269,32 @@ class HPUWorker:
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
+        if self.step_debug:
+            self.step_debug(f'step={self.step}')
+        if self.step_profiler and self.step == self.profile_steps[0]:
+            self.step_profiler.start()
         with track_graph_compile('HPUWorker.execute_model') \
             if self.gc_track_recompiles \
             else contextlib.nullcontext():
             output = self.model_runner.execute_model(scheduler_output)
         # TODO(woosuk): Send the output to the engine process.
+        if self.step_profiler:
+            if self.step >= self.profile_steps[0]:
+                self.step_profiler.step()
+            if self.step == self.profile_steps[1]:
+                self.step_profiler.stop()
+                self.step_profiler = None
+                raise RuntimeError('Step profiling finished!')
+        self.step += 1
         return output if self.rank == 0 else None
+
+    def profile(self, is_start: bool = True):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        if is_start:
+            self.profiler.start()
+        else:
+            self.profiler.stop()
 
 
 def init_worker_distributed_environment(

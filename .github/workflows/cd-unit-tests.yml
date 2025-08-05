@@ -1,0 +1,32 @@
+name: cd-unit-tests
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - habana_main
+    paths:
+      - '.cd/**'
+  pull_request:
+    branches:
+      - habana_main
+    paths:
+      - '.cd/**'
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          pip install -r .cd/requirements_tests.txt
+      - name: Run unit tests
+        run: |
+          PYTHONPATH=.cd pytest .cd/tests

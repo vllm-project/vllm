@@ -3,8 +3,8 @@
 
 import itertools
 import os
-from typing import Iterable, Optional, Tuple, Union
 from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -12,7 +12,7 @@ from transformers import RobertaConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.pooler import CrossEncodingPooler, ClassifierPooler
+from vllm.model_executor.layers.pooler import ClassifierPooler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -28,8 +28,8 @@ from .interfaces import SupportsCrossEncoding, SupportsV0Only
 
 
 def roberta_task_weights_filter(
-    all_weights: Iterable[Tuple[str, torch.Tensor]]
-) -> Tuple[Iterable[Tuple[str, torch.Tensor]], Iterable[Tuple[str,
+    all_weights: Iterable[tuple[str, torch.Tensor]]
+) -> tuple[Iterable[tuple[str, torch.Tensor]], Iterable[tuple[str,
                                                               torch.Tensor]]]:
     """
     Separate task-specific weights that are applied on top
@@ -406,7 +406,7 @@ jina_to_vllm_mapper = WeightsMapper(
 
 
 @torch.inference_mode()
-def jina_merge_lora_weights(weights: Iterable[Tuple[str, torch.Tensor]],
+def jina_merge_lora_weights(weights: Iterable[tuple[str, torch.Tensor]],
                             scaling: float = 1.0):
     # use for jina-embeddings-v3
     # Merge Lora weights into a single weight tensor.
@@ -444,27 +444,3 @@ def jina_merge_lora_weights(weights: Iterable[Tuple[str, torch.Tensor]],
                                                   a], weights[weight_name + b]
 
     return [(name, weight) for name, weight in weights.items()]
-
-
-def roberta_task_weights_filter(
-    all_weights: Iterable[tuple[str, torch.Tensor]]
-) -> tuple[Iterable[tuple[str, torch.Tensor]], Iterable[tuple[str,
-                                                              torch.Tensor]]]:
-    """
-    Separate task-specific weights that are applied on top
-    of the encoder-decoder bert base.
-    To do so, return two generators over the original iterator.
-    Also, remove the "roberta." prefix to make it loadable
-    from vanilla BertModel.
-    """
-    # Copy of a lazy iterator without in-memory overhead so both
-    # iterators can be iterated upon independently.
-    all_weights1, all_weights2 = itertools.tee(all_weights)
-
-    def encoder_decoder_weights():
-        for name, weight in all_weights1:
-            if name.startswith("roberta."):
-                yield (name[len("roberta."):], weight)
-
-    return encoder_decoder_weights(), ((n, w) for n, w in all_weights2
-                                       if not n.startswith("roberta."))

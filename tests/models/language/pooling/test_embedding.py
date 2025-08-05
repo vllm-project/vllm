@@ -21,23 +21,14 @@ from ...utils import check_embeddings_close
         pytest.param("intfloat/e5-mistral-7b-instruct",
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
         pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
-        # [Encoder-only]
-        pytest.param("BAAI/bge-base-en-v1.5",
-                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
-        pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
-        pytest.param("intfloat/multilingual-e5-small"),
-        pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
+        pytest.param("Linq-AI-Research/Linq-Embed-Mistral"),
         # [Cross-Encoder]
         pytest.param("sentence-transformers/stsb-roberta-base-v2"),
     ],
 )
-def test_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model,
-    monkeypatch,
-) -> None:
+@pytest.mark.parametrize("dtype", ["half", "float"])
+def test_models(hf_runner, vllm_runner, example_prompts, model, monkeypatch,
+                dtype) -> None:
 
     if model == "BAAI/bge-multilingual-gemma2" and current_platform.is_rocm():
         # ROCm Triton FA does not currently support sliding window attention
@@ -57,7 +48,10 @@ def test_models(
     # So we need to strip the input texts to avoid test failing.
     example_prompts = [str(s).strip() for s in example_prompts]
 
-    with hf_runner(model, is_sentence_transformer=True) as hf_model:
+    # Force hf_runner to use CPU
+    monkeypatch.setattr(hf_runner, "get_default_device", lambda self: "cpu")
+    with hf_runner(model, dtype=dtype,
+                   is_sentence_transformer=True) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
     with vllm_runner(model,

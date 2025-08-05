@@ -1,0 +1,7 @@
+{
+    "local_hostname": "localhost",
+    "metadata_server": "etcd://localhost:2379",
+    "protocol": "tcp",
+    "device_name": "",
+    "master_server_address": "localhost:50001"
+}

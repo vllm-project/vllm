@@ -22,7 +22,7 @@ import math
 from collections import defaultdict
 from collections.abc import Hashable, Iterable
 from functools import lru_cache
-from typing import Any, Callable, DefaultDict, Dict, List, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import numpy as np
 import torch

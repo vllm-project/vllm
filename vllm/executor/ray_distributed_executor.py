@@ -127,18 +127,19 @@ class RayDistributedExecutor(DistributedExecutorBase):
         self.shutdown_workers = True
         self.terminate_ray = True
 
-    def shutdown(self) -> None:
-        logger.info(
-            "Shutting down Ray distributed executor. If you see error log "
-            "from logging.cc regarding SIGTERM received, please ignore because "
-            "this is the expected termination process in Ray.")
+    def shutdown(self, logger=logger) -> None:
+        if logger is not None:
+            logger.info(
+                "Shutting down Ray distributed executor. If you see error log "
+                "from logging.cc regarding SIGTERM received, please ignore "
+                "because this is the expected termination process in Ray.")
         if getattr(self, 'shutdown_workers', False):
-            self._run_workers("shutdown")
             self.shutdown_workers = False
+            getattr(self._run_workers, 'shutdown', lambda: None)()
         if getattr(self, 'terminate_ray', False):
+            self.terminate_ray = False
             for worker in self.workers:
                 worker.__ray_terminate__.remote()
-            self.terminate_ray = False
         if hasattr(self, "forward_dag") and self.forward_dag is not None:
             self.forward_dag.teardown()
             import ray
@@ -466,8 +467,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
                                                  execute_model_req)
 
     def execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self, execute_model_req: ExecuteModelRequest
+    ) -> Optional[List[SamplerOutput]]:
         if not self.use_ray_spmd_worker:
             return super().execute_model(execute_model_req)
 
@@ -552,8 +553,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
         ray.get(parallel_worker_tasks)
 
     def _check_ray_cgraph_installation(self):
-        import pkg_resources  # type: ignore
         import importlib.metadata
+
         from packaging import version
 
         required_version = version.parse("2.43.0")

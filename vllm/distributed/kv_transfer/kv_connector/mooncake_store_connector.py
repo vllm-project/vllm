@@ -212,12 +212,12 @@ class MooncakeStoreConnector(KVConnectorBase):
         self,
         model_executable: torch.nn.Module,
         model_input: "ModelInputForHPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
     ) -> None:
-        if self.rank != 0:
-            # only the first rank will send kv cache
+        if self.rank != 0 and self.kv_helper.use_mla():
+            # only the first rank will send kv cache when using MLA.
             return
         input_tokens_tensor_cpu = model_input.input_tokens.to(
             "cpu")  # shape: [batch_size, seq_len_padding_to_128]
@@ -260,14 +260,17 @@ class MooncakeStoreConnector(KVConnectorBase):
             if self.kv_helper.use_mla():
                 # we pack kv together, only need send one tensor
                 kvcache_to_sent = keys
+                store_kvcache_key = f"{store_key_prefix}_{self.rank}"
+                hidden_key = f"{store_key_prefix}_hidden_{self.rank}"
             else:
                 values = torch.cat(values, dim=0)
                 kvcache_to_sent = torch.stack((keys, values), dim=0)
-            store_kvcache_key = f"{store_key_prefix}_{self.rank}"
+                store_kvcache_key = f"{store_key_prefix}_{self.local_tp_rank}"
+                hidden_key = f"{store_key_prefix}_hidden_{self.local_tp_rank}"
+
             self.kv_store.put(store_kvcache_key, kvcache_to_sent)
             logger.debug("put kv cache key: %s", store_kvcache_key)
 
-            hidden_key = f"{store_key_prefix}_hidden_{self.rank}"
             self.kv_store.put(
                 hidden_key,
                 hidden_or_intermediate_states[idx].unsqueeze(0).cpu())
@@ -279,8 +282,8 @@ class MooncakeStoreConnector(KVConnectorBase):
     def recv_kv_caches_and_hidden_states_hpu(
         self, model_executable: torch.nn.Module,
         model_input: "ModelInputForHPUWithSamplingMetadata",
-        attn_metadata: AttentionMetadata, kv_caches: List[torch.Tensor]
-    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+        attn_metadata: AttentionMetadata, kv_caches: list[torch.Tensor]
+    ) -> tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForHPUWithSamplingMetadata"]:
         # When bypass_model_exec is set to False, it means that at least for one
         # request its corresponding KV cache or hidden state is missing.
@@ -334,17 +337,23 @@ class MooncakeStoreConnector(KVConnectorBase):
                                      current_slot_mapping)
                 # the first one should never be padding,
                 # so we can append the first one.
-                hidden_or_intermediate_states_for_one_req.append(
-                    hidden_or_intermediate_states_for_one_req[0])
+                if len(hidden_or_intermediate_states_for_one_req):
+                    hidden_or_intermediate_states_for_one_req.append(
+                        hidden_or_intermediate_states_for_one_req[0])
                 start_block_idx = end_block_idx
                 continue
 
             # get roi for current seq
             load_key_prefix = self.tensor_hash(current_tokens)
-            # For deepseek, we only need recv first rank
-            load_kvcache_key = f"{load_key_prefix}_0"
+            if self.kv_helper.use_mla():
+                # For deepseek, we only need recv first rank
+                load_kvcache_key = f"{load_key_prefix}_0"
+                hidden_key = f"{load_key_prefix}_hidden_0"
+            else:
+                load_kvcache_key = f"{load_key_prefix}_{self.local_tp_rank}"
+                hidden_key = f"{load_key_prefix}_hidden_{self.local_tp_rank}"
+
             remote_kv = self.kv_store.get(load_kvcache_key)
-            hidden_key = f"{load_key_prefix}_hidden_0"
             hidden = self.kv_store.get(hidden_key)
 
             if remote_kv is None or hidden is None:

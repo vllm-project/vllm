@@ -1,0 +1,42 @@
+services:
+  vllm-server:
+    image: ${DOCKER_IMAGE}
+    environment:
+      - MODEL
+      - HF_HOME=/mnt/hf_cache
+      - HF_TOKEN
+      - HABANA_VISIBLE_DEVICES=${HABANA_VISIBLE_DEVICES:-all}
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - ./server/server_user.env
+    volumes:
+      - /mnt/hf_cache:/mnt/hf_cache
+    ports:
+      - "8000:8000"
+    cap_add:
+      - SYS_NICE
+    ipc: host
+    runtime: habana
+    restart: unless-stopped
+    command: ["server", "--config-file", "${VLLM_SERVER_CONFIG_FILE}", "--config-name", "${VLLM_SERVER_CONFIG_NAME}"]
+    healthcheck:
+      test: ["CMD", "sh", "-c", "[ -f logs/vllm_server.log ] && grep -q 'Application startup complete' logs/vllm_server.log"]
+      interval: 10s
+      timeout: 2s
+      retries: 500
+      start_period: 10s
+
+  benchmark:
+    profiles: ["benchmark"]
+    image: ${DOCKER_IMAGE}
+    network_mode: service:vllm-server
+    depends_on:
+      vllm-server:
+        condition: service_healthy
+    environment:
+      - MODEL
+      - HF_TOKEN=${HF_TOKEN}
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - ./benchmark/benchmark_user.env
+    command: ["benchmark", "--config-file", "${VLLM_BENCHMARK_CONFIG_FILE}", "--config-name", "${VLLM_BENCHMARK_CONFIG_NAME}"]

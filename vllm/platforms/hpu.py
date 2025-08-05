@@ -31,17 +31,29 @@ class HpuPlatform(Platform):
     simple_compile_backend: str = "hpu_backend" if not is_fake_hpu(
     ) else "inductor"
     supported_quantization: list[str] = [
-        "compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu"
+        "compressed-tensors", "fp8", "inc", "awq_hpu", "gptq_hpu",
+        "bitsandbytes"
     ]
+
+    @property
+    def supported_dtypes(self) -> list[torch.dtype]:
+        """Returns the supported dtypes for the current platform."""
+        # Be careful with the order of the dtypes. The first dtype will
+        # be used as the default dtype fallback for the current platform,
+        # when encountering unsupported dtypes in "auto" dtype.
+        return [torch.bfloat16, torch.float32]
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool,
                              use_mla: bool) -> str:
-        if use_v1:
+        if use_v1 and not use_mla:
             logger.info("Using HPUAttentionV1 backend.")
             return "vllm.v1.attention.backends.hpu_attn.HPUAttentionBackendV1"
+        if use_v1 and use_mla:
+            logger.info("Using HPUAttentionMLA backend.")
+            return "vllm.attention.backends.hpu_attn.HPUMLAAttentionBackend"
         if use_mla:
             logger.info("Using HPUAttentionMLA backend.")
             return "vllm.attention.backends.hpu_attn.HPUMLAAttentionBackend"
@@ -55,9 +67,6 @@ class HpuPlatform(Platform):
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return cls.device_name
-
-    def inference_mode(cls):
-        return torch.no_grad()
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -90,7 +99,7 @@ class HpuPlatform(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 128
-        if (parallel_config.distributed_executor_backend == 'mp'
+        if (parallel_config.distributed_executor_backend in ['mp', 'uni']
                 and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
             if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD",
                               None) is not None:

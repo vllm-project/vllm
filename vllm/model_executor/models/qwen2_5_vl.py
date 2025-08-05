@@ -26,12 +26,11 @@
 # limitations under the License.
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable, Mapping
-from functools import lru_cache, partial
 import math
 import os
-from typing import (Callable, Iterable, List, Literal, Mapping, Optional, Set,
-                    Tuple, TypedDict, Union)
+from collections.abc import Iterable, Mapping
+from functools import lru_cache, partial
+from typing import Callable, Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -833,12 +832,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         hidden_states = x.to(device=self.device, dtype=self.dtype)
         hidden_states = self.patch_embed(hidden_states)
 
-        window_index_id = 0
-        cu_window_seqlens_last = 0
         for t, h, w in grid_thw:
             t, h, w = int(t), int(h), int(w)
-            llm_h = h // self.spatial_merge_size
-            llm_w = w // self.spatial_merge_size
 
         # windows attention
         window_index, cu_window_seqlens = self.get_window_index(grid_thw)
@@ -1351,7 +1346,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
-        grid_thw_list = grid_thw.tolist()
 
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
@@ -1380,7 +1374,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         grid_thw = video_input["video_grid_thw"]
         assert grid_thw.ndim == 2
-        grid_thw_list = grid_thw.tolist()
 
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)

@@ -7,11 +7,8 @@
 
 import contextlib
 import gc
-import gzip
-import json
 import os
 import queue
-import time
 from typing import List, Optional, Set, Tuple, Type
 
 import habana_frameworks.torch as htorch  # noqa:F401
@@ -111,7 +108,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                         torch_profiler_trace_dir)
 
             if os.getenv('VLLM_PROFILER_ENABLED') == 'full':
-                fn = self.full_trace_handler
+                fn = self.model_runner.profiler.full_trace_handler
                 with_stack = False
             else:
                 fn = torch.profiler.tensorboard_trace_handler
@@ -125,53 +122,6 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                 on_trace_ready=fn(torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
-
-    def full_trace_handler(self, dir_name, use_gzip=False):
-
-        def handler_fn(prof) -> None:
-            if not os.path.isdir(dir_name):
-                try:
-                    os.makedirs(dir_name, exist_ok=True)
-                except Exception as e:
-                    raise RuntimeError("Can't create directory: " +
-                                       dir_name) from e
-            file_name = f"vllm.{time.time_ns()}.pt.trace.json"
-            file_path = os.path.join(dir_name, file_name)
-            prof.export_chrome_trace(file_path)
-            with open(file_path) as f:
-                pytorch_trace = json.load(f)
-            os.remove(file_path)
-            base = pytorch_trace['baseTimeNanoseconds'] / 1000
-            events = self.model_runner.profiler.profiling_trace_events
-            while True:
-                try:
-                    event_str = events.get_nowait()
-                    event = json.loads(event_str[:-1])
-                    event['ts'] = event['ts'] - base
-                    pytorch_trace['traceEvents'].append(event)
-                except queue.Empty:
-                    break
-
-            pytorch_trace['traceEvents'].append({
-                "args": {
-                    "name": "vLLM"
-                },
-                "name": "process_name",
-                "ph": "M",
-                "pid": 1,
-                "tid": 0,
-                "ts": 0.0
-            })
-            if use_gzip:
-                file_path = file_path + ".gz"
-                with gzip.open(file_path, 'wt', encoding="ascii") as zipfile:
-                    json.dump(pytorch_trace, zipfile)
-            else:
-                with open(file_path, "w") as outfile:
-                    outfile.write(json.dumps(pytorch_trace))
-            logger.info("Saved full profiling to %s", file_path)
-
-        return handler_fn
 
     def _is_encoder_decoder_model(self):
         return self.model_config.is_encoder_decoder
@@ -207,7 +157,12 @@ class HPUWorker(LocalOrDistributedWorkerBase):
     def init_device(self) -> None:
         if self.device_config.device.type == "hpu":
             self.device = torch.device("hpu")
-            torch.hpu.set_device(self.device)
+            if self.vllm_config.parallel_config.pipeline_parallel_size > 1:
+                # When using PCIe cards with pipeline parallelism enabled,
+                # set the HPU device using local_rank to maintain NUMA affinity.
+                torch.hpu.set_device(self.local_rank)
+            else:
+                torch.hpu.set_device(self.device)
         elif self.device_config.device_type == "cpu":
             self.device = torch.device("cpu")
         else:
@@ -257,12 +212,17 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                 seq_group_metadata.is_prompt
                 for seq_group_metadata in seq_group_metadata_list
             ])
-            max_context_len = max([
-                max([
-                    len(v.prompt_token_ids) + len(v.output_token_ids)
-                    for v in seq_group_metadata.seq_data.values()
-                ]) for seq_group_metadata in seq_group_metadata_list
-            ])  # whoa, that's some spicy stuff right here
+            # for dummy run in DP, we don't have real seq,
+            # so use a dummy context_len here
+            if len(seq_group_metadata_list) == 0:
+                max_context_len = 128
+            else:
+                max_context_len = max([
+                    max([
+                        len(v.prompt_token_ids) + len(v.output_token_ids)
+                        for v in seq_group_metadata.seq_data.values()
+                    ]) for seq_group_metadata in seq_group_metadata_list
+                ])  # whoa, that's some spicy stuff right here
             max_num_blocks = (
                 (max_context_len - 1) // self.cache_config.block_size) + 1
             input_stats = (f'is_prompt: {is_prompt}, '
@@ -318,7 +278,8 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             cache_block_size = self.get_cache_block_size_bytes()
             fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
             num_fake_hpu_blocks = fake_hpu_cache_alloc // cache_block_size
-            self.model_runner.bucketing_ctx.num_hpu_blocks = num_fake_hpu_blocks
+            self.model_runner.bucketing_manager.num_hpu_blocks = \
+                    num_fake_hpu_blocks
             return num_fake_hpu_blocks, 0
         with HabanaMemoryProfiler() as m:
             self.model_runner.profile_run()
@@ -375,8 +336,11 @@ class HPUWorker(LocalOrDistributedWorkerBase):
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
-        self.model_runner.bucketing_ctx.num_hpu_blocks = (
+        self.model_runner.bucketing_manager.num_hpu_blocks = (
             num_gpu_blocks // self.parallel_config.pipeline_parallel_size)
+        self.model_runner.bucketing_manager.generate_prompt_buckets()
+        if not self.model_runner.is_pooler:
+            self.model_runner.bucketing_manager.generate_decode_buckets()
 
         with HabanaMemoryProfiler() as m:
             self._init_cache_engine()
@@ -494,7 +458,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             "Prompt Adapter is not implemented for HPU backend.")
 
     def shutdown(self):
-        self.model_runner.shutdown_inc()
+        getattr(self.model_runner, 'shutdown_inc', lambda: None)()
 
     @property
     def max_model_len(self) -> int:
@@ -536,11 +500,14 @@ def init_worker_distributed_environment(
         get_pp_group().all_reduce(torch.zeros(1).to('hpu'))
     if torch.distributed.is_initialized():
         torch_world_size = torch.distributed.get_world_size()
-        if torch_world_size != parallel_config.world_size:
+        expected_size = parallel_config.world_size *\
+            parallel_config.data_parallel_size
+        if torch_world_size != expected_size:
             raise RuntimeError(
                 "torch.distributed is already initialized but the torch world "
-                "size does not match parallel_config.world_size "
-                f"({torch_world_size} vs. {parallel_config.world_size}).")
+                "size does not match parallel_config.world_size * "
+                "parallel_config.data_parallel_size "
+                f"({torch_world_size} vs. {expected_size}).")
     elif not distributed_init_method:
         raise ValueError(
             "distributed_init_method must be set if torch.distributed "
@@ -558,7 +525,8 @@ def init_worker_distributed_environment(
     device = hpu_device_string()
     dummy_tensor_hpu = torch.ones(1).to(device)
     torch.distributed.all_reduce(dummy_tensor_hpu)
-    assert dummy_tensor_hpu.item() == parallel_config.world_size
+    assert dummy_tensor_hpu.item(
+    ) == parallel_config.world_size * parallel_config.data_parallel_size
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
     ensure_kv_transfer_initialized(vllm_config)

@@ -689,13 +689,28 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             topk_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
             topk_weights, topk_ids = torch.topk(topk_weights, top_k, dim=-1)
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
-            topk_weights = topk_weights.to(x.dtype)
+        topk_ids = topk_ids.to(torch.int64)
+        topk_weights = topk_weights.to(x.dtype)
+        if layer.dp_size > 1:
+            cu_tokens_across_dp_cpu = get_forward_context(
+            ).dp_metadata.cu_tokens_across_dp_cpu
+
+            topk_ids_across_dp = get_forward_context(
+            ).dp_metadata.topk_ids_across_dp
+            topk_ids = layer.multicast_fn(topk_ids, cu_tokens_across_dp_cpu,
+                                          topk_ids_across_dp)
+
+            topk_weights_across_dp = get_forward_context(
+            ).dp_metadata.topk_weights_across_dp
+            topk_weights = layer.multicast_fn(topk_weights,
+                                              cu_tokens_across_dp_cpu,
+                                              topk_weights_across_dp)
         topk_ids = topk_ids.view(*x.shape[:-1], -1)
         topk_weights = topk_weights.view(*x.shape[:-1], -1)
         return layer.moe_op(
             x,
-            topk_ids.to(torch.int64),
-            topk_weights.to(x.dtype),
+            topk_ids,
+            topk_weights,
             permuted_weights=True,
             activation=activation,
         ).view(*input_shape)
@@ -885,6 +900,8 @@ class FusedMoE(torch.nn.Module):
         self.e_score_correction_bias = e_score_correction_bias
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
+        self.multicast_fn = self.hpu_multicast if is_hpu\
+            else self.naive_multicast
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -1241,7 +1258,8 @@ class FusedMoE(torch.nn.Module):
                     shard_dim=shard_dim,
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
-                    tp_rank=self.tp_rank)
+                    tp_rank=self.tp_rank,
+                    expert_id=expert_id)
             return
 
         # Case weight scales, zero_points and offset
@@ -1366,6 +1384,48 @@ class FusedMoE(torch.nn.Module):
         return (self.use_pplx_kernels or self.use_deepep_ht_kernels
                 or self.use_deepep_ll_kernels)
 
+    def hpu_multicast(self,
+                      x: torch.Tensor,
+                      cu_tokens_across_dp_cpu: torch.Tensor,
+                      output_tensor: Optional[torch.Tensor] = None):
+        if output_tensor is None:
+            world_size = get_dp_group().world_size
+            input_size = x.size()
+            # Allocate output tensor.
+            output_size = list(input_size)
+            output_size[0] *= world_size
+            output_tensor = torch.empty(output_size,
+                                        dtype=x.dtype,
+                                        device=x.device)
+        else:
+            if output_tensor.ndim == 3 and x.ndim == 2:
+                output_tensor.view(-1, x.size(1))
+        # All-gather.
+        torch.distributed.all_gather_into_tensor(
+            output_tensor, x, group=get_dp_group().device_group)
+        return output_tensor
+
+    def naive_multicast(self,
+                        x: torch.Tensor,
+                        cu_tokens_across_dp_cpu: torch.Tensor,
+                        output_tensor: Optional[torch.Tensor] = None):
+        assert (len(x.shape) in [2, 3])
+        if len(x.shape) == 3:
+            x = x.view(-1, x.size(2))
+        buffer = torch.empty((cu_tokens_across_dp_cpu[-1], x.size(1)),
+                             device=x.device,
+                             dtype=x.dtype)
+        start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
+            self.dp_rank - 1]
+        end = cu_tokens_across_dp_cpu[self.dp_rank]
+        buffer[start:end, :].copy_(x)
+        for idx in range(get_dp_group().world_size):
+            start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
+            end = cu_tokens_across_dp_cpu[idx]
+            get_dp_group().broadcast(buffer[start:end, :], idx)
+
+        return buffer
+
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):
         """
@@ -1464,12 +1524,15 @@ class FusedMoE(torch.nn.Module):
                 or self.moe_parallel_config.use_deepep_ll_kernels):
             return self.forward_impl_chunked(hidden_states, router_logits)
 
-        do_naive_dispatch_combine: bool = (
-            self.dp_size > 1
-            and not self.moe_parallel_config.use_deepep_ht_kernels)
-        if do_naive_dispatch_combine:
-            hidden_states, router_logits = get_ep_group().dispatch(
-                hidden_states, router_logits)
+        if self.dp_size > 1:
+            cu_tokens_across_dp_cpu = get_forward_context(
+            ).dp_metadata.cu_tokens_across_dp_cpu
+            hidden_states_across_dp = get_forward_context(
+            ).dp_metadata.hidden_states_across_dp
+
+            hidden_states = self.multicast_fn(hidden_states,
+                                              cu_tokens_across_dp_cpu,
+                                              hidden_states_across_dp)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
@@ -1490,8 +1553,20 @@ class FusedMoE(torch.nn.Module):
             apply_router_weight_on_input=self.apply_router_weight_on_input,
         )
 
-        if do_naive_dispatch_combine:
-            final_hidden_states = get_ep_group().combine(final_hidden_states)
+        if self.dp_size > 1:
+            if final_hidden_states.ndim == 3:
+                final_hidden_states = final_hidden_states.view(
+                    -1, final_hidden_states.size(2))
+
+            import habana_frameworks.torch as htorch
+            htorch.core.mark_step()
+            local_hidden_states = get_forward_context(
+            ).dp_metadata.hidden_states
+            torch.distributed.reduce_scatter_tensor(
+                local_hidden_states,
+                final_hidden_states,
+                group=get_dp_group().device_group)
+            final_hidden_states = local_hidden_states
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             # Default set to False. (May have to add shared expert outputs.
