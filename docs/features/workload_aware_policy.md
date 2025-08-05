@@ -1,7 +1,7 @@
 
-## Title:  \[Perf\]\[Feat\] Workload-Aware KVCache Cache Policy
+# Title:  \[Perf\]\[Feat\] Workload-Aware KVCache Cache Policy
 
-### PR Descrption
+## PR Descrption
 
 Nowadays, cloud providers typically use a unified serving engine deployed on GPUs to serve all request types (text, image, file, agent-calls, etc.) for better resource utilization. However, the mean response time of these workloads is different, causing KVCache reuse time differences. For example, humans respond faster when they process image/audio data than to the complex text or file results generated by the LLM. Based on our analysis of real-world LLM traffic from top-level cloud provider Aliyun Bailian ([https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon](https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon)), we found that the general cache policy (like LRU) for KVCache may not be optimal.
 
@@ -11,7 +11,7 @@ This PR introduces a new optional parameter for each request, `metainf
 
 Note that the WA policy can be applied beyond the traces from Aliyun Bailian. The WA policy can be useful in any deployment where one vLLM serving engine serves multiple frontend workloads (Chat, Multi-modal, Reasoning, etc.). As soon as the client provides the workload tag in the request, the WA policy can leverage this to perform better cache eviction than LRU.
 
-### Implementation Details
+## Implementation Details
 
 The KVCache reuse patterns vary across different request categories and can be predicted using historical request information. Therefore, the WA policy estimates a KV cache reuse probability for each workload, and the WA free queue selects the block with the lowest predicted reuse probability in the upcoming time window as the eviction candidate.
 
@@ -27,28 +27,21 @@ When `popLeft`is called, WAQ considers all queues and selects the bloc
 
 More details analysis about the production trace and the formula about our probability prediction model can be found in our paper [https://www.usenix.org/conference/atc25/presentation/wang-jiahao](https://www.usenix.org/conference/atc25/presentation/wang-jiahao)  (Appeared at USENIX ATC '25).
 
-### Evaluation
+## Evaluation
 
 We evaluate the effectiveness of WA policy on 7B and 70B model in different GPU cache space.
 
-#### Setup
+### Setup
 
-*   Model: Qwen/Qwen2.5-7B-Instruct, meta/Llama-3.3-70B-Instruct
-    
-*   GPU: 1~4 x Nvidia A800 80GB, TP=4 when testing the 70B model.
-    
-*   Trace: Aliyun Bailian Trace [https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon](https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon)
-    
-*   Qps: First hour 6qps, second hour 6ps.
-    
-*   Total elements: 43195
-    
-*   Average input length: 2337.99
-    
-*   Average output length: 430.34
-    
+- Model: Qwen/Qwen2.5-7B-Instruct, meta/Llama-3.3-70B-Instruct
+- GPU: 1~4 x Nvidia A800 80GB, TP=4 when testing the 70B model.
+- Trace: [Aliyun Bailian Trace](https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon)
+- Qps: First hour 6qps, second hour 6ps.
+- Total elements: 43195
+- Average input length: 2337.99
+- Average output length: 430.34
 
-#### Demo
+### Demo
 
 The `benchmark/benchmark_wa.py` script demonstrates a basic implementation of the workload-aware policy's profiling and prediction workflow. This specially designed client simulates multi-turn dialogues by generating requests based on the previous turn's output.
 
@@ -56,20 +49,18 @@ The `benchmark/profiler_utils.py` module provides a cache simulator to p
 
 The Bailian Traces dataset contains a two-hour trace at 6 queries per second (QPS). We utilize the first hour's trace to:
 
-1.  Profile KVCache reuse patterns for various workloads
-    
-2.  Generate and export a hyperparameter configuration file
-    
+1. Profile KVCache reuse patterns for various workloads
+2. Generate and export a hyperparameter configuration file
 
 Subsequently, we launch a vLLM engine that loads this hyperparameter file to serve the second hour's trace.
 
 Additionally, `benchmark_wa.py` generates detailed metrics files for analyzing both Query Time to First Token (QTTFT) and Time Per Output Token (TPOT) performance.
 
-#### Performance Improvement
+### Performance Improvement
 
 Since KVCache hits primarily reduce Time to First Token (TTFT) latency, and Prefill-Decoding (P-D) disaggregation has become prevalent in modern cloud provider deployments, we tested the Prefill-Only component (representing the Prefill-Node in P-D disaggregation) using the 6 QPS trace data. These tests were conducted across varying GPU KVCache block allocations. The reported queued TTFT metric—which includes request queuing time—is particularly critical for user experience evaluation.
 
-##### Qwen 7B model
+#### Qwen 7B model
 
 The max\_num\_batch\_tokens is set as 16384 to improve the GPU utilization. The GPU memory utlization is 0.9. We use the hyperparamter 'num-gpu-blocks-override' to change the cache space.
 
@@ -86,7 +77,7 @@ The max\_num\_batch\_tokens is set as 16384 to improve the GPU utiliza
 
 We can see that the WA policy can get the cache hit rate improvement from 2.5% to 24.6% than LRU, and reduce the qttft from 0.7% to 52% than LRU. WA policy is better when the cache space is relatively limited.
 
-##### Llama 70B model
+#### Llama 70B model
 
 Since the system throughtput is 1~2 qps when inferencing the 70B model, we sample the second hour's 6qps trace to 2qps. we prove the ratio of different turns remains the same.
 
@@ -97,12 +88,13 @@ Since the system throughtput is 1~2 qps when inferencing the 70B mode
 | 2048 | 3299.04 | 4589.6 | 28.1191 | 0.215587 | 0.201457 | 7.01393 |
 | 3072 | 2672.74 | 2798.33 | 4.48785 | 0.261666 | 0.259961 | 0.655852 |
 
-We can see that the WA policy can get the cache hit rate improvement from 0.7% to 28% than LRU, and reduce the qttft from 4.5% to 46% than LRU. 
+We can see that the WA policy can get the cache hit rate improvement from 0.7% to 28% than LRU,and reduce the qttft from 4.5% to 46% than LRU.
 
-### Comments
+## Comments
 
 The Workload-Aware policy (WA) feature is designed for users who observe significant differences between workloads served within a single instance.
 
 Users or developers can enable this eviction policy via the `--enable-wa-policy` hyperparameter and specify the WA hyperparameter by `--wa-offline-param-path`. Our example `benchmark_wa.py`offers a demo to generate the hyperparameter file.
 
-When incoming requests lack sufficient workload tagging, this feature should remain disabled. In such cases, the system will automatically revert to the default FreeKVCacheBlockQueue implementation.
+When incoming requests lack sufficient workload tagging, this feature should remain disabled.
+In such cases,the system will automatically revert to the default FreeKVCacheBlockQueue implementation.

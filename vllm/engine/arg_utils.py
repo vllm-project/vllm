@@ -707,6 +707,10 @@ class EngineArgs:
                                  **cache_kwargs["calculate_kv_scales"])
         cache_group.add_argument("--kv-sharing-fast-prefill",
                                  **cache_kwargs["kv_sharing_fast_prefill"])
+        cache_group.add_argument("--enable-wa-policy",
+                                 **cache_kwargs["enable_wa_policy"])
+        cache_group.add_argument("--wa-offline-param-path",
+                                 **cache_kwargs["wa_offline_param_path"])
 
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)

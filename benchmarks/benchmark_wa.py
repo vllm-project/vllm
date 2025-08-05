@@ -1002,7 +1002,9 @@ def print_metrics(
 
         metrics["extras"] = {
             "total_hit_tokens": sum(hit_tokens),
-            "hit_rate": sum(hit_tokens) / sum(input_lengths),
+            "hit_rate": sum(hit_tokens) / sum(input_lengths)
+            if sum(input_lengths) > 0
+            else 0.0,
         }
 
         return metrics
@@ -1213,19 +1215,19 @@ if __name__ == "__main__":
             the hash_ids in trace, \
             which can be different from the block size of vLLM",
     )
-    parser.add_argument(
-        "--enable-wa-policy",
-        action="store_true",
-        help="evictor policy, such as LRU, WA (workload-aware)",
-    )
-    parser.add_argument(
-        "--wa-offline-param-path",
-        type=str,
-        default="",
-        help="path to offline param for workload-aware cache eviction policy, \
-            if not specified, wa cache eviction policy will do profile and \
-            dump a hyperparameter file and use it",
-    )
+    # parser.add_argument(
+    #     "--enable-wa-policy",
+    #     action="store_true",
+    #     help="evictor policy, such as LRU, WA (workload-aware)",
+    # )
+    # parser.add_argument(
+    #     "--wa-offline-param-path",
+    #     type=str,
+    #     default="",
+    #     help="path to offline param for workload-aware cache eviction policy, \
+    #         if not specified, wa cache eviction policy will do profile and \
+    #         dump a hyperparameter file and use it",
+    # )
     parser.add_argument(
         "--use-raw-token-ids",
         action="store_true",

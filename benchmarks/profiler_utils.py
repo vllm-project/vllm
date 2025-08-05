@@ -123,7 +123,8 @@ class Monitor:
         def get_exp_fitting(data: list[float]):
             params = expon.fit(data)
             if params[1] == 0:
-                return 0
+                mean_reuse_time = np.mean(data)
+                return 1.0 / mean_reuse_time if mean_reuse_time > 0 else 1e9
             lambda_hat = 1 / params[1]
             return lambda_hat
 

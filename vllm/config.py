@@ -1866,7 +1866,7 @@ class CacheConfig:
     enable_wa_policy: bool = False
     """This feature enable workload-aware policy for KVcache pool
     """
-    wa_offline_param_path: Optional[str] = ""
+    wa_offline_param_path: str = ""
     """The offline parameter used by workload-aware policy"""
 
     def compute_hash(self) -> str:
@@ -1951,11 +1951,13 @@ class CacheConfig:
 
         if (self.enable_wa_policy and self.wa_offline_param_path == ""):
             raise ValueError(
-                "Wa offline param must be specified when wa policy is enabled")
+                f"Wa offline param must be specified when wa policy is enabled "
+                f"{self.wa_offline_param_path=}")
 
         if (self.wa_offline_param_path != "" and not self.enable_wa_policy):
             raise ValueError(
-                "Wa offline param must be specified when wa policy is enabled")
+                f"Wa offline param must be specified when wa policy is enabled"
+                f"{self.wa_offline_param_path=}")
 
     def verify_with_parallel_config(
         self,
