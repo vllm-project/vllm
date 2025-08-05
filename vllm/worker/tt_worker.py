@@ -408,17 +408,8 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 # TT-NN utilities, also used by V1 TTWorker
 
 
-def get_dispatch_core_type():
-    dispatch_core_type = ttnn.device.DispatchCoreType.WORKER
-    if ("WH_ARCH_YAML" in os.environ) and os.environ[
-            "WH_ARCH_YAML"] == "wormhole_b0_80_arch_eth_dispatch.yaml":
-        dispatch_core_type = ttnn.device.DispatchCoreType.ETH
-    return dispatch_core_type
-
-
-def get_dispatch_core_config(override_tt_config, device_params):
-    dispatch_core_type = get_dispatch_core_type()
-
+def get_dispatch_core_config(override_tt_config):
+    dispatch_core_axis: ttnn.DispatchCoreAxis = None
     if (override_tt_config is not None
             and "dispatch_core_axis" in override_tt_config):
         assert override_tt_config["dispatch_core_axis"] in [
@@ -429,16 +420,8 @@ def get_dispatch_core_config(override_tt_config, device_params):
         dispatch_core_axis = (ttnn.DispatchCoreAxis.COL
                               if override_tt_config["dispatch_core_axis"]
                               == "col" else ttnn.DispatchCoreAxis.ROW)
-    else:
-        dispatch_core_axis = device_params.pop(
-            "dispatch_core_axis",
-            ttnn.DispatchCoreAxis.COL if "blackhole" in ttnn.get_arch_name()
-            else ttnn.DispatchCoreAxis.ROW,
-        )
 
-    dispatch_core_config = ttnn.DispatchCoreConfig(dispatch_core_type,
-                                                   dispatch_core_axis)
-    return dispatch_core_config
+    return ttnn.DispatchCoreConfig(axis=dispatch_core_axis)
 
 
 def get_fabric_config(override_tt_config):
@@ -532,8 +515,7 @@ def open_mesh_device(override_tt_config, trace_mode):
 
     mesh_device = ttnn.open_mesh_device(
         ttnn.MeshShape(*mesh_grid),
-        dispatch_core_config=get_dispatch_core_config(override_tt_config,
-                                                      device_params),
+        dispatch_core_config=get_dispatch_core_config(override_tt_config),
         **device_params,
     )
     logger.info("multidevice with %d devices and grid %s is created",

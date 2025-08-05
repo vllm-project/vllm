@@ -63,13 +63,13 @@ To run Meta-Llama-3.1/3.2, it is required to have access to the model on Hugging
 To generate tokens (Llama70B on QuietBox) for sample prompts (with batch size 32):
 
 ```sh
-MESH_DEVICE=T3K WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py
+MESH_DEVICE=T3K python examples/offline_inference_tt.py
 ```
 
 To measure performance (Llama70B on QuietBox) for a single batch of 32 prompts (with the default prompt length of 128 tokens):
 
 ```sh
-MESH_DEVICE=T3K WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py --measure_perf
+MESH_DEVICE=T3K python examples/offline_inference_tt.py --measure_perf
 ```
 
 **Note 1**: Custom TT options can be set using `--override_tt_config` with a json string, e.g. `--override_tt_config '{"sample_on_device_mode": "all"}'`, however these shouldn't be used unless the model supports them (most currently do not). Supported parameters are:
@@ -80,7 +80,7 @@ MESH_DEVICE=T3K WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python exampl
 - `dispatch_core_axis`: ["row", "col"]
 - `data_parallel`: [default: 1]
 
-**Note 2 (Llama70B)**: To run Llama70B on Galaxy, set `MESH_DEVICE=TG` and do not set `WH_ARCH_YAML=...`.
+**Note 2 (Llama70B)**: To run Llama70B on Galaxy, set `MESH_DEVICE=TG`.
 
 **Note 3 (Llama70B)**: By default, this will run the newer tt-metal implementation of Llama70B from the [tt_transformers demo](https://github.com/tenstorrent/tt-metal/tree/main/models/tt_transformers). To run other implementations use the `TT_LLAMA_TEXT_VER` environment variable:
 - `"llama3_70b_galaxy"` for the Llama TG implementation
@@ -105,13 +105,13 @@ MESH_DEVICE=TG LLAMA_DIR=<path to weights> TT_LLAMA_TEXT_VER="llama3_70b_galaxy"
 To generate tokens (Llama-3.2-11B on N300) for sample prompts:
 
 ```sh
-MESH_DEVICE=N300 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py --model "meta-llama/Llama-3.2-11B-Vision-Instruct" --multi_modal --max_seqs_in_batch 16 --num_repeat_prompts 8
+MESH_DEVICE=N300 python examples/offline_inference_tt.py --model "meta-llama/Llama-3.2-11B-Vision-Instruct" --multi_modal --max_seqs_in_batch 16 --num_repeat_prompts 8
 ```
 
 To measure performance (Llama-3.2-11B on N300) for a single batch (with the default prompt length of 128 tokens):
 
 ```sh
-MESH_DEVICE=N300 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py --model "meta-llama/Llama-3.2-11B-Vision-Instruct" --measure_perf --multi_modal --max_seqs_in_batch 16
+MESH_DEVICE=N300 python examples/offline_inference_tt.py --model "meta-llama/Llama-3.2-11B-Vision-Instruct" --measure_perf --multi_modal --max_seqs_in_batch 16
 ```
 
 > **Notes:**
@@ -123,7 +123,7 @@ MESH_DEVICE=N300 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examp
 To start up the server:
 
 ```sh
-VLLM_RPC_TIMEOUT=100000 MESH_DEVICE=T3K WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/server_example_tt.py
+VLLM_RPC_TIMEOUT=100000 MESH_DEVICE=T3K python examples/server_example_tt.py
 ```
 
 > **Notes:**
