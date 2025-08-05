@@ -271,7 +271,11 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
 
     seqlen, chunk_size, num_examples, cases = seq_len_chunk_size_cases
 
-    atol, rtol = 5e-3, 5e-3
+    # This test can have larger error for longer sequences
+    if seqlen > 256:
+        atol, rtol = 1e-2, 5e-3
+    else:
+        atol, rtol = 5e-3, 5e-3
 
     # hold state during the cutting process so we know if an
     # example has been exhausted and needs to cycle
