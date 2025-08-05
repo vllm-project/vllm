@@ -8,6 +8,7 @@ vLLM's **Sleep Mode** allows you to temporarily release most GPU memory used b
 - **Fast resume**: Quickly wake up the engine and resume inference without full model reload.
 - **API endpoints**: Control sleep/wake state via HTTP endpoints or Python API.
 - **Supports distributed workloads**: Works with tensor parallelism.
+- **Fine-grained control**: Optionally wake up only model weights or KV cache to avoid OOM during weight updates.
 
 ## **Usage**
 
@@ -50,6 +51,23 @@ VLLM_SERVER_DEV_MODE=1 python -m vllm.entrypoints.openai.api_server \
 - `GET /is_sleeping` — Check if the model is sleeping.
 
 These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`
+
+### RLHF Weight updates
+
+During RLHF training, vLLM allows you to selectively wake up only the model weights or the KV cache using the tags argument in wake_up(). This fine-grained control is especially useful when updating model weights: by waking up just the weights (e.g., llm.wake_up(tags=["weights"])), you avoid allocating memory for the KV cache until after the weight update is complete. This approach helps prevent GPU out-of-memory (OOM) errors, particularly with large models, by minimizing peak memory usage during weight synchronization and update operations.
+
+```python
+# Put engine to deep sleep (level=2)
+llm.sleep(level=2)
+# Simulate weight update (e.g., after RLHF training)
+new_weights = train_model.state_dict()
+# Wake up only weights to avoid OOM
+llm.wake_up(tags=["weights"])
+llm.inplace_update_weights(new_weights)
+del new_weights
+# Optionally, wake up KV cache after weights are updated
+llm.wake_up(tags=["kv_cache"])
+```
 
 ### Notes
 
