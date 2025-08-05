@@ -20,8 +20,8 @@ from typing import Optional, Union
 
 import torch
 from torch import nn
-from transformers.models.gemma3n.configuration_gemma3n import Gemma3nTextConfig
 
+from transformers.models.gemma3n.configuration_gemma3n import Gemma3nTextConfig
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -331,14 +331,15 @@ class Gemma3nAttention(nn.Module):
                                      config.num_kv_shared_layers)
         self.is_kv_shared = layer_idx >= first_kv_shared_layer_idx
 
+        kv_sharing_target_layer_name = None
         if self.is_kv_shared:
             # Last full attention layer is 1 before sharing
             # Last sliding attention layer is 2 before sharing
             offset = 2 if self.sliding_window is not None else 1
             kv_shared_layer_index = first_kv_shared_layer_idx - offset
-            kv_sharing_target_layer_name = f"language_model.model.layers.{kv_shared_layer_index}.self_attn.attn"  # noqa: E501
-        else:
-            kv_sharing_target_layer_name = None
+            if kv_shared_layer_index >= 0:
+                # Only the greater layer is required to specify sharing.
+                kv_sharing_target_layer_name = f"language_model.model.layers.{kv_shared_layer_index}.self_attn.attn"  # noqa: E501
 
         self.rotary_emb = get_rope(
             self.head_dim,
