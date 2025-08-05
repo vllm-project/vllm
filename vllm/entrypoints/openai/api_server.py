@@ -92,6 +92,8 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription, OpenAIServingTranslation)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.entrypoints.openai.tool_server import (DemoToolServer, MCPToolServer,
+                                                 ToolServer)
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     log_non_default_args, with_cancellation)
 from vllm.logger import init_logger
@@ -1620,6 +1622,14 @@ async def init_app_state(
                     "This discrepancy may lead to performance degradation.",
                     resolved_chat_template, args.model)
 
+    if args.tool_server == "demo":
+        tool_server: Optional[ToolServer] = DemoToolServer()
+    elif args.tool_server:
+        tool_server = MCPToolServer()
+        await tool_server.add_tool_server(args.tool_server)
+    else:
+        tool_server = None
+
     # Merge default_mm_loras into the static lora_modules
     default_mm_loras = (vllm_config.lora_config.default_mm_loras
                         if vllm_config.lora_config is not None else {})
@@ -1654,6 +1664,7 @@ async def init_app_state(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
+        tool_server=tool_server,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,

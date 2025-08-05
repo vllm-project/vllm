@@ -1383,14 +1383,12 @@ class OpenAIServingChat(OpenAIServing):
         # Add system message.
         # In Chat Completion API, browsing is enabled by default if the model
         # supports it.
-        enable_browsing = self.supports_browsing
+        assert not self.supports_browsing
+        assert not self.supports_code_interpreter
         sys_msg = get_system_message(
             reasoning_effort=request.reasoning_effort,
-            enable_browsing=enable_browsing,
-            browser_tool=self.browser_tool,
-            enable_python=self.supports_code_interpreter,
-            python_tool=self.python_tool,
-        )
+            browser_description=None,
+            python_description=None)
         messages.append(sys_msg)
 
         # Add developer message.

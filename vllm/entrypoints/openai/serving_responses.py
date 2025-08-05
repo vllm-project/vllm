@@ -5,9 +5,10 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
-from typing import Callable, Final, Optional, Union
+from typing import Any, Callable, Final, Optional, Union
 
 import jinja2
 import openai.types.responses as openai_responses_types
@@ -47,7 +48,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.tool import HarmonyBrowserTool, HarmonyPythonTool
+from vllm.entrypoints.openai.tool_server import MCPToolServer, ToolServer
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -74,6 +75,7 @@ class OpenAIServingResponses(OpenAIServing):
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         tool_parser: Optional[str] = None,
+        tool_server: Optional[ToolServer] = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
     ) -> None:
@@ -111,8 +113,11 @@ class OpenAIServingResponses(OpenAIServing):
             logger.info("Using default chat sampling params from %s: %s",
                         source, self.default_sampling_params)
 
-        self.supports_browsing = False
-        self.supports_code_interpreter = False
+        self.supports_browsing = tool_server.has_tool(
+            "browser") if tool_server else False
+        self.supports_code_interpreter = tool_server.has_tool(
+            "python") if tool_server else False
+        self.tool_server = tool_server
         self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             logger.warning("For gpt-oss, we ignore --enable-auto-tool-choice "
@@ -123,11 +128,6 @@ class OpenAIServingResponses(OpenAIServing):
                 self.default_sampling_params["stop_token_ids"] = []
             self.default_sampling_params["stop_token_ids"].extend(
                 get_stop_tokens_for_assistant_actions())
-
-            self.browser_tool = HarmonyBrowserTool()
-            self.supports_browsing = self.browser_tool.enabled
-            self.python_tool = HarmonyPythonTool()
-            self.supports_code_interpreter = self.python_tool.enabled
 
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
@@ -235,112 +235,142 @@ class OpenAIServingResponses(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
+        if self.tool_server is not None and isinstance(
+                self.tool_server, MCPToolServer
+        ) and (request.background or request.stream) and request.tools and any(
+                tool.type in ["web_search_preview", "code_interpreter"]
+                for tool in request.tools):
+            return self.create_error_response(
+                "MCP tool server is not supported in background mode and "
+                "streaming mode")
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[RequestOutput, None]] = []
-        try:
-            for i, engine_prompt in enumerate(engine_prompts):
-                default_max_tokens = self.max_model_len - len(
-                    engine_prompt["prompt_token_ids"])
-                sampling_params = request.to_sampling_params(
-                    default_max_tokens, self.default_sampling_params)
-
-                trace_headers = (None if raw_request is None else await
-                                 self._get_trace_headers(raw_request.headers))
-
-                context: ConversationContext
-                if self.use_harmony:
-                    if request.stream:
-                        context = StreamingHarmonyContext(
-                            messages, self.browser_tool, self.python_tool)
-                    else:
-                        context = HarmonyContext(messages, self.browser_tool,
-                                                 self.python_tool)
+        if self.use_harmony:
+            tool_list = []
+            if self.supports_browsing:
+                tool_list.append("browser")
+            if self.supports_code_interpreter:
+                tool_list.append("python")
+        async with AsyncExitStack() as exit_stack:
+            try:
+                if self.tool_server is not None:
+                    tool_session_ctxs: dict[str, Any] = {
+                        tool_name:
+                        exit_stack.enter_async_context(
+                            self.tool_server.get_tool_session(tool_name))
+                        for tool_name in tool_list
+                    }
+                    tool_sessions = {}
+                    for tool_name in tool_list:
+                        tool_sessions[tool_name] = (
+                            await tool_session_ctxs[tool_name])
                 else:
-                    context = SimpleContext()
-                generator = self._generate_with_builtin_tools(
-                    request.request_id,
-                    request_prompts[i],
-                    engine_prompt,
-                    sampling_params,
-                    context,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    priority=request.priority,
-                )
-                generators.append(generator)
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+                    assert len(tool_list) == 0
+                    tool_sessions = {}
+                for i, engine_prompt in enumerate(engine_prompts):
+                    default_max_tokens = self.max_model_len - len(
+                        engine_prompt["prompt_token_ids"])
+                    sampling_params = request.to_sampling_params(
+                        default_max_tokens, self.default_sampling_params)
 
-        assert len(generators) == 1
-        result_generator, = generators
+                    trace_headers = (None if raw_request is None else await
+                                     self._get_trace_headers(
+                                         raw_request.headers))
 
-        # Store the input messages.
-        if request.store:
-            self.msg_store[request.request_id] = messages
+                    context: ConversationContext
+                    if self.use_harmony:
+                        if request.stream:
+                            context = StreamingHarmonyContext(
+                                messages, tool_sessions)
+                        else:
+                            context = HarmonyContext(messages, tool_sessions)
+                    else:
+                        context = SimpleContext()
+                    generator = self._generate_with_builtin_tools(
+                        request.request_id,
+                        request_prompts[i],
+                        engine_prompt,
+                        sampling_params,
+                        context,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                        priority=request.priority,
+                    )
+                    generators.append(generator)
+            except ValueError as e:
+                # TODO: Use a vllm-specific Validation Error
+                return self.create_error_response(str(e))
 
-        if request.background:
-            created_time = int(time.time())
-            response = ResponsesResponse.from_request(
-                request,
-                sampling_params,
-                model_name=model_name,
-                created_time=created_time,
-                output=[],
-                status="queued",
-                usage=None,
-            )
-            async with self.response_store_lock:
-                self.response_store[response.id] = response
+            assert len(generators) == 1
+            result_generator, = generators
 
-            # Run the request in the background.
-            task = asyncio.create_task(
-                self._run_background_request(
+            # Store the input messages.
+            if request.store:
+                self.msg_store[request.request_id] = messages
+
+            if request.background:
+                created_time = int(time.time())
+                response = ResponsesResponse.from_request(
                     request,
                     sampling_params,
-                    result_generator,
-                    context,
+                    model_name=model_name,
+                    created_time=created_time,
+                    output=[],
+                    status="queued",
+                    usage=None,
+                )
+                async with self.response_store_lock:
+                    self.response_store[response.id] = response
+
+                # Run the request in the background.
+                task = asyncio.create_task(
+                    self._run_background_request(
+                        request,
+                        sampling_params,
+                        result_generator,
+                        context,
+                        model_name,
+                        tokenizer,
+                        request_metadata,
+                        created_time,
+                    ),
+                    name=f"create_{response.id}",
+                )
+
+                # For cleanup.
+                response_id = response.id
+                self.background_tasks[response_id] = task
+                task.add_done_callback(
+                    lambda _: self.background_tasks.pop(response_id, None))
+                return response
+
+            if request.stream:
+                return self.responses_stream_generator(
+                    request,
+                    sampling_params,
+                    result_generator,  # type: ignore[arg-type]
+                    context,  # type: ignore[arg-type]
                     model_name,
                     tokenizer,
                     request_metadata,
-                    created_time,
-                ),
-                name=f"create_{response.id}",
-            )
-
-            # For cleanup.
-            response_id = response.id
-            self.background_tasks[response_id] = task
-            task.add_done_callback(
-                lambda _: self.background_tasks.pop(response_id, None))
-            return response
-
-        if request.stream:
-            return self.responses_stream_generator(
-                request,
-                sampling_params,
-                result_generator,  # type: ignore[arg-type]
-                context,  # type: ignore[arg-type]
-                model_name,
-                tokenizer,
-                request_metadata,
-            )
-
-        try:
-            result: Union[
-                ErrorResponse,
-                ResponsesResponse] = await self.responses_full_generator(
-                    request,
-                    sampling_params,
-                    result_generator,
-                    context,
-                    model_name,
-                    tokenizer,
-                    request_metadata,
                 )
-            return result
-        except Exception as e:
-            return self.create_error_response(str(e))
+
+            try:
+                result: Union[
+                    ErrorResponse,
+                    ResponsesResponse] = await self.responses_full_generator(
+                        request,
+                        sampling_params,
+                        result_generator,
+                        context,
+                        model_name,
+                        tokenizer,
+                        request_metadata,
+                    )
+                return result
+            except Exception as e:
+                return self.create_error_response(str(e))
+        return self.create_error_response("Unknown error")
 
     async def _make_request(
         self,
@@ -557,16 +587,18 @@ class OpenAIServingResponses(OpenAIServing):
             reasoning_effort = (request.reasoning.effort
                                 if request.reasoning else None)
             tool_types = [tool.type for tool in request.tools]
-            enable_browsing = ("web_search_preview" in tool_types
-                               and self.supports_browsing)
+            enable_browser = ("web_search_preview" in tool_types
+                              and self.tool_server is not None)
             enable_code_interpreter = ("code_interpreter" in tool_types
-                                       and self.supports_code_interpreter)
+                                       and self.tool_server is not None)
             sys_msg = get_system_message(
                 reasoning_effort=reasoning_effort,
-                enable_browsing=enable_browsing,
-                browser_tool=self.browser_tool,
-                enable_python=enable_code_interpreter,
-                python_tool=self.python_tool,
+                browser_description=self.tool_server.get_tool_description(
+                    "browser")
+                if self.tool_server and enable_browser else None,
+                python_description=self.tool_server.get_tool_description(
+                    "python")
+                if self.tool_server and enable_code_interpreter else None,
             )
             messages.append(sys_msg)
             dev_msg = get_developer_message(request.instructions,
@@ -937,7 +969,7 @@ class OpenAIServingResponses(OpenAIServing):
 
             if ctx.is_assistant_action_turn() and len(ctx.parser.messages) > 0:
                 previous_item = ctx.parser.messages[-1]
-                if (self.browser_tool.enabled
+                if (self.supports_browsing
                         and previous_item.recipient is not None
                         and previous_item.recipient.startswith("browser.")):
                     function_name = previous_item.recipient[len("browser."):]
@@ -1025,7 +1057,7 @@ class OpenAIServingResponses(OpenAIServing):
                             ),
                         ))
 
-                if (self.python_tool.enabled
+                if (self.supports_code_interpreter
                         and previous_item.recipient is not None
                         and previous_item.recipient.startswith("python")):
                     yield _send_event(

@@ -981,13 +981,12 @@ class OpenAIServing:
                 # NOTE(woosuk): The stop condition is handled by the engine.
                 yield context
 
-            tool = context.get_tool_call()
-            if tool is None:
+            if not context.need_builtin_tool_call():
                 # The model did not ask for a tool call, so we're done.
                 break
 
             # Call the tool and update the context with the result.
-            tool_output = await tool.get_result(context)
+            tool_output = await context.call_tool()
             context.append_output(tool_output)
 
             # TODO: uncomment this and enable tool output streaming

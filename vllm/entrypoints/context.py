@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
+import logging
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Optional
+from typing import Union
 
-from openai_harmony import Role, StreamState
+from mcp import ClientSession
+from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm.entrypoints.harmony_utils import (
     get_encoding, get_streamable_parser_for_assistant, render_for_completion)
+from vllm.entrypoints.tool import Tool
 from vllm.outputs import RequestOutput
 
-if TYPE_CHECKING:
-    # Avoid circular import.
-    from vllm.entrypoints.tool import Tool
+logger = logging.getLogger(__name__)
 
 
 class ConversationContext(ABC):
@@ -21,7 +23,11 @@ class ConversationContext(ABC):
         pass
 
     @abstractmethod
-    def get_tool_call(self) -> Optional["Tool"]:
+    async def call_tool(self) -> list[Message]:
+        pass
+
+    @abstractmethod
+    def need_builtin_tool_call(self) -> bool:
         pass
 
     @abstractmethod
@@ -37,9 +43,11 @@ class SimpleContext(ConversationContext):
     def append_output(self, output) -> None:
         self.last_output = output
 
-    def get_tool_call(self) -> Optional["Tool"]:
-        # Doesn't support builtin tool calls.
-        return None
+    def need_builtin_tool_call(self) -> bool:
+        return False
+
+    async def call_tool(self) -> list[Message]:
+        raise NotImplementedError("Should not be called.")
 
     def render_for_completion(self) -> list[int]:
         raise NotImplementedError("Should not be called.")
@@ -50,12 +58,12 @@ class HarmonyContext(ConversationContext):
     def __init__(
         self,
         messages: list,
-        browser_tool,
-        python_tool,
+        tool_sessions: dict[str, Union[ClientSession, Tool]],
     ):
+        # TODO: Remove the hack of Union[ClientSession, Tool] by using MCP
+        # when demo.
         self._messages = messages
-        self.browser_tool = browser_tool
-        self.python_tool = python_tool
+        self.tool_sessions = tool_sessions
 
         self.parser = get_streamable_parser_for_assistant()
         self.num_init_messages = len(messages)
@@ -80,20 +88,62 @@ class HarmonyContext(ConversationContext):
     def messages(self) -> list:
         return self._messages
 
-    def get_tool_call(self) -> Optional["Tool"]:
+    def need_builtin_tool_call(self) -> bool:
+        last_msg = self.messages[-1]
+        recipient = last_msg.recipient
+        return recipient is not None and (recipient.startswith("browser.")
+                                          or recipient.startswith("python"))
+
+    async def call_tool(self) -> list[Message]:
         if not self.messages:
-            return None
+            return []
         last_msg = self.messages[-1]
         recipient = last_msg.recipient
         if recipient is not None:
             if recipient.startswith("browser."):
-                return self.browser_tool
+                return await self.call_search_tool(
+                    self.tool_sessions["browser"], last_msg)
             elif recipient.startswith("python"):
-                return self.python_tool
-        return None
+                return await self.call_python_tool(
+                    self.tool_sessions["python"], last_msg)
+        raise ValueError("No tool call found")
 
     def render_for_completion(self) -> list[int]:
         return render_for_completion(self.messages)
+
+    async def call_search_tool(self, tool_session: Union[ClientSession, Tool],
+                               last_msg: Message) -> list[Message]:
+        if isinstance(tool_session, Tool):
+            return await tool_session.get_result(self)
+        tool_name = last_msg.recipient.split(".")[1]
+        args = json.loads(last_msg.content[0].text)
+        result = await tool_session.call_tool(tool_name, args)
+        result_str = result.content[0].text
+        content = TextContent(text=result_str)
+        author = Author(role=Role.TOOL, name=last_msg.recipient)
+        return [
+            Message(author=author, content=[content], recipient=Role.ASSISTANT)
+        ]
+
+    async def call_python_tool(self, tool_session: Union[ClientSession, Tool],
+                               last_msg: Message) -> list[Message]:
+        if isinstance(tool_session, Tool):
+            return await tool_session.get_result(self)
+        param = {
+            "code": last_msg.content[0].text,
+        }
+        result = await tool_session.call_tool("python", param)
+        result_str = result.content[0].text
+
+        content = TextContent(text=result_str)
+        author = Author(role=Role.TOOL, name="python")
+
+        return [
+            Message(author=author,
+                    content=[content],
+                    channel=last_msg.channel,
+                    recipient=Role.ASSISTANT)
+        ]
 
 
 class StreamingHarmonyContext(HarmonyContext):
