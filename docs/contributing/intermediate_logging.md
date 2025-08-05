@@ -12,8 +12,6 @@ The intermediate tensor logging feature enables you to:
 - Filter tensors by device
 - Filter whole model fwd step id
 
-This is manily useful for debugging model accucacy gaps with 2 runs
-
 ## Usage
 
 ### Enabling via parameters or config file
@@ -80,56 +78,4 @@ When you enable intermediate logging, the system creates a timestamped directory
         └── ...
 ```
 
-Each tensor is saved in two formats:
-1. `.json` files containing metadata and small tensor values
-2. `.pt` files containing the full PyTorch tensors (can be loaded with `torch.load()`)
-
-## Comparing Intermediate Logging Results
-
-vLLM provides a tool called `compare_intermediate.py` to compare intermediate tensors between two different runs. This is particularly useful for debugging accuracy differences or verifying that code changes don't affect model outputs.
-
-### Usage
-
-```bash
-python tools/compare_intermediate.py --dir1 /path/to/first/log/dir --dir2 /path/to/second/log/dir [options]
-```
-
-### Options
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--dir1` | First intermediate logging directory | (required) |
-| `--dir2` | Second intermediate logging directory | (required) |
-| `--output` | Output file for the report | stdout |
-| `--rtol` | Relative tolerance for tensor comparison | 1e-5 |
-| `--atol` | Absolute tolerance for tensor comparison | 1e-8 |
-| `--steps` | Comma-separated list of steps to compare | all |
-| `--modules` | Comma-separated list of module name patterns to compare | all |
-| `--verbose` | Include detailed information about each tensor | false |
-
-### Example
-
-```bash
-# Compare all tensors from two different runs
-python tools/compare_intermediate.py --dir1 /tmp/vllm_intermediates/run1 --dir2 /tmp/vllm_intermediates/run2
-
-# Compare only specific modules and steps with custom tolerance
-python tools/compare_intermediate.py \
-  --dir1 /tmp/vllm_intermediates/run1 \
-  --dir2 /tmp/vllm_intermediates/run2 \
-  --steps 0,1 \
-  --modules ".*attention.*,.*mlp.*" \
-  --rtol 1e-4 \
-  --atol 1e-7 \
-  --output comparison_report.md
-```
-
-### Output
-
-The tool generates a detailed markdown report that includes:
-
-- Overall summary of matching and mismatched tensors
-- Per-module comparison results
-- Detailed tensor differences (when using `--verbose`)
-
-This makes it easy to identify which specific tensors differ between runs and by how much.
+Each tensor is saved in a `.pt` file containing the full PyTorch tensors (can be loaded with `torch.load()`)
