@@ -26,7 +26,7 @@ class MinPLogitsProcessor(LogitsProcessor):
                                             pin_memory=is_pin_memory)
         self.min_p_cpu = self.min_p_cpu_tensor.numpy()
 
-        self.use_double_tensor = torch.device("cpu") != torch.device(device)
+        self.use_double_tensor = torch.device(device).type != "cpu"
 
         if self.use_double_tensor:
             # Pre-allocated device tensor
@@ -52,7 +52,6 @@ class MinPLogitsProcessor(LogitsProcessor):
         needs_update = False
         # Process added requests.
         for _, index, params, _ in batch_update.added:
-            assert params is not None
             min_p = params.min_p
             if self.min_p_cpu[index] != min_p:
                 needs_update = True
@@ -129,8 +128,7 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         needs_update: bool = False
         # Process added requests.
         for _, index, params, _ in batch_update.added:
-            assert params is not None
-            if (lb := params.logit_bias):
+            if lb := params.logit_bias:
                 self.biases[index] = lb
                 needs_update = True
             else:
@@ -216,7 +214,6 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         if batch_update:
             # Process added requests.
             for _, index, params, output_tok_ids in batch_update.added:
-                assert params is not None
                 if ((min_tokens := params.min_tokens)
                         and len(output_tok_ids) < min_tokens):
                     # Replace request metadata at batch index

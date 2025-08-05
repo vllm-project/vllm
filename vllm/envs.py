@@ -1042,7 +1042,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOOPBACK_IP":
     lambda: os.getenv("VLLM_LOOPBACK_IP", ""),
 
-    # Controls whether or not to use cudnn prefill
+    # Used to inject a fake logits processor entrypoint for unit testing
     "VLLM_MOCK_LP_ENTRYPOINT":
     lambda: bool(int(os.getenv("VLLM_MOCK_LP_ENTRYPOINT", "0"))),
 
