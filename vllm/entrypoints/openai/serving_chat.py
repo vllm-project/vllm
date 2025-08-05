@@ -1049,14 +1049,28 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs = None
 
             if self.use_harmony:
-                output_msgs = parse_output_into_messages(token_ids)
-                is_tool_call = output_msgs[-1].recipient is not None
-                if len(output_msgs) != 2:
-                    raise ValueError(
-                        "Expected 2 output messages (reasoning and final), "
-                        f"but got {len(output_msgs)}.")
-                reasoning_msg, final_msg = output_msgs
-                reasoning_content = reasoning_msg.content[0].text
+                parser = parse_output_into_messages(token_ids)
+                output_msgs = parser.messages
+                if len(output_msgs) == 0:
+                    # The generation has stopped during reasoning.
+                    is_tool_call = False
+                    reasoning_content = parser.current_content
+                    final_content = None
+                elif len(output_msgs) == 1:
+                    # The generation has stopped during final message.
+                    is_tool_call = False
+                    reasoning_content = output_msgs[0].content[0].text
+                    final_content = parser.current_content
+                else:
+                    if len(output_msgs) != 2:
+                        raise ValueError(
+                            "Expected 2 output messages (reasoning and final), "
+                            f"but got {len(output_msgs)}.")
+                    reasoning_msg, final_msg = output_msgs
+                    reasoning_content = reasoning_msg.content[0].text
+                    final_content = final_msg.content[0].text
+                    is_tool_call = final_msg.recipient is not None
+
                 if not request.include_reasoning:
                     reasoning_content = None
                 if is_tool_call:
@@ -1068,7 +1082,7 @@ class OpenAIServingChat(OpenAIServing):
                     message = ChatMessage(
                         role=role,
                         reasoning_content=reasoning_content,
-                        content=final_msg.content[0].text,
+                        content=final_content,
                     )
 
                 if is_tool_call:
