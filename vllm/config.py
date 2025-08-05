@@ -1108,6 +1108,21 @@ class ModelConfig:
         if quant_cfg is None:
             # compressed-tensors uses a "compression_config" key
             quant_cfg = getattr(self.hf_config, "compression_config", None)
+
+        else:
+            # Set quant_method for ModelOpt models.
+            producer_name = quant_cfg.get("producer", {}).get("name")
+            if producer_name == "modelopt":
+                quant_algo = quant_cfg.get("quantization",
+                                           {}).get("quant_algo")
+                if quant_algo == "FP8":
+                    quant_cfg["quant_method"] = "modelopt"
+                elif quant_algo == "NVFP4":
+                    quant_cfg["quant_method"] = "modelopt_fp4"
+                elif quant_algo is not None:
+                    raise ValueError(
+                        f"Unknown ModelOpt quant algo: {quant_algo}")
+
         return quant_cfg
 
     def _verify_quantization(self) -> None:
