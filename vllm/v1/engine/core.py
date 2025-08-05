@@ -721,8 +721,11 @@ class EngineCoreProc(EngineCore):
             req = self.input_queue.get_nowait()
             self._handle_client_request(*req)
 
-    def _process_engine_step(self) -> bool:
-        """Called only when there are unfinished local requests."""
+    def _process_engine_step(self) -> tuple[bool, bool]:
+        """
+        Called only when there are unfinished local requests.
+        Returns tuple of booleans (model_executed, produced_output).
+        """
 
         # Step the engine core.
         outputs, model_executed = self.step_fn()
@@ -730,7 +733,7 @@ class EngineCoreProc(EngineCore):
         for output in (outputs.items() if outputs else ()):
             self.output_queue.put_nowait(output)
 
-        return model_executed
+        return model_executed, bool(outputs)
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
@@ -991,25 +994,6 @@ class DPEngineCoreProc(EngineCoreProc):
         else:
             super()._handle_client_request(request_type, request)
 
-    def _process_engine_step(self) -> bool:
-        # Step the engine core.
-        outputs, model_executed = self.step_fn()
-        # Put EngineCoreOutputs into the output queue.
-        for output in (outputs.items() if outputs else ()):
-            self.output_queue.put_nowait(output)
-
-        if outputs and not model_executed:
-            # NOTE(woosuk): This branch is taken when the previous step_fn call
-            # updated the scheduler or worker states without actually executing
-            # the model. With asynchronous scheduling, this typically occurs
-            # every other step. To avoid unnecessary dummy runs, we give
-            # step_fn a second chance to execute the model if possible.
-            outputs, model_executed = self.step_fn()
-            for output in (outputs.items() if outputs else ()):
-                self.output_queue.put_nowait(output)
-
-        return model_executed
-
     def _maybe_publish_request_counts(self):
         if not self.publish_dp_lb_stats:
             return
@@ -1033,7 +1017,15 @@ class DPEngineCoreProc(EngineCoreProc):
             self._process_input_queue()
 
             # 2) Step the engine core.
-            executed = self._process_engine_step()
+            executed, produced_output = self._process_engine_step()
+            while not executed and produced_output:
+                # NOTE(woosuk): This branch is taken when the previous step_fn
+                # call updated the scheduler or worker states without actually
+                # executing the model. With asynchronous scheduling, this
+                # typically occurs every other step. To avoid unnecessary dummy
+                # runs, we give step_fn a second chance to execute the model if
+                # possible.
+                executed, produced_output = self._process_engine_step()
             self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
