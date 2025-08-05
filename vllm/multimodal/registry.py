@@ -201,6 +201,9 @@ class MultiModalRegistry:
             # Non-multimodal models are always in "text-only" mode
             return True
 
+        if model_config.multimodal_config is None:
+            return True
+
         processor = self.create_processor(model_config, disable_cache=False)
         supported_modalities = processor.info.get_supported_mm_limits()
 
