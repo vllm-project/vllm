@@ -359,7 +359,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         token_type_ids = []
 
         for i in range(num_reqs):
-            pos = token_type_id_requests.get(i), seq_lens[i]
+            pos = token_type_id_requests.get(i, seq_lens[i])
             ids = (torch.arange(seq_lens[i]) >= pos).int()
             token_type_ids.append(ids)
 
