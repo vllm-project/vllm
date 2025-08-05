@@ -1231,14 +1231,6 @@ class EngineArgs:
         )
 
         if model_config.is_multimodal_model:
-            mm_processor_kwargs = model_config.mm_processor_kwargs or {}
-            if (mm_processor_kwargs.get("device", "cpu") != "cpu"
-                    and not model_config.disable_mm_preprocessor_cache):
-                logger.info("Multi-modal preprocessor cache is automatically "
-                            "disabled to optimize the performance of "
-                            "GPU-accelerated multi-modal processor.")
-                model_config.set_disable_mm_preprocessor_cache(True)
-
             dp_supports_mm_preprocessor_cache = (self.data_parallel_size == 1
                                                  or data_parallel_external_lb)
             if (not dp_supports_mm_preprocessor_cache
