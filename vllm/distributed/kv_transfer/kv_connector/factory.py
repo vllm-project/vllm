@@ -5,13 +5,9 @@ import importlib
 from typing import TYPE_CHECKING, Callable
 
 import vllm.envs as envs
-from vllm.config import KVTransferConfig
-from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
-from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
-                                                          KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.logger import init_logger
-
-from .base import KVConnectorBase
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -20,7 +16,7 @@ logger = init_logger(__name__)
 
 
 class KVConnectorFactory:
-    _registry: dict[str, Callable[[], type[KVConnectorBaseType]]] = {}
+    _registry: dict[str, Callable[[], type[KVConnectorBase]]] = {}
 
     @classmethod
     def register_connector(cls, name: str, module_path: str,
@@ -29,28 +25,23 @@ class KVConnectorFactory:
         if name in cls._registry:
             raise ValueError(f"Connector '{name}' is already registered.")
 
-        def loader() -> type[KVConnectorBaseType]:
+        def loader() -> type[KVConnectorBase]:
             module = importlib.import_module(module_path)
             return getattr(module, class_name)
 
         cls._registry[name] = loader
 
     @classmethod
-    def create_connector_v0(cls, rank: int, local_rank: int,
-                            config: "VllmConfig") -> KVConnectorBase:
-        if envs.VLLM_USE_V1:
-            raise ValueError("Attempting to initialize a V0 Connector, "
+    def create_connector(
+        cls,
+        config: "VllmConfig",
+        role: KVConnectorRole,
+    ) -> KVConnectorBase:
+        if not envs.VLLM_USE_V1:
+            raise ValueError("Attempting to initialize a V1 Connector, "
                              f"but found {envs.VLLM_USE_V1=}")
 
-        connector_cls = cls.get_connector_class(config.kv_transfer_config)
-        assert issubclass(connector_cls, KVConnectorBase)
-        return connector_cls(rank, local_rank, config)
-
-    @classmethod
-    def get_connector_class(
-            cls, kv_transfer_config: "KVTransferConfig"
-    ) -> type[KVConnectorBaseType]:
-        """Get the connector class by name."""
+        kv_transfer_config = config.kv_transfer_config
         connector_name = kv_transfer_config.kv_connector
         if connector_name in cls._registry:
             connector_cls = cls._registry[connector_name]()
@@ -61,21 +52,7 @@ class KVConnectorFactory:
                     f"Unsupported connector type: {connector_name}")
             connector_module = importlib.import_module(connector_module_path)
             connector_cls = getattr(connector_module, connector_name)
-        return connector_cls
-
-    @classmethod
-    def create_connector_v1(
-        cls,
-        config: "VllmConfig",
-        role: KVConnectorRole,
-    ) -> KVConnectorBase_V1:
-        if not envs.VLLM_USE_V1:
-            raise ValueError("Attempting to initialize a V1 Connector, "
-                             f"but found {envs.VLLM_USE_V1=}")
-
-        kv_transfer_config = config.kv_transfer_config
-        connector_cls = cls.get_connector_class(kv_transfer_config)
-        assert issubclass(connector_cls, KVConnectorBase_V1)
+        assert issubclass(connector_cls, KVConnectorBase)
         logger.info("Creating v1 connector with name: %s and engine_id: %s",
                     connector_cls.__name__, kv_transfer_config.engine_id)
         # NOTE(Kuntai): v1 connector is explicitly separated into two roles.
@@ -92,25 +69,6 @@ class KVConnectorFactory:
 # Register various connectors here.
 # The registration should not be done in each individual file, as we want to
 # only load the files corresponding to the current connector.
-KVConnectorFactory.register_connector(
-    "PyNcclConnector",
-    "vllm.distributed.kv_transfer.kv_connector.simple_connector",
-    "SimpleConnector")
-
-KVConnectorFactory.register_connector(
-    "MooncakeConnector",
-    "vllm.distributed.kv_transfer.kv_connector.simple_connector",
-    "SimpleConnector")
-
-KVConnectorFactory.register_connector(
-    "LMCacheConnector",
-    "vllm.distributed.kv_transfer.kv_connector.lmcache_connector",
-    "LMCacheConnector")
-
-KVConnectorFactory.register_connector(
-    "MooncakeStoreConnector",
-    "vllm.distributed.kv_transfer.kv_connector.mooncake_store_connector",
-    "MooncakeStoreConnector")
 
 KVConnectorFactory.register_connector(
     "SharedStorageConnector",
