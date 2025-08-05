@@ -33,9 +33,12 @@ class OpenAIReasoningParser(ReasoningParser):
         print("reasoning_end_token_ids", self.reasoning_end_token_ids)
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
+
         def find_last_index(lst, value):
             return len(lst) - 1 - list(reversed(lst)).index(value)
-        last_start = find_last_index(input_ids, self.reasoning_end_token_ids[0])
+
+        last_start = find_last_index(input_ids,
+                                     self.reasoning_end_token_ids[0])
         if last_start is None:
             return False
         for i in range(5):

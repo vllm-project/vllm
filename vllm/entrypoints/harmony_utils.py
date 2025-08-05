@@ -5,8 +5,8 @@ import json
 from collections.abc import Iterable
 from typing import Any, Literal, Optional, Union
 
-from openai.types.responses import (ResponseOutputMessage, ResponseOutputText,
-                                    ResponseOutputItem)
+from openai.types.responses import (ResponseOutputItem, ResponseOutputMessage,
+                                    ResponseOutputText)
 from openai.types.responses.response_function_tool_call import (
     ResponseFunctionToolCall)
 from openai.types.responses.response_function_web_search import (
@@ -16,9 +16,8 @@ from openai_harmony import (Author, Conversation, DeveloperContent,
                             Role, StreamableParser, SystemContent, TextContent,
                             ToolDescription, load_harmony_encoding)
 
-from vllm.entrypoints.openai.protocol import (ResponseReasoningItem,
-                                              OpenAIBaseModel,
-                                              ResponseInputOutputItem,
+from vllm.entrypoints.openai.protocol import (ResponseInputOutputItem,
+                                              ResponseReasoningItem,
                                               ResponseReasoningTextContent)
 from vllm.entrypoints.tool import Tool
 from vllm.utils import random_uuid
