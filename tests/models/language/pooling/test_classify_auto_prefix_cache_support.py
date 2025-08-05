@@ -50,12 +50,8 @@ def test_encode_only_classify(
     vllm_runner,
     example_prompts,
     model: str,
-    dtype: str,
-    monkeypatch,
+    dtype: str
 ) -> None:
-    if model == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
-        monkeypatch.setenv("VLLM_USE_V1", "0")
-
     with vllm_runner(model,
                      max_model_len=512,
                      dtype=dtype,
