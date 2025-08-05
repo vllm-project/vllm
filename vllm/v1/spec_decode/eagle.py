@@ -621,8 +621,9 @@ class EagleProposer:
 
         if supports_multimodal(target_model):
             # handle multimodality
-            self.model.config.image_token_index = (
-                target_model.config.image_token_index)
+            if hasattr(target_model.config, "image_token_index"):
+                self.model.config.image_token_index = (
+                    target_model.config.image_token_index)
             target_language_model = target_model.get_language_model()
         else:
             target_language_model = target_model

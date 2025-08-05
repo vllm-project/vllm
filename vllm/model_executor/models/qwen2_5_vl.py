@@ -1196,13 +1196,18 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                     video_input=video_input)
                 input_ids = None
 
-        hidden_states = self.language_model.model(
+        outputs = self.language_model.model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
-        return hidden_states
+
+        if isinstance(outputs, tuple):
+            hidden_states, aux_hidden_states = outputs
+            return hidden_states, aux_hidden_states
+        else:
+            return outputs
 
     def compute_logits(
         self,
@@ -1211,6 +1216,13 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
+        self.language_model.set_aux_hidden_state_layers(layers)
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
+        num_layers = len(self.language_model.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
