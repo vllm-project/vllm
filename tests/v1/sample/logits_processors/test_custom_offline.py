@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
+from typing import Union
 
 import pytest
 
@@ -11,6 +12,7 @@ from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
                                                      prompts)
 from vllm import LLM, SamplingParams
 from vllm.test_utils import DUMMY_LOGITPROC_FQCN, DummyLogitsProcessor
+from vllm.v1.sample.logits_processor import LogitsProcessor
 
 # Create a mixture of requests which do and don't utilize the dummy logitproc
 sampling_params_list = [
@@ -92,22 +94,25 @@ def test_custom_logitsprocs_py(monkeypatch,
     random.seed(40)
 
     # Choose LLM args based on logitproc source
-    kwargs = {}
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_NONE:
         # Scenario: the server does not load any custom logitproc
         # Every other scenario is a different way of loading a custom logitproc
-        _run_test(kwargs, logitproc_loaded=False)
+        _run_test({}, logitproc_loaded=False)
         return
+
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT:
         # Scenario: vLLM loads a logitproc from a preconfigured entrypoint
         # To that end, mock a dummy logitproc entrypoint
         monkeypatch.setenv("VLLM_MOCK_LP_ENTRYPOINT", "1")
-    elif logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_FQCN:
+        _run_test({}, logitproc_loaded=True)
+        return
+
+    kwargs: dict[str, list[Union[str, type[LogitsProcessor]]]] = {}
+    if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_FQCN:
         # Scenario: load logitproc based on fully-qualified class name (FQCN)
         kwargs["logits_processors"] = [DUMMY_LOGITPROC_FQCN]
     elif logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_CLASS:
         # Scenario: load logitproc from provided class object
         kwargs["logits_processors"] = [DummyLogitsProcessor]
 
-    # Test one of the above scenarios where the server loads a custom logitproc
     _run_test(kwargs, logitproc_loaded=True)
