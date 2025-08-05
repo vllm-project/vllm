@@ -273,6 +273,7 @@ class CudaPlatformBase(Platform):
             TRITON_SPLIT_PREFILL_DECODE_ATTENTION_V1 = "vllm.v1.attention.backends.triton_attn." \
                                             "TritonSplitPrefillDecodeAttentionBackend"                                                                                                                                                                            # noqa: E501
             FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
+            TREE_ATTN_V1 = "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend"  # noqa: E501
 
             if selected_backend == _Backend.FLASHINFER:
                 logger.info_once("Using FlashInfer backend on V1 engine.")
@@ -298,6 +299,9 @@ class CudaPlatformBase(Platform):
             elif selected_backend == _Backend.FLASH_ATTN:
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return FLASH_ATTN_V1
+            elif selected_backend == _Backend.TREE_ATTN:
+                logger.info_once("Using Tree Attention backend on V1 engine.")
+                return TREE_ATTN_V1
 
             from vllm.attention.selector import is_attn_backend_supported
 

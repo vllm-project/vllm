@@ -18,10 +18,9 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
-                                                AttentionMetadataBuilder,
+                                              AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
                                               is_power_of_two)
-
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)

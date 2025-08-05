@@ -1360,10 +1360,8 @@ def fused_experts(
     # E8M0 scale, which means we requantize the weight and input to the specific
     # scale. Fallen back to cutlass or triton for some cases would cause
     # accuracy issue.
-    N = w1.size(1)
-    should_use_deep_gemm = ((N > 512
-                             and _valid_deep_gemm(hidden_states, w1, w2))
-                            or is_blackwell_deep_gemm_used())
+    should_use_deep_gemm = is_blackwell_deep_gemm_used() or _valid_deep_gemm(
+        hidden_states, w1, w2)
     if (allow_deep_gemm and use_fp8_w8a8 and should_use_deep_gemm):
         assert apply_router_weight_on_input is False
         assert is_act_and_mul, (

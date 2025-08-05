@@ -123,6 +123,7 @@ class Glm4MoE(nn.Module):
                                      config.n_routed_experts,
                                      bias=False,
                                      quant_config=None,
+                                     params_dtype=torch.float32,
                                      prefix=f"{prefix}.gate")
 
         self.gate.e_score_correction_bias = nn.Parameter(
@@ -180,7 +181,7 @@ class Glm4MoE(nn.Module):
 
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
-        router_logits, _ = self.gate(hidden_states)
+        router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits) * self.routed_scaling_factor

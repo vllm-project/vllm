@@ -17,7 +17,8 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
     _Backend.FLASH_ATTN_VLLM_V1, _Backend.FLASHINFER_VLLM_V1,
-    _Backend.FLEX_ATTENTION, _Backend.TRITON_UNIFIED_ATTENTION_V1
+    _Backend.TRITON_UNIFIED_ATTENTION_V1, _Backend.FLEX_ATTENTION,
+    _Backend.TREE_ATTN
 ]
 
 # Remove flashinfer from the list if it's not available
