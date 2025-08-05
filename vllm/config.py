@@ -39,8 +39,8 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    try_get_generation_config, try_get_safetensors_metadata,
-    try_get_tokenizer_config, uses_mrope)
+    maybe_override_with_speculators_target_model, try_get_generation_config,
+    try_get_safetensors_metadata, try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 # yapf conflicts with isort for this block
@@ -57,6 +57,7 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
+    from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
     from transformers.configuration_utils import PretrainedConfig
 
@@ -74,6 +75,7 @@ if TYPE_CHECKING:
 else:
     DataclassInstance = Any
     PlacementGroup = Any
+    RuntimeEnv = Any
     PretrainedConfig = Any
     ExecutorBase = Any
     QuantizationConfig = Any
@@ -375,7 +377,8 @@ class ModelConfig:
     max_logprobs: int = 20
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
-    OpenAI Chat Completions API."""
+    OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
+    vocab_size) logprobs are allowed to be returned and it may cause OOM."""
     logprobs_mode: LogprobsMode = "raw_logprobs"
     """Indicates the content returned in the logprobs and prompt_logprobs.
     Supported mode:
@@ -535,6 +538,15 @@ class ModelConfig:
                     "affect the random state of the Python process that "
                     "launched vLLM.", self.seed)
 
+        if self.runner != "draft":
+            # If we're not running the draft model, check for speculators config
+            # If speculators config, set model / tokenizer to be target model
+            self.model, self.tokenizer = maybe_override_with_speculators_target_model(  # noqa: E501
+                model=self.model,
+                tokenizer=self.tokenizer,
+                revision=self.revision,
+                trust_remote_code=self.trust_remote_code)
+
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(self.model,
                                                        self.served_model_name)
@@ -606,8 +618,8 @@ class ModelConfig:
                                self.config_format,
                                hf_overrides_kw=hf_overrides_kw,
                                hf_overrides_fn=hf_overrides_fn)
-        self.hf_config = hf_config
 
+        self.hf_config = hf_config
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.attention_chunk_size = getattr(self.hf_text_config,
                                             "attention_chunk_size", None)
@@ -803,12 +815,17 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
+        if getattr(self, "runner_type", self.runner) == "pooling":
+            return "TransformersModel"
         if self.hf_config != self.hf_text_config:
             # If 'hf_text_config' is the same as 'hf_config'. If not, it is
             # probably a composite config, i.e. multimodal
             return "TransformersForMultimodalLM"
-        else:
-            return "TransformersForCausalLM"
+        return "TransformersForCausalLM"
+
+    def using_transformers_backend(self) -> bool:
+        """Check if the model is using the Transformers backend class."""
+        return self.architecture == self._get_transformers_backend_cls()
 
     @property
     def registry(self):
@@ -1082,6 +1099,21 @@ class ModelConfig:
         if quant_cfg is None:
             # compressed-tensors uses a "compression_config" key
             quant_cfg = getattr(self.hf_config, "compression_config", None)
+
+        else:
+            # Set quant_method for ModelOpt models.
+            producer_name = quant_cfg.get("producer", {}).get("name")
+            if producer_name == "modelopt":
+                quant_algo = quant_cfg.get("quantization",
+                                           {}).get("quant_algo")
+                if quant_algo == "FP8":
+                    quant_cfg["quant_method"] = "modelopt"
+                elif quant_algo == "NVFP4":
+                    quant_cfg["quant_method"] = "modelopt_fp4"
+                elif quant_algo is not None:
+                    raise ValueError(
+                        f"Unknown ModelOpt quant algo: {quant_algo}")
+
         return quant_cfg
 
     def _verify_quantization(self) -> None:
@@ -1557,7 +1589,18 @@ class ModelConfig:
         return self.multimodal_config
 
     def try_get_generation_config(self) -> dict[str, Any]:
-        if self.generation_config in ("auto", "vllm"):
+        """
+        This method attempts to retrieve the non-default values of the
+        generation config for this model.
+
+        The generation config can contain information about special tokens, as
+        well as sampling parameters. Which is why this method exists separately
+        to `get_diff_sampling_param`.
+
+        Returns:
+            A dictionary containing the non-default generation config.
+        """
+        if self.generation_config in {"auto", "vllm"}:
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
@@ -1576,13 +1619,18 @@ class ModelConfig:
 
     def get_diff_sampling_param(self) -> dict[str, Any]:
         """
-        This method returns a dictionary containing the parameters
-        that differ from the default sampling parameters. If
-        `generation_config` is `"vllm"`, an empty dictionary is returned.
+        This method returns a dictionary containing the non-default sampling
+        parameters with `override_generation_config` applied.
+
+        The default sampling parameters are:
+
+        - vLLM's neutral defaults if `self.generation_config="vllm"`
+        - the model's defaults if `self.generation_config="auto"`
+        - as defined in `generation_config.json` if
+            `self.generation_config="path/to/generation_config/dir"`
 
         Returns:
-            dict[str, Any]: A dictionary with the differing sampling
-            parameters, if `generation_config` is `"vllm"` an empty dictionary.
+            A dictionary containing the non-default sampling parameters.
         """
         if self.generation_config == "vllm":
             config = {}
@@ -2025,7 +2073,7 @@ class ParallelConfig:
     and when data_parallel_size > 0. Enables running an AsyncLLM
     and API server on a "per-node" basis where vLLM load balances
     between local data parallel ranks, but an external LB balances
-    between vLLM nodes/replicas. Set explicitly in conjunction with 
+    between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
@@ -2058,6 +2106,9 @@ class ParallelConfig:
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
+
+    ray_runtime_env: Optional["RuntimeEnv"] = None
+    """Ray runtime environment to pass to distributed workers."""
 
     placement_group: Optional["PlacementGroup"] = None
     """ray distributed model workers placement group."""
@@ -2971,10 +3022,13 @@ class SpeculativeConfig:
                             "Chunked prefill and EAGLE are not compatible "
                             "when using V0.")
 
+                    from vllm.transformers_utils.configs import (
+                        SpeculatorsConfig)
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
+
                     if isinstance(self.draft_model_config.hf_config,
-                                  EAGLEConfig):
+                                  (EAGLEConfig, SpeculatorsConfig)):
                         pass
                     else:
                         eagle_config = EAGLEConfig(
@@ -3001,6 +3055,19 @@ class SpeculativeConfig:
                         raise ValueError(
                             f"num_speculative_tokens:{self.num_speculative_tokens}"
                             f" must be divisible by {n_predict=}")
+
+                if self.speculative_token_tree is None:
+                    # Generate chain of tokens.
+                    self.speculative_token_tree = str([
+                        (i + 1) * (0, )
+                        for i in range(self.num_speculative_tokens)
+                    ])
+                else:
+                    # Sort the token tree breadth-first.
+                    tree_choices = ast.literal_eval(
+                        self.speculative_token_tree)
+                    self.speculative_token_tree = str(
+                        sorted(tree_choices, key=lambda t: (len(t), t)))
 
                 self.draft_tensor_parallel_size = \
                     SpeculativeConfig._verify_and_get_draft_tp(
@@ -3133,10 +3200,19 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        if self.method == "eagle3" and self.target_model_config and \
-            "llama" not in self.target_model_config.hf_text_config.model_type:
+        from vllm.transformers_utils.configs import SpeculatorsConfig
+
+        eagle3_target_supported = ["llama"]
+        if self.draft_model_config and isinstance(
+                self.draft_model_config.hf_config, SpeculatorsConfig):
+            eagle3_target_supported.append("qwen")
+
+        if self.method == "eagle3" and self.target_model_config and not any(
+                supported_model in
+                self.target_model_config.hf_text_config.model_type
+                for supported_model in eagle3_target_supported):
             raise ValueError(
-                "Eagle3 is only supported for Llama models. "
+                f"Eagle3 is only supported for {eagle3_target_supported} models. "  # noqa: E501
                 f"Got {self.target_model_config.hf_text_config.model_type=}")
 
         return self
@@ -4298,12 +4374,20 @@ class CompilationConfig:
             "disabled_custom_ops": True,
             "compilation_time": True,
             "bs_to_padded_graph_size": True,
-            "pass_config": True,
             "traced_files": True,
             "inductor_compile_config": {
                 "post_grad_custom_post_pass": True,
             },
         }
+
+        # exclude default attr in pass_config
+        pass_config_exclude = {}
+        for attr, default_val in vars(PassConfig()).items():
+            if getattr(self.pass_config, attr) == default_val:
+                pass_config_exclude[attr] = True
+        if pass_config_exclude:
+            exclude["pass_config"] = pass_config_exclude
+
         # The cast to string is necessary because Pydantic is mocked in docs
         # builds and sphinx-argparse doesn't know the return type of decode()
         return str(
