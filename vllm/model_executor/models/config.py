@@ -44,6 +44,15 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
         }
 
 
+class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        pooler_config = vllm_config.model_config.pooler_config
+        if pooler_config.activation is None:
+            pooler_config.activation = False
+
+
 class JinaRobertaModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
@@ -153,6 +162,26 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
             model_config.encoder_config = encoder_config
 
             vllm_config.recalculate_max_model_len(max_model_len)
+
+
+class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        pooler_config = vllm_config.model_config.pooler_config
+
+        if pooler_config.step_tag_id is None:
+            pooler_config.step_tag_id = 151651
+
+
+class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        pooler_config = vllm_config.model_config.pooler_config
+
+        if pooler_config.softmax is None:
+            pooler_config.softmax = False
 
 
 class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
@@ -309,8 +338,11 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "NomicBertModel": NomicBertModelConfig,
+    "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
+    "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
+    "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "GraniteMoeHybridForCausalLM": GraniteMoeHybridModelConfig,
 }
