@@ -379,43 +379,43 @@ class XCodeModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
         
-        hidden_states_list = [hidden_states.clone().cpu()] if not torch.cuda.is_current_stream_capturing() else []
+        # # Note: This forward() method only runs during graph capture!
+        # # After CUDA graphs are captured, this Python code is bypassed.
+        # # For debugging during actual inference, you need to disable CUDA graphs.
+        
+        # # Always collect hidden states during the few times this runs
+        # hidden_states_list = [hidden_states.clone().cpu()]
         for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
             )
+        #     hidden_states_list.append(hidden_states.clone().cpu())
 
-            if not torch.cuda.is_current_stream_capturing():
-                # Clone to CPU to avoid memory issues
-                hidden_states_list.append(hidden_states.clone().cpu())
-            
-
-                # Print hidden states for debugging
-        if not torch.cuda.is_current_stream_capturing():
-            # print(hidden_states_list)
-            # Save hidden_state_list to a file for debugging
-            # Turn tuple to tensor for saving
-            hidden_states_tensor = torch.stack(hidden_states_list, dim=0)
-            # print(f"Hidden states tensor shape: {hidden_states_tensor.shape}")
-            # print(f"Hidden states tensor sample: {hidden_states_tensor[:3, :5]}")
-            torch.save(hidden_states_tensor, "test_py_files/enc_hidden_states_tensor.pt")
-            # Save residual to a file for debugging
-            if residual is not None:
-                torch.save(residual.clone().cpu(), "test_py_files/enc_residual_tensor.pt")
-            else:
-                print("Residual is None, skipping saving residual tensor.")
+        # # Save debug information (only during graph capture phase)
+        # try:
+        #     hidden_states_tensor = torch.stack(hidden_states_list, dim=0)
+        #     print("Here - Forward called (graph capture or first inference)")
+        #     torch.save(hidden_states_tensor, "test_py_files/enc_hidden_states_tensor.pt")
+        #     if residual is not None:
+        #         torch.save(residual.clone().cpu(), "test_py_files/enc_residual_tensor.pt")
+        #     else:
+        #         print("Residual is None, skipping saving residual tensor.")
+        # except Exception as e:
+        #     print(f"Debug save failed: {e}")
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
                 "residual": residual
             })
-        hidden_states, _ = self.norm(hidden_states, residual)
+        # print(self.norm(hidden_states, residual))
+        # hidden_states, _ = self.norm(hidden_states, residual)
         # return IntermediateTensors({
         #         "hidden_states": hidden_states,
         #         "residual": residual
         #     })
+        return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

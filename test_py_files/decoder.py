@@ -377,31 +377,48 @@ class XCodeModel(nn.Module):
                 hidden_states = self.get_input_embeddings(input_ids)
               
             residual = None
+            # residual = torch.load()
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-
-        hidden_states_list = []
+        # if not torch.cuda.is_current_stream_capturing() and residual is None:
+        #     try:
+        #         # Load the same residual tensor that works in middle_model.py
+        #         loaded_residual = torch.load("test_py_files/middle_residual_tensor.pt").to(hidden_states.device)
+                
+        #         # # Fix dimension mismatch by repeating to match hidden_states batch dimension
+        #         if loaded_residual.shape != hidden_states.shape:
+        #             # Use repeat instead of expand to create a proper copy
+        #             residual = None
+        #         else:
+        #             residual = loaded_residual.contiguous()
+                    
+        #         # print(f"[RESIDUAL DEBUG] Successfully loaded and resized residual: {residual.shape}")
+        #     except Exception as e:
+        #         print(f"[RESIDUAL DEBUG] Error with residual: {e}")
+        #         # If residual loading fails, just use None and let the layer handle it
+        #         residual = None
+        # hidden_states_list = []
         for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
             )
-            if not torch.cuda.is_current_stream_capturing():
-                # Clone to CPU to avoid memory issues
-                hidden_states_list.append(hidden_states.clone().cpu())
+        #     if not torch.cuda.is_current_stream_capturing():
+        #         # Clone to CPU to avoid memory issues
+        #         hidden_states_list.append(hidden_states.clone().cpu())
 
-                # Print hidden states for debugging
-        if not torch.cuda.is_current_stream_capturing():
-            # print(hidden_states_list)
-            # Save hidden_state_list to a file for debugging
-            # Turn tuple to tensor for saving
-            hidden_states_tensor = torch.stack(hidden_states_list, dim=0)
-            # print(f"Hidden states tensor shape: {hidden_states_tensor.shape}")
-            # print(f"Hidden states tensor sample: {hidden_states_tensor[:3, :5]}")
-            torch.save(hidden_states_tensor, "test_py_files/dec_hidden_states_tensor.pt")
+        #         # Print hidden states for debugging
+        # if not torch.cuda.is_current_stream_capturing():
+        #     # print(hidden_states_list)
+        #     # Save hidden_state_list to a file for debugging
+        #     # Turn tuple to tensor for saving
+        #     hidden_states_tensor = torch.stack(hidden_states_list, dim=0)
+        #     # print(f"Hidden states tensor shape: {hidden_states_tensor.shape}")
+        #     # print(f"Hidden states tensor sample: {hidden_states_tensor[:3, :5]}")
+        #     torch.save(hidden_states_tensor, "test_py_files/dec_hidden_states_tensor.pt")
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,

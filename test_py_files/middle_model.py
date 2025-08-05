@@ -393,9 +393,9 @@ class XCodeModel(nn.Module):
             residual = intermediate_tensors["residual"]
         
         # print(f"Number of layers: {len(self.layers)}")
-        if not torch.cuda.is_current_stream_capturing() and residual is None:
-            residual = torch.load("test_py_files/enc_residual_tensor.pt").to(hidden_states.device)
-        hidden_states_list = []
+        # if not torch.cuda.is_current_stream_capturing() and residual is None:
+        #     residual = torch.load("test_py_files/enc_residual_tensor.pt").to(hidden_states.device)
+        # hidden_states_list = []
         for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
@@ -403,22 +403,22 @@ class XCodeModel(nn.Module):
                 residual,
             )
             # Append hidden states for debugging
-            if not torch.cuda.is_current_stream_capturing():
-                # Clone to CPU to avoid memory issues
-                hidden_states_list.append(hidden_states.clone().cpu())
+            # if not torch.cuda.is_current_stream_capturing():
+            #     # Clone to CPU to avoid memory issues
+            #     hidden_states_list.append(hidden_states.clone().cpu())
         
 
         
         # Print hidden states for debugging
-        if not torch.cuda.is_current_stream_capturing():
-            # print(hidden_states_list)
-            # Save hidden_state_list to a file for debugging
-            # Turn tuple to tensor for saving
-            hidden_states_tensor = torch.stack(hidden_states_list, dim=0)
-            # print(f"Hidden states tensor shape: {hidden_states_tensor.shape}")
-            # print(f"Hidden states tensor sample: {hidden_states_tensor[:3, :5]}")
-            torch.save(hidden_states_tensor, "test_py_files/middle_hidden_states_tensor.pt")
-            torch.save(residual, "test_py_files/middle_residual_tensor.pt")
+        # if not torch.cuda.is_current_stream_capturing():
+        #     # print(hidden_states_list)
+        #     # Save hidden_state_list to a file for debugging
+        #     # Turn tuple to tensor for saving
+        #     hidden_states_tensor = torch.stack(hidden_states_list, dim=0)
+        #     # print(f"Hidden states tensor shape: {hidden_states_tensor.shape}")
+        #     # print(f"Hidden states tensor sample: {hidden_states_tensor[:3, :5]}")
+        #     torch.save(hidden_states_tensor, "test_py_files/middle_hidden_states_tensor.pt")
+        #     torch.save(residual, "test_py_files/middle_residual_tensor.pt")
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
