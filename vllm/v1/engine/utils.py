@@ -819,11 +819,11 @@ def wait_for_engine_startup(
                 logger.debug(
                     "Received transfer handshake metadata from engine %s: %s",
                     eng_index, txfer_metadata)
-                if cache_config.xfer_handshake_metadata is None:
-                    cache_config.xfer_handshake_metadata = defaultdict(dict)
+                if parallel_config.xfer_handshake_metadata is None:
+                    parallel_config.xfer_handshake_metadata = defaultdict(dict)
                 for dp_rank, tp_dict in txfer_metadata.items():
                     for tp_rank, metadata in tp_dict.items():
-                        cache_config.xfer_handshake_metadata[dp_rank][
+                        parallel_config.xfer_handshake_metadata[dp_rank][
                             tp_rank] = metadata
             # In external DP LB mode, the coordinator address that the
             # front-end procs connect to is obtained from rank 0 via
