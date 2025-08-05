@@ -3400,23 +3400,6 @@ class MultiModalConfig:
             999 if envs.VLLM_USE_V1 else 1,
         )
 
-    def is_text_only_mode(self) -> bool:
-        """Check if model is running in text-only mode.
-        
-        Text-only mode is when ALL non-text modalities are explicitly disabled
-        via limit_per_prompt (all limits set to 0).
-        
-        Returns:
-            True if all multimodal capabilities are disabled and model should
-            operate in text-only mode, False otherwise.
-        """
-        # If no limits configured, not in text-only mode
-        if not self.limit_per_prompt:
-            return False
-
-        # Text-only mode: all configured modalities have limit == 0
-        return all(limit == 0 for limit in self.limit_per_prompt.values())
-
     def merge_mm_processor_kwargs(
         self,
         inference_kwargs: Mapping[str, object],
