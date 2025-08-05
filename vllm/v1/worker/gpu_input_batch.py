@@ -303,7 +303,7 @@ class InputBatch:
                 self.spec_decode_unsupported_reqs.add(req_id)
             if sampling_params.sampling_type == SamplingType.GREEDY:
                 # Avoid later division by zero.
-                self.temperature_cpu[req_index] = -1.0
+                self.temperature_cpu[req_index] = 1.0
                 self.greedy_reqs.add(req_id)
             else:
                 self.temperature_cpu[req_index] = sampling_params.temperature
