@@ -32,7 +32,7 @@ from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
-                          PoolingRequestOutput)
+                          PoolingRequestOutput, RequestOutput)
 from vllm.pooling_params import PoolingParams
 
 logger = init_logger(__name__)

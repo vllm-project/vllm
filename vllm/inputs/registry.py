@@ -154,7 +154,7 @@ class InputProcessingContext(InputContext):
         assert callable(hf_processor)
 
         mm_config = self.model_config.get_multimodal_config()
-        merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
+        merged_kwargs = {**(mm_config.mm_processor_kwargs or {}), **kwargs}
 
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
