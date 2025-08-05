@@ -21,13 +21,12 @@ from .modular_kernel_tools.common import (Config, RankTensors, WeightTensors,
                                           run_modular_kernel)
 from .modular_kernel_tools.mk_objects import (
     MK_FUSED_EXPERT_TYPES, MK_MULTI_GPU_PREPARE_FINALIZE_TYPES,
-    MK_QUANT_CONFIGS, MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES,
-    expert_info)
+    MK_QUANT_CONFIGS, MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES, expert_info)
 from .modular_kernel_tools.parallel_utils import (ProcessGroupInfo,
                                                   parallel_launch_with_config)
 
-has_any_multi_gpu_package = (has_deep_ep() or has_deep_gemm() or has_pplx() or
-                             has_flashinfer_cutlass_fused_moe())
+has_any_multi_gpu_package = (has_deep_ep() or has_deep_gemm() or has_pplx()
+                             or has_flashinfer_cutlass_fused_moe())
 
 meets_multi_gpu_requirements = pytest.mark.skipif(
     not has_any_multi_gpu_package,

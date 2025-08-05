@@ -19,8 +19,8 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
 
+from .mk_objects import expert_info, make_fused_experts, prepare_finalize_info
 from .parallel_utils import ProcessGroupInfo
-from .mk_objects import prepare_finalize_info, expert_info, make_fused_experts
 
 
 def _describe_tensor(t: Optional[torch.Tensor], name: str) -> str:
@@ -121,8 +121,7 @@ class Config:
 
         backend = self.all2all_backend()
         if backend is not None:
-            env_dict.update(
-                {"VLLM_ALL2ALL_BACKEND": backend})
+            env_dict.update({"VLLM_ALL2ALL_BACKEND": backend})
 
         if self.fused_moe_chunk_size is not None:
             env_dict.update(
@@ -136,11 +135,13 @@ class Config:
 
     def is_batched_prepare_finalize(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
-        return mk.FusedMoEActivationFormat.BatchedExperts == info.activation_format
+        return (mk.FusedMoEActivationFormat.BatchedExperts ==
+                info.activation_format)
 
     def is_batched_fused_experts(self):
         info = expert_info(self.fused_experts_type)
-        return mk.FusedMoEActivationFormat.BatchedExperts == info.activation_format
+        return (mk.FusedMoEActivationFormat.BatchedExperts ==
+                info.activation_format)
 
     def is_standard_fused_experts(self):
         info = expert_info(self.fused_experts_type)
@@ -156,8 +157,8 @@ class Config:
 
     def is_fe_block_fp8_supported(self):
         info = expert_info(self.fused_experts_type)
-        return (torch.float8_e4m3fn in info.supported_dtypes and
-                info.blocked_quantization_support)
+        return (torch.float8_e4m3fn in info.supported_dtypes
+                and info.blocked_quantization_support)
 
     def is_fe_supports_chunking(self):
         info = expert_info(self.fused_experts_type)
@@ -177,8 +178,8 @@ class Config:
 
     def needs_deep_ep(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
-        return (info.backend == "deepep_high_throughput" or
-                info.backend == "deepep_low_latency")
+        return (info.backend == "deepep_high_throughput"
+                or info.backend == "deepep_low_latency")
 
     def all2all_backend(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
@@ -477,18 +478,29 @@ def run_modular_kernel(
     mk = make_modular_kernel(config, vllm_config)
 
     mk_kwargs = {
-        "hidden_states": rank_tensors.hidden_states.clone(
+        "hidden_states":
+        rank_tensors.hidden_states.clone(
         ),  # impls might update the tensor in place
-        "w1": rank_weights.w1,
-        "w2": rank_weights.w2,
-        "topk_weights": rank_tensors.topk_weights,
-        "topk_ids": rank_tensors.topk_ids.to(mk.prepare_finalize.topk_indices_dtype()),
-        "expert_map": rank_tensors.expert_map,
-        "w1_scale": rank_weights.w1_scale,
-        "w2_scale": rank_weights.w2_scale,
-        "a1_scale": rank_tensors.hidden_states_scale,
-        "global_num_experts": config.E,
-        "apply_router_weight_on_input": config.topk == 1,
+        "w1":
+        rank_weights.w1,
+        "w2":
+        rank_weights.w2,
+        "topk_weights":
+        rank_tensors.topk_weights,
+        "topk_ids":
+        rank_tensors.topk_ids.to(mk.prepare_finalize.topk_indices_dtype()),
+        "expert_map":
+        rank_tensors.expert_map,
+        "w1_scale":
+        rank_weights.w1_scale,
+        "w2_scale":
+        rank_weights.w2_scale,
+        "a1_scale":
+        rank_tensors.hidden_states_scale,
+        "global_num_experts":
+        config.E,
+        "apply_router_weight_on_input":
+        config.topk == 1,
     }
     out = mk.forward(**mk_kwargs)
 
