@@ -33,12 +33,15 @@ import torch
 from torch.distributed import all_gather, all_reduce
 
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import get_ep_group, get_node_count
+from vllm.distributed.parallel_state import (get_ep_group, get_node_count,
+                                             in_the_same_node_as)
+from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
-
 from .rebalance_algo import rebalance_experts
 from .rebalance_execute import move_from_buffer,transfer_layer, rearrange_expert_weights_inplace
+from typing import Optional, List, Dict, Set, Sequence, Iterable, Union
+from torch.distributed import ProcessGroup
 import threading
 import asyncio
 logger = init_logger(__name__)
@@ -217,7 +220,7 @@ class EplbState:
             f"must be less than or equal to {MAX_EXPERT_REDUNDANCY}")
         max_slots_per_logical_expert = MAX_EXPERT_REDUNDANCY + 1
         logical_to_physical_map = torch.full(
-            (model.num_logical_experts, model.num_redundant_experts + 1),
+            (model.num_logical_experts, max_slots_per_logical_expert),
             -1,
             device=device,
         )
@@ -506,11 +509,11 @@ class EplbState:
             num_nodes = get_node_count()
             num_gpus = ep_group.size()
 
-        if num_devices % num_nodes != 0:
+        if num_gpus % num_nodes != 0:
             logger.warning_once(
-                f"num_devices % num_nodes != 0, "
+                f"num_gpus % num_nodes != 0, "
                 "not using hierarchical rearrangement algorithm.\n"
-                f"{num_devices=}, {num_nodes=}")
+                f"{num_gpus=}, {num_nodes=}")
 
         # Get new expert mappings
         (
@@ -556,14 +559,18 @@ class EplbState:
             try:
                 loop.run_until_complete(self.transfer_run_periodically(model=model, is_profile=is_profile, rank_mapping=rank_mapping))
             except Exception as e:
-                logger.error(f"async loop error (Rank {rank}): {e}")
+                logger.error(
+                "async loop error (Rank %d): %s", 
+                rank, 
+                str(e), 
+                exc_info=True
+            )
             finally:
                 loop.close()
 
         thread = threading.Thread(target=thread_target, daemon=True)
         thread.start()
         return thread
-
 
     async def transfer_run_periodically(self, model, is_profile: bool = False,rank_mapping: Optional[dict[int, int]] = None):
         experts_stream = torch.cuda.Stream()

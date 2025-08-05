@@ -14,7 +14,7 @@ from torch.distributed import (P2POp, ProcessGroup,
 from vllm.distributed.parallel_state import get_ep_group, get_node_count
 from typing import Optional, List, Dict, Set, Sequence, Iterable
 
-def idx_local_to_global(
+def idx_local_to_global(    
     local_idx: int,
     local_cnt: int,
     ep_rank: int,
@@ -292,7 +292,7 @@ async def transfer_layer(
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
     """
-    ep_rank = ep_group.rank()
+    ep_group = get_ep_group().device_group
     ep_size = ep_group.size()
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
@@ -406,8 +406,6 @@ def rearrange_expert_weights_inplace(
     num_local_physical_experts = next(iter(expert_weights[0])).shape[0]
     assert new_global_expert_indices.shape == (num_moe_layers,
                                                num_physical_experts)
-
-    ep_rank = ep_group.rank()
     ep_size = ep_group.size()
     assert num_physical_experts == ep_size * num_local_physical_experts
 
