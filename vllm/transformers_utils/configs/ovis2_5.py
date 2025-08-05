@@ -11,23 +11,17 @@ INDICATOR_IDS = [-301, -302, -303, -304]
 
 
 class Siglip2NavitConfig(PretrainedConfig):
-    """This is the configuration class to store the configuration of an [`AIMv2Model`].
-    Instantiating a configuration with the defaults will yield a similar configuration
-    to that of the [apple/aimv2-large-patch14-224](https://huggingface.co/apple/aimv2-large-patch14-224).
+    """
     Args:
         hidden_size: Dimension of the hidden representations.
-        intermediate_size: Dimension of the SwiGLU representations.
+        intermediate_size: Dimension of the gelu representations.
         num_hidden_layers: Number of hidden layers in the Transformer.
-        num_attention_heads: Number of attention heads for each attention layer
-            in the Transformer.
+        num_attention_heads: Number of attention heads for each
+            attention layer in the Transformer.
         num_channels: Number of input channels.
         image_size: Image size.
         patch_size: Patch size.
-        rms_norm_eps: Epsilon value used for the RMS normalization layer.
         attention_dropout: Dropout ratio for attention probabilities.
-        projection_dropout: Dropout ratio for the projection layer after the attention.
-        qkv_bias: Whether to add a bias to the queries, keys and values.
-        use_bias: Whether to add a bias in the feed-forward and projection layers.
         kwargs: Keyword arguments for the [`PretrainedConfig`].
     """
     model_type: str = "siglip2_navit"
@@ -94,7 +88,8 @@ class Ovis2_5Config(PretrainedConfig):
         super().__init__(**kwargs)
         if llm_config is not None:
             assert isinstance(llm_config, (PretrainedConfig, dict)), \
-                f"expect `llm_config` to be instance of PretrainedConfig or dict, but got {type(llm_config)} type"
+                f"expect `llm_config` to be instance of PretrainedConfig " \
+                f"or dict,but got {type(llm_config)} type"
             if not isinstance(llm_config, PretrainedConfig):
                 model_type = llm_config['model_type']
                 llm_config.pop('model_type')
@@ -102,7 +97,8 @@ class Ovis2_5Config(PretrainedConfig):
         self.llm_config = llm_config
         if vit_config is not None:
             assert isinstance(vit_config, (PretrainedConfig, dict)), \
-                f"expect `vit_config` to be instance of PretrainedConfig or dict, but got {type(vit_config)} type"
+                f"expect `vit_config` to be instance of PretrainedConfig " \
+                f"or dict, but got {type(vit_config)} type"
             if not isinstance(vit_config, PretrainedConfig):
                 model_type = vit_config['model_type']
                 vit_config.pop('model_type')
