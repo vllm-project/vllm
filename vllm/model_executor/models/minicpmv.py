@@ -1201,7 +1201,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        assert self.version == (2, 6) or self.version == (4, 0)
+        assert self.version == (2, 6)
 
     def init_llm(
         self,
@@ -1284,7 +1284,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         )
         return loader.load_weights(weights)
 
-class MiniCPMV4_0(MiniCPMV2_6):
+class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1296,8 +1296,10 @@ class MiniCPMV4_0(MiniCPMV2_6):
             "up_proj",
         ],
     }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        assert self.version == (4, 0)
 
     def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
         if isinstance(quant_config, (AWQConfig, AWQMarlinConfig)):
@@ -1309,10 +1311,7 @@ class MiniCPMV4_0(MiniCPMV2_6):
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> nn.Module:
-        if self.version == (4, 0):
-            return LlamaForCausalLM(vllm_config=vllm_config, prefix=prefix)
-        else:
-            raise ValueError(f"Unsupported version: {self.version}")
+        return LlamaForCausalLM(vllm_config=vllm_config, prefix=prefix)
 
     def init_vision_module(
         self,
@@ -1321,7 +1320,12 @@ class MiniCPMV4_0(MiniCPMV2_6):
         prefix: str = "",
     ) -> nn.Module:
         quant_config = self._maybe_ignore_quant_config(quant_config)
-        return super().init_vision_module(config, quant_config, prefix)        
+        model = Idefics2VisionTransformer(config.vision_config,
+                                          quant_config=quant_config,
+                                          prefix=prefix)
+        if self.config.drop_vision_last_layer:
+            model.encoder.layers = model.encoder.layers[:-1]
+        return model
 
     def init_resampler(
         self,
@@ -1331,9 +1335,54 @@ class MiniCPMV4_0(MiniCPMV2_6):
         prefix: str = "",
     ) -> nn.Module:
         quant_config = self._maybe_ignore_quant_config(quant_config)
-        return super().init_resampler(embed_dim, vision_dim, quant_config,
-                                      prefix)
-    
+        with set_default_torch_dtype(torch.float16):
+            # The resampler in 4.0 remains consistent with the one in 2.5/2.6.
+            resampler = Resampler2_5(num_queries=self.config.query_num,
+                                     embed_dim=embed_dim,
+                                     num_heads=embed_dim // 128,
+                                     kv_dim=vision_dim,
+                                     quant_config=quant_config,
+                                     prefix=prefix)
+
+        return resampler.to(device=current_platform.device_type,
+                            dtype=torch.get_default_dtype())
+
+    def get_vision_hidden_states(
+            self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
+        pixel_values = data["pixel_values"]
+        tgt_sizes = data["tgt_sizes"]
+
+        B = len(pixel_values)
+        P = pixel_values[0].shape[-2]
+        L = max(item.shape[-1] for item in pixel_values)
+        device = pixel_values[0].device
+        dtype = pixel_values[0].dtype
+
+        all_pixel_values = torch.zeros((B, 3, P, L),
+                                       dtype=dtype,
+                                       device=device)
+        for i, pixel_values_item in enumerate(pixel_values):
+            L_item = pixel_values_item.shape[-1]
+            all_pixel_values[i, ..., :L_item] = pixel_values_item
+
+        num_patches = tgt_sizes.prod(-1)
+        max_patches = num_patches.max().item()
+        assert isinstance(max_patches, int)
+
+        patch_attn_mask = torch.zeros((B, max_patches),
+                                      dtype=torch.bool,
+                                      device=device)
+        for i, num_patches_item in enumerate(num_patches):
+            patch_attn_mask[i, :num_patches_item] = True
+
+        vision_embedding = self.vpm(
+            all_pixel_values,
+            patch_attention_mask=patch_attn_mask.unsqueeze(1),
+            tgt_sizes=tgt_sizes,
+        )
+
+        return self.resampler(vision_embedding, tgt_sizes)
+
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
@@ -1374,8 +1423,9 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
         # Dispatch class based on version
         instance_cls = _SUPPORT_VERSION.get(version)
         if instance_cls is None:
+            supported_versions = ", ".join([f"{v[0]}.{v[1]}" for v in sorted(_SUPPORT_VERSION.keys())])
             raise ValueError(
-                f"Currently, MiniCPMV only supports versions 2.0, 2.5, 2.6, and 4.0. Got version: {version}")
+                f"Currently, MiniCPMV only supports versions {supported_versions}. Got version: {version}")
 
         # quant_config references base class members,
         # so update values before init is called
