@@ -209,15 +209,16 @@ def parse_output_message(message: Message):
             raise ValueError("Invalid number of contents in browser message")
         content = message.content[0]
         browser_call = json.loads(content.text)
+        # TODO: translate to url properly!
         if recipient == "browser.search":
-            action = ActionSearch(query=browser_call["query"], type="search")
+            action = ActionSearch(
+                query=f"cursor:{browser_call.get('query', '')}", type="search")
         elif recipient == "browser.open":
-            url = ""  # FIXME: browser_call["url"]
-            action = ActionOpenPage(url=url, type="open_page")
+            action = ActionOpenPage(
+                url=f"cursor:{browser_call.get('url', '')}", type="open_page")
         elif recipient == "browser.find":
-            url = ""  # FIXME: browser_call["url"]
             action = ActionFind(pattern=browser_call["pattern"],
-                                url=url,
+                                url=f"cursor:{browser_call.get('url', '')}",
                                 type="find")
         else:
             raise ValueError(f"Unknown browser action: {recipient}")

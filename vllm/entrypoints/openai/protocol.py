@@ -18,6 +18,7 @@ from openai.types.chat.chat_completion_message import (
     Annotation as OpenAIAnnotation)
 # yapf: enable
 from openai.types.responses import (ResponseFunctionToolCall,
+                                    ResponseFunctionToolCallOutputItem,
                                     ResponseInputItemParam, ResponseOutputItem,
                                     ResponsePrompt, ResponseStatus,
                                     ResponseTextConfig)
@@ -1731,6 +1732,60 @@ class ResponseReasoningItem(OpenAIBaseModel):
     status: Optional[Literal["in_progress", "completed", "incomplete"]]
 
 
+class InputTokensDetails(OpenAIBaseModel):
+    cached_tokens: int
+
+
+class OutputTokensDetails(OpenAIBaseModel):
+    reasoning_tokens: int
+
+
+class ResponseUsage(OpenAIBaseModel):
+    input_tokens: int
+    input_tokens_details: InputTokensDetails
+    output_tokens: int
+    output_tokens_details: OutputTokensDetails
+    total_tokens: int
+
+
+class ResponseReasoningTextDeltaEvent(OpenAIBaseModel):
+    type: Literal[
+        "response.reasoning_text.delta"] = "response.reasoning_text.delta"
+    item_id: str = "item_1234"
+    output_index: int
+    content_index: int
+    delta: str
+    sequence_number: int = -1
+
+
+class ResponseReasoningTextDoneEvent(OpenAIBaseModel):
+    type: Literal[
+        "response.reasoning_text.done"] = "response.reasoning_text.done"
+    item_id: str = "item_1234"
+    output_index: int
+    content_index: int
+    text: str
+    sequence_number: int = -1
+
+
+class ResponseContentPartDoneEvent(OpenAIBaseModel):
+    type: Literal["response.content_part.done"] = "response.content_part.done"
+    item_id: str = "item_1234"
+    output_index: int
+    content_index: int
+    part: Union[ResponseOutputItem, ResponseReasoningItem]
+    sequence_number: int = -1
+
+
+class ResponseOutputItemDoneEvent(OpenAIBaseModel):
+    type: Literal["response.output_item.done"] = "response.output_item.done"
+    item_id: str = "item_1234"
+    output_index: int
+    item: Union[ResponseOutputItem, ResponseReasoningItem,
+                ResponseFunctionToolCallOutputItem]
+    sequence_number: int = -1
+
+
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
@@ -1757,7 +1812,7 @@ class ResponsesResponse(OpenAIBaseModel):
     text: Optional[ResponseTextConfig] = None
     top_logprobs: int
     truncation: Literal["auto", "disabled"]
-    usage: Optional[UsageInfo] = None
+    usage: Optional[ResponseUsage] = None
     user: Optional[str] = None
 
     @classmethod
