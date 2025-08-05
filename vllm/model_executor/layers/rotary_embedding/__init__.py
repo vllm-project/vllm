@@ -16,6 +16,7 @@ from .llama4_vision_rope import Llama4VisionRotaryEmbedding
 from .mrope import MRotaryEmbedding
 from .ntk_scaling_rope import NTKScalingRotaryEmbedding
 from .phi3_long_rope_scaled_rope import Phi3LongRoPEScaledRotaryEmbedding
+from .rocm_aiter_deepseek_scaling_rope import is_rocm_rotatry_embedding_enabled
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding
 
 _ROPE_DICT: dict[tuple, RotaryEmbedding] = {}
@@ -157,6 +158,13 @@ def get_rope(
                                                     scaling_factor, dtype,
                                                     **extra_kwargs)
         elif scaling_type == "deepseek_yarn":
+            if is_rocm_rotatry_embedding_enabled():
+                from .rocm_aiter_deepseek_scaling_rope import (
+                    AiterDeepseekScalingRotaryEmbedding)
+                rotary_cls = AiterDeepseekScalingRotaryEmbedding
+            else:
+                rotary_cls = DeepseekScalingRotaryEmbedding
+
             scaling_factor = rope_scaling["factor"]
             original_max_position = rope_scaling[
                 "original_max_position_embeddings"]
@@ -167,9 +175,9 @@ def get_rope(
                 if k in ("extrapolation_factor", "attn_factor", "beta_fast",
                          "beta_slow", "mscale", "mscale_all_dim")
             }
-            rotary_emb = DeepseekScalingRotaryEmbedding(
-                head_size, rotary_dim, original_max_position, base,
-                is_neox_style, scaling_factor, dtype, **extra_kwargs)
+            rotary_emb = rotary_cls(head_size, rotary_dim,
+                                    original_max_position, base, is_neox_style,
+                                    scaling_factor, dtype, **extra_kwargs)
         elif scaling_type == "longrope":
             short_factor = rope_scaling["short_factor"]
             long_factor = rope_scaling["long_factor"]
