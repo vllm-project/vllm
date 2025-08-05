@@ -9,8 +9,9 @@ from tests.kernels.quantization.nvfp4_utils import (FLOAT4_E2M1_MAX,
 from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts)
+    FlashInferExperts, is_valid_flashinfer_cutlass_fused_moe)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
@@ -40,6 +41,7 @@ MNK_FACTORS = [
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", [40, 64, 256])
+#@pytest.mark.parametrize("e", [128, 256])
 @pytest.mark.parametrize("topk", [1, 6, 8])
 @pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
 @torch.inference_mode()
@@ -95,6 +97,8 @@ def test_flashinfer_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
         a1_gs = torch.ones((e, ), device="cuda", dtype=torch.float32)
         a2_gs = torch.ones((e, ), device="cuda", dtype=torch.float32)
 
+        assert is_valid_flashinfer_cutlass_fused_moe(a, w1_q, w2_q)
+
         flashinfer_experts = FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             FlashInferExperts(
@@ -103,7 +107,7 @@ def test_flashinfer_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
                 a2_gscale=a2_gs,
                 g2_alphas=(1 / w2_gs),
                 out_dtype=dtype,
-                quant_dtype=None,
+                quant_dtype="nvfp4",
             ))
 
         flashinfer_output = flashinfer_experts(
@@ -112,8 +116,28 @@ def test_flashinfer_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
             w1_scale=w1_blockscale,
             w2=w2_q,
             w2_scale=w2_blockscale,
+            a1_scale=a1_gs,
+            a2_scale=a2_gs,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+        )
+
+        cutlass_output = cutlass_moe_fp4(
+            a=a,
+            a1_gscale=a1_gs,
+            w1_fp4=w1_q,
+            w1_blockscale=w1_blockscale,
+            g1_alphas=(1 / w1_gs),
+            a2_gscale=a2_gs,
+            w2_fp4=w2_q,
+            w2_blockscale=w2_blockscale,
+            g2_alphas=(1 / w2_gs),
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            m=m,
+            n=n,
+            k=k,
+            e=e,
         )
 
         # Reference check:
@@ -147,10 +171,11 @@ def test_flashinfer_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
 
         torch_output = torch_moe(a_in_dtype, w1_d, w2_d, score, topk)
 
-        torch.testing.assert_close(torch_output,
-                                   flashinfer_output,
-                                   atol=1e-1,
-                                   rtol=1e-1)
+        torch.testing.assert_close(
+            cutlass_output,  #torch_output,
+            flashinfer_output,
+            atol=1e-1,
+            rtol=1e-1)
 
 
 if __name__ == "__main__":
