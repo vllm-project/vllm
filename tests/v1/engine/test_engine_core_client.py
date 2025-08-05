@@ -6,10 +6,13 @@ import os
 import signal
 import time
 import uuid
+from dataclasses import dataclass
 from threading import Thread
-from typing import Optional
+from typing import Optional, Union
+from unittest.mock import MagicMock
 
 import pytest
+import torch
 from transformers import AutoTokenizer
 
 from tests.utils import multi_gpu_test
@@ -24,8 +27,8 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
                                         SyncMPClient)
+from vllm.v1.engine.utils import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.utils import CoreEngineProcManager
 
 from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
@@ -53,6 +56,7 @@ def make_request(
         mm_hashes=None,
         mm_placeholders=None,
         sampling_params=params,
+        pooling_params=None,
         eos_token_id=None,
         arrival_time=time.time(),
         lora_request=None,
@@ -289,6 +293,77 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
             client.shutdown()
 
 
+@dataclass
+class MyDataclass:
+    message: str
+
+
+# Dummy utility function to monkey-patch into engine core.
+def echo_dc(
+    self,
+    msg: str,
+    return_list: bool = False,
+) -> Union[MyDataclass, list[MyDataclass]]:
+    print(f"echo dc util function called: {msg}")
+    val = None if msg is None else MyDataclass(msg)
+    # Return dataclass to verify support for returning custom types
+    # (for which there is special handling to make it work with msgspec).
+    return [val for _ in range(3)] if return_list else val
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_engine_core_client_util_method_custom_return(
+        monkeypatch: pytest.MonkeyPatch):
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+
+        # Must set insecure serialization to allow returning custom types.
+        m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+        # Monkey-patch core engine utility function to test.
+        m.setattr(EngineCore, "echo_dc", echo_dc, raising=False)
+
+        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+        vllm_config = engine_args.create_engine_config(
+            usage_context=UsageContext.UNKNOWN_CONTEXT)
+        executor_class = Executor.get_class(vllm_config)
+
+        with set_default_torch_num_threads(1):
+            client = EngineCoreClient.make_client(
+                multiprocess_mode=True,
+                asyncio_mode=True,
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=True,
+            )
+
+        try:
+            # Test utility method returning custom / non-native data type.
+            core_client: AsyncMPClient = client
+
+            result = await core_client.call_utility_async(
+                "echo_dc", "testarg2", False)
+            assert isinstance(result,
+                              MyDataclass) and result.message == "testarg2"
+            result = await core_client.call_utility_async(
+                "echo_dc", "testarg2", True)
+            assert isinstance(result, list) and all(
+                isinstance(r, MyDataclass) and r.message == "testarg2"
+                for r in result)
+
+            # Test returning None and list of Nones
+            result = await core_client.call_utility_async(
+                "echo_dc", None, False)
+            assert result is None
+            result = await core_client.call_utility_async(
+                "echo_dc", None, True)
+            assert isinstance(result, list) and all(r is None for r in result)
+
+        finally:
+            client.shutdown()
+
+
 @pytest.mark.parametrize(
     "multiprocessing_mode,publisher_config",
     [(True, "tcp"), (False, "inproc")],
@@ -516,3 +591,72 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
         )
 
     assert "Engine core initialization failed" in str(e_info.value)
+
+
+@create_new_process_for_each_test()
+def test_engine_core_proc_instantiation_cuda_empty(
+        monkeypatch: pytest.MonkeyPatch):
+    """
+    Test that EngineCoreProc can be instantiated when CUDA_VISIBLE_DEVICES
+    is empty. This ensures the engine frontend does not need access to GPUs.
+    """
+
+    from vllm.v1.engine.core import EngineCoreProc
+    from vllm.v1.executor.abstract import Executor
+
+    # Create a simple mock executor instead of a complex custom class
+    mock_executor_class = MagicMock(spec=Executor)
+
+    def create_mock_executor(vllm_config):
+        mock_executor = MagicMock()
+
+        # Only implement the methods that are actually called during init
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+        mock_spec = FullAttentionSpec(block_size=16,
+                                      num_kv_heads=1,
+                                      head_size=64,
+                                      dtype=torch.float16,
+                                      use_mla=False)
+
+        mock_executor.get_kv_cache_specs.return_value = [{
+            "default": mock_spec
+        }]
+        mock_executor.determine_available_memory.return_value = [
+            1024 * 1024 * 1024
+        ]
+        mock_executor.initialize_from_config.return_value = None
+        mock_executor.max_concurrent_batches = 1
+
+        return mock_executor
+
+    mock_executor_class.side_effect = create_mock_executor
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        m.setenv("CUDA_VISIBLE_DEVICES", "")  # No CUDA devices
+
+        from vllm.v1.engine.utils import EngineZmqAddresses
+
+        def mock_startup_handshake(self, handshake_socket, local_client,
+                                   headless, parallel_config):
+            return EngineZmqAddresses(inputs=["tcp://127.0.0.1:5555"],
+                                      outputs=["tcp://127.0.0.1:5556"],
+                                      coordinator_input=None,
+                                      coordinator_output=None)
+
+        # Background processes are not important here
+        m.setattr(EngineCoreProc, "startup_handshake", mock_startup_handshake)
+
+        vllm_config = EngineArgs(
+            model="deepseek-ai/DeepSeek-V2-Lite",
+            trust_remote_code=True).create_engine_config()
+        engine_core_proc = EngineCoreProc(
+            vllm_config=vllm_config,
+            local_client=True,
+            handshake_address="tcp://127.0.0.1:12345",
+            executor_class=mock_executor_class,
+            log_stats=False,
+            engine_index=0,
+        )
+
+        engine_core_proc.shutdown()

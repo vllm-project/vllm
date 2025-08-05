@@ -7,13 +7,21 @@ import os
 from abc import abstractmethod
 from collections.abc import Sequence
 from functools import cached_property
-from typing import Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage)
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import import_from_path, is_list_of
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                                  DeltaMessage,
+                                                  ResponsesRequest)
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
+else:
+    ChatCompletionRequest = Any
+    DeltaMessage = Any
+    ResponsesRequest = Any
+    AnyTokenizer = Any
 
 logger = init_logger(__name__)
 
@@ -66,7 +74,9 @@ class ReasoningParser:
 
     @abstractmethod
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+        self,
+        model_output: str,
+        request: Union[ChatCompletionRequest, ResponsesRequest],
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from a complete model-generated string.

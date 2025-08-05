@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import ClassVar, Literal, Optional
+from typing import Any, ClassVar, Literal, Optional
 
 import cv2
 import numpy as np
@@ -59,7 +59,9 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
         if idx in frame_indices:  # only decompress needed
             ret, frame = cap.retrieve()
             if ret:
-                frames.append(frame)
+                # OpenCV uses BGR format, we need to convert it to RGB
+                # for PIL and transformers compatibility
+                frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
     frames = np.stack(frames)
     if len(frames) < num_frames:
@@ -71,10 +73,25 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
 def video_to_pil_images_list(path: str,
                              num_frames: int = -1) -> list[Image.Image]:
     frames = video_to_ndarrays(path, num_frames)
-    return [
-        Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        for frame in frames
-    ]
+    return [Image.fromarray(frame) for frame in frames]
+
+
+def video_get_metadata(path: str) -> dict[str, Any]:
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video file {path}")
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    duration = total_frames / fps if fps > 0 else 0
+
+    metadata = {
+        "total_num_frames": total_frames,
+        "fps": fps,
+        "duration": duration,
+        "video_backend": "opencv"
+    }
+    return metadata
 
 
 VideoAssetName = Literal["baby_reading"]
@@ -103,6 +120,12 @@ class VideoAsset:
     def np_ndarrays(self) -> npt.NDArray:
         video_path = download_video_asset(self.filename)
         ret = video_to_ndarrays(video_path, self.num_frames)
+        return ret
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        video_path = download_video_asset(self.filename)
+        ret = video_get_metadata(video_path)
         return ret
 
     def get_audio(self, sampling_rate: Optional[float] = None) -> npt.NDArray:

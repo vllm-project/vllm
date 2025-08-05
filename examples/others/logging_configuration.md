@@ -8,11 +8,11 @@ of logging configurations that range from simple-and-inflexible to
 more-complex-and-more-flexible.
 
 - No vLLM logging (simple and inflexible)
-  - Set `VLLM_CONFIGURE_LOGGING=0` (leaving `VLLM_LOGGING_CONFIG_PATH` unset)
+    - Set `VLLM_CONFIGURE_LOGGING=0` (leaving `VLLM_LOGGING_CONFIG_PATH` unset)
 - vLLM's default logging configuration (simple and inflexible)
-  - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1`
+    - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1`
 - Fine-grained custom logging configuration (more complex, more flexible)
-  - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1` and
+    - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1` and
     set `VLLM_LOGGING_CONFIG_PATH=<path-to-logging-config.json>`
 
 ## Logging Configuration Environment Variables
@@ -55,33 +55,33 @@ STDOUT of the console in JSON format with a log level of `INFO`.
 
 To begin, first, create an appropriate JSON logging configuration file:
 
-**/path/to/logging_config.json:**
+??? note "/path/to/logging_config.json"
 
-```json
-{
-  "formatters": {
-    "json": {
-      "class": "pythonjsonlogger.jsonlogger.JsonFormatter"
+    ```json
+    {
+      "formatters": {
+        "json": {
+          "class": "pythonjsonlogger.jsonlogger.JsonFormatter"
+        }
+      },
+      "handlers": {
+        "console": {
+          "class" : "logging.StreamHandler",
+          "formatter": "json",
+          "level": "INFO",
+          "stream": "ext://sys.stdout"
+        }
+      },
+      "loggers": {
+        "vllm": {
+          "handlers": ["console"],
+          "level": "INFO",
+          "propagate": false
+        }
+      },
+      "version": 1
     }
-  },
-  "handlers": {
-    "console": {
-      "class" : "logging.StreamHandler",
-      "formatter": "json",
-      "level": "INFO",
-      "stream": "ext://sys.stdout"
-    }
-  },
-  "loggers": {
-    "vllm": {
-      "handlers": ["console"],
-      "level": "INFO",
-      "propagate": false
-    }
-  },
-  "version": 1
-}
-```
+    ```
 
 Finally, run vLLM with the `VLLM_LOGGING_CONFIG_PATH` environment variable set
 to the path of the custom logging configuration JSON file:
@@ -104,38 +104,38 @@ configuration overrides the built-in default logging configuration used by vLLM.
 First, create an appropriate JSON logging configuration file that includes
 configuration for the root vLLM logger and for the logger you wish to silence:
 
-**/path/to/logging_config.json:**
+??? note "/path/to/logging_config.json"
 
-```json
-{
-  "formatters": {
-    "vllm": {
-      "class": "vllm.logging_utils.NewLineFormatter",
-      "datefmt": "%m-%d %H:%M:%S",
-      "format": "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
+    ```json
+    {
+      "formatters": {
+        "vllm": {
+          "class": "vllm.logging_utils.NewLineFormatter",
+          "datefmt": "%m-%d %H:%M:%S",
+          "format": "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
+        }
+      },
+      "handlers": {
+        "vllm": {
+          "class" : "logging.StreamHandler",
+          "formatter": "vllm",
+          "level": "INFO",
+          "stream": "ext://sys.stdout"
+        }
+      },
+      "loggers": {
+        "vllm": {
+          "handlers": ["vllm"],
+          "level": "DEBUG",
+          "propagate": false
+        },
+        "vllm.example_noisy_logger": {
+          "propagate": false
+        }
+      },
+      "version": 1
     }
-  },
-  "handlers": {
-    "vllm": {
-      "class" : "logging.StreamHandler",
-      "formatter": "vllm",
-      "level": "INFO",
-      "stream": "ext://sys.stdout"
-    }
-  },
-  "loggers": {
-    "vllm": {
-      "handlers": ["vllm"],
-      "level": "DEBUG",
-      "propagate": false
-    },
-    "vllm.example_noisy_logger": {
-      "propagate": false
-    }
-  },
-  "version": 1
-}
-```
+    ```
 
 Finally, run vLLM with the `VLLM_LOGGING_CONFIG_PATH` environment variable set
 to the path of the custom logging configuration JSON file:

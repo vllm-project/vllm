@@ -324,6 +324,9 @@ class RandomDataset(BenchmarkDataset):
         input_low = int(real_input_len * (1 - range_ratio))
         input_high = int(real_input_len * (1 + range_ratio))
         output_low = int(output_len * (1 - range_ratio))
+        # Ensure the lower bound for output length is at least 1 to prevent
+        # sampling 0 tokens, which can cause request failures.
+        output_low = max(output_low, 1)
         output_high = int(output_len * (1 + range_ratio))
 
         # Add logging for debugging
@@ -349,11 +352,12 @@ class RandomDataset(BenchmarkDataset):
             # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
             # To avoid uncontrolled change of the prompt length,
             # the encoded sequence is truncated before being decode again.
+            total_input_len = prefix_len + int(input_lens[i])
             re_encoded_sequence = tokenizer.encode(prompt, add_special_tokens=False)[
-                : input_lens[i]
+                :total_input_len
             ]
             prompt = tokenizer.decode(re_encoded_sequence)
-            total_input_len = prefix_len + int(input_lens[i])
+            total_input_len = len(re_encoded_sequence)
             requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -700,6 +704,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         self,
         dataset_path: str,
         dataset_split: str,
+        no_stream: bool = False,
         dataset_subset: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -707,6 +712,7 @@ class HuggingFaceDataset(BenchmarkDataset):
 
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
+        self.load_stream = not no_stream
         self.load_data()
 
     def load_data(self) -> None:
@@ -715,7 +721,7 @@ class HuggingFaceDataset(BenchmarkDataset):
             self.dataset_path,
             name=self.dataset_subset,
             split=self.dataset_split,
-            streaming=True,
+            streaming=self.load_stream,
         )
         self.data = self.data.shuffle(seed=self.random_seed)
 

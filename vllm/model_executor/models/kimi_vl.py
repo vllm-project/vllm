@@ -264,6 +264,13 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
                                         dummy_inputs=KimiVLDummyInputsBuilder)
 class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|media_start|>image<|media_content|><|media_pad|><|media_end|>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -393,7 +400,8 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
         # model as one of the requirements of basic vLLM model implementation.
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None and len(
+                multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,

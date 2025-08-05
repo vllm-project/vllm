@@ -1,14 +1,18 @@
+---
+toc_depth: 4
+---
+
 # vLLM CLI Guide
 
 The vllm command-line tool is used to run and manage vLLM models. You can start by viewing the help message with:
 
-```
+```bash
 vllm --help
 ```
 
 Available Commands:
 
-```
+```bash
 vllm {chat,complete,serve,bench,collect-env,run-batch}
 ```
 
@@ -16,34 +20,39 @@ vllm {chat,complete,serve,bench,collect-env,run-batch}
 
 Start the vLLM OpenAI Compatible API server.
 
-Examples:
+??? console "Examples"
 
-```bash
-# Start with a model
-vllm serve meta-llama/Llama-2-7b-hf
+    ```bash
+    # Start with a model
+    vllm serve meta-llama/Llama-2-7b-hf
 
-# Specify the port
-vllm serve meta-llama/Llama-2-7b-hf --port 8100
+    # Specify the port
+    vllm serve meta-llama/Llama-2-7b-hf --port 8100
 
-# Check with --help for more options
-# To list all groups
-vllm serve --help=listgroup
+    # Check with --help for more options
+    # To list all groups
+    vllm serve --help=listgroup
 
-# To view a argument group
-vllm serve --help=ModelConfig
+    # To view a argument group
+    vllm serve --help=ModelConfig
 
-# To view a single argument
-vllm serve --help=max-num-seqs
+    # To view a single argument
+    vllm serve --help=max-num-seqs
 
-# To search by keyword
-vllm serve --help=max
-```
+    # To search by keyword
+    vllm serve --help=max
+
+    # To view full help with pager (less/more)
+    vllm serve --help=page
+    ```
+
+### Options
+
+--8<-- "docs/argparse/serve.md"
 
 ## chat
 
 Generate chat completions via the running API server.
-
-Examples:
 
 ```bash
 # Directly connect to localhost API without arguments
@@ -60,8 +69,6 @@ vllm chat --quick "hi"
 
 Generate text completions based on the given prompt via the running API server.
 
-Examples:
-
 ```bash
 # Directly connect to localhost API without arguments
 vllm complete
@@ -72,6 +79,8 @@ vllm complete --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 # Quick complete with a single prompt
 vllm complete --quick "The future of AI is"
 ```
+
+</details>
 
 ## bench
 
@@ -89,8 +98,6 @@ vllm bench {latency, serve, throughput}
 
 Benchmark the latency of a single batch of requests.
 
-Example:
-
 ```bash
 vllm bench latency \
     --model meta-llama/Llama-3.2-1B-Instruct \
@@ -103,8 +110,6 @@ vllm bench latency \
 ### serve
 
 Benchmark the online serving throughput.
-
-Example:
 
 ```bash
 vllm bench serve \
@@ -119,8 +124,6 @@ vllm bench serve \
 ### throughput
 
 Benchmark offline inference throughput.
-
-Example:
 
 ```bash
 vllm bench throughput \
@@ -143,7 +146,8 @@ vllm collect-env
 
 Run batch prompts and write results to file.
 
-Examples:
+<details>
+<summary>Examples</summary>
 
 ```bash
 # Running with a local file
@@ -158,6 +162,8 @@ vllm run-batch \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
+
+</details>
 
 ## More Help
 
