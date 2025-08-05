@@ -171,8 +171,17 @@ class Worker(WorkerBase):
 
             # take current memory snapshot
             self.init_snapshot = MemorySnapshot()
-            self.requested_memory = (self.init_snapshot.total_memory *
-                                     self.cache_config.gpu_memory_utilization)
+            # If num_gpu_blocks_override is set, we consider that the memory
+            # usage will be lower than what gpu_memory_utilization suggests,
+            # so we don't need to check the memory requirement in this case.
+            if self.cache_config.num_gpu_blocks_override is not None:
+                self.requested_memory = min(
+                    self.init_snapshot.total_memory *
+                    self.cache_config.gpu_memory_utilization,
+                    self.init_snapshot.free_memory)
+            else:
+                self.requested_memory = (self.init_snapshot.total_memory *
+                                        self.cache_config.gpu_memory_utilization)
             if self.init_snapshot.free_memory < self.requested_memory:
                 GiB = lambda b: round(b / GiB_bytes, 2)
                 raise ValueError(
