@@ -37,9 +37,6 @@ from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
 from vllm.config.utils import ConfigType, config
-from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorHandshakeMetadata)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.platforms import current_platform
@@ -1773,6 +1770,7 @@ class ModelConfig:
             encoder_config=self.encoder_config)
         logger.info("Using max model len %s", max_model_len)
         return max_model_len
+
 
 @config
 @dataclass
@@ -3730,7 +3728,8 @@ class VllmConfig:
             if (self.kv_transfer_config is not None
                     and self.kv_transfer_config.is_kv_transfer_instance):
                 from collections import defaultdict
-                self.cache_config.xfer_handshake_metadata = defaultdict(dict)
+                self.parallel_config.xfer_handshake_metadata = defaultdict(
+                    dict)
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True

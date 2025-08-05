@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, TextIO, Tuple, TypeVar, Union, cast, overload)
+                    Optional, TextIO, TypeVar, Union, cast, overload)
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 

@@ -1955,24 +1955,20 @@ async def run_server_worker(listen_address,
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
 
-        # create shared SSL configuration
-        from vllm.entrypoints.ssl import SSLConfig
-        ssl_config = SSLConfig.from_args(args)
-
         nixl_side_channel_server = None
         try:
             nixl_side_channel_server = await \
-                set_up_nixl_side_channel_server(vllm_config, ssl_config)
+                set_up_nixl_side_channel_server(vllm_config)
         except Exception as e:
-            logger.warning("Failed to start NIXL side channel server: %s", e)
+            logger.error("Failed to start NIXL side channel server: %s", e)
+            raise
 
         logger.info("Starting vLLM API server %d on %s", server_index,
                     listen_address)
-
         shutdown_task = await serve_http(
             app,
             sock=sock,
-            ssl_config=ssl_config,
+            enable_ssl_refresh=args.enable_ssl_refresh,
             host=args.host,
             port=args.port,
             log_level=args.uvicorn_log_level,
