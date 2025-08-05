@@ -12,7 +12,7 @@ source /etc/environment
 source $ENV_FILE
 
 remove_docker_container() { 
-    docker rm -f tpu-test || true;
+    docker rm -f $CONTAINER_NAME || true;
 }
 
 trap remove_docker_container EXIT
