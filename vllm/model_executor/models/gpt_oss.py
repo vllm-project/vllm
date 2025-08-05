@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 from torch import nn
 
+from vllm import envs
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -69,9 +70,13 @@ class OAIAttention(nn.Module):
 
         tp_size = get_tensor_model_parallel_world_size()
 
+        attention_sink_dtype = (
+            torch.float32 if envs.VLLM_USE_TRTLLM_CONTEXT_ATTENTION
+            or envs.VLLM_USE_TRTLLM_DECODE_ATTENTION else torch.bfloat16)
         self.sinks = torch.nn.Parameter(
             torch.empty(config.num_attention_heads // tp_size,
-                        dtype=torch.bfloat16))
+                        dtype=attention_sink_dtype,
+                        requires_grad=False))
 
         self.norm = RMSNorm(config.hidden_size, eps=1e-5)
 

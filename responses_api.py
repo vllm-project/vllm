@@ -1,12 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-<<<<<<< HEAD
 vllm serve /data/woosuk/os-mini-weights/pytorch-rc-20b --enforce-eager
-=======
-vllm serve /data/woosuk/os-mini-weights/pytorch-rc-20b \
-    --tokenizer /data/xmo/os-mini/models/hf-converted --enforce-eager
->>>>>>> 4a52d33d8 (streaming support)
 """
 import argparse
 import json
