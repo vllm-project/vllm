@@ -631,16 +631,16 @@ class EplbState:
         self.ep_buffer_ready = False
 
     def post_eplb(self,
-        model: MixtureOfExperts,
-        is_profile: bool = False) -> None:
-
+                  model: MixtureOfExperts,
+                  is_profile: bool = False) -> None:
         if not is_profile:
             if self.physical_to_logical_map.shape[
                     1] != self.new_physical_to_logical_map.shape[1]:
                 self.physical_to_logical_map = self.new_physical_to_logical_map.to(
                     self.physical_to_logical_map.device)
             else:
-                self.physical_to_logical_map.copy_(self.new_physical_to_logical_map)
+                self.physical_to_logical_map.copy_(
+                    self.new_physical_to_logical_map)
             max_physical_slots = self.new_logical_to_physical_map.shape[-1]
             assert max_physical_slots <= self.logical_to_physical_map.shape[-1]
             self.new_logical_to_physical_map = torch.nn.functional.pad(
