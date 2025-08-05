@@ -74,8 +74,8 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import (
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from ..sample.logits_processor import LogitsProcessorManager
-from .utils import (MultiModalBudget, AttentionGroup, bind_kv_cache, gather_mm_placeholders,
-                    initialize_kv_cache_for_kv_sharing,
+from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
+                    gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
 if TYPE_CHECKING:
