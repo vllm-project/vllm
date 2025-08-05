@@ -276,28 +276,28 @@ for _ in range(1):
 print(y)
 
 # continue second test
-# size = [4096,4096]
-# dtype = torch.float16
-# x = torch.full(size, local_rank*2, dtype=dtype, device="cuda")
-# for _ in range(10):
-#     y = compiled_model(x) if use_compiled else model(x)
-# print(y)
+size = [4096,4096]
+dtype = torch.float16
+x = torch.full(size, local_rank*2, dtype=dtype, device="cuda")
+for _ in range(10):
+    y = compiled_model(x) if use_compiled else model(x)
+print(y)
 
-# # continue third test
-# size = [8192,8192]
-# dtype = torch.float16
-# x = torch.full(size, local_rank*4, dtype=dtype, device="cuda")
-# for _ in range(10):
-#     y = compiled_model(x) if use_compiled else model(x)
-# print(y)
+# continue third test
+size = [8192,8192]
+dtype = torch.float16
+x = torch.full(size, local_rank*4, dtype=dtype, device="cuda")
+for _ in range(10):
+    y = compiled_model(x) if use_compiled else model(x)
+print(y)
 
-# # forth test
-# size = [512,512]
-# dtype = torch.float16
-# x = torch.full(size, local_rank, dtype=dtype, device="cuda")
-# for _ in range(10):
-#     y = compiled_model(x) if use_compiled else model(x)
-# print(y)
+# forth test
+size = [512,512]
+dtype = torch.float16
+x = torch.full(size, local_rank, dtype=dtype, device="cuda")
+for _ in range(10):
+    y = compiled_model(x) if use_compiled else model(x)
+print(y)
 
 print("done")
 dist.destroy_process_group()
