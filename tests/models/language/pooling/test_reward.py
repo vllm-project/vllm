@@ -103,7 +103,7 @@ def test_prm_models(
 
     # check logits difference
     for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
-        hf_output = torch.tensor(hf_output)
-        vllm_output = torch.tensor(vllm_output)
+        hf_output = torch.tensor(hf_output).float()
+        vllm_output = torch.tensor(vllm_output).float()
 
         assert torch.allclose(hf_output, vllm_output, 1.5e-2)
