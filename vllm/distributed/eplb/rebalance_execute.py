@@ -356,7 +356,7 @@ async def transfer_layer(
 def rearrange_expert_weights_inplace(
     old_global_expert_indices: torch.Tensor,
     new_global_expert_indices: torch.Tensor,
-    expert_weights: Sequence[Iterable[torch.Tensor]],
+    expert_weights: list[torch.Tensor],
     ep_group: ProcessGroup,
     is_profile: bool = False,
     rank_mapping: Optional[dict[int, int]] = None,

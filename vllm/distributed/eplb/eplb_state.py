@@ -24,13 +24,15 @@ total. And when deploying, we'll have 288 sets of linear layer weights for each
 MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
-
+import asyncio
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Optional, List, Dict, Set, Sequence, Iterable, Union
 
 import torch
-from torch.distributed import all_gather, all_reduce
+from torch.distributed import all_gather, all_reduce, ProcessGroup
 
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import (get_ep_group, get_node_count,
@@ -39,11 +41,11 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from .rebalance_algo import rebalance_experts
-from .rebalance_execute import move_from_buffer,transfer_layer, rearrange_expert_weights_inplace
-from typing import Optional, List, Dict, Set, Sequence, Iterable, Union
-from torch.distributed import ProcessGroup
-import threading
-import asyncio
+from .rebalance_execute import (move_from_buffer,
+                                transfer_layer, 
+                                rearrange_expert_weights_inplace)
+
+
 logger = init_logger(__name__)
 
 
@@ -152,7 +154,7 @@ class EplbState:
     Interval for expert rearrangement steps.
     This is a constant and is taken from the config.
     """ 
-    layer:int = 0
+    layer: int = 0
 
     ep_buffer_ready: bool = False
 
@@ -162,11 +164,11 @@ class EplbState:
 
     rebalanced: bool = False  
 
-    is_unchanged: Optional[list[bool]] = None
+    is_unchanged: list[bool] = []
 
-    is_received_locally: Optional[list[bool]] = None
+    is_received_locally: list[bool] = []
 
-    experts_recv_loc: Optional[dict[int, int]] = None
+    experts_recv_loc: dict[int, int] = {}
 
     is_async: bool = False
 
@@ -410,15 +412,12 @@ class EplbState:
         self.expert_rearrangement_step += 1
 
         if self.is_async and self.ep_buffer_ready:
-            self.move_to_workspace(model,is_profile)
+            self.move_to_workspace(model, is_profile)
         if (self.expert_rearrangement_step
                 >= self.expert_rearrangement_step_interval):
             self.expert_rearrangement_step = 0
-            self.rearrange_calculate(model,is_profile)
+            self.rearrange_calculate(model, is_profile)
             
-
-
-
     def rearrange_calculate(self,
                   model: MixtureOfExperts,
                   is_profile: bool = False,
@@ -532,12 +531,12 @@ class EplbState:
         ))
         if not self.is_async:
             rearrange_expert_weights_inplace(
-            self.physical_to_logical_map,
-            self.new_physical_to_logical_map,
-            model.expert_weights,
-            ep_group,
-            is_profile,
-            rank_mapping,
+                self.physical_to_logical_map,
+                self.new_physical_to_logical_map,
+                model.expert_weights,
+                ep_group,
+                is_profile,
+                rank_mapping,
             )
             self.post_eplb(model, is_profile)
             if is_main_rank:
@@ -550,20 +549,25 @@ class EplbState:
                     time_end - time_start,
                 )
 
-        self.rebalanced= True
+        self.rebalanced = True
 
-    def eplb_async_loop(self, model, rank_mapping: Optional[dict[int, int]] = None,is_profile: bool = False):
-        
+    def eplb_async_loop(
+        self, model,
+        rank_mapping: Optional[dict[int, int]] = None,
+        is_profile: bool = False):
+
         ep_group = get_ep_group().device_group
         rank = ep_group.rank()
         def thread_target():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                loop.run_until_complete(self.transfer_run_periodically(model=model, is_profile=is_profile, rank_mapping=rank_mapping))
+                loop.run_until_complete(
+                    self.transfer_run_periodically(model=model,
+                    is_profile=is_profile, 
+                    rank_mapping=rank_mapping))
             except Exception as e:
-                logger.error(
-                "async loop error (Rank %d): %s", 
+                logger.error("async loop error (Rank %d): %s", 
                 rank, 
                 str(e), 
                 exc_info=True
@@ -575,17 +579,23 @@ class EplbState:
         thread.start()
         return thread
 
-    async def transfer_run_periodically(self, model, is_profile: bool = False,rank_mapping: Optional[dict[int, int]] = None):
+    async def transfer_run_periodically(
+            self, model, 
+            is_profile: bool = False,
+            rank_mapping: Optional[dict[int, int]] = None):
         experts_stream = torch.cuda.Stream()
         while self.layer < model.num_moe_layers:
             if not self.ep_buffer_ready and self.rebalanced:
                 # get lock
                 await asyncio.to_thread(self.buffer_lock.acquire)
                 try:
-                    self.expert_buffer= [torch.empty_like(w) for w in model.expert_weights[0]]
+                    self.expert_buffer= [
+                        torch.empty_like(w) for w in model.expert_weights[0]
+                        ]
                     await transfer_layer(
                         old_global_expert_indices=self.physical_to_logical_map,
-                        new_global_expert_indices=self.new_physical_to_logical_map,
+                        new_global_expert_indices=self.
+                            new_physical_to_logical_map,
                         expert_weights=model.expert_weights,
                         expert_weights_buffer=self.expert_buffer,
                         is_profile=is_profile,
@@ -614,7 +624,8 @@ class EplbState:
                 is_unchanged=self.is_unchanged,
                 is_received_locally=self.is_received_locally, 
                 experts_recv_loc=self.experts_recv_loc, 
-                new_indices=self.new_physical_to_logical_map[self.layer].tolist(),
+                new_indices=self.new_physical_to_logical_map[
+                    self.layer].tolist(),
             )
         self.layer += 1
         self.ep_buffer_ready = False
@@ -638,8 +649,10 @@ class EplbState:
                  self.logical_to_physical_map.shape[-1] - max_physical_slots),
                 value=-1,
             )
-            self.logical_to_physical_map.copy_(self.new_logical_to_physical_map)
-            self.logical_replica_count.copy_(self.new_logical_replica_count)
+            self.logical_to_physical_map.copy_(
+                self.new_logical_to_physical_map)
+            self.logical_replica_count.copy_(
+                self.new_logical_replica_count)
 
     @staticmethod
     def recv_state() -> tuple[torch.Tensor, torch.Tensor]:
