@@ -455,7 +455,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 #ifdef __FP8__PA__
         if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto){
            scalar_t* qptr = reinterpret_cast<scalar_t*>(&Qlocal[qkhe_depth][qkratio].xy[i]);
-           for(int k = 0; k< 2; k++)
+           for(int k = 0; k< 4; k++)
                q_max = fmax(fabs(to_float<scalar_t>(qptr[k])), q_max);
         }
 #endif
@@ -703,7 +703,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   // disable rtz conversion due to its impact on accuracy.
   constexpr bool LOGITS_RTZ_CONVERSION = false;
 
-#ifndef __FP8__PA__
+#ifdef __FP8__PA__
   int rowid_8x8 = rowid/2;
   int offset    = rowid%2;
 #endif
