@@ -1167,14 +1167,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def allowed_mm_limits(self):
         return self._allowed_mm_limits
 
-    def is_text_only_mode(self) -> bool:
-        """Check if all supported modalities are disabled.
-        
-        Returns True when all modalities that this model supports have
-        their limits set to 0, effectively running in text-only mode.
-        """
-        return all(limit == 0 for limit in self.allowed_mm_limits.values())
-
     def __call__(
         self,
         prompt: str,

@@ -520,11 +520,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                 and config.vision_config.hidden_act == "gelu"):
             config.projector_hidden_act = "gelu"
 
-        processor = MULTIMODAL_REGISTRY.create_processor(
-            vllm_config.model_config,
-            disable_cache=True  # Don't need caching for init check
-        )
-        self.text_only_mode = processor.is_text_only_mode()
+        self.text_only_mode = MULTIMODAL_REGISTRY.is_text_only_mode(
+            vllm_config.model_config)
 
         if not self.text_only_mode:
             self.vision_tower = init_vision_tower_for_llava(

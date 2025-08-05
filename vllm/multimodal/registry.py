@@ -189,6 +189,26 @@ class MultiModalRegistry:
         profiler = MultiModalProfiler(processor)
         return profiler.get_mm_limits()
 
+    def is_text_only_mode(self, model_config: "ModelConfig") -> bool:
+        """
+        Check if all supported modalities for this model have their limits
+        set to 0, effectively running in text-only mode.
+
+        Returns True when all modalities that this model supports have
+        their limits set to 0 in the multimodal config.
+        """
+        if not model_config.is_multimodal_model:
+            # Non-multimodal models are always in "text-only" mode
+            return True
+
+        processor = self.create_processor(model_config, disable_cache=False)
+        supported_modalities = processor.info.get_supported_mm_limits()
+
+        # Check if all supported modalities have limit 0
+        return all(
+            model_config.multimodal_config.get_limit_per_prompt(modality) == 0
+            for modality in supported_modalities)
+
     def register_processor(
         self,
         processor: MultiModalProcessorFactory[_I],
