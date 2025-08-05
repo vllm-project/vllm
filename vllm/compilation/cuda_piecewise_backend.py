@@ -44,7 +44,7 @@ class CUDAPiecewiseBackend:
                  graph_pool: Any, piecewise_compile_index: int,
                  total_piecewise_compiles: int, sym_shape_indices: list[int],
                  compiled_graph_for_general_shape: Callable,
-                 vllm_backend: VllmBackend):
+                 module_index: int, vllm_backend: VllmBackend):
         """
         The backend for piecewise compilation.
         It mainly handles the compilation and cudagraph capturing.
@@ -67,8 +67,19 @@ class CUDAPiecewiseBackend:
         self.vllm_backend = vllm_backend
 
         self.is_first_graph = piecewise_compile_index == 0
-        self.is_last_graph = (
+        
+        # Last graph in this compilation unit
+        self.is_last_graph_local = (
             piecewise_compile_index == total_piecewise_compiles - 1)
+        
+        # Last graph in the entire compilation
+        # If there are multiple compilation units (e.g. compile
+        # multiple submodules in a model), last graph in a compilation unit
+        # is not necessarily the last graph in the entire compilation.
+        self.is_last_graph_global = (
+            self.is_last_graph_local 
+            and (module_index == compilation_counter.num_models_seen - 1)
+        )
 
         self.compile_sizes: set[int] = set(
             self.compilation_config.compile_sizes)
@@ -99,7 +110,7 @@ class CUDAPiecewiseBackend:
             )
 
     def check_for_ending_compilation(self):
-        if self.is_last_graph and not self.to_be_compiled_sizes:
+        if self.is_last_graph_local and not self.to_be_compiled_sizes:
             # no specific sizes to compile
             # save the hash of the inductor graph for the next run
             self.vllm_backend.compiler_manager.save_to_file()
@@ -135,7 +146,7 @@ class CUDAPiecewiseBackend:
                 runtime_shape=runtime_shape)
 
             # finished compilations for all required shapes
-            if self.is_last_graph and not self.to_be_compiled_sizes:
+            if self.is_last_graph_local and not self.to_be_compiled_sizes:
                 self.check_for_ending_compilation()
 
         # Skip CUDA graphs if this entry doesn't use them OR
@@ -184,7 +195,7 @@ class CUDAPiecewiseBackend:
                 with torch.cuda.graph(cudagraph, pool=self.graph_pool):
                     # `output` is managed by pytorch's cudagraph pool
                     output = entry.runnable(*args)
-                    if self.is_last_graph:
+                    if self.is_last_graph_global:
                         # by converting it to weak ref,
                         # the original `output` will immediately be released
                         # to save memory. It is only safe to do this for
