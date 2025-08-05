@@ -23,7 +23,8 @@ class AsyncScheduler(Scheduler):
             if (request.num_computed_tokens == request.num_tokens_with_spec +
                     request.num_output_placeholders):
                 # The request will generate a new token in this scheduling step.
-                request.num_output_placeholders = 1 + len(request.spec_token_ids)
+                request.num_output_placeholders = 1 + len(
+                    request.spec_token_ids)
 
     def _update_request_with_output(
         self,
