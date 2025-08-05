@@ -257,6 +257,7 @@ __device__ __forceinline__ _B16x8 convert_b8x8_custom(const _B8x8 input) {
 }
 
 #define __FP8__PA__ // Enable full fp8 paged attention
+#ifdef __FP8__PA__
 typedef union u64_cvt {
   half f16x4[4];
   int16_t b16x4[4];
