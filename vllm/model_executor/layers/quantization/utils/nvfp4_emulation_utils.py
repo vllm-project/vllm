@@ -4,7 +4,11 @@ import torch
 
 from vllm.scalar_type import scalar_types
 
-__all__ = ["break_fp4_bytes", "dequantize_to_dtype", "ref_nvfp4_quant"]
+__all__ = [
+    "break_fp4_bytes",
+    "dequantize_to_dtype",
+    "ref_nvfp4_quant",
+]
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 

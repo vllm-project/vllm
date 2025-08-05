@@ -26,12 +26,10 @@ if not current_platform.is_cuda():
 TEXT_ENGINE_ARGS = AsyncEngineArgs(
     model="meta-llama/Llama-3.2-1B-Instruct",
     enforce_eager=True,
-    disable_log_requests=True,
 )
 
 VISION_ENGINE_ARGS = AsyncEngineArgs(model="Qwen/Qwen2-VL-2B-Instruct",
-                                     enforce_eager=True,
-                                     disable_log_requests=True)
+                                     enforce_eager=True)
 
 TEXT_PROMPT = "Hello my name is Robert and"
 
@@ -336,9 +334,10 @@ async def test_customize_loggers(monkeypatch):
 
         await engine.do_log_stats()
 
-        assert len(engine.stat_loggers) == 1
-        assert len(engine.stat_loggers[0]) == 1
-        engine.stat_loggers[0][0].log.assert_called_once()
+        stat_loggers = engine.logger_manager.per_engine_logger_dict
+        assert len(stat_loggers) == 1
+        assert len(stat_loggers[0]) == 1
+        stat_loggers[0][0].log.assert_called_once()
 
 
 @pytest.mark.asyncio(scope="module")

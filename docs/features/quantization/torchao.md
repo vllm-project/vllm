@@ -13,9 +13,10 @@ pip install \
 ```
 
 ## Quantizing HuggingFace Models
+
 You can quantize your own huggingface model with torchao, e.g. [transformers](https://huggingface.co/docs/transformers/main/en/quantization/torchao) and [diffusers](https://huggingface.co/docs/diffusers/en/quantization/torchao), and save the checkpoint to huggingface hub like [this](https://huggingface.co/jerryzh168/llama3-8b-int8wo) with the following example code:
 
-??? Code
+??? code
 
     ```Python
     import torch

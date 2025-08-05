@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utils for model executor."""
+
 import copy
 from typing import Any, Optional
 
@@ -9,6 +10,7 @@ import torch
 
 def set_random_seed(seed: int) -> None:
     from vllm.platforms import current_platform
+
     current_platform.seed_everything(seed)
 
 
@@ -29,7 +31,7 @@ def set_weight_attrs(
         return
     for key, value in weight_attrs.items():
         assert not hasattr(
-            weight, key), (f"Overwriting existing tensor attribute: {key}")
+            weight, key), f"Overwriting existing tensor attribute: {key}"
 
         # NOTE(woosuk): During weight loading, we often do something like:
         # narrowed_tensor = param.data.narrow(0, offset, len)
@@ -41,6 +43,7 @@ def set_weight_attrs(
         # we sync the param tensor after its weight loader is called.
         # TODO(woosuk): Remove this hack once we have a better solution.
         from vllm.platforms import current_platform
+
         if current_platform.is_tpu() and key == "weight_loader":
             value = _make_synced_weight_loader(value)
         setattr(weight, key, value)
@@ -58,7 +61,8 @@ def _make_synced_weight_loader(original_weight_loader):
 
 
 def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
-    parent_map = copy.deepcopy(getattr(model, "packed_modules_mapping", {}))
+    parent_map = getattr(model, "packed_modules_mapping", None)
+    parent_map = copy.deepcopy(parent_map) if parent_map is not None else {}
 
     # don't infer mapping if the model has defined it explicitly.
     if parent_map:
@@ -66,7 +70,9 @@ def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
 
     # We only check main components instead of whole model submodules
     for child in model.children():
-        child_map = getattr(child, "packed_modules_mapping", {})
+        child_map = getattr(child, "packed_modules_mapping", None)
+        child_map = copy.deepcopy(child_map) if child_map is not None else {}
+
         if any((k in parent_map and parent_map[k] != v)
                for k, v in child_map.items()):
             raise ValueError(
@@ -75,3 +81,16 @@ def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
         else:
             parent_map.update(child_map)
     return parent_map
+
+
+def get_moe_expert_mapping(
+    model: torch.nn.Module, ) -> list[tuple[str, str, int, str]]:
+    if parent_map := getattr(model, "get_expert_mapping", None):
+        return parent_map()
+    else:
+        # We only check main components instead of whole model submodules
+        for child in model.children():
+            child_map = getattr(child, "get_expert_mapping", None)
+            if child_map is not None:
+                return child_map()
+        return []
