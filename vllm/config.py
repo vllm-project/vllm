@@ -2830,6 +2830,19 @@ class SpeculativeConfig:
         ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
 
+    # params for relaxed thinking
+    relaxed_thinking: bool = False
+    """Whether to enable relaxed thinking."""
+    relax_ratio: float = 1.0
+    """The relax ratio for relaxed thinking. Used when relaxed thinking 
+    is enabled."""
+    relax_top_k: int = 1
+    """Top k tokens to sample from target model. Used when relaxed thinking 
+    is enabled."""
+    reasoning_parser: Optional[str] = None
+    """Reasoning Parser to parse think_start_token_id and think_end_token_id.
+    Used when relaxed thinking is enabled."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

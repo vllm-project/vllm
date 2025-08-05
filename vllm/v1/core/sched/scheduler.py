@@ -9,6 +9,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
+from transformers import AutoTokenizer
+
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
@@ -17,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -25,7 +28,7 @@ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
                                               create_request_queue)
-from vllm.v1.core.sched.utils import check_stop
+from vllm.v1.core.sched.utils import check_stop, maybe_update_thinking_state
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -142,6 +145,11 @@ class Scheduler(SchedulerInterface):
 
         speculative_config = vllm_config.speculative_config
 
+        self.relaxed_thinking = False
+        self.think_start_token_id = None
+        self.think_end_token_id = None
+        reasoning_parser: Optional[ReasoningParser] = None
+
         self.use_eagle = False
         self.num_spec_tokens = self.num_lookahead_tokens = 0
         if speculative_config:
@@ -149,6 +157,46 @@ class Scheduler(SchedulerInterface):
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
+
+            self.relaxed_thinking = speculative_config.relaxed_thinking
+            if self.relaxed_thinking:
+                if not (0 < speculative_config.relax_ratio < 1):
+                    raise ValueError(
+                        f"Invalid relax_ratio, the value should be in "
+                        "range (0, 1) when relaxed thinking is enabled, "
+                        f"got {speculative_config.relax_ratio}.")
+                if not speculative_config.reasoning_parser:
+                    raise ValueError("No reasoning_parser specified.")
+                logger.info("Enable relaxed thinking, relax_ratio = %s, "
+                            "relax_top_k = %s", 
+                            speculative_config.relax_ratio, 
+                            speculative_config.relax_top_k)
+                tokenizer = AutoTokenizer.from_pretrained(
+                    self.vllm_config.model_config.tokenizer)
+                try:
+                    reasoning_parser = \
+                        ReasoningParserManager.get_reasoning_parser(
+                            speculative_config.reasoning_parser)(tokenizer)
+                    assert reasoning_parser is not None
+                except Exception as e:
+                    raise TypeError(
+                        f"{speculative_config.reasoning_parser} has " \
+                         "not been registered") from e
+
+                logger.info("Use reasoning parser: %s", reasoning_parser)
+
+                if speculative_config.reasoning_parser == 'deepseek_r1':
+                    self.think_start_token_id = \
+                        reasoning_parser.start_token_id
+                    self.think_end_token_id = reasoning_parser.end_token_id
+                elif speculative_config.reasoning_parser == 'qwen3':
+                    self.think_start_token_id = \
+                        reasoning_parser.think_start_token_id
+                    self.think_end_token_id = \
+                        reasoning_parser.think_end_token_id
+                else:
+                    raise ValueError("Invalid reasoning_parser, options "
+                                     "are ['deepseek_r1', 'qwen3'].")
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
@@ -925,6 +973,13 @@ class Scheduler(SchedulerInterface):
         # to return empty token ids for the request.
         stopped = False
         for num_new, output_token_id in enumerate(new_token_ids, 1):
+            if self.relaxed_thinking:
+                maybe_update_thinking_state(
+                    request=request,
+                    new_token_id=output_token_id,
+                    think_start_token_id=self.think_start_token_id,
+                    think_end_token_id=self.think_end_token_id)
+
             request.append_output_token_ids(output_token_id)
 
             # Check for stop and update request state.

@@ -53,6 +53,10 @@ class RejectionSampler(nn.Module):
         # [batch_size, 1]
         bonus_token_ids: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        relaxed_thinking: bool = False,
+        relax_ratio: float = 1.0,
+        relax_top_k: int = 1,
+        thinking_states: torch.Tensor = torch.tensor([]),
     ) -> torch.Tensor:
         '''
         Args:
@@ -101,6 +105,10 @@ class RejectionSampler(nn.Module):
             target_probs,
             bonus_token_ids,
             sampling_metadata,
+            relaxed_thinking,
+            relax_ratio,
+            relax_top_k,
+            thinking_states,
         )
         return output_token_ids
 
@@ -147,6 +155,10 @@ def rejection_sample(
     # [batch_size, 1]
     bonus_token_ids: torch.Tensor,
     sampling_metadata: SamplingMetadata,
+    relaxed_thinking: bool = False,
+    relax_ratio: float = 1.0,
+    relax_top_k: int = 1,
+    thinking_states: torch.Tensor = torch.tensor([]),
 ) -> torch.Tensor:
     assert draft_token_ids.ndim == 1
     assert draft_probs is None or draft_probs.ndim == 2
@@ -176,18 +188,37 @@ def rejection_sample(
     else:
         is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
     if not sampling_metadata.all_random:
-        # Rejection sampling for greedy sampling requests.
-        target_argmax = target_probs.argmax(dim=-1)
-        rejection_greedy_sample_kernel[(batch_size, )](
-            output_token_ids,
-            cu_num_draft_tokens,
-            draft_token_ids,
-            target_argmax,
-            bonus_token_ids,
-            is_greedy,
-            max_spec_len,
-            num_warps=1,
-        )
+        if relaxed_thinking:
+            topk_values, topk_indices = torch.topk(target_probs, k=relax_top_k, dim=-1)
+            topk_indices = topk_indices.to(torch.int32)
+            relax_ratios = torch.where(thinking_states, relax_ratio, 1.0)
+            relax_top_ks = torch.where(thinking_states, relax_top_k, 1)
+            relaxed_thinking_sample_kernel[(batch_size, )](
+                output_token_ids,
+                cu_num_draft_tokens,
+                draft_token_ids,
+                topk_values,
+                topk_indices,
+                bonus_token_ids,
+                is_greedy,
+                max_spec_len,
+                relax_ratios,
+                relax_top_ks,
+                num_warps=1,
+            )
+        else:
+            # Rejection sampling for greedy sampling requests.
+            target_argmax = target_probs.argmax(dim=-1)
+            rejection_greedy_sample_kernel[(batch_size, )](
+                output_token_ids,
+                cu_num_draft_tokens,
+                draft_token_ids,
+                target_argmax,
+                bonus_token_ids,
+                is_greedy,
+                max_spec_len,
+                num_warps=1,
+            )
         if sampling_metadata.all_greedy:
             return output_token_ids
 
@@ -426,6 +457,80 @@ def sample_recovered_tokens(
         NO_DRAFT_PROBS=draft_probs is None,
     )
     return recovered_token_ids
+
+
+# NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
+@triton.jit(do_not_specialize=["max_spec_len"])
+def relaxed_thinking_sample_kernel(
+    output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
+    cu_num_draft_tokens_ptr,  # [batch_size]
+    draft_token_ids_ptr,  # [num_tokens]
+    topk_values_ptr,  # [num_tokens, k]
+    topk_indices_ptr,  # [num_tokens, k]
+    bonus_token_ids_ptr,  # [batch_size]
+    is_greedy_ptr,  # [batch_size] or None
+    max_spec_len,
+    relax_ratios_ptr,  # [batch_size]
+    relax_top_ks_ptr,  # [batch_size]
+):
+    req_idx = tl.program_id(0)
+    # FIXME(woosuk): Because is_greedy_ptr is not None at profiling run,
+    # re-compilation may happen during runtime when is_greedy_ptr is None.
+    if is_greedy_ptr is None:
+        is_greedy = True
+    else:
+        is_greedy = tl.load(is_greedy_ptr + req_idx)
+    if not is_greedy:
+        # Early exit for non-greedy sampling requests.
+        return
+
+    if req_idx == 0:
+        start_idx = 0
+    else:
+        start_idx = tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
+    num_draft_tokens = end_idx - start_idx
+
+    relax_ratio = tl.load(relax_ratios_ptr + req_idx)
+    relax_top_k = tl.load(relax_top_ks_ptr + req_idx)
+
+    rejected = False
+    for pos in range(num_draft_tokens):
+        if not rejected:
+            draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
+
+            target_top1_prob = tl.load(topk_values_ptr + (
+                start_idx + pos) * relax_top_k)
+            target_top1_token_id = tl.load(topk_indices_ptr + (
+                start_idx + pos) * relax_top_k)
+
+            cur_pos_accepted = False
+            token_id = target_top1_token_id
+            for i in range(relax_top_k):
+                if not cur_pos_accepted:
+                    target_candidate_prob = tl.load(topk_values_ptr + (
+                        start_idx + pos) * relax_top_k + i)
+                    target_candidate_token_id = tl.load(topk_indices_ptr + (
+                        start_idx + pos) * relax_top_k + i)
+                    if target_candidate_prob >= (
+                        target_top1_prob * relax_ratio) and \
+                        draft_token_id == target_candidate_token_id:
+                        # Accept.
+                        token_id = draft_token_id
+                        cur_pos_accepted = True
+
+            if not cur_pos_accepted:
+                rejected = True
+
+            tl.store(output_token_ids_ptr + req_idx * (
+                max_spec_len + 1) + pos, token_id)
+
+    if not rejected:
+        # If all tokens are accepted, append the bonus token.
+        bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
+        tl.store(
+            output_token_ids_ptr + req_idx * (max_spec_len + 1) +
+            num_draft_tokens, bonus_token_id)
 
 
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.

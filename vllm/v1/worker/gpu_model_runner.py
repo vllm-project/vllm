@@ -1642,12 +1642,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # separate storage from the original `logits` tensor. Therefore,
             # it is safe to update `target_logits` in place.
             target_logits = logits[spec_decode_metadata.target_logits_indices]
+
+            thinking_states = torch.tensor(
+                scheduler_output.scheduled_cached_reqs.thinking_states,
+                dtype=torch.bool,
+                device=self.device,
+            )
+
             output_token_ids = self.rejection_sampler(
                 spec_decode_metadata,
                 None,  # draft_probs
                 target_logits,
                 bonus_token_ids,
                 sampling_metadata,
+                relaxed_thinking=self.speculative_config.relaxed_thinking,
+                relax_ratio=self.speculative_config.relax_ratio,
+                relax_top_k=self.speculative_config.relax_top_k,
+                thinking_states=thinking_states,
             )
             sampler_output.sampled_token_ids = output_token_ids
 
