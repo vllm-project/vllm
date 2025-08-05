@@ -64,9 +64,10 @@ __global__ void rms_norm_static_fp8_quant_kernel(
 template <typename scalar_t, int width, typename fp8_type>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
 fused_add_rms_norm_static_fp8_quant_kernel(
-    fp8_type* __restrict__ out,    // [..., hidden_size]
-    scalar_t* __restrict__ input,  // [..., hidden_size]
+    fp8_type* __restrict__ out,           // [..., hidden_size]
+    scalar_t* __restrict__ input,         // [..., hidden_size]
     const int input_stride,
+    scalar_t* __restrict__ residual_out,  // [..., hidden_size]
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size]
     const float* __restrict__ scale,      // [1]
@@ -84,6 +85,8 @@ fused_add_rms_norm_static_fp8_quant_kernel(
      in this kernel as that would be undefined behavior */
   auto* __restrict__ input_v =
       reinterpret_cast<_f16Vec<scalar_t, width>*>(input);
+  auto* __restrict__ residual_out_v =
+      reinterpret_cast<_f16Vec<scalar_t, width>*>(residual_out);
   auto* __restrict__ residual_v =
       reinterpret_cast<_f16Vec<scalar_t, width>*>(residual);
   auto* __restrict__ weight_v =
@@ -95,7 +98,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
     _f16Vec<scalar_t, width> temp = input_v[stride_id];
     temp += residual_v[id];
     variance += temp.sum_squares();
-    residual_v[id] = temp;
+    residual_out_v[id] = temp;
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -112,7 +115,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int id = blockIdx.x * vec_hidden_size + idx;
-    _f16Vec<scalar_t, width> temp = residual_v[id];
+    _f16Vec<scalar_t, width> temp = residual_out_v[id];
     temp *= s_variance;
     temp *= weight_v[idx];
 #pragma unroll
@@ -129,9 +132,10 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 template <typename scalar_t, int width, typename fp8_type>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
 fused_add_rms_norm_static_fp8_quant_kernel(
-    fp8_type* __restrict__ out,    // [..., hidden_size]
-    scalar_t* __restrict__ input,  // [..., hidden_size]
+    fp8_type* __restrict__ out,           // [..., hidden_size]
+    scalar_t* __restrict__ input,         // [..., hidden_size]
     const int input_stride,
+    scalar_t* __restrict__ residual_out,  // [..., hidden_size]
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size]
     const float* __restrict__ scale,      // [1]
@@ -144,7 +148,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
     z += residual[blockIdx.x * hidden_size + idx];
     float x = (float)z;
     variance += x * x;
-    residual[blockIdx.x * hidden_size + idx] = z;
+    residual_out[blockIdx.x * hidden_size + idx] = z;
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -160,7 +164,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   float const scale_inv = 1.0f / *scale;
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)residual[blockIdx.x * hidden_size + idx];
+    float x = (float)residual_out[blockIdx.x * hidden_size + idx];
     float const out_norm = ((scalar_t)(x * s_variance)) * weight[idx];
     out[blockIdx.x * hidden_size + idx] =
         scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
@@ -206,17 +210,19 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
                                                                width, fp8_t> \
                   <<<grid, block, 0, stream>>>(                              \
                       out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),     \
-                      input_stride, residual.data_ptr<scalar_t>(),           \
+                      input_stride, residual_out.data_ptr<scalar_t>(),                     \
+                      residual.data_ptr<scalar_t>(),           \
                       weight.data_ptr<scalar_t>(), scale.data_ptr<float>(),  \
                       epsilon, num_tokens, hidden_size);                     \
             });                                                              \
       });
 void fused_add_rms_norm_static_fp8_quant(
-    torch::Tensor& out,       // [..., hidden_size],
-    torch::Tensor& input,     // [..., hidden_size]
-    torch::Tensor& residual,  // [..., hidden_size]
-    torch::Tensor& weight,    // [hidden_size]
-    torch::Tensor& scale,     // [1]
+    torch::Tensor& out,           // [..., hidden_size],
+    torch::Tensor& input,         // [..., hidden_size]
+    torch::Tensor& residual_out,  // [..., hidden_size]
+    torch::Tensor& residual,      // [..., hidden_size]
+    torch::Tensor& weight,        // [hidden_size]
+    torch::Tensor& scale,         // [1]
     double epsilon) {
   TORCH_CHECK(out.is_contiguous());
   TORCH_CHECK(residual.is_contiguous());
