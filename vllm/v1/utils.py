@@ -288,14 +288,13 @@ def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,
         # the original slicing behavior from the end of the tensor.
         return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)
     
-    # Check if narrow() can be safely used (both tensors have sufficient size)
-    # If not, fall back to original slicing to preserve error behavior
-    if length > from_tensor.shape[0] or length > to_tensor.shape[0]:
-        return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)
+    # Clamp length to the minimum of the two tensor sizes to avoid out-of-bounds
+    # access with narrow(), which is stricter than slicing.
+    copy_len = min(length, from_tensor.shape[0], to_tensor.shape[0])
     
     # Use narrow() for better memory efficiency when safe to do so
-    to_slice = to_tensor.narrow(0, 0, length)
-    from_slice = from_tensor.narrow(0, 0, length)
+    to_slice = to_tensor.narrow(0, 0, copy_len)
+    from_slice = from_tensor.narrow(0, 0, copy_len)
     
     return to_slice.copy_(from_slice, non_blocking=True)
 
