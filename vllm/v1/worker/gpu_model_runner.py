@@ -86,8 +86,10 @@ else:
 
 logger = init_logger(__name__)
 
-from triton_dist.kernels.nvidia.allreduce import (create_allreduce_ctx, AllReduceMethod)
-from triton_dist import pynvshmem
+from triton_dist.layers.nvidia import GemmARLayer
+from triton_dist.utils import init_nvshmem_by_torch_process_group, is_nvshmem_multimem_supported
+import warnings
+import sys
 from vllm.model_executor.layers.linear import RowParallelLinear
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -1802,24 +1804,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             time_after_load = time.perf_counter()
 
             max_M = self.model_config.max_seq_len_to_capture * 4
-            input_tensor = torch.empty([max_M, self.model.model.embed_tokens.embedding_dim], dtype=self.model_config.dtype, device="meta")
-            print(f"Creating allreduce context for model loading: {input_tensor.shape}")
+            print(f"Creating allreduce context for model loading")
             WORLD_SIZE = int(get_tp_group().world_size)
             TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-            pynvshmem.init_nvshmem_by_uniqueid(TP_GROUP)
-            self.ctx = create_allreduce_ctx(
-                    input=input_tensor,
-                    method=AllReduceMethod.TwoShot,
-                    signal_stages=1,
+            init_nvshmem_by_torch_process_group(TP_GROUP)
+            if not is_nvshmem_multimem_supported():
+                warnings.warn("Skip because nvshmem multimem is not supported")
+                sys.exit(0)
+            attn_K = self.model.model.layers[0].self_attn.o_proj.input_size_per_partition
+            attn_N = self.model.model.layers[0].self_attn.o_proj.output_size
+            mlp_K = self.model.model.layers[0].mlp.down_proj.input_size_per_partition
+            mlp_N = self.model.model.layers[0].mlp.down_proj.output_size
+            self.attn_gemm_ar = GemmARLayer(
+                    TP_GROUP, max_M, attn_N, attn_K, self.model_config.dtype, self.model_config.dtype, WORLD_SIZE, persistent=True, use_ll_kernel=True, copy_to_local=False, NUM_COMM_SMS=16
             )
-            self.ctx._scatter_bufs = self.ctx.scatter_bufs 
-            self.ar_output = torch.empty_like(input_tensor, device="cuda", dtype=input_tensor.dtype).contiguous()
+            self.mlp_gemm_ar = GemmARLayer(
+                    TP_GROUP, max_M, mlp_N, mlp_K, self.model_config.dtype, self.model_config.dtype, WORLD_SIZE, persistent=True, use_ll_kernel=True, copy_to_local=False, NUM_COMM_SMS=16
+            )
+            
+            logger.info("Gemm AR ctx done.")
             
             for module in self.model.modules():
-                if isinstance(module, RowParallelLinear):
-                    module.ctx = self.ctx
-                    module.ar_output = self.ar_output
-                    module.ar_method = AllReduceMethod.TwoShot
+                if isinstance(module, RowParallelLinear) and module.input_size_per_partition == attn_K:
+                    module.gemm_ar_op = self.attn_gemm_ar
+                elif isinstance(module, RowParallelLinear) and module.input_size_per_partition == mlp_K:
+                    module.gemm_ar_op = self.mlp_gemm_ar
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Model loading took %.4f GiB and %.6f seconds",

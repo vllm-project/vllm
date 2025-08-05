@@ -1312,7 +1312,8 @@ class RowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = self.quant_method.apply(self,
+        if self.ar_option != 'triton_dist':
+            output_parallel = self.quant_method.apply(self,
                                                   input_parallel,
                                                   bias=bias_)
         if self.reduce_results and self.tp_size > 1:
@@ -1326,17 +1327,7 @@ class RowParallelLinear(LinearBase):
 
             elif self.ar_option == 'triton_dist':
                 # triton dist AR
-                M, N = output_parallel.shape
-                self.ctx.M = M
-                self.ctx.buf_M = M
-                self.ctx.scatter_bufs = self.ctx._scatter_bufs[:M].contiguous()
-                assert self.ctx.scatter_bufs.shape[0] == M, (self.ctx.scatter_bufs.shape, M)
-                output = all_reduce(
-                    input=output_parallel.contiguous(),
-                    output=self.ar_output[:M].contiguous(),
-                    method=self.ar_method,
-                    ctx=self.ctx,
-                )
+                output = self.gemm_ar_op.forward(input_parallel, self._parameters['weight'], None)
             else:
                 raise ValueError(f"Unknown all-reduce method: {self.ar_option}")
         else:

@@ -183,4 +183,6 @@ if __name__ == "__main__":
             "The environment variable 'VLLM_TORCH_PROFILER_DIR' is not set. "
             "Please set it to a valid path to use torch profiler."
         )
+    from triton_dist.tools import apply_triton340_inductor_patch
+    apply_triton340_inductor_patch()
     main(args)
