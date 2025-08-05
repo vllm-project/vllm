@@ -995,7 +995,9 @@ class OpenAIServing:
         elif isinstance(inputs, list):
             prompt_token_ids = inputs
         elif 'prompt_embeds' in inputs:
-            prompt_embeds = inputs.get("prompt_embeds")
+            # Cast to proper type for log_inputs
+            prompt_embeds = cast(Optional[torch.Tensor],
+                                 inputs.get("prompt_embeds"))
         else:
             prompt = inputs["prompt"]
             prompt_token_ids = inputs["prompt_token_ids"]
