@@ -166,23 +166,16 @@ def main(
     print("\nresult f16= ", output.shape, output[0,0,:])
     f16_output = copy.deepcopy(output)
 
-    sel = torch.abs(f16_output)>1e-3 # min precision for fp8 
+    sel = torch.abs(f16_output)>1e-4 # thresh for min precision limited by fp8 
     diff = f16_output - fp8_output
 
     diff = 100*torch.abs(diff[sel]/f16_output[sel])
-    loc = diff>10 # different > 10%
 
     print("Diff = 100*(fp16-fp8)/fp16: ",
           "\nmean   = ", torch.mean(diff).item(),
           "\nmax    = ", torch.max(diff).item(),
           "\nmdeian = ", torch.median(diff).item(),
           "\nstd    = ", torch.std(diff).item())
-
-    print("Outlier: ", loc.shape, torch.sum(loc).item(),
-          "\ndiff = ", diff[loc==True],
-          "\nfp16 = ", f16_output[sel][loc==True],
-          "\nfp8  = ", fp8_output[sel][loc==True],
-          "\nquery= ", query[sel][loc==True])
 
 if __name__ == "__main__":
     logger.warning(
