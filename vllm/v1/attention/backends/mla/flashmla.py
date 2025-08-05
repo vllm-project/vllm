@@ -112,7 +112,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             num_splits_view.copy_(num_splits)
             # Num splits needs to monotonically increasing
             # (with: https://github.com/vllm-project/FlashMLA/pull/3, otherwise
-            #  it needs to montonicaly increasing by 1)
+            #  it needs to monotonically increasing by 1)
             self.cg_buf_num_splits[n:].fill_(num_splits[-1])
             num_splits = num_splits_view
 
