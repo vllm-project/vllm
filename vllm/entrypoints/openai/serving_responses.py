@@ -105,7 +105,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         self.supports_browsing = False
         self.supports_code_interpreter = False
-        self.use_harmony = True  # FIXME
+        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             logger.warning("For gpt-oss, we ignore --enable-auto-tool-choice "
                            "and always enable tool use.")
