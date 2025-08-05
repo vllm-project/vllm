@@ -24,13 +24,8 @@ eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 
 def _create_proposer(method: str, k: int) -> EagleProposer:
     model_config = ModelConfig(model=model_dir,
-                               task="generate",
-                               max_model_len=100,
-                               tokenizer=model_dir,
-                               tokenizer_mode="auto",
-                               dtype="auto",
-                               seed=None,
-                               trust_remote_code=False)
+                               runner="generate",
+                               max_model_len=100)
 
     # Choose model directory based on method
     draft_model_dir = eagle_dir if method == "eagle" else eagle3_dir
@@ -207,7 +202,9 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
-def test_propose(num_speculative_tokens):
+@pytest.mark.parametrize("backend",
+                         [_Backend.FLASH_ATTN_VLLM_V1, _Backend.TREE_ATTN])
+def test_propose(num_speculative_tokens, backend):
     # Use GPU device
     device = torch.device(current_platform.device_type)
 
@@ -306,10 +303,10 @@ def test_propose(num_speculative_tokens):
                                    device=device)
     sampling_metadata = mock.MagicMock()
 
-    attn_metadata_builder_cls, _ = get_attention_backend(
-        _Backend.FLASH_ATTN_VLLM_V1)
+    attn_metadata_builder_cls, _ = get_attention_backend(backend)
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
+        layer_names=proposer.attn_layer_names,
         vllm_config=proposer.vllm_config,
         device=device,
     )

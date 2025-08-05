@@ -221,7 +221,7 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
 # GLM-4v
 def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
-    model_name = "THUDM/glm-4v-9b"
+    model_name = "zai-org/glm-4v-9b"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -250,7 +250,7 @@ def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
 
 # GLM-4.1V
 def run_glm4_1v(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "THUDM/GLM-4.1V-9B-Thinking"
+    model_name = "zai-org/GLM-4.1V-9B-Thinking"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -423,44 +423,32 @@ def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# SmolVLM2-2.2B-Instruct
-def run_smolvlm(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-    model_name = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=8192,
-        max_num_seqs=2,
-        enforce_eager=True,
-        mm_processor_kwargs={
-            "max_image_size": {"longest_edge": 384},
-        },
-        limit_mm_per_prompt={modality: 1},
-    )
-    prompts = [
-        (f"<|im_start|>User:<image>{question}<end_of_utterance>\nAssistant:")
-        for question in questions
-    ]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
-# omni-research/Tarsier-7b
-def run_tarsier(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-    model_name = "omni-research/Tarsier-7b"
+# Intern-S1
+def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "internlm/Intern-S1"
 
     engine_args = EngineArgs(
         model=model_name,
         trust_remote_code=True,
-        max_model_len=4096,
+        max_model_len=8192,
+        max_num_seqs=2,
         limit_mm_per_prompt={modality: 1},
+        enforce_eager=True,
     )
-    prompts = [(f"USER: <image>\n{question} ASSISTANT:") for question in questions]
+
+    if modality == "image":
+        placeholder = "<IMG_CONTEXT>"
+    elif modality == "video":
+        placeholder = "<video>"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -483,44 +471,6 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
         placeholder = "<image>"
     elif modality == "video":
         placeholder = "<video>"
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    messages = [
-        [{"role": "user", "content": f"{placeholder}\n{question}"}]
-        for question in questions
-    ]
-    prompts = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    # Stop tokens for InternVL
-    # models variants may have different stop tokens
-    # please refer to the model card for the correct "stop words":
-    # https://huggingface.co/OpenGVLab/InternVL2-2B/blob/main/conversation.py
-    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
-    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
-    stop_token_ids = [token_id for token_id in stop_token_ids if token_id is not None]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
-    )
-
-
-# Nemontron_VL
-def run_nemotron_vl(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=8192,
-        limit_mm_per_prompt={modality: 1},
-    )
-
-    assert modality == "image"
-    placeholder = "<image>"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [
@@ -598,6 +548,41 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
+    )
+
+
+def run_llama4(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=4,
+        tensor_parallel_size=8,
+        gpu_memory_utilization=0.4,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    messages = [
+        [
+            {
+                "role": "user",
+                "content": [{"type": "image"}, {"type": "text", "text": f"{question}"}],
+            }
+        ]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=False
+    )
+    stop_token_ids = None
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=stop_token_ids,
     )
 
 
@@ -843,41 +828,6 @@ def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-def run_llama4(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    model_name = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=8192,
-        max_num_seqs=4,
-        tensor_parallel_size=8,
-        gpu_memory_utilization=0.4,
-        limit_mm_per_prompt={modality: 1},
-    )
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    messages = [
-        [
-            {
-                "role": "user",
-                "content": [{"type": "image"}, {"type": "text", "text": f"{question}"}],
-            }
-        ]
-        for question in questions
-    ]
-    prompts = tokenizer.apply_chat_template(
-        messages, add_generation_prompt=True, tokenize=False
-    )
-    stop_token_ids = None
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
-    )
-
-
 # Molmo
 def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -900,6 +850,44 @@ def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
+    )
+
+
+# Nemontron_VL
+def run_nemotron_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    assert modality == "image"
+    placeholder = "<image>"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    # Stop tokens for InternVL
+    # models variants may have different stop tokens
+    # please refer to the model card for the correct "stop words":
+    # https://huggingface.co/OpenGVLab/InternVL2-2B/blob/main/conversation.py
+    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
+    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+    stop_token_ids = [token_id for token_id in stop_token_ids if token_id is not None]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=stop_token_ids,
     )
 
 
@@ -1057,6 +1045,41 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
         # Note - mm_processor_kwargs can also be passed to generate/chat calls
         mm_processor_kwargs={"dynamic_hd": 16},
         limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        lora_requests=[LoRARequest("vision", 1, vision_lora_path)],
+    )
+
+
+# HF format Phi-4-multimodal-instruct
+def run_phi4_multimodal(questions: list[str], modality: str) -> ModelRequestData:
+    """
+    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    show how to process image inputs.
+    """
+    assert modality == "image"
+    model_path = snapshot_download(
+        "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
+    )
+    # Since the vision-lora and speech-lora co-exist with the base model,
+    # we have to manually specify the path of the lora weights.
+    vision_lora_path = os.path.join(model_path, "vision-lora")
+    prompts = [
+        f"<|user|><|image|>{question}<|end|><|assistant|>" for question in questions
+    ]
+    engine_args = EngineArgs(
+        model=model_path,
+        max_model_len=5120,
+        max_num_seqs=2,
+        max_num_batched_tokens=12800,
+        enable_lora=True,
+        max_lora_rank=320,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={"dynamic_hd": 16},
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
@@ -1225,37 +1248,6 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
     )
 
 
-def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "omni-research/Tarsier2-Recap-7b"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=4096,
-        hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]},
-        limit_mm_per_prompt={modality: 1},
-    )
-
-    if modality == "image":
-        placeholder = "<|image_pad|>"
-    elif modality == "video":
-        placeholder = "<|video_pad|>"
-
-    prompts = [
-        (
-            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
-            f"{question}<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
-        for question in questions
-    ]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # SkyworkR1V
 def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1289,6 +1281,111 @@ def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# SmolVLM2-2.2B-Instruct
+def run_smolvlm(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        enforce_eager=True,
+        mm_processor_kwargs={
+            "max_image_size": {"longest_edge": 384},
+        },
+        limit_mm_per_prompt={modality: 1},
+    )
+    prompts = [
+        (f"<|im_start|>User:<image>{question}<end_of_utterance>\nAssistant:")
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Step3
+def run_step3(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "stepfun-ai/step3-fp8"
+
+    # NOTE: Below are verified configurations for step3-fp8
+    # on 8xH100 GPUs.
+    engine_args = EngineArgs(
+        model=model_name,
+        max_num_batched_tokens=4096,
+        gpu_memory_utilization=0.85,
+        tensor_parallel_size=8,
+        limit_mm_per_prompt={modality: 1},
+        reasoning_parser="step3",
+    )
+
+    prompts = [
+        "<｜begin▁of▁sentence｜> You are a helpful assistant. <|BOT|>user\n "
+        f"<im_patch>{question} <|EOT|><|BOT|>assistant\n<think>\n"
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# omni-research/Tarsier-7b
+def run_tarsier(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "omni-research/Tarsier-7b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+    )
+    prompts = [(f"USER: <image>\n{question} ASSISTANT:") for question in questions]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "omni-research/Tarsier2-Recap-7b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]},
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "<|image_pad|>"
+    elif modality == "video":
+        placeholder = "<|video_pad|>"
+
+    prompts = [
+        (
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 model_example_map = {
     "aria": run_aria,
     "aya_vision": run_aya_vision,
@@ -1303,10 +1400,11 @@ model_example_map = {
     "h2ovl_chat": run_h2ovl,
     "hyperclovax_seed_vision": run_hyperclovax_seed_vision,
     "idefics3": run_idefics3,
+    "interns1": run_interns1,
     "internvl_chat": run_internvl,
-    "nemotron_vl": run_nemotron_vl,
     "keye_vl": run_keye_vl,
     "kimi_vl": run_kimi_vl,
+    "llama4": run_llama4,
     "llava": run_llava,
     "llava-next": run_llava_next,
     "llava-next-video": run_llava_next_video,
@@ -1316,14 +1414,15 @@ model_example_map = {
     "minicpmv": run_minicpmv,
     "mistral3": run_mistral3,
     "mllama": run_mllama,
-    "llama4": run_llama4,
     "molmo": run_molmo,
+    "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
     "ovis": run_ovis,
     "paligemma": run_paligemma,
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
     "phi4_mm": run_phi4mm,
+    "phi4_multimodal": run_phi4_multimodal,
     "pixtral_hf": run_pixtral_hf,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
@@ -1331,6 +1430,7 @@ model_example_map = {
     "qwen2_5_omni": run_qwen2_5_omni,
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
+    "step3": run_step3,
     "tarsier": run_tarsier,
     "tarsier2": run_tarsier2,
 }

@@ -2,19 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-from copy import copy
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
+from copy import copy
 from http import HTTPStatus
 from typing import Callable, Final, Optional, Union
 
 import jinja2
 from fastapi import Request
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
-import openai.types.responses as openai_responses_tyes
-from openai_harmony import Message as OpenAIMessage
 from openai.types.responses.response_function_tool_call import (
     ResponseFunctionToolCall)
+from openai_harmony import Message as OpenAIMessage
+
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
@@ -24,7 +25,7 @@ from vllm.entrypoints.context import (ConversationContext, HarmonyContext,
 from vllm.entrypoints.harmony_utils import (
     get_developer_message, get_stop_tokens_for_assistant_actions,
     get_system_message, get_user_message, parse_output_message,
-    parse_response_input, parse_response_output, render_for_completion)
+    parse_response_input, render_for_completion)
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -131,17 +132,27 @@ class OpenAIServingResponses(OpenAIServing):
                 raise NotImplementedError("Auto tool choice is not supported "
                                           "yet unless using Harmony")
 
+        # If False (default), the "store" option is (silently) ignored and the
+        # response is not stored. If True, the response is stored in memory.
+        # NOTE(woosuk): This may not be intuitive for users, as the default
+        # behavior in OpenAI's Responses API is to store the response, but
+        # vLLM's default behavior is not.
+        self.enable_store = envs.VLLM_ENABLE_RESPONSES_API_STORE
+        if self.enable_store:
+            logger.warning_once(
+                "`VLLM_ENABLE_RESPONSES_API_STORE` is enabled. This may "
+                "cause a memory leak since we never remove responses from "
+                "the store.")
         # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: This causes a memory leak since we never remove responses
-        # from the store.
+        # FIXME: If enable_store=True, this may cause a memory leak since we
+        # never remove responses from the store.
         self.response_store: dict[str, ResponsesResponse] = {}
         self.response_store_lock = asyncio.Lock()
 
         # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: This causes a memory leak since we never remove messages
-        # from the store.
-        self.msg_store: dict[str, Union[list[ChatCompletionMessageParam],
-                                        list[OpenAIMessage]]] = {}
+        # FIXME: If enable_store=True, this may cause a memory leak since we
+        # never remove messages from the store.
+        self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
 
         self.background_tasks: dict[str, asyncio.Task] = {}
 
@@ -160,6 +171,26 @@ class OpenAIServingResponses(OpenAIServing):
         # success status before we actually start generating text :).
         if self.engine_client.errored:
             raise self.engine_client.dead_error
+
+        if request.store and not self.enable_store:
+            if request.background:
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message=(
+                        "This vLLM engine does not support `store=True` and "
+                        "therefore does not support the background mode. To "
+                        "enable these features, set the environment variable "
+                        "`VLLM_ENABLE_RESPONSES_API_STORE=1` when launching "
+                        "the vLLM server."),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                )
+            # Disable the store option.
+            # NOTE(woosuk): Although returning an error is possible, we opted
+            # to implicitly disable store and process the request anyway, as
+            # we assume most users do not intend to actually store the response
+            # (i.e., their request's `store=True` just because it's the default
+            # value).
+            request.store = False
 
         # Handle the previous response ID.
         prev_response_id = request.previous_response_id
@@ -625,4 +656,14 @@ class OpenAIServingResponses(OpenAIServing):
             err_type="invalid_request_error",
             message=f"Response with id '{response_id}' not found.",
             status_code=HTTPStatus.NOT_FOUND,
+        )
+
+    def _make_store_not_supported_error(self) -> ErrorResponse:
+        return self.create_error_response(
+            err_type="invalid_request_error",
+            message=("`store=True` (default) is not supported. Please set "
+                     "`store=False` in Responses API or set "
+                     "`VLLM_ENABLE_RESPONSES_API_STORE=1` in the env var when "
+                     "starting the vLLM server."),
+            status_code=HTTPStatus.BAD_REQUEST,
         )

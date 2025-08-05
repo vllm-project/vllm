@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 from dataclasses import dataclass
-from typing import ClassVar, Optional
 from functools import cache
+from typing import ClassVar, Optional
 
 import torch
 
@@ -18,11 +18,13 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                              AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
+
 
 @dataclass
 class TritonAttentionMetadata:
@@ -56,10 +58,11 @@ class TritonAttentionMetadata:
 
 class TritonAttentionMetadataBuilder(
         AttentionMetadataBuilder[TritonAttentionMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = True
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.ALWAYS
 
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
         self.device = device
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
@@ -189,12 +192,14 @@ class TritonAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["TritonAttentionMetadataBuilder"]:
         return TritonAttentionMetadataBuilder
 
+
 @cache
 def use_aiter_unified_attention() -> bool:
     """Check if aiter unified attention should be used."""
     # VLLM_ROCM_USE_AITER_MHA needs to set to 0 as well as it is set to 1 as default
     return envs.VLLM_ROCM_USE_AITER \
         and envs.VLLM_USE_AITER_UNIFIED_ATTENTION
+
 
 class TritonAttentionImpl(AttentionImpl):
 
@@ -250,19 +255,20 @@ class TritonAttentionImpl(AttentionImpl):
             if use_aiter_unified_attention():
                 logger.info_once(
                     "Using aiter unified attention for TritonAttentionImpl")
-                from aiter.ops.triton.unified_attention import unified_attention
+                from aiter.ops.triton.unified_attention import (
+                    unified_attention)
                 self.unified_attention = unified_attention
             else:
                 logger.info_once(
                     "Using vllm unified attention for TritonAttentionImpl")
-                from vllm.attention.ops.triton_unified_attention import unified_attention
+                from vllm.attention.ops.triton_unified_attention import (
+                    unified_attention)
                 self.unified_attention = unified_attention
 
         self.sinks = sinks
         if self.sinks is not None:
             assert sinks.shape[
                 0] == num_heads, "Sinks must have the same number of heads as the number of heads in the layer"
-
 
     def forward(
         self,
@@ -366,25 +372,26 @@ class TritonAttentionImpl(AttentionImpl):
 
         if use_prefill_decode_attn:
             # Compute attention and update output up to `num_actual_tokens`.
-            chunked_prefill_paged_decode(query=query[:num_actual_tokens],
-                                         key=key[:num_actual_tokens],
-                                         value=value[:num_actual_tokens],
-                                         output=output[:num_actual_tokens],
-                                         kv_cache_dtype=self.kv_cache_dtype,
-                                         key_cache=key_cache,
-                                         value_cache=value_cache,
-                                         block_table=block_table,
-                                         query_start_loc=cu_seqlens_q,
-                                         seq_lens=seqused_k,
-                                         max_seq_len=max_seqlen_k,
-                                         max_query_len=max_seqlen_q,
-                                         k_scale=layer._k_scale,
-                                         v_scale=layer._v_scale,
-                                         alibi_slopes=self.alibi_slopes,
-                                         sliding_window=self.sliding_window[0],
-                                         sm_scale=self.scale,
-                                         sinks=self.sinks,
-                                         )
+            chunked_prefill_paged_decode(
+                query=query[:num_actual_tokens],
+                key=key[:num_actual_tokens],
+                value=value[:num_actual_tokens],
+                output=output[:num_actual_tokens],
+                kv_cache_dtype=self.kv_cache_dtype,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                block_table=block_table,
+                query_start_loc=cu_seqlens_q,
+                seq_lens=seqused_k,
+                max_seq_len=max_seqlen_k,
+                max_query_len=max_seqlen_q,
+                k_scale=layer._k_scale,
+                v_scale=layer._v_scale,
+                alibi_slopes=self.alibi_slopes,
+                sliding_window=self.sliding_window[0],
+                sm_scale=self.scale,
+                sinks=self.sinks,
+            )
 
         else:
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])

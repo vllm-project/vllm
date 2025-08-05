@@ -18,23 +18,25 @@ from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
 import regex as re
 import torch
 from pydantic import TypeAdapter, ValidationError
-from typing_extensions import TypeIs
+from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigFormat, ConfigType, DecodingConfig,
-                         DetailedTraceModules, Device, DeviceConfig,
-                         DistributedExecutorBackend, GuidedDecodingBackend,
-                         GuidedDecodingBackendV1, HfOverrides, KVEventsConfig,
+                         ConfigFormat, ConfigType, ConvertOption,
+                         DecodingConfig, DetailedTraceModules, Device,
+                         DeviceConfig, DistributedExecutorBackend,
+                         GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
                          LoRAConfig, ModelConfig, ModelDType, ModelImpl,
                          MultiModalConfig, ObservabilityConfig, ParallelConfig,
-                         PoolerConfig, PrefixCachingHashAlgo, SchedulerConfig,
-                         SchedulerPolicy, SpeculativeConfig, TaskOption,
-                         TokenizerMode, VllmConfig, get_attr_docs, get_field)
+                         PoolerConfig, PrefixCachingHashAlgo, RunnerOption,
+                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
+                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs,
+                         get_field)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
+from vllm.ray.lazy_utils import is_ray_initialized
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
@@ -107,15 +109,19 @@ def get_type(type_hints: set[TypeHint], type: TypeHintT) -> TypeHintT:
 
 
 def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
-    """Convert Literal type hints to argparse kwargs."""
+    """Get the `type` and `choices` from a `Literal` type hint in `type_hints`.
+
+    If `type_hints` also contains `str`, we use `metavar` instead of `choices`.
+    """
     type_hint = get_type(type_hints, Literal)
-    choices = get_args(type_hint)
-    choice_type = type(choices[0])
-    if not all(isinstance(choice, choice_type) for choice in choices):
+    options = get_args(type_hint)
+    option_type = type(options[0])
+    if not all(isinstance(option, option_type) for option in options):
         raise ValueError(
-            "All choices must be of the same type. "
-            f"Got {choices} with types {[type(c) for c in choices]}")
-    return {"type": choice_type, "choices": sorted(choices)}
+            "All options must be of the same type. "
+            f"Got {options} with types {[type(c) for c in options]}")
+    kwarg = "metavar" if contains_type(type_hints, str) else "choices"
+    return {"type": option_type, kwarg: sorted(options)}
 
 
 def is_not_builtin(type_hint: TypeHint) -> bool:
@@ -212,10 +218,12 @@ Additionally, list elements can be passed individually using `+`:
         elif contains_type(type_hints, list):
             type_hint = get_type(type_hints, list)
             types = get_args(type_hint)
-            assert len(types) == 1, (
-                "List type must have exactly one type. Got "
-                f"{type_hint} with types {types}")
-            kwargs[name]["type"] = types[0]
+            list_type = types[0]
+            if get_origin(list_type) is Union:
+                msg = "List type must contain str if it is a Union."
+                assert str in get_args(list_type), msg
+                list_type = str
+            kwargs[name]["type"] = list_type
             kwargs[name]["nargs"] = "+"
         elif contains_type(type_hints, int):
             kwargs[name]["type"] = int
@@ -270,7 +278,9 @@ class EngineArgs:
         str, List[str]]] = ModelConfig.served_model_name
     tokenizer: Optional[str] = ModelConfig.tokenizer
     hf_config_path: Optional[str] = ModelConfig.hf_config_path
-    task: TaskOption = ModelConfig.task
+    runner: RunnerOption = ModelConfig.runner
+    convert: ConvertOption = ModelConfig.convert
+    task: Optional[TaskOption] = ModelConfig.task
     skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
     enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
     tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
@@ -438,6 +448,9 @@ class EngineArgs:
     # DEPRECATED
     enable_prompt_adapter: bool = False
 
+    kv_sharing_fast_prefill: bool = \
+        CacheConfig.kv_sharing_fast_prefill
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -461,7 +474,11 @@ class EngineArgs:
         )
         if not ('serve' in sys.argv[1:] and '--help' in sys.argv[1:]):
             model_group.add_argument("--model", **model_kwargs["model"])
-        model_group.add_argument("--task", **model_kwargs["task"])
+        model_group.add_argument("--runner", **model_kwargs["runner"])
+        model_group.add_argument("--convert", **model_kwargs["convert"])
+        model_group.add_argument("--task",
+                                 **model_kwargs["task"],
+                                 deprecated=True)
         model_group.add_argument("--tokenizer", **model_kwargs["tokenizer"])
         model_group.add_argument("--tokenizer-mode",
                                  **model_kwargs["tokenizer_mode"])
@@ -686,6 +703,8 @@ class EngineArgs:
                                  **cache_kwargs["cpu_offload_gb"])
         cache_group.add_argument("--calculate-kv-scales",
                                  **cache_kwargs["calculate_kv_scales"])
+        cache_group.add_argument("--kv-sharing-fast-prefill",
+                                 **cache_kwargs["kv_sharing_fast_prefill"])
 
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)
@@ -870,6 +889,8 @@ class EngineArgs:
         return ModelConfig(
             model=self.model,
             hf_config_path=self.hf_config_path,
+            runner=self.runner,
+            convert=self.convert,
             task=self.task,
             tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
@@ -960,8 +981,28 @@ class EngineArgs:
         provided as a JSON string input via CLI arguments or directly as a
         dictionary from the engine.
         """
+
+        from vllm.transformers_utils.config import get_config
+        from vllm.transformers_utils.configs.speculators.base import (
+            SpeculatorsConfig)
+
         if self.speculative_config is None:
-            return None
+            hf_config = get_config(self.hf_config_path or self.model,
+                                   self.trust_remote_code, self.revision,
+                                   self.code_revision, self.config_format)
+
+            # if loading a SpeculatorsConfig, load the specualtive_config
+            # details from the config directly
+            # no user input required / expected
+            if isinstance(hf_config, SpeculatorsConfig):
+                # We create one since we dont create one
+                self.speculative_config = {}
+                self.speculative_config[
+                    "num_speculative_tokens"] = hf_config.num_lookahead_tokens
+                self.speculative_config["model"] = self.model
+                self.speculative_config["method"] = hf_config.method
+            else:
+                return None
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
@@ -1056,7 +1097,17 @@ class EngineArgs:
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
+            kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
         )
+
+        ray_runtime_env = None
+        if is_ray_initialized():
+            # Ray Serve LLM calls `create_engine_config` in the context
+            # of a Ray task, therefore we check is_ray_initialized()
+            # as opposed to is_in_ray_actor().
+            import ray
+            ray_runtime_env = ray.get_runtime_context().runtime_env
+            logger.info("Using ray runtime env: %s", ray_runtime_env)
 
         # Get the current placement group if Ray is initialized and
         # we are in a Ray actor. If so, then the placement group will be
@@ -1170,6 +1221,7 @@ class EngineArgs:
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
+            ray_runtime_env=ray_runtime_env,
             placement_group=placement_group,
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
@@ -1177,6 +1229,18 @@ class EngineArgs:
             enable_multimodal_encoder_data_parallel=self.
             enable_multimodal_encoder_data_parallel,
         )
+
+        supports_mm_preprocessor_cache = (self.data_parallel_size == 1
+                                          or data_parallel_external_lb)
+        if (not supports_mm_preprocessor_cache
+                and model_config.is_multimodal_model
+                and not model_config.disable_mm_preprocessor_cache):
+            logger.warning(
+                "Multi-modal preprocessor cache is not compatible "
+                "with data parallelism when there does not exist a "
+                "one-to-one correspondance between API process and "
+                "EngineCore process, so the cache will be disabled.")
+            model_config.set_disable_mm_preprocessor_cache(True)
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
@@ -1330,14 +1394,6 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        if self.guided_decoding_backend not in get_args(
-                GuidedDecodingBackendV1):
-            _raise_or_fallback(
-                feature_name=
-                f"--guided-decoding-backend={self.guided_decoding_backend}",
-                recommend_to_remove=False)
-            return False
-
         # Need at least Ampere for now (FA support required).
         # Skip this check if we are running on a non-GPU platform,
         # or if the device capability is not available
@@ -1398,7 +1454,6 @@ class EngineArgs:
                 "Please consider using other speculative decoding methods "
                 "such as ngram, medusa, eagle, or deepseek_mtp.")
 
-        # No XFormers so far.
         V1_BACKENDS = [
             "FLASH_ATTN_VLLM_V1",
             "FLASH_ATTN",
@@ -1406,13 +1461,14 @@ class EngineArgs:
             "PALLAS_VLLM_V1",
             "TRITON_ATTN_VLLM_V1",
             "TRITON_MLA",
-            "CUTLASS_MLA_VLLM_V1",
+            "CUTLASS_MLA",
             "FLASHMLA",
             "FLASHINFER",
             "FLASHINFER_VLLM_V1",
             "ROCM_AITER_MLA",
             "TORCH_SDPA_VLLM_V1",
             "FLEX_ATTENTION",
+            "TREE_ATTN",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
@@ -1434,14 +1490,18 @@ class EngineArgs:
                 and _warn_or_fallback("Engine in background thread")):
             return False
 
-        if (self.pipeline_parallel_size > 1
-                and self.distributed_executor_backend
-                not in (ParallelConfig.distributed_executor_backend, "ray",
-                        "mp", "external_launcher")):
-            name = "Pipeline Parallelism without Ray distributed executor " \
-                    "or multiprocessing executor or external launcher"
-            _raise_or_fallback(feature_name=name, recommend_to_remove=False)
-            return False
+        if self.pipeline_parallel_size > 1:
+            supports_pp = getattr(self.distributed_executor_backend,
+                                  'supports_pp', False)
+            if not supports_pp and self.distributed_executor_backend not in (
+                    ParallelConfig.distributed_executor_backend, "ray", "mp",
+                    "external_launcher"):
+                name = "Pipeline Parallelism without Ray distributed " \
+                        "executor or multiprocessing executor or external " \
+                        "launcher"
+                _raise_or_fallback(feature_name=name,
+                                   recommend_to_remove=False)
+                return False
 
         # The platform may be supported on V1, but off by default for now.
         if not current_platform.default_v1(  # noqa: SIM103
@@ -1649,7 +1709,8 @@ class EngineArgs:
 
         if (self.max_num_seqs is None
                 and usage_context in default_max_num_seqs):
-            self.max_num_seqs = default_max_num_seqs[usage_context]
+            self.max_num_seqs = min(default_max_num_seqs[usage_context],
+                                    self.max_num_batched_tokens or sys.maxsize)
 
             logger.debug("Setting max_num_seqs to %d for %s usage context.",
                          self.max_num_seqs, use_context_value)
@@ -1658,7 +1719,23 @@ class EngineArgs:
 @dataclass
 class AsyncEngineArgs(EngineArgs):
     """Arguments for asynchronous vLLM engine."""
-    disable_log_requests: bool = False
+    enable_log_requests: bool = False
+
+    @property
+    @deprecated(
+        "`disable_log_requests` is deprecated and has been replaced with "
+        "`enable_log_requests`. This will be removed in v0.12.0. Please use "
+        "`enable_log_requests` instead.")
+    def disable_log_requests(self) -> bool:
+        return not self.enable_log_requests
+
+    @disable_log_requests.setter
+    @deprecated(
+        "`disable_log_requests` is deprecated and has been replaced with "
+        "`enable_log_requests`. This will be removed in v0.12.0. Please use "
+        "`enable_log_requests` instead.")
+    def disable_log_requests(self, value: bool):
+        self.enable_log_requests = not value
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser,
@@ -1669,9 +1746,15 @@ class AsyncEngineArgs(EngineArgs):
         load_general_plugins()
         if not async_args_only:
             parser = EngineArgs.add_cli_args(parser)
+        parser.add_argument('--enable-log-requests',
+                            action=argparse.BooleanOptionalAction,
+                            default=AsyncEngineArgs.enable_log_requests,
+                            help='Enable logging requests.')
         parser.add_argument('--disable-log-requests',
-                            action='store_true',
-                            help='Disable logging requests.')
+                            action=argparse.BooleanOptionalAction,
+                            default=not AsyncEngineArgs.enable_log_requests,
+                            help='[DEPRECATED] Disable logging requests.',
+                            deprecated=True)
         current_platform.pre_register_and_update(parser)
         return parser
 

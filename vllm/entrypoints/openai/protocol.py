@@ -17,12 +17,10 @@ from openai.types.chat.chat_completion_audio import (
 from openai.types.chat.chat_completion_message import (
     Annotation as OpenAIAnnotation)
 # yapf: enable
-from openai.types.responses import (ResponseInputItemParam, ResponseOutputItem,
-                                    ResponsePrompt, ResponseStatus,
-                                    ResponseReasoningItem, ResponseTextConfig,
-                                    ResponseFunctionWebSearch,
-                                    ResponseFunctionToolCall,
-                                    ResponseOutputText)
+from openai.types.responses import (ResponseFunctionToolCall,
+                                    ResponseInputItemParam, ResponseOutputItem,
+                                    ResponsePrompt, ResponseReasoningItem,
+                                    ResponseStatus, ResponseTextConfig)
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
@@ -869,6 +867,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     'are supported.'
                 )
 
+            # if tool_choice is "required" but the "tools" list is empty,
+            # override the data to behave like "none" to align with
+            # OpenAI’s behavior.
+            if data["tool_choice"] == "required" and isinstance(
+                    data["tools"], list) and len(data["tools"]) == 0:
+                data["tool_choice"] = "none"
+                del data["tools"]
+                return data
+
             # ensure that if "tool_choice" is specified as an object,
             # it matches a valid tool
             correct_usage_message = 'Correct usage: `{"type": "function",' \
@@ -1707,9 +1714,11 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
     choices: list[TranscriptionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
 
+
 class ResponseReasoningTextContent(OpenAIBaseModel):
     text: str
     type: Literal["reasoning_text"] = "reasoning_text"
+
 
 class ResponseReasoningItem(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"rs_{random_uuid()}")
