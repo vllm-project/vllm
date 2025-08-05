@@ -300,7 +300,7 @@ class CoreEngineActorManager:
         nodes = sorted(list_nodes(filters=[("state", "=", "ALIVE")]),
                        key=lambda node: node.node_ip != dp_master_ip)
         assert nodes[0].node_ip == dp_master_ip, (
-            "The first node must be the head node")
+            "The head node is missing or dead")
         assert len(nodes) == 1 or nodes[1].node_ip != dp_master_ip, (
             "There can only be one head node")
 
@@ -348,6 +348,13 @@ class CoreEngineActorManager:
                     )
                     placement_groups.append(pg)
                     local_dp_ranks.append(i)
+        if len(placement_groups) < num_pg_to_create:
+            raise ValueError(
+                f"Not enough resources to allocate {num_pg_to_create} "
+                "placement groups, only created "
+                f"{len(placement_groups)} placement groups. "
+                "Available resources: "
+                f"{available_resources}")
         return placement_groups, local_dp_ranks
 
     @staticmethod
