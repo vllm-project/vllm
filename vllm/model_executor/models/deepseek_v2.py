@@ -993,18 +993,10 @@ class DeepseekV3ForCausalLMWithAdditionalHeads(DeepseekV3ForCausalLM):
             return nn.Sequential(nn.Linear(token_hidden_size, 1), nn.Sigmoid())
         
         assert hidden_dim is not None, "hidden_dim is required for num_hidden_layers > 0"
-        if num_hidden_layers == 1:
-            return nn.Sequential(
-                nn.Linear(token_hidden_size, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, 1),
-                nn.Sigmoid()
-            )
-        # Multiple hidden layers
         layers = []
         layers.append(nn.Linear(token_hidden_size, hidden_dim))
         layers.append(nn.ReLU())
-        for _ in range(num_hidden_layers - 2):
+        for _ in range(num_hidden_layers - 1):
             layers.append(nn.Linear(hidden_dim, hidden_dim))
             layers.append(nn.ReLU())
         layers.append(nn.Linear(hidden_dim, 1))
