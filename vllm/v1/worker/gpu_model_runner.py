@@ -37,7 +37,8 @@ from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
+                                    PlaceholderRange)
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
@@ -52,7 +53,6 @@ from vllm.v1.attention.backends.utils import (
     make_kv_sharing_fast_prefill_attention_metadata,
     make_local_attention_virtual_batches,
     reorder_batch_to_split_decodes_and_prefills)
-from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
@@ -74,7 +74,7 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import (
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from ..sample.logits_processor import LogitsProcessorManager
-from .utils import (bind_kv_cache, gather_mm_placeholders,
+from .utils import (MultiModalBudget, bind_kv_cache, gather_mm_placeholders,
                     initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
@@ -148,14 +148,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-
-        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
-            model_config=model_config,
-            scheduler_config=scheduler_config,
-            mm_registry=self.mm_registry,
-        )
-        self.max_num_encoder_input_tokens = encoder_compute_budget
-        self.encoder_cache_size = encoder_cache_size
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
@@ -330,6 +322,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.cache_config.kv_sharing_fast_prefill:
             self.kv_sharing_fast_prefill_logits_indices = torch.zeros(
                 self.max_num_tokens, dtype=torch.int32, device=self.device)
+
+        self.mm_budget = (MultiModalBudget(
+            self.model_config,
+            self.scheduler_config,
+            self.mm_registry,
+            max_model_len=self.max_model_len,
+            max_num_reqs=self.max_num_reqs,
+        ) if self.is_multimodal_model else None)
 
         self.reorder_batch_threshold: Optional[int] = None
 
@@ -579,37 +579,33 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
 
-    def _init_model_kwargs_for_multimodal_model(
+    def _extract_mm_kwargs(
         self,
-        scheduler_output: Optional["SchedulerOutput"] = None,
-        num_reqs: int = -1,
-    ) -> dict[str, Any]:
-
-        model_kwargs: dict[str, Any] = {}
-        if self.is_multimodal_raw_input_supported:
-            # This model requires the raw multimodal data in input.
+        scheduler_output: "SchedulerOutput",
+    ) -> BatchedTensorInputs:
+        if self.is_multimodal_raw_input_supported:  # noqa: SIM102
             if scheduler_output:
-                multi_modal_kwargs_list = []
+                multi_modal_kwargs_list = list[MultiModalKwargs]()
                 for req in scheduler_output.scheduled_new_reqs:
                     req_mm_inputs = req.mm_inputs
                     if not isinstance(req_mm_inputs, list):
                         req_mm_inputs = list(req_mm_inputs)
                     multi_modal_kwargs_list.extend(req_mm_inputs)
-                multi_modal_kwargs = MultiModalKwargs.batch(
-                    multi_modal_kwargs_list)
-            else:
-                # The only case where SchedulerOutput is None is for
-                # a dummy run let's get some dummy data.
-                dummy_data = [
-                    self.mm_registry.get_decoder_dummy_data(
-                        model_config=self.model_config,
-                        seq_len=1).multi_modal_data for i in range(num_reqs)
-                ]
-                multi_modal_kwargs = MultiModalKwargs.batch(dummy_data)
 
-            model_kwargs.update(multi_modal_kwargs)
+                return MultiModalKwargs.batch(multi_modal_kwargs_list)
 
-        return model_kwargs
+        return {}
+
+    def _dummy_mm_kwargs(self, num_seqs: int) -> BatchedTensorInputs:
+        if self.is_multimodal_raw_input_supported:
+            mm_budget = self.mm_budget
+            assert mm_budget is not None
+
+            dummy_modality, _ = mm_budget.get_modality_with_max_tokens()
+
+            return self._get_mm_dummy_batch(dummy_modality, num_seqs)
+
+        return {}
 
     def _get_cumsum_and_arange(
         self,
@@ -1518,19 +1514,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            input_ids = self.input_ids[:num_scheduled_tokens]
-
-            model_kwargs = self._init_model_kwargs_for_multimodal_model(
-                scheduler_output=scheduler_output)
-            inputs_embeds = self.model.get_input_embeddings(
-                input_ids=input_ids,
+            inputs_embeds_scheduled = self.model.get_input_embeddings(
+                input_ids=self.input_ids[:num_scheduled_tokens],
                 multimodal_embeddings=mm_embeds or None,
             )
 
             # TODO(woosuk): Avoid the copy. Optimize.
-            self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
-            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            self.inputs_embeds[:num_scheduled_tokens].copy_(
+                inputs_embeds_scheduled)
+
             input_ids = None
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
         else:
             # For text-only models, we use token ids as input.
             # While it is possible to use embeddings as input just like the
@@ -1538,7 +1533,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
-            model_kwargs = {}
+            model_mm_kwargs = {}
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_input_tokens]
         else:
@@ -1572,7 +1567,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
                 **MultiModalKwargs.as_kwargs(
-                    model_kwargs,
+                    model_mm_kwargs,
                     device=self.device,
                 ),
             )
@@ -2150,6 +2145,30 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             yield
             input_ids.fill_(0)
 
+    def _get_mm_dummy_batch(
+        self,
+        modality: str,
+        max_items_per_batch: int,
+    ) -> BatchedTensorInputs:
+        """Dummy data for profiling and precompiling multimodal models."""
+        dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
+            model_config=self.model_config,
+            seq_len=self.max_num_tokens,
+            mm_counts={modality: 1},
+        )
+        dummy_mm_data = dummy_decoder_data.multi_modal_data
+
+        # Result in the maximum GPU consumption of the model
+        dummy_mm_item = dummy_mm_data.get_item(modality=modality, item_index=0)
+        dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
+
+        batched_dummy_mm_inputs = MultiModalKwargs.batch([dummy_mm_kwargs] *
+                                                         max_items_per_batch)
+        return MultiModalKwargs.as_kwargs(
+            batched_dummy_mm_inputs,
+            device=self.device,
+        )
+
     @torch.inference_mode()
     def _dummy_run(
         self,
@@ -2214,16 +2233,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
-            model = self.model
             if self.is_multimodal_model:
-                model_kwargs = self._init_model_kwargs_for_multimodal_model(
-                    num_reqs=num_reqs)
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
+                model_mm_kwargs = self._dummy_mm_kwargs(num_reqs)
             else:
                 input_ids = self.input_ids[:num_tokens]
                 inputs_embeds = None
-                model_kwargs = {}
+                model_mm_kwargs = {}
 
             if self.uses_mrope:
                 positions = self.mrope_positions[:, :num_tokens]
@@ -2248,13 +2265,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.vllm_config,
                     num_tokens=num_tokens,
                     num_tokens_across_dp=num_tokens_across_dp):
-                outputs = model(
+                outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                     **MultiModalKwargs.as_kwargs(
-                        model_kwargs,
+                        model_mm_kwargs,
                         device=self.device,
                     ),
                 )
@@ -2424,75 +2441,51 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
-        # TODO: handle encoder-decoder models once we support them.
-        if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
-                and self.encoder_cache_size > 0):
+        if self.is_multimodal_model:
+            mm_budget = self.mm_budget
+            assert mm_budget is not None
 
-            # NOTE: Currently model is profiled with a single non-text
-            # modality with the max possible input tokens even when
-            # it supports multiple.
-            max_tokens_by_modality_dict = self.mm_registry \
-                .get_max_tokens_per_item_by_nonzero_modality(self.model_config)
-            dummy_data_modality, max_tokens_per_mm_item = max(
-                max_tokens_by_modality_dict.items(), key=lambda item: item[1])
+            # TODO: handle encoder-decoder models once we support them.
+            if (encoder_budget := mm_budget.get_encoder_budget()) > 0:
+                # NOTE: Currently model is profiled with a single non-text
+                # modality with the max possible input tokens even when
+                # it supports multiple.
+                (
+                    dummy_modality,
+                    max_tokens,
+                ) = mm_budget.get_modality_with_max_tokens()
+                (
+                    max_mm_items_per_prompt,
+                    max_mm_items_per_batch,
+                ) = mm_budget.get_max_items(dummy_modality, max_tokens)
 
-            # Check how many items of this modality can be supported by
-            # the encoder budget.
-            encoder_budget = min(self.max_num_encoder_input_tokens,
-                                 self.encoder_cache_size)
+                logger.info(
+                    "Encoder cache will be initialized with a budget of "
+                    "%s tokens, and profiled with %s %s items of the maximum "
+                    "feature size.",
+                    encoder_budget,
+                    max_mm_items_per_batch,
+                    dummy_modality,
+                )
 
-            max_num_mm_items_encoder_budget = encoder_budget // \
-                max_tokens_per_mm_item
+                # Create dummy batch of multimodal inputs.
+                batched_dummy_mm_inputs = self._get_mm_dummy_batch(
+                    dummy_modality,
+                    max_mm_items_per_batch,
+                )
 
-            # Check how many items of this modality can be supported by
-            # the decoder budget.
-            max_mm_items_per_req = self.mm_registry.get_mm_limits_per_prompt(
-                self.model_config)[dummy_data_modality]
+                # Run multimodal encoder.
+                dummy_encoder_outputs = self.model.get_multimodal_embeddings(
+                    **batched_dummy_mm_inputs)
 
-            # NOTE: We do not consider max_num_batched_tokens on purpose
-            # because the multimodal embeddings can be generated in advance
-            # and chunked prefilled.
-            max_num_mm_items_decoder_budget = self.max_num_reqs * \
-                max_mm_items_per_req
+                sanity_check_mm_encoder_outputs(
+                    dummy_encoder_outputs,
+                    expected_num_items=max_mm_items_per_batch,
+                )
 
-            max_num_mm_items = max(
-                1,
-                min(max_num_mm_items_encoder_budget,
-                    max_num_mm_items_decoder_budget))
-
-            logger.info(
-                "Encoder cache will be initialized with a budget of %s tokens,"
-                " and profiled with %s %s items of the maximum feature size.",
-                encoder_budget, max_num_mm_items, dummy_data_modality)
-
-            # Create dummy batch of multimodal inputs.
-            dummy_mm_kwargs = self.mm_registry.get_decoder_dummy_data(
-                model_config=self.model_config,
-                seq_len=max_tokens_per_mm_item,
-                mm_counts={
-                    dummy_data_modality: 1
-                },
-            ).multi_modal_data
-
-            batched_dummy_mm_inputs = MultiModalKwargs.batch(
-                [dummy_mm_kwargs] * max_num_mm_items,
-                pin_memory=self.pin_memory)
-            batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
-                batched_dummy_mm_inputs,
-                device=self.device,
-            )
-
-            # Run multimodal encoder.
-            dummy_encoder_outputs = self.model.get_multimodal_embeddings(
-                **batched_dummy_mm_inputs)
-
-            sanity_check_mm_encoder_outputs(
-                dummy_encoder_outputs,
-                expected_num_items=max_num_mm_items,
-            )
-
-            # Cache the dummy encoder outputs.
-            self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
+                # Cache the dummy encoder outputs.
+                self.encoder_cache["tmp"] = dict(
+                    enumerate(dummy_encoder_outputs))
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states \
