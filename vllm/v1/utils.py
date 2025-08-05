@@ -286,7 +286,7 @@ def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,
     if length <= 0:
         # For length=0, this is a no-op. For negative length, this preserves
         # the original slicing behavior from the end of the tensor.
-        return to_tensor[:length].copy_(from_tensor[:length], 
+        return to_tensor[:length].copy_(from_tensor[:length],
                                         non_blocking=True)
 
     # Clamp length to the minimum of the two tensor sizes to avoid out-of-bounds
