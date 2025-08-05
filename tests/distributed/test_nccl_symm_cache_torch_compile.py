@@ -5,7 +5,9 @@ import logging
 import tempfile
 from contextlib import nullcontext
 from typing import List
-
+import argparse
+import traceback
+from torch.library import Library
 import torch.distributed
 from torch.cuda.memory import CUDAPluggableAllocator
 from torch.distributed.distributed_c10d import _get_default_group
@@ -87,15 +89,50 @@ _WORLD = GroupCoordinator(
 # _WORLD.device_communicator.pynccl_comm.register_comm_window(symm_input)
 # _WORLD.device_communicator.pynccl_comm.all_reduce(symm_input,symm_input)
 # print(symm_input)
+my_test_lib2 = Library("test_lib2", "FRAGMENT")
+buffer_cache = {}
 
+def get_symm_input_impl3(template: torch.Tensor) -> torch.Tensor:
+    # if buffer_cache.get((tuple(size), dtype)) is None:
+    #   print(f"mallocing {size} {dtype}")
+    #   buffer_cache[(tuple(size), dtype)] = torch.ops.nccl_symm_cache.nccl_malloc_tensor(
+    #       size,
+    #       dtype,
+    #       'cuda',
+    #   )
+    #   _WORLD.device_communicator.pynccl_comm.register_comm_window(
+    #       buffer_cache[(tuple(size), dtype)])
+    # else:
+    #     print(f"using cached {size} {dtype}")
+    # return buffer_cache[(tuple(size), dtype)]
+    print("using actual malloc")
+    mem = torch.ops.nccl_symm_cache.nccl_malloc_tensor(template.shape, template.dtype, template.device)
+    _WORLD.device_communicator.pynccl_comm.register_comm_window(mem)
+    return mem
+
+
+def get_symm_input_fake3(template: torch.Tensor) -> torch.Tensor:
+    print("this should not be called!!!!")
+    return torch.empty_like(template)
+
+direct_register_custom_op(
+    op_name="get_symm_input3",
+    op_func=get_symm_input_impl3,
+    mutates_args=["template"],
+    fake_impl=get_symm_input_fake3,
+    target_lib=my_test_lib2,
+    tags=(torch.Tag.maybe_aliasing_or_mutating,),
+)
 
 def pynccl_all_reduce_impl(input_tensor: torch.Tensor, output_tensor: torch.Tensor) -> torch.Tensor:
     """Implementation function for the custom NCCL all_reduce operator."""
+    print("using real all reduce")
     return _WORLD.device_communicator.pynccl_comm.all_reduce(input_tensor, output_tensor)
 
 
 def pynccl_all_reduce_fake(input_tensor: torch.Tensor, output_tensor: torch.Tensor) -> torch.Tensor:
     """Fake implementation for torch.compile tracing."""
+    print("using FAKE all reduce")
     return output_tensor
 
 # Register the custom operator
@@ -106,31 +143,6 @@ direct_register_custom_op(
     fake_impl=pynccl_all_reduce_fake,
 )
 
-buffer_cache = {}
-def get_symm_input_impl(dummy: torch.Tensor, size: List[int], dtype: torch.dtype) -> torch.Tensor:
-    if buffer_cache.get((tuple(size), dtype)) is None:
-      print(f"mallocing {size} {dtype}")
-      buffer_cache[(tuple(size), dtype)] = torch.ops.nccl_symm_cache.nccl_malloc_tensor(
-          size,
-          dtype,
-          'cuda',
-      )
-      _WORLD.device_communicator.pynccl_comm.register_comm_window(
-          buffer_cache[(tuple(size), dtype)])
-    else:
-        print(f"using cached {size} {dtype}")
-    return buffer_cache[(tuple(size), dtype)]
-
-def get_symm_input_fake(dummy: torch.Tensor, size: List[int], dtype: torch.dtype) -> torch.Tensor:
-    return torch.empty(size, dtype=dtype, device='cuda')
-
-direct_register_custom_op(
-    op_name="get_symm_input",
-    op_func=get_symm_input_impl,
-    mutates_args=[],
-    fake_impl=get_symm_input_fake,
-)
-
 class simple_model(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -139,8 +151,10 @@ class simple_model(torch.nn.Module):
         y =torch.add(x,x)
         z = torch.add(y,x)
         # Create a dummy tensor to satisfy PyTorch's requirement
-        dummy = torch.empty(1, device='cuda', dtype=torch.float32)
-        symm_input = torch.ops.vllm.get_symm_input(dummy, size, dtype)
+        #symm_input = torch.zeros(x.size(), device=x.device, dtype=x.dtype)
+        #symm_input = torch.ops.vllm.get_symm_input(dummy, size, dtype)
+        symm_input = torch.ops.test_lib2.get_symm_input3(x)
+        #symm_input = torch.ops.test_lib3.get_symm_input(x)
         torch.add(z,x,out=symm_input)
         torch.ops.vllm.pynccl_all_reduce(
             symm_input,
@@ -150,8 +164,13 @@ class simple_model(torch.nn.Module):
         b = torch.add(a,a)
         return b
 
-use_compiled = True
-size = [1024,1024]
+parser = argparse.ArgumentParser(description='NCCL symmetric cache torch compile test')
+parser.add_argument('--compile', action='store_true', default=False,
+                    help='Use torch.compile for the model (default: False)')
+args = parser.parse_args()
+
+use_compiled = args.compile
+size = [2048,2048]
 dtype = torch.float16
 model = simple_model()
 if use_compiled:
@@ -161,11 +180,25 @@ for _ in range(10):
     y = compiled_model(x) if use_compiled else model(x)
 print(y)
 
-size = [512,512]
-dtype = torch.float16
-x = torch.full(size, local_rank*2, dtype=dtype, device="cuda")
-for _ in range(10):
-    y = compiled_model(x) if use_compiled else model(x)
-print(y)
+# size = [4096,4096]
+# dtype = torch.float16
+# x = torch.full(size, local_rank*2, dtype=dtype, device="cuda")
+# for _ in range(10):
+#     y = compiled_model(x) if use_compiled else model(x)
+# print(y)
+
+# size = [8192,8192]
+# dtype = torch.float16
+# x = torch.full(size, local_rank*2, dtype=dtype, device="cuda")
+# for _ in range(10):
+#     y = compiled_model(x) if use_compiled else model(x)
+# print(y)
+
+# size = [16384,16384]
+# dtype = torch.float16
+# x = torch.full(size, local_rank*2, dtype=dtype, device="cuda")
+# for _ in range(10):
+#     y = compiled_model(x) if use_compiled else model(x)
+# print(y)
 
 dist.destroy_process_group()

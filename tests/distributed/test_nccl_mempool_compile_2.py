@@ -6,6 +6,7 @@ import tempfile
 from contextlib import nullcontext
 from typing import List
 from packaging import version
+import argparse
 
 import torch.distributed
 from torch.cuda.memory import CUDAPluggableAllocator
@@ -118,6 +119,7 @@ class use_symmetric_memory:
         global _registered_base_addrs
         self._mem_pool_ctx.__exit__(exc_type, exc_val, exc_tb)
         for segment in get_nccl_mem_pool().snapshot():
+            print("there is a segment")
             if segment["address"] not in _registered_base_addrs:
                 if segment["stream"] == 0 and self.pre_2_8_0:
                     # PyTorch version < 2.8.0 has a multi-thread MemPool bug
@@ -185,66 +187,66 @@ direct_register_custom_op(
     fake_impl=pynccl_all_reduce_fake,
 )
 
-def get_symm_input_impl(dummy: torch.Tensor, size: List[int], dtype: torch.dtype) -> torch.Tensor:
-    with use_symmetric_memory(_WORLD) as sm:
-        mem = torch.empty(size, dtype=dtype, device='cuda')
-        sm.tag(mem)
+def get_symm_input_impl(template: torch.Tensor) -> torch.Tensor:
+    # with use_symmetric_memory(_WORLD) as sm:
+    #     mem = torch.empty_like(template)
+    #     sm.tag(mem)
+    print("USING ACTUALL NCCL SYMM MEMPOOL")
+    with torch.cuda.use_mem_pool(get_nccl_mem_pool()):
+        mem = torch.empty_like(template)
+        mem.symmetric_memory = True
+        _WORLD.device_communicator.pynccl_comm.register_comm_window(mem)
     return mem
 
-def get_symm_input_fake(dummy: torch.Tensor, size: List[int], dtype: torch.dtype) -> torch.Tensor:
-    print("in FAKE IT SHOULD NOT BE CALLED")
-    return torch.empty(size, dtype=dtype, device='cuda')
+def get_symm_input_fake(template: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(template)
 
 direct_register_custom_op(
     op_name="get_symm_input",
     op_func=get_symm_input_impl,
-    mutates_args=[],
+    mutates_args=["template"],
     fake_impl=get_symm_input_fake,
+    tags=(torch.Tag.maybe_aliasing_or_mutating,),
 )
 
 class simple_model(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        # self.symm_input = get_symm_input(size, dtype)
     def forward(self, x):
         y =torch.add(x,x)
         z = torch.add(y,x)
-        # Create a dummy tensor to satisfy PyTorch's requirement
-        # dummy = torch.empty(1, device='cuda', dtype=torch.float32)
-        # symm_input = torch.ops.vllm.get_symm_input(dummy, size, dtype)
-        # with use_symmetric_memory(_WORLD) as sm:
-        #     symm_input = torch.empty_like(z)
-        #     sm.tag(symm_input)
-        with torch.cuda.use_mem_pool(get_nccl_mem_pool()):
-            symm_input = torch.empty_like(z)
-            symm_input.symmetric_memory = True
-            _WORLD.device_communicator.pynccl_comm.register_comm_window(symm_input)
+        symm_input = torch.ops.vllm.get_symm_input(z)
         torch.add(z,x,out=symm_input)
-        _WORLD.device_communicator.pynccl_comm.all_reduce(symm_input, symm_input)
-        # torch.ops.vllm.pynccl_all_reduce(
-        #     symm_input,
-        #     symm_input,
-        # )
+        torch.ops.vllm.pynccl_all_reduce(
+            symm_input,
+            symm_input,
+        )
         a = torch.add(symm_input,symm_input)
         b = torch.add(a,a)
         return b
 
-# important settings
-use_compiled = True
+# model and settings
+parser = argparse.ArgumentParser(description='NCCL symmetric cache torch compile test')
+parser.add_argument('--compile', action='store_true', default=False,
+                    help='Use torch.compile for the model (default: False)')
+args = parser.parse_args()
+
+use_compiled = args.compile
+
+model = simple_model()
+if use_compiled:
+    compiled_model = torch.compile(model, backend="inductor", fullgraph=True)
 
 # first test
 size = [2048,2048]
 dtype = torch.float16
-model = simple_model()
-if use_compiled:
-    compiled_model = torch.compile(model, backend="inductor", fullgraph=True)
 x = torch.full(size, local_rank, dtype=dtype, device="cuda")
 for _ in range(10):
     y = compiled_model(x) if use_compiled else model(x)
 print(y)
 
 # continue second test
-size = [512,512]
+size = [4096,4096]
 dtype = torch.float16
 x = torch.full(size, local_rank*2, dtype=dtype, device="cuda")
 for _ in range(10):
@@ -252,13 +254,21 @@ for _ in range(10):
 print(y)
 
 # continue third test
-size = [2048,2048]
+size = [8192,8192]
 dtype = torch.float16
 x = torch.full(size, local_rank*4, dtype=dtype, device="cuda")
 for _ in range(10):
     y = compiled_model(x) if use_compiled else model(x)
 print(y)
 
+# forth test
+size = [512,512]
+dtype = torch.float16
+x = torch.full(size, local_rank, dtype=dtype, device="cuda")
+for _ in range(10):
+    y = compiled_model(x) if use_compiled else model(x)
+print(y)
 
 print("done")
+print(len(_registered_base_addrs))
 dist.destroy_process_group()

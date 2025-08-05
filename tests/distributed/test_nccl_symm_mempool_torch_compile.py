@@ -226,7 +226,7 @@ class simple_model(torch.nn.Module):
         return b
 
 # important settings
-use_compiled = False
+use_compiled = True
 model = simple_model()
 if use_compiled:
     compiled_model = torch.compile(model, backend="inductor", fullgraph=True)
