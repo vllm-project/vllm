@@ -1,26 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import argparse
 import asyncio
+import dataclasses
 import functools
 import os
-from typing import Any, Optional
+import subprocess
+import sys
+from typing import Any, Optional, Union
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
+from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              CompletionRequest)
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
 VLLM_SUBCMD_PARSER_EPILOG = (
-    "Tip: Use `vllm [serve|run-batch] --help=<keyword>` "
-    "to explore arguments from help.\n"
+    "Tip: Use `vllm [serve|run-batch|bench <bench_type>] "
+    "--help=<keyword>` to explore arguments from help.\n"
     "   - To view a argument group:     --help=ModelConfig\n"
     "   - To view a single argument:    --help=max-num-seqs\n"
     "   - To search by keyword:         --help=max\n"
-    "   - To list all groups:           --help=listgroup")
+    "   - To list all groups:           --help=listgroup\n"
+    "   - To view help with pager:      --help=page")
 
 
 async def listen_for_disconnect(request: Request) -> None:
@@ -28,10 +39,12 @@ async def listen_for_disconnect(request: Request) -> None:
     while True:
         message = await request.receive()
         if message["type"] == "http.disconnect":
-            if request.app.state.enable_server_load_tracking:
-                # on timeout/cancellation the BackgroundTask in load_aware_call
-                # cannot decrement the server load metrics.
-                # Must be decremented by with_cancellation instead.
+            # If load tracking is enabled *and* the counter exists, decrement
+            # it. Combines the previous nested checks into a single condition
+            # to satisfy the linter rule.
+            if (getattr(request.app.state, "enable_server_load_tracking",
+                        False)
+                    and hasattr(request.app.state, "server_load_metrics")):
                 request.app.state.server_load_metrics -= 1
             break
 
@@ -96,8 +109,13 @@ def load_aware_call(func):
             raise ValueError(
                 "raw_request required when server load tracking is enabled")
 
-        if not raw_request.app.state.enable_server_load_tracking:
+        if not getattr(raw_request.app.state, "enable_server_load_tracking",
+                       False):
             return await func(*args, **kwargs)
+
+        # ensure the counter exists
+        if not hasattr(raw_request.app.state, "server_load_metrics"):
+            raw_request.app.state.server_load_metrics = 0
 
         raw_request.app.state.server_load_metrics += 1
         try:
@@ -178,29 +196,60 @@ def _validate_truncation_size(
     return truncate_prompt_tokens
 
 
-def show_filtered_argument_or_group_from_help(parser, subcommand_name):
-    import sys
+def _output_with_pager(text: str):
+    """Output text using scrolling view if available and appropriate."""
+
+    pagers = ['less -R', 'more']
+    for pager_cmd in pagers:
+        try:
+            proc = subprocess.Popen(pager_cmd.split(),
+                                    stdin=subprocess.PIPE,
+                                    text=True)
+            proc.communicate(input=text)
+            return
+        except (subprocess.SubprocessError, OSError, FileNotFoundError):
+            continue
+
+    # No pager worked, fall back to normal print
+    print(text)
+
+
+def show_filtered_argument_or_group_from_help(parser: argparse.ArgumentParser,
+                                              subcommand_name: list[str]):
 
     # Only handle --help=<keyword> for the current subcommand.
     # Since subparser_init() runs for all subcommands during CLI setup,
     # we skip processing if the subcommand name is not in sys.argv.
-    if subcommand_name not in sys.argv:
+    # sys.argv[0] is the program name. The subcommand follows.
+    # e.g., for `vllm bench latency`,
+    # sys.argv is `['vllm', 'bench', 'latency', ...]`
+    # and subcommand_name is "bench latency".
+    if len(sys.argv) <= len(subcommand_name) or sys.argv[
+            1:1 + len(subcommand_name)] != subcommand_name:
         return
 
     for arg in sys.argv:
         if arg.startswith('--help='):
             search_keyword = arg.split('=', 1)[1]
 
+            # Enable paged view for full help
+            if search_keyword == 'page':
+                help_text = parser.format_help()
+                _output_with_pager(help_text)
+                sys.exit(0)
+
             # List available groups
             if search_keyword == 'listgroup':
-                print("\nAvailable argument groups:")
+                output_lines = ["\nAvailable argument groups:"]
                 for group in parser._action_groups:
                     if group.title and not group.title.startswith(
                             "positional arguments"):
-                        print(f"  - {group.title}")
+                        output_lines.append(f"  - {group.title}")
                         if group.description:
-                            print("    " + group.description.strip())
-                        print()
+                            output_lines.append("    " +
+                                                group.description.strip())
+                        output_lines.append("")
+                _output_with_pager("\n".join(output_lines))
                 sys.exit(0)
 
             # For group search
@@ -212,7 +261,7 @@ def show_filtered_argument_or_group_from_help(parser, subcommand_name):
                     formatter.add_text(group.description)
                     formatter.add_arguments(group._group_actions)
                     formatter.end_section()
-                    print(formatter.format_help())
+                    _output_with_pager(formatter.format_help())
                     sys.exit(0)
 
             # For single arg
@@ -226,12 +275,52 @@ def show_filtered_argument_or_group_from_help(parser, subcommand_name):
                         matched_actions.append(action)
 
             if matched_actions:
-                print(f"\nParameters matching '{search_keyword}':\n")
+                header = f"\nParameters matching '{search_keyword}':\n"
                 formatter = parser._get_formatter()
                 formatter.add_arguments(matched_actions)
-                print(formatter.format_help())
+                _output_with_pager(header + formatter.format_help())
                 sys.exit(0)
 
             print(f"\nNo group or parameter matching '{search_keyword}'")
             print("Tip: use `--help=listgroup` to view all groups.")
             sys.exit(1)
+
+
+def get_max_tokens(max_model_len: int, request: Union[ChatCompletionRequest,
+                                                      CompletionRequest],
+                   input_length: int, default_sampling_params: dict) -> int:
+
+    max_tokens = getattr(request, "max_completion_tokens",
+                         None) or request.max_tokens
+    default_max_tokens = max_model_len - input_length
+    max_output_tokens = current_platform.get_max_output_tokens(input_length)
+
+    return min(val
+               for val in (default_max_tokens, max_tokens, max_output_tokens,
+                           default_sampling_params.get("max_tokens"))
+               if val is not None)
+
+
+def log_non_default_args(args: Union[argparse.Namespace, EngineArgs]):
+    non_default_args = {}
+
+    # Handle argparse.Namespace
+    if isinstance(args, argparse.Namespace):
+        parser = make_arg_parser(FlexibleArgumentParser())
+        for arg, default in vars(parser.parse_args([])).items():
+            if default != getattr(args, arg):
+                non_default_args[arg] = getattr(args, arg)
+
+    # Handle EngineArgs instance
+    elif isinstance(args, EngineArgs):
+        default_args = EngineArgs()  # Create default instance
+        for field in dataclasses.fields(args):
+            current_val = getattr(args, field.name)
+            default_val = getattr(default_args, field.name)
+            if current_val != default_val:
+                non_default_args[field.name] = current_val
+    else:
+        raise TypeError("Unsupported argument type. " \
+        "Must be argparse.Namespace or EngineArgs instance.")
+
+    logger.info("non-default args: %s", non_default_args)

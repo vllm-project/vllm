@@ -331,10 +331,8 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
         return hf_processor
 
-    def get_image_processor(self):
-        hf_processor = self.get_hf_processor()
-        image_processor = hf_processor.image_processor  # type: ignore
-        return image_processor
+    def get_image_processor(self, **kwargs: object):
+        return self.get_hf_processor(**kwargs).image_processor
 
     def get_model_version(self):
         return get_version_by_config(self.get_hf_config())
@@ -734,6 +732,15 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     The abstract class of MiniCPMV can only be inherited, but cannot be
     instantiated.
     """
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "(<image>./</image>)"
+        if modality.startswith("video"):
+            return "(<video>./</video>)"
+
+        raise ValueError("Only image or video modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config

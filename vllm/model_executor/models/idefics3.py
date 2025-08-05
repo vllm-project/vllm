@@ -18,12 +18,12 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, Optional, TypedDict, Union
+from typing import Annotated, Literal, Optional, Union
 
 import torch
 from torch import nn
-from transformers import (AddedToken, BatchFeature, Idefics3Config,
-                          Idefics3ImageProcessor, Idefics3Processor)
+from transformers import (BatchFeature, Idefics3Config, Idefics3ImageProcessor,
+                          Idefics3Processor)
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -45,6 +45,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 # yapf: disable
 from .idefics2_vision_model import (
@@ -56,26 +57,30 @@ from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
 
 
-class Idefics3ImagePixelInputs(TypedDict):
+class Idefics3ImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - bn: Batch size * number of images
+        - bnp: Batch size * number of images * number of patches
+        - c: Number of channels (3)
+        - h: Height
+        - w: Width
+    """
     type: Literal["pixel_values"]
-    pixel_values: torch.Tensor
-    """
-    Shape: `(batch_size * num_images * num_patches, 
-             num_channels, height, width)`
-    """
+    pixel_values: Annotated[torch.Tensor, TensorShape("bnp", 3, "h", "w")]
     pixel_attention_mask: torch.Tensor
-
-    num_patches: torch.Tensor
-    """Shape: `(batch_size * num_images)`"""
+    num_patches: Annotated[torch.Tensor, TensorShape("bn")]
 
 
-class Idefics3ImageEmbeddingInputs(TypedDict):
+class Idefics3ImageEmbeddingInputs(TensorSchema):
+    """
+    Dimensions:
+        - bn: Batch size * number of images
+        - f: Image feature size
+        - h: Hidden size (must match the hidden size of language model backbone)
+    """
     type: Literal["image_embeds"]
-    data: torch.Tensor
-    """
-    Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
-    `hidden_size` must match the hidden size of language model backbone.
-    """
+    data: Annotated[torch.Tensor, TensorShape("bn", "f", "h")]
 
 
 ImageInputs = Union[Idefics3ImagePixelInputs, Idefics3ImageEmbeddingInputs]
@@ -83,15 +88,7 @@ ImageInputs = Union[Idefics3ImagePixelInputs, Idefics3ImageEmbeddingInputs]
 
 class Idefics3ProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_processor(
-        self,
-        *,
-        size: Optional[dict[str, int]] = None,
-        **kwargs: object,
-    ) -> Idefics3Processor:
-        if size is not None:
-            kwargs["size"] = size
-
+    def get_hf_processor(self, **kwargs: object) -> Idefics3Processor:
         return self.ctx.get_hf_processor(Idefics3Processor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -199,21 +196,14 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
 
         return grid_w * grid_h + 1
 
-    # TODO: Remove after requiring transformers>=4.52
-    def _get_content(self, token: Union[AddedToken, str]) -> str:
-        if isinstance(token, str):
-            return token
-
-        return token.content
-
     def _get_image_token(
             self,
             processor: Optional[Idefics3Processor]) -> tuple[str, str, str]:
         if processor is None:
             processor = self.get_hf_processor()
 
-        image_token = self._get_content(processor.image_token)
-        fake_image_token = self._get_content(processor.fake_image_token)
+        image_token = processor.image_token
+        fake_image_token = processor.fake_image_token
         global_image_token = processor.global_image_tag
         return image_token, fake_image_token, global_image_token
 
@@ -591,6 +581,13 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         ],
     }
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -613,25 +610,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         if self.config.text_config.tie_word_embeddings:
             self.lm_head.weight = self.model.text_model.wte.weight
         self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
-
-    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        h = w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape)
-
-            if actual_dims != expected_dims:
-                expected_expr = str(expected_dims)
-                raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f" per patch is {expected_expr}. "
-                    f"You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[ImageInputs]:
@@ -666,16 +644,17 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 raise ValueError("Incorrect type of num_patches. "
                                  f"Got type: {type(num_patches)}")
 
-            pixel_values = flatten_bn(pixel_values, concat=True)
-            pixel_attention_mask = flatten_bn(pixel_attention_mask,
-                                              concat=True)
-            num_patches = flatten_bn(num_patches, concat=True)
-
+            expected_h = expected_w = self.config.vision_config.image_size
             return Idefics3ImagePixelInputs(
                 type="pixel_values",
-                pixel_values=self._validate_pixel_values(pixel_values),
-                pixel_attention_mask=pixel_attention_mask,
-                num_patches=num_patches,
+                pixel_values=flatten_bn(pixel_values, concat=True),
+                pixel_attention_mask=flatten_bn(pixel_attention_mask,
+                                                concat=True),
+                num_patches=flatten_bn(num_patches, concat=True),
+                resolve_bindings={
+                    "h": expected_h,
+                    "w": expected_w
+                },
             )
 
         raise AssertionError("This line should be unreachable.")

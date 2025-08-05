@@ -22,6 +22,13 @@ from vllm.utils import FlexibleArgumentParser
 FP8_DTYPE = current_platform.fp8_dtype()
 
 
+def ensure_divisibility(numerator, denominator):
+    """Ensure that numerator is divisible by the denominator."""
+    assert numerator % denominator == 0, (
+        "intermediate_size {} is not divisible by tp {}.".format(numerator, denominator)
+    )
+
+
 class BenchmarkConfig(TypedDict):
     BLOCK_SIZE_M: int
     BLOCK_SIZE_N: int
@@ -86,6 +93,9 @@ def benchmark_config(
             (num_experts, 2 * shard_intermediate_size), dtype=torch.float32
         )
         w2_scale = torch.randn((hidden_size, num_experts), dtype=torch.float32)
+    if use_deep_gemm:
+        # we use the default block shape for deepgemm
+        block_quant_shape = [128, 128]
     if use_fp8_w8a8:
         if block_quant_shape:
             block_n, block_k = block_quant_shape[0], block_quant_shape[1]
@@ -573,7 +583,11 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
-    elif config.architectures[0] in ("DeepseekV3ForCausalLM", "DeepseekV2ForCausalLM"):
+    elif config.architectures[0] in (
+        "DeepseekV3ForCausalLM",
+        "DeepseekV2ForCausalLM",
+        "Glm4MoeForCausalLM",
+    ):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
@@ -583,6 +597,11 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
+    elif config.architectures[0] in ("HunYuanMoEV1ForCausalLM"):
+        E = config.num_experts
+        topk = config.moe_topk[0]
+        intermediate_size = config.moe_intermediate_size[0]
+        shard_intermediate_size = 2 * intermediate_size // args.tp_size
     else:
         # Support for llama4
         config = config.get_text_config()
@@ -591,7 +610,7 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
-
+    ensure_divisibility(intermediate_size, args.tp_size)
     hidden_size = config.hidden_size
     dtype = torch.float16 if current_platform.is_rocm() else config.torch_dtype
     use_fp8_w8a8 = args.dtype == "fp8_w8a8"
@@ -620,7 +639,7 @@ def main(args: argparse.Namespace):
             4096,
         ]
     else:
-        batch_sizes = [args.batch_size]
+        batch_sizes = args.batch_size
 
     use_deep_gemm = bool(args.use_deep_gemm)
 
@@ -728,7 +747,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--use-deep-gemm", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--batch-size", type=int, required=False)
+    parser.add_argument("--batch-size", type=int, nargs="+", required=False)
     parser.add_argument("--tune", action="store_true")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--model-prefix", type=str, required=False)

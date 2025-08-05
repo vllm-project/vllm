@@ -132,42 +132,15 @@ class Qwen2_5OmniThinkerProcessingInfo(Qwen2AudioProcessingInfo,
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2_5OmniConfig).thinker_config
 
-    def get_hf_processor(
-        self,
-        *,
-        sampling_rate: Optional[int] = None,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        size: Optional[dict[str, int]] = None,
-        fps: Optional[Union[float, list[float]]] = None,
-        **kwargs: object,
-    ) -> Qwen2_5OmniProcessor:
-        if fps is not None:
-            kwargs["fps"] = fps
-        processor = self.ctx.get_hf_processor(
+    def get_hf_processor(self, **kwargs: object) -> Qwen2_5OmniProcessor:
+        return self.ctx.get_hf_processor(
             Qwen2_5OmniProcessor,
-            image_processor=self.get_image_processor(min_pixels=min_pixels,
-                                                     max_pixels=max_pixels,
-                                                     size=size,
-                                                     use_fast=kwargs.get(
-                                                         "use_fast", True)),
+            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
-        if not hasattr(processor, "audio_token"):
-            processor.audio_token = "<|AUDIO|>"
-        if not hasattr(processor, "image_token"):
-            processor.image_token = "<|IMAGE|>"
-        if not hasattr(processor, "video_token"):
-            processor.video_token = "<|VIDEO|>"
-        return processor
 
-    def get_feature_extractor(
-        self,
-        *,
-        sampling_rate: Optional[int] = None,
-        **kwargs: object,
-    ):
-        hf_processor = self.get_hf_processor(sampling_rate=sampling_rate)
+    def get_feature_extractor(self, **kwargs: object):
+        hf_processor = self.get_hf_processor(**kwargs)
         feature_extractor = hf_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
@@ -716,6 +689,17 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             "thinker.model.": "language_model.model.",
             "thinker.": "",
         })
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|vision_start|><|IMAGE|><|vision_end|>"
+        if modality.startswith("video"):
+            return "<|vision_start|><|VIDEO|><|vision_end|>"
+        if modality.startswith("audio"):
+            return f"Audio {i}: <|audio_bos|><|AUDIO|><|audio_eos|>"
+
+        raise ValueError("Only image, video or audio modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

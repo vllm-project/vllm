@@ -126,6 +126,13 @@ class EngineCoreOutput(
         return self.finish_reason is not None
 
 
+class UtilityResult:
+    """Wrapper for special handling when serializing/deserializing."""
+
+    def __init__(self, r: Any = None):
+        self.result = r
+
+
 class UtilityOutput(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]
@@ -135,7 +142,7 @@ class UtilityOutput(
 
     # Non-None implies the call failed, result should be None.
     failure_message: Optional[str] = None
-    result: Any = None
+    result: Optional[UtilityResult] = None
 
 
 class EngineCoreOutputs(
@@ -180,3 +187,19 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b'\x03'
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b'\x04'
+
+
+class ReconfigureDistributedRequest(msgspec.Struct):
+    new_data_parallel_size: int
+    new_data_parallel_rank: int
+    new_data_parallel_rank_local: int
+    new_data_parallel_master_ip: str
+    new_data_parallel_master_port: int
+
+
+class ReconfigureRankType(enum.IntEnum):
+    """
+    Rank type for reconfiguring distributed request.
+    """
+    KEEP_CURRENT_RANK = -1
+    SHUTDOWN_CURRENT_RANK = -2

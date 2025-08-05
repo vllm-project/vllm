@@ -19,7 +19,7 @@
 """ PyTorch Fuyu model."""
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, Optional, TypedDict
+from typing import Annotated, Literal, Optional
 
 import torch
 import torch.nn as nn
@@ -40,6 +40,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix,
@@ -50,18 +51,25 @@ _IMAGE_TOKEN_ID = 71011
 _NEWLINE_TOKEN_ID = 71019
 
 
-class FuyuImagePatchInputs(TypedDict):
-    type: Literal["image_patches"]
-    flat_data: torch.Tensor
+class FuyuImagePatchInputs(TensorSchema):
     """
-    Shape: 
-    `(batch_size * num_patches, patch_size_x * patch_size_y * num_channels)`
+    Dimensions:
+        - bn: Batch size * number of images
+        - bnp: Batch size * number of images * number of patches
+        - fn: patch_size_x * patch_size_y * num_channels
     """
 
-    patches_per_image: list[int]
+    type: Literal["image_patches"] = "image_patches"
+
+    flat_data: Annotated[
+        torch.Tensor,
+        TensorShape("bnp", "fn"),
+    ]
+
+    patches_per_image: Annotated[list[int], TensorShape("bn")]
     """
     The number of total patches for each image in the batch.
-
+    
     This is used to split the embeddings which has the first two dimensions
     flattened just like `flat_data`.
     """
@@ -75,8 +83,8 @@ class FuyuProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(FuyuProcessor, **kwargs)
 
-    def get_image_processor(self) -> FuyuImageProcessor:
-        return self.get_hf_processor().image_processor
+    def get_image_processor(self, **kwargs: object) -> FuyuImageProcessor:
+        return self.get_hf_processor(**kwargs).image_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
@@ -175,12 +183,21 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
 
             # Original output: (1, num_images, Pn, Px * Py * C)
             # New output: (num_images, Pn, Px * Py * C)
-            assert (isinstance(image_patches, list)
-                    and len(image_patches) == 1)
-            assert (isinstance(image_patches[0], torch.Tensor)
-                    and len(image_patches[0]) == len(images))
-
-            processed_outputs["image_patches"] = image_patches[0]
+            # image_patches is a list with shape:
+            # (1, num_images, Pn, Px * Py * C)
+            # before Transformers 4.53
+            if isinstance(image_patches, list):
+                assert len(image_patches) == 1
+                assert (isinstance(image_patches[0], torch.Tensor)
+                        and len(image_patches[0]) == len(images))
+                processed_outputs["image_patches"] = image_patches[0]
+            # image_patches is a tensor with shape:
+            # (num_images, Pn, Px * Py * C)
+            # after Transformers 4.53
+            elif isinstance(image_patches, torch.Tensor):
+                assert len(image_patches) == len(images)
+            else:
+                raise AssertionError("This line should be unreachable.")
 
         return processed_outputs
 
@@ -193,8 +210,10 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
         vocab = tokenizer.get_vocab()
 
         boa_token_id = vocab["<0x04>"]
+        if prompt_tokens[-1] != boa_token_id:
+            prompt_tokens.append(boa_token_id)
 
-        return prompt_tokens + [boa_token_id]
+        return prompt_tokens
 
     def _get_mm_fields_config(
         self,
@@ -254,6 +273,13 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             "lm_head.": "language_model.lm_head.",
         })
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return None
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -279,42 +305,18 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-
-        h = w = self.config.patch_size
-        num_channels = self.config.num_channels
-        expected_dims = num_channels * h * w
-
-        def _validate_shape(d: torch.Tensor):
-            actual_dims = d.size(-1)
-
-            if actual_dims != expected_dims:
-                expected_expr = str(expected_dims)
-                raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f"per patch is {expected_expr}. "
-                    f"You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data.to(self.vision_embed_tokens.weight.dtype)
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[FuyuImagePatchInputs]:
         image_patches = kwargs.pop("image_patches", None)
         if image_patches is not None:
-            if not isinstance(image_patches, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image patches. "
-                                 f"Got type: {type(image_patches)}")
-
             image_patches_flat = flatten_bn(image_patches)
+            flat_data = flatten_bn(image_patches_flat, concat=True)
 
             return FuyuImagePatchInputs(
                 type="image_patches",
-                flat_data=self._validate_pixel_values(
-                    flatten_bn(image_patches_flat, concat=True)),
+                flat_data=flat_data,
                 patches_per_image=[x.size(0) for x in image_patches_flat],
+                resolve_bindings={"fn": self.image_feature_size},
             )
 
         return None

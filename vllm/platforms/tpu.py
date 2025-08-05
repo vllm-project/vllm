@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Optional, Union, cast
 import torch
 from tpu_info import device
 
-import vllm.envs as envs
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -32,10 +31,13 @@ class TpuPlatform(Platform):
     device_type: str = "tpu"
     dispatch_key: str = "XLA"
     ray_device_key: str = "TPU"
+    dist_backend: str = "gloo"
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
     simple_compile_backend: str = "openxla"
 
-    supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
+    supported_quantization: list[str] = [
+        "fp8", "tpu_int8", "compressed-tensors"
+    ]
 
     additional_env_vars: list[str] = [
         "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
@@ -50,12 +52,17 @@ class TpuPlatform(Platform):
                 and selected_backend != _Backend.PALLAS_VLLM_V1):
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
-        if use_v1:
-            logger.info("Using Pallas V1 backend.")
-            return "vllm.v1.attention.backends.pallas.PallasAttentionBackend"
-        else:
-            logger.info("Using Pallas backend.")
-            return "vllm.attention.backends.pallas.PallasAttentionBackend"
+        if not use_v1:
+            raise ValueError("TPU backend only supports V1.")
+        logger.info("Using Pallas V1 backend.")
+        return "vllm.v1.attention.backends.pallas.PallasAttentionBackend"
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.tpu.set_device(device)
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -68,7 +75,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return not envs.VLLM_USE_V1
+        return False
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
@@ -111,37 +118,27 @@ class TpuPlatform(Platform):
         assert vllm_config.speculative_config is None, \
             "TPU does not support speculative decoding"
 
-        if vllm_config.model_config.dtype in (torch.float16, torch.float32):
+        model_config = vllm_config.model_config
+        if model_config is not None and model_config.dtype in (torch.float16,
+                                                               torch.float32):
             logger.warning(
                 "The TPU backend currently does not support %s. "
-                "Using bfloat16 instead.", vllm_config.model_config.dtype)
-            vllm_config.model_config.dtype = torch.bfloat16
+                "Using bfloat16 instead.", model_config.dtype)
+            model_config.dtype = torch.bfloat16
 
-        if envs.VLLM_USE_V1:
-            from vllm.v1.attention.backends.pallas import (
-                PallasAttentionBackend)
-            cache_config.block_size = PallasAttentionBackend.get_page_size(
-                vllm_config)  # type: ignore[assignment]
+        from vllm.v1.attention.backends.pallas import PallasAttentionBackend
+        cache_config.block_size = PallasAttentionBackend.get_page_size(
+            vllm_config)  # type: ignore[assignment]
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
-                if envs.VLLM_USE_V1:
-                    raise NotImplementedError(
-                        "Multi-step scheduling is not supported (and not "
-                        "needed) on vLLM V1. Please launch without "
-                        "--num-scheduler-steps.")
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.worker.multi_step_tpu_worker.MultiStepTPUWorker"
-            else:
-                if envs.VLLM_USE_V1:
-                    parallel_config.worker_cls = \
-                        "vllm.v1.worker.tpu_worker.TPUWorker"
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.worker.tpu_worker.TPUWorker"
+                raise NotImplementedError(
+                    "Multi-step scheduling is not supported (and not "
+                    "needed) on vLLM V1. Please launch without "
+                    "--num-scheduler-steps.")
+            parallel_config.worker_cls = "vllm.v1.worker.tpu_worker.TPUWorker"
 
         assert not vllm_config.speculative_config, (
             "Speculative decoding is not yet supported for TPU backend")
@@ -153,7 +150,7 @@ class TpuPlatform(Platform):
             "Forcing --disable_chunked_mm_input.")
             scheduler_config.disable_chunked_mm_input = True
 
-        if vllm_config.model_config and vllm_config.model_config.use_mla:
+        if model_config and model_config.use_mla:
             logger.info(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled.")
@@ -189,13 +186,13 @@ class TpuPlatform(Platform):
         processed_inputs: ProcessorInputs,
     ) -> None:
         """Raises if this request is unsupported on this platform"""
-        if isinstance(params, SamplingParams):
-            if params.guided_decoding is not None and not envs.VLLM_USE_V1:
-                raise ValueError("Structured output is not supported on "
-                                 f"{cls.device_name} V0.")
-            if params.sampling_type == SamplingType.RANDOM_SEED:
-                raise ValueError(
-                    "Torch XLA does not support per-request seed.")
+        if (isinstance(params, SamplingParams)
+                and params.sampling_type == SamplingType.RANDOM_SEED):
+            raise ValueError("Torch XLA does not support per-request seed.")
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+        return True
 
 
 try:

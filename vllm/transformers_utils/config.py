@@ -7,7 +7,7 @@ import os
 import time
 from functools import cache, partial
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, TypeVar, Union
+from typing import Any, Callable, Optional, TypeVar, Union
 
 import huggingface_hub
 from huggingface_hub import get_safetensors_metadata, hf_hub_download
@@ -17,7 +17,6 @@ from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
                                    HFValidationError, LocalEntryNotFoundError,
                                    RepositoryNotFoundError,
                                    RevisionNotFoundError)
-from torch import nn
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
@@ -30,22 +29,18 @@ from vllm import envs
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
-                                             DbrxConfig, DeepseekVLV2Config,
-                                             EAGLEConfig, ExaoneConfig,
-                                             H2OVLChatConfig,
-                                             InternVLChatConfig, JAISConfig,
+from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
+                                             EAGLEConfig, JAISConfig,
                                              KimiVLConfig, MedusaConfig,
-                                             MiniMaxText01Config,
-                                             MiniMaxVL01Config, MllamaConfig,
-                                             MLPSpeculatorConfig, MPTConfig,
+                                             MllamaConfig, MLPSpeculatorConfig,
+                                             Nemotron_Nano_VL_Config,
                                              NemotronConfig, NVLM_D_Config,
-                                             OvisConfig, RWConfig,
-                                             SkyworkR1VChatConfig, SolarConfig,
-                                             Telechat2Config, UltravoxConfig)
+                                             RWConfig, SpeculatorsConfig,
+                                             Step3TextConfig, Step3VLConfig,
+                                             UltravoxConfig)
 # yapf: enable
+from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import resolve_obj_by_qualname
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -56,36 +51,48 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+
+def _get_hf_token() -> Optional[str]:
+    """
+    Get the HuggingFace token from environment variable.
+
+    Returns None if the token is not set, is an empty string, 
+    or contains only whitespace.
+    This follows the same pattern as huggingface_hub library which
+    treats empty string tokens as None to avoid authentication errors.
+    """
+    token = os.getenv('HF_TOKEN')
+    if token and token.strip():
+        return token
+    return None
+
+
 _CONFIG_REGISTRY_OVERRIDE_HF: dict[str, type[PretrainedConfig]] = {
     "mllama": MllamaConfig
 }
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
-    "cohere2": Cohere2Config,
-    "dbrx": DbrxConfig,
     "deepseek_vl_v2": DeepseekVLV2Config,
     "kimi_vl": KimiVLConfig,
-    "mpt": MPTConfig,
+    "Llama_Nemotron_Nano_VL": Nemotron_Nano_VL_Config,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
     "jais": JAISConfig,
     "mlp_speculator": MLPSpeculatorConfig,
     "medusa": MedusaConfig,
     "eagle": EAGLEConfig,
-    "exaone": ExaoneConfig,
-    "h2ovl_chat": H2OVLChatConfig,
-    "internvl_chat": InternVLChatConfig,
-    "minimax_text_01": MiniMaxText01Config,
-    "minimax_vl_01": MiniMaxVL01Config,
+    "speculators": SpeculatorsConfig,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
-    "ovis": OvisConfig,
-    "solar": SolarConfig,
-    "skywork_chat": SkyworkR1VChatConfig,
-    "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
+    "step3_vl": Step3VLConfig,
+    "step3_text": Step3TextConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
+}
+
+_CONFIG_ATTRS_MAPPING: dict[str, str] = {
+    "llm_config": "text_config",
 }
 
 
@@ -195,7 +202,7 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
     return file_exists(str(model),
                        config_name,
                        revision=revision,
-                       token=os.getenv('HF_TOKEN', None))
+                       token=_get_hf_token())
 
 
 def patch_rope_scaling(config: PretrainedConfig) -> None:
@@ -270,12 +277,57 @@ def is_encoder_decoder(config: PretrainedConfig) -> bool:
     return getattr(config, "is_encoder_decoder", False)
 
 
+def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
+    """Remap config attributes to match the expected names."""
+    for old_attr, new_attr in _CONFIG_ATTRS_MAPPING.items():
+        if hasattr(config, old_attr):
+            if not hasattr(config, new_attr):
+                config.update({new_attr: getattr(config, old_attr)})
+            delattr(config, old_attr)
+            logger.debug("Remapped config attribute '%s' to '%s'", old_attr,
+                         new_attr)
+    return config
+
+
+def maybe_override_with_speculators_target_model(
+    model: str,
+    tokenizer: str,
+    trust_remote_code: bool,
+    revision: Optional[str] = None,
+    **kwargs,
+) -> tuple[str, str]:
+    """
+    If running a speculators config, override running model with target model
+    """
+    is_gguf = check_gguf_file(model)
+    if is_gguf:
+        kwargs["gguf_file"] = Path(model).name
+        gguf_model_repo = Path(model).parent
+    else:
+        gguf_model_repo = None
+    config_dict, _ = PretrainedConfig.get_config_dict(
+        model if gguf_model_repo is None else gguf_model_repo,
+        revision=revision,
+        trust_remote_code=trust_remote_code,
+        token=_get_hf_token(),
+        **kwargs,
+    )
+    spec_config = config_dict.get("speculators_config", None)
+    # Return the target model
+    if spec_config is not None:
+        model = tokenizer = spec_config["verifier"]["name_or_path"]
+    return model, tokenizer
+
+
 def get_config(
     model: Union[str, Path],
     trust_remote_code: bool,
     revision: Optional[str] = None,
     code_revision: Optional[str] = None,
     config_format: ConfigFormat = ConfigFormat.AUTO,
+    hf_overrides_kw: Optional[dict[str, Any]] = None,
+    hf_overrides_fn: Optional[Callable[[PretrainedConfig],
+                                       PretrainedConfig]] = None,
     **kwargs,
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
@@ -322,19 +374,22 @@ def get_config(
             model,
             revision=revision,
             code_revision=code_revision,
-            token=os.getenv('HF_TOKEN', None),
+            token=_get_hf_token(),
             **kwargs,
         )
-
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
+        if model_type is None:
+            model_type = "speculators" if config_dict.get(
+                "speculators_config") is not None else model_type
+
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
                 model,
                 revision=revision,
                 code_revision=code_revision,
-                token=os.getenv('HF_TOKEN', None),
+                token=_get_hf_token(),
                 **kwargs,
             )
         else:
@@ -344,7 +399,10 @@ def get_config(
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
-                    token=os.getenv('HF_TOKEN', None),
+                    token=_get_hf_token(),
+                    # some old custom model's config needs
+                    # `has_no_defaults_at_init=True` to work.
+                    has_no_defaults_at_init=trust_remote_code,
                     **kwargs,
                 )
             except ValueError as e:
@@ -360,9 +418,19 @@ def get_config(
                     raise RuntimeError(err_msg) from e
                 else:
                     raise e
+        config = _maybe_remap_hf_config_attrs(config)
 
     elif config_format == ConfigFormat.MISTRAL:
-        config = load_params_config(model, revision, **kwargs)
+        # This function loads a params.json config which
+        # should be used when loading models in mistral format
+        config_dict = _download_mistral_config_file(model, revision)
+        if (max_position_embeddings :=
+                config_dict.get("max_position_embeddings")) is None:
+            max_position_embeddings = _maybe_retrieve_max_pos_from_hf(
+                model, revision, **kwargs)
+            config_dict["max_position_embeddings"] = max_position_embeddings
+
+        config = adapt_config_dict(config_dict)
     else:
         supported_formats = [
             fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
@@ -380,6 +448,27 @@ def get_config(
                 f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
+
+    # ModelOpt 0.31.0 and after saves the quantization config in the model
+    # config file.
+    quantization_config = config_dict.get("quantization_config", None)
+
+    # ModelOpt 0.29.0 and before saves the quantization config in a separate
+    # "hf_quant_config.json" in the same directory as the model config file.
+    if quantization_config is None \
+        and file_or_path_exists(model, "hf_quant_config.json", revision):
+        quantization_config = get_hf_file_to_dict("hf_quant_config.json",
+                                                  model, revision)
+
+    if quantization_config is not None:
+        config.quantization_config = quantization_config
+
+    if hf_overrides_kw:
+        logger.debug("Overriding HF config with %s", hf_overrides_kw)
+        config.update(hf_overrides_kw)
+    if hf_overrides_fn:
+        logger.debug("Overriding HF config with %s", hf_overrides_fn)
+        config = hf_overrides_fn(config)
 
     patch_rope_scaling(config)
 
@@ -520,17 +609,15 @@ def get_pooling_config_name(pooling_name: str) -> Union[str, None]:
     supported_pooling_types = ['LAST', 'ALL', 'CLS', 'STEP', 'MEAN']
     pooling_type_name = pooling_name.upper()
 
-    try:
-        if pooling_type_name in supported_pooling_types:
-            return pooling_type_name
-    except NotImplementedError as e:
-        logger.debug("Pooling type not supported", e)
-        return None
-    return None
+    if pooling_type_name in supported_pooling_types:
+        return pooling_type_name
+
+    raise NotImplementedError(
+        f"Pooling type {pooling_type_name} not supported")
 
 
 @cache
-def get_sentence_transformer_tokenizer_config(model: str,
+def get_sentence_transformer_tokenizer_config(model: Union[str, Path],
                                               revision: Optional[str] = 'main'
                                               ):
     """
@@ -538,7 +625,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
     given Sentence Transformer BERT model.
 
     Parameters:
-    - model (str): The name of the Sentence Transformer
+    - model (str|Path): The name of the Sentence Transformer
     BERT model.
     - revision (str, optional): The revision of the m
     odel to use. Defaults to 'main'.
@@ -566,12 +653,12 @@ def get_sentence_transformer_tokenizer_config(model: str,
             if encoder_dict:
                 break
 
-    if not encoder_dict and not model.startswith("/"):
+    if not encoder_dict and not Path(model).is_absolute():
         try:
             # If model is on HuggingfaceHub, get the repo files
             repo_files = list_repo_files(model,
                                          revision=revision,
-                                         token=os.getenv('HF_TOKEN', None))
+                                         token=_get_hf_token())
         except Exception:
             repo_files = []
 
@@ -623,33 +710,34 @@ def maybe_register_config_serialize_by_value() -> None:
     """ # noqa
     try:
         import transformers_modules
+        transformers_modules_available = True
     except ImportError:
-        # the config does not need trust_remote_code
-        return
+        transformers_modules_available = False
 
     try:
-        import cloudpickle
-        cloudpickle.register_pickle_by_value(transformers_modules)
-
-        # ray vendors its own version of cloudpickle
-        from vllm.executor.ray_utils import ray
-        if ray:
-            ray.cloudpickle.register_pickle_by_value(transformers_modules)
-
-        # multiprocessing uses pickle to serialize arguments when using spawn
-        # Here we get pickle to use cloudpickle to serialize config objects
-        # that contain instances of the custom config class to avoid
-        # serialization problems if the generated module (and model) has a `.`
-        # in its name
         import multiprocessing
         import pickle
 
+        import cloudpickle
+
         from vllm.config import VllmConfig
 
+        # Register multiprocessing reducers to handle cross-process
+        # serialization of VllmConfig objects that may contain custom configs
+        # from transformers_modules
         def _reduce_config(config: VllmConfig):
             return (pickle.loads, (cloudpickle.dumps(config), ))
 
         multiprocessing.reducer.register(VllmConfig, _reduce_config)
+
+        # Register transformers_modules with cloudpickle if available
+        if transformers_modules_available:
+            cloudpickle.register_pickle_by_value(transformers_modules)
+
+            # ray vendors its own version of cloudpickle
+            from vllm.executor.ray_utils import ray
+            if ray:
+                ray.cloudpickle.register_pickle_by_value(transformers_modules)
 
     except Exception as e:
         logger.warning(
@@ -658,117 +746,6 @@ def maybe_register_config_serialize_by_value() -> None:
             " lead to a later error. If remote code is not needed"
             " remove `--trust-remote-code`",
             exc_info=e)
-
-
-def load_params_config(model: Union[str, Path], revision: Optional[str],
-                       **kwargs) -> PretrainedConfig:
-    # This function loads a params.json config which
-    # should be used when loading models in mistral format
-
-    config_file_name = "params.json"
-
-    config_dict = get_hf_file_to_dict(config_file_name, model, revision)
-    if config_dict is None:
-        raise ValueError(
-            f"Failed to load mistral '{config_file_name}' config for model "
-            f"{model}. Please check if the model is a mistral-format model "
-            f"and if the config file exists.")
-    assert isinstance(config_dict, dict)
-
-    config_mapping = {
-        "dim": "hidden_size",
-        "norm_eps": "rms_norm_eps",
-        "n_kv_heads": "num_key_value_heads",
-        "n_layers": "num_hidden_layers",
-        "n_heads": "num_attention_heads",
-        "hidden_dim": "intermediate_size",
-    }
-
-    def recurse_elems(elem: Any):
-        if isinstance(elem, dict):
-            config_dict = {}
-            for key, value in elem.items():
-                key = config_mapping.get(key, key)
-                config_dict[key] = recurse_elems(value)
-
-            return config_dict
-        else:
-            return elem
-
-    config_dict["model_type"] = config_dict.get("model_type", "transformer")
-    config_dict["hidden_act"] = config_dict.get("activation", "silu")
-    config_dict["tie_word_embeddings"] = config_dict.get(
-        "tie_embeddings", False)
-
-    if config_dict.get("max_position_embeddings") is None:
-        max_position_embeddings = 128_000
-        try:
-            trust_remote_code_val = kwargs.get("trust_remote_code", False)
-            hf_config = get_config(model=model,
-                                   trust_remote_code=trust_remote_code_val,
-                                   revision=revision,
-                                   config_format=ConfigFormat.HF)
-            if hf_value := hf_config.get_text_config().max_position_embeddings:
-                max_position_embeddings = hf_value
-        except Exception as e:
-            logger.warning(
-                "The params.json file is missing 'max_position_embeddings'"
-                " and could not get a value from the HF config."
-                " Defaulting to 128000",
-                exc_info=e)
-        config_dict["max_position_embeddings"] = max_position_embeddings
-
-    if config_dict.get("quantization") is not None:
-        quantization = config_dict.get("quantization", {})
-        if quantization.get("qformat_weight") == "fp8_e4m3":
-            # This maps to the FP8 static per-tensor quantization scheme
-            quantization_config = {
-                "quant_method": "fp8",
-                "activation_scheme": "static"
-            }
-        elif quantization.get("quant_method") == "compressed-tensors":
-            # Pass through the quantization config to compressed-tensors
-            quantization_config = quantization
-        else:
-            raise ValueError(
-                f"Found unknown quantization='{quantization}' in config")
-
-        config_dict["quantization_config"] = quantization_config
-
-    config_type: Literal["text",
-                         "multimodal"] = "multimodal" if config_dict.get(
-                             "vision_encoder") is not None else "text"
-
-    if config_dict.get("moe") is not None:
-        config_dict["architectures"] = ["MixtralForCausalLM"]
-    else:
-        config_dict["architectures"] = ["MistralForCausalLM"]
-
-    if config_type == "multimodal":
-        multimodal_config = config_dict.pop("vision_encoder")
-        quantization_config = config_dict.get("quantization_config", {})
-
-        config_dict = {
-            "text_config": config_dict,
-            "vision_config": multimodal_config
-        }
-        config_dict["architectures"] = ["PixtralForConditionalGeneration"]
-        config_dict["model_type"] = "pixtral"
-        if quantization_config:
-            config_dict["quantization_config"] = quantization_config
-
-    config_dict.update(kwargs)
-
-    config_dict = recurse_elems(config_dict)
-
-    # transform to HF config format
-    if config_type == "multimodal":
-        config_dict["text_config"] = PretrainedConfig(
-            **config_dict["text_config"])
-        config_dict["vision_config"] = PretrainedConfig(
-            **config_dict["vision_config"])
-
-    return PretrainedConfig(**config_dict)
 
 
 def get_hf_image_processor_config(
@@ -793,13 +770,6 @@ def get_hf_text_config(config: PretrainedConfig):
     """Get the "sub" config relevant to llm for multi modal models.
     No op for pure text models.
     """
-    # This block should be unnecessary after https://github.com/huggingface/transformers/pull/37517
-    if hasattr(config, "thinker_config"):
-        # TODO(suyang.fy): Refactor code.
-        #  For Qwen2.5-Omni, change hf_text_config to
-        #  thinker_config.text_config.
-        return config.thinker_config.text_config
-
     text_config = config.get_text_config()
 
     if text_config is not config:
@@ -833,26 +803,6 @@ def try_get_generation_config(
             return None
 
 
-def get_cross_encoder_activation_function(config: PretrainedConfig):
-
-    function_name: Optional[str] = None
-    if hasattr(config, "sentence_transformers") and "activation_fn" in \
-        config.sentence_transformers:
-        function_name = config.sentence_transformers["activation_fn"]
-
-    elif (hasattr(config, "sbert_ce_default_activation_function")
-          and config.sbert_ce_default_activation_function is not None):
-        function_name = config.sbert_ce_default_activation_function
-
-    if function_name is not None:
-        assert function_name.startswith("torch.nn.modules."), \
-            "Loading of activation functions is restricted to " \
-            "torch.nn.modules for security reasons"
-        return resolve_obj_by_qualname(function_name)()
-    else:
-        return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()
-
-
 def try_get_safetensors_metadata(
     model: str,
     *,
@@ -862,7 +812,7 @@ def try_get_safetensors_metadata(
         get_safetensors_metadata,
         model,
         revision=revision,
-        token=os.getenv('HF_TOKEN', None),
+        token=_get_hf_token(),
     )
 
     try:
@@ -885,3 +835,35 @@ def try_get_tokenizer_config(
         )
     except Exception:
         return None
+
+
+def _download_mistral_config_file(model, revision) -> dict:
+    config_file_name = "params.json"
+    config_dict = get_hf_file_to_dict(config_file_name, model, revision)
+    if config_dict is None:
+        raise ValueError(
+            f"Failed to load mistral '{config_file_name}' config for model "
+            f"{model}. Please check if the model is a mistral-format model "
+            f"and if the config file exists.")
+    assert isinstance(config_dict, dict)
+    return config_dict
+
+
+def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> int:
+    max_position_embeddings = 128_000
+    try:
+        trust_remote_code_val = kwargs.get("trust_remote_code", False)
+        hf_config = get_config(model=model,
+                               trust_remote_code=trust_remote_code_val,
+                               revision=revision,
+                               config_format=ConfigFormat.HF)
+        if hf_value := hf_config.get_text_config().max_position_embeddings:
+            max_position_embeddings = hf_value
+    except Exception as e:
+        logger.warning(
+            "The params.json file is missing 'max_position_embeddings'"
+            " and could not get a value from the HF config."
+            " Defaulting to 128000",
+            exc_info=e)
+
+    return max_position_embeddings

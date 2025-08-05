@@ -3,17 +3,19 @@
 """
 This example shows how to use Ray Data for data parallel batch inference.
 
-Ray Data is a data processing framework that can handle large datasets
-and integrates tightly with vLLM for data-parallel inference.
-
-As of Ray 2.44, Ray Data has a native integration with
-vLLM (under ray.data.llm).
+Ray Data is a data processing framework that can process very large datasets
+with first-class support for vLLM.
 
 Ray Data provides functionality for:
-* Reading and writing to cloud storage (S3, GCS, etc.)
-* Automatic sharding and load-balancing across a cluster
-* Optimized configuration of vLLM using continuous batching
-* Compatible with tensor/pipeline parallel inference as well.
+* Reading and writing to most popular file formats and cloud object storage.
+* Streaming execution, so you can run inference on datasets that far exceed
+  the aggregate RAM of the cluster.
+* Scale up the workload without code changes.
+* Automatic sharding, load-balancing, and autoscaling across a Ray cluster,
+  with built-in fault-tolerance and retry semantics.
+* Continuous batching that keeps vLLM replicas saturated and maximizes GPU
+  utilization.
+* Compatible with tensor/pipeline parallel inference.
 
 Learn more about Ray Data's LLM integration:
 https://docs.ray.io/en/latest/data/working-with-llms.html

@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.nn.functional import gumbel_softmax, pad, softmax
-from transformers import BaseImageProcessor, BatchFeature
+from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -48,8 +48,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.ovis import (BaseVisualTokenizerConfig,
-                                                  OvisConfig)
 from vllm.transformers_utils.processors.ovis import OvisProcessor
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -83,7 +81,7 @@ class VisualTokenizer(torch.nn.Module):
 
     def __init__(
         self,
-        config: BaseVisualTokenizerConfig,
+        config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
@@ -107,7 +105,7 @@ class VisualTokenizer(torch.nn.Module):
 
     def _init_backbone(
         self,
-        config: BaseVisualTokenizerConfig,
+        config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> nn.Module:
@@ -247,14 +245,12 @@ class VisualEmbedding(torch.nn.Embedding):
 
 class OvisProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_config(self):
-        return self.ctx.get_hf_config(OvisConfig)
-
-    def get_hf_processor(self, **kwargs):
+    def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(
             OvisProcessor,
             image_pad_token=self.get_image_pad_token(),
             image_segment_len=self.get_image_segment_len(),
+            **kwargs,
         )
 
     def get_image_segment_len(self) -> int:
@@ -273,9 +269,6 @@ class OvisProcessingInfo(BaseProcessingInfo):
         hf_text_config = self.get_hf_config().get_text_config()
         text_model_type = hf_text_config.model_type
         return IMAGE_PAD_TOKEN_MAP.get(text_model_type)
-
-    def get_image_processor(self) -> BaseImageProcessor:
-        return self.get_hf_processor().image_processor  # type: ignore
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -405,12 +398,19 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
                                         dummy_inputs=OvisDummyInputsBuilder)
 class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
-        self.config: OvisConfig = config
+        self.config: PretrainedConfig = config
         self.llm = init_vllm_registered_model(
             vllm_config=vllm_config.with_hf_config(config.get_text_config()),
             prefix=maybe_prefix(prefix, "llm"),

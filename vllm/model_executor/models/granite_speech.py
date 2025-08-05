@@ -25,7 +25,7 @@
 """Inference-only IBM Granite speech model."""
 import math
 from collections.abc import Iterable, Mapping
-from typing import Optional, TypedDict, Union
+from typing import Annotated, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -36,7 +36,6 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -49,6 +48,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .blip2 import Blip2QFormerModel
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -58,16 +58,25 @@ from .utils import (AutoWeightsLoader, embed_multimodal,
 
 
 ### Audio Input
-class GraniteSpeechAudioInputs(TypedDict):
+class GraniteSpeechAudioInputs(TensorSchema):
+    """
+    Audio input features for Granite Speech model.
+    
+    Dimensions:
+        - b: Batch size
+        - fi: Number of input features from the Mel spectrogram.
+        - fo: Number of output features, i.e. the embedding size.
+        - 160: Fixed feature dimension for Mel spectrogram features
+    """
 
-    input_features: torch.Tensor
-    """Shape: `(bsz, num_features, 160)`"""
+    input_features: Annotated[torch.Tensor, TensorShape("b", "fi", 160)]
+    """Audio input features."""
 
-    input_features_mask: torch.Tensor
-    """Shape: `(bsz, num_features)`"""
+    input_features_mask: Annotated[torch.Tensor, TensorShape("b", "fo")]
+    """Mask for variable length audio features."""
 
-    audio_embed_sizes: list[int]
-    """List of length `bsz`"""
+    audio_embed_sizes: Annotated[list[int], TensorShape("b")]
+    """List of audio embedding sizes for each item in batch."""
 
 
 class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
@@ -533,6 +542,13 @@ class GraniteSpeechForConditionalGeneration(
         ],
     }
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("audio"):
+            return "<|audio|>"
+
+        raise ValueError("Only audio modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -542,7 +558,6 @@ class GraniteSpeechForConditionalGeneration(
         self.config = config
         self.quant_config = quant_config
         self.cache_config = cache_config
-        self.sampler = get_sampler()
 
         # The language model is typically a Granite LLM
         self.language_model = init_vllm_registered_model(
@@ -576,6 +591,7 @@ class GraniteSpeechForConditionalGeneration(
         input_features = kwargs.pop("input_features", None)
         input_features_mask = kwargs.pop("input_features_mask", None)
         audio_embed_sizes = kwargs.pop("audio_embed_sizes", None)
+
         if input_features is None:
             return None
 

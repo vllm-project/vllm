@@ -16,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 import regex as re
 import torch
@@ -45,6 +45,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
@@ -93,32 +94,42 @@ def _init_img_processor(hf_config: PretrainedConfig,
     return img_processor
 
 
-class Phi3VImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
+class Phi3VImagePixelInputs(TensorSchema):
     """
-    Shape:
-    `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
-
-    Note that `num_patches` may be different per batch and image,
-    in which case the data is passed as a list instead of a batched tensor.
-    """
-
-    image_sizes: torch.Tensor
-    """
-    Shape: `(batch_size * num_images, 2)`
-
-    This should be in `(height, width)` format.
+    Dimensions:
+        - b: Batch size
+        - n: Number of images
+        - p: Number of patches
+        - h: Height of each patch
+        - w: Width of each patch
     """
 
+    type: Literal["pixel_values", "image_embeds"] = "pixel_values"
 
-class Phi3VImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
-    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
+    # Supports either a stacked tensor or a list of (p, 3, h, w) tensors
+    data: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "p", 3, "h", "w", dynamic_dims={"p"}
+                    ),  # 'p' may vary across items
+    ]
 
-    `hidden_size` must match the hidden size of language model backbone.
+    # Stacked tensor with height and width for each image
+    image_sizes: Annotated[Optional[torch.Tensor], TensorShape("bn", 2)]
+
+
+class Phi3VImageEmbeddingInputs(TensorSchema):
     """
+    Dimensions:
+        - b: Batch size
+        - n: Number of images
+        - f: Image feature size (e.g., number of tokens per image)
+        - h: Hidden size (must match language model backbone)
+    """
+    type: Literal["image_embeds"] = "image_embeds"
+    data: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "f", "h"),
+    ]
 
 
 Phi3VImageInputs = Union[Phi3VImagePixelInputs, Phi3VImageEmbeddingInputs]
@@ -306,17 +317,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
 
 
 class Phi3VProcessingInfo(BaseProcessingInfo):
-
-    def get_hf_processor(
-        self,
-        *,
-        num_crops: Optional[int] = None,
-        **kwargs: object,
-    ) -> ProcessorMixin:
-        if num_crops is not None:
-            kwargs["num_crops"] = num_crops
-
-        return self.ctx.get_hf_processor(**kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -520,6 +520,13 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             "model.": "language_model.model.",
         })
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return f"<|image_{i}|>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -556,44 +563,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
-        expected_dims = (2, )
-
-        def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape)
-
-            if actual_dims != expected_dims:
-                expected_expr = str(expected_dims)
-                raise ValueError(
-                    f"The expected shape of image sizes per image per batch "
-                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
-
-    def _validate_pixel_values(
-        self, data: Union[torch.Tensor, list[torch.Tensor]]
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
-
-        h = w = CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape[1:])
-
-            if actual_dims != expected_dims:
-                expected_expr = ("num_patches", *map(str, expected_dims))
-                raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Phi3VImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -604,25 +573,16 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             return None
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
-            if not isinstance(image_sizes, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image sizes. "
-                                 f"Got type: {type(image_sizes)}")
-
             return Phi3VImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(flatten_bn(pixel_values)),
-                image_sizes=self._validate_image_sizes(
-                    flatten_bn(image_sizes, concat=True)))
+                data=flatten_bn(pixel_values),
+                image_sizes=flatten_bn(image_sizes, concat=True),
+                resolve_bindings={
+                    "h": CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size,
+                    "w": CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size
+                })
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, torch.Tensor):
-                raise ValueError("Incorrect type of image embeddings. "
-                                 f"Got type: {type(image_embeds)}")
-
             return Phi3VImageEmbeddingInputs(
                 type="image_embeds",
                 data=flatten_bn(image_embeds),

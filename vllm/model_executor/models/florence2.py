@@ -4,7 +4,7 @@
 import math
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, Optional, TypedDict, Union
+from typing import Annotated, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -29,16 +29,28 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
                          SupportsV0Only)
 from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings
 
 
-class Florence2ImagePixelInputs(TypedDict):
+class Florence2ImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - b: Batch size
+        - c: Number of channels (3)
+        - h: Height of the image
+        - w: Width of the image
+    """
+
     type: Literal["pixel_values"]
-    data: torch.Tensor
-    """Shape: (batch_size, num_channel, height, width)"""
+
+    data: Annotated[
+        torch.Tensor,
+        TensorShape("b", 3, "h", "w"),
+    ]
 
 
 # ViT implementation are all copied from
@@ -749,12 +761,6 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
 
 class Florence2ProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_config(self):
-        return self.ctx.get_hf_config()
-
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor()
-
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 
@@ -877,6 +883,13 @@ class Florence2MultiModalProcessor(
 class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsV0Only):
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return None
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -924,28 +937,6 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
             raise NotImplementedError(
                 'Florence2 only supports COSINE as temporal embedding.')
 
-    def _validate_pixel_values(
-        self, data: Union[torch.Tensor, list[torch.Tensor]]
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
-
-        size = self.processor_config["size"]
-        h, w = size["height"], size["width"]
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape)
-
-            if actual_dims != expected_dims:
-                expected_expr = tuple(*map(str, expected_dims))
-                raise ValueError(
-                    "The expected shape of pixel values per batch "
-                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
-
     def _parse_and_validate_image_input(self, **kwargs: object):
         pixel_values: Optional[Union[list[list[torch.Tensor]],
                                      list[torch.Tensor],
@@ -964,10 +955,16 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 "Both pixel values and image embeds are provided.")
 
         if pixel_values is not None:
+            size = self.processor_config["size"]
+            expected_h, expected_w = size["height"], size["width"]
+
             return Florence2ImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(
-                    flatten_bn(pixel_values, concat=True)),
+                data=flatten_bn(pixel_values, concat=True),
+                resolve_bindings={
+                    "h": expected_h,
+                    "w": expected_w
+                },
             )
 
         if image_embeds is not None:
