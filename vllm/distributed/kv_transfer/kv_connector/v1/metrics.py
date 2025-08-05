@@ -37,8 +37,8 @@ class KVTransferStats(msgspec.Struct,
 class NixlKVTransferStats(KVTransferStats, tag="NIXL"):
     """Container for transfer performance metrics"""
     # Setup buffers
-    # TODO we could use specialized data structures to avoid copying the data
-    # or even just maintaining order when merging. Let's keep it simple for now.
+    # We could use specialized data structures to avoid copying the data
+    # or even just maintaining order when merging. Let's keep it simple for now
     transfer_durations: list[float] = msgspec.field(
         default_factory=list)  # Transfer durations in seconds
     bytes_transferred: list[int] = msgspec.field(
@@ -53,27 +53,9 @@ class NixlKVTransferStats(KVTransferStats, tag="NIXL"):
         self.num_blocks_transferred = []
         self.num_successful_transfers = 0
 
-    def record_transfer(self, duration: float, bytes_count: int,
-                        num_blocks: int):
-        self.transfer_durations.append(duration)
-        self.bytes_transferred.append(bytes_count)
-        self.num_blocks_transferred.append(num_blocks)
+    def record_transfer(self):
+        # TODO: record actual transfer stats when available
         self.num_successful_transfers += 1
-
-    def get_throughput_stats(self, now: float) -> tuple[float, float, float]:
-        """Get transfer throughput statistics"""
-        pass
-
-    def get_latency_stats(self) -> tuple[float, float, float]:
-        """Get transfer latency statistics"""
-        # TODO possible use
-        import numpy as np
-        durations = np.array(self.transfer_durations)
-        avg_latency = float(np.mean(durations))
-        p50_latency = float(np.percentile(durations, 50))
-        p95_latency = float(np.percentile(durations, 95))
-
-        return avg_latency, p50_latency, p95_latency
 
     def clone_and_reset(self) -> "NixlKVTransferStats":
         if self.is_empty():
@@ -94,22 +76,8 @@ class NixlKVTransferStats(KVTransferStats, tag="NIXL"):
         return self
 
     def reduce(self) -> dict[str, Union[int, float]]:
-        # TODO should you return a pair with a string for the unit?
-        # # Format throughput for readability
-        # if bytes_per_sec >= 1024**3:  # GB/s
-        #     bytes_throughput_str = f"{bytes_per_sec / (1024**3):.2f} GB/s"
-        # elif bytes_per_sec >= 1024**2:  # MB/s
-        #     bytes_throughput_str = f"{bytes_per_sec / (1024**2):.1f} MB/s"
-        # elif bytes_per_sec >= 1024:  # KB/s
-        #     bytes_throughput_str = f"{bytes_per_sec / 1024:.1f} KB/s"
-        # else:  # B/s
-        #     bytes_throughput_str = f"{bytes_per_sec:.1f} B/s"
-        return {
-            "avg_transfer_durations": 11,
-            "avg_bytes_transferred": 110,
-            "num_blocks_transferred": 77,
-            "num_successful_transfers": 8
-        }
+        # TODO: reduce stats to a single value, calculate latency/throughput
+        return {"num_successful_transfers": self.num_successful_transfers}
 
 
 # Union type for serialization/deserialization
