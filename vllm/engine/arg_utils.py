@@ -448,7 +448,7 @@ class EngineArgs:
     enable_prompt_adapter: bool = False
     intermediate_log_config_path: Optional[str] = None
 
-    intermediate_log_config: Optional[dict[str, Any]] = None
+    intermediate_log_config: Optional[IntermediateLoggingConfig] = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -763,23 +763,6 @@ class EngineArgs:
             help="The configurations for speculative decoding. Should be a "
             "JSON string.")
 
-        intermediate_log_group = parser.add_argument_group(
-            title="IntermediateLoggingConfig",
-            description=IntermediateLoggingConfig.__doc__,
-        )
-        intermediate_log_group.add_argument(
-            "--intermediate-log-config",
-            type=json.loads,
-            default=None,
-            help="The configurations for intermediate loggings. Should be a "
-            "JSON string.")
-
-        intermediate_log_group.add_argument(
-            "--intermediate-log-config-path",
-            type=str,
-            help="The path to the configurations for intermediate loggings. "
-            "Should be a string.")
-
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
         observability_group = parser.add_argument_group(
@@ -859,6 +842,14 @@ class EngineArgs:
             title="VllmConfig",
             description=VllmConfig.__doc__,
         )
+
+        vllm_group.add_argument("--intermediate-log-config",
+                                **vllm_kwargs["intermediate_log_config"])
+        vllm_group.add_argument(
+            "--intermediate-log-config-path",
+            type=str,
+            help="The path to the configurations for intermediate loggings. "
+            "Should be a string.")
         vllm_group.add_argument("--kv-transfer-config",
                                 **vllm_kwargs["kv_transfer_config"])
         vllm_group.add_argument('--kv-events-config',
@@ -980,18 +971,17 @@ class EngineArgs:
             pt_load_map_location=self.pt_load_map_location,
         )
 
-    def create_intermediate_log_config(
-        self, ) -> Optional[IntermediateLoggingConfig]:
-        """Initializes and returns an IntermediateLoggingConfig object based on
-        `intermediate_log_config` or `intermediate_log_config_path`.
+    def create_intermediate_log_config_from_path(self, ) -> None:
+        """set intermediate_log_config from intermediate_log_config_path
         """
-        if self.intermediate_log_config is not None:
-            return IntermediateLoggingConfig.from_dict(
-                self.intermediate_log_config)
         if self.intermediate_log_config_path is not None:
+            if self.intermediate_log_config is not None:
+                logger.warning("The `intermediate_log_config` is set,"
+                               "`intermediate_log_config_path` "
+                               "will be ignored.")
             with open(self.intermediate_log_config_path) as f:
-                return IntermediateLoggingConfig.from_dict(json.load(f))
-        return None
+                self.intermediate_log_config = \
+                    IntermediateLoggingConfig.from_dict(json.load(f))
 
     def create_speculative_config(
         self,
@@ -1233,7 +1223,7 @@ class EngineArgs:
             disable_log_stats=self.disable_log_stats,
         )
 
-        intermediate_log_config = self.create_intermediate_log_config()
+        self.create_intermediate_log_config_from_path()
 
         # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
@@ -1335,7 +1325,7 @@ class EngineArgs:
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
-            intermediate_log_config=intermediate_log_config,
+            intermediate_log_config=self.intermediate_log_config,
             additional_config=self.additional_config,
         )
 
