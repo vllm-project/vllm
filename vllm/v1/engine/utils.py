@@ -297,7 +297,7 @@ class CoreEngineActorManager:
         local_engine_count = \
             vllm_config.parallel_config.data_parallel_size_local
 
-        nodes = sorted(list_nodes(),
+        nodes = sorted(list_nodes(filters=[("state", "=", "ALIVE")]),
                        key=lambda node: node.node_ip != dp_master_ip)
         assert nodes[0].node_ip == dp_master_ip, (
             "The first node must be the head node")
@@ -312,6 +312,8 @@ class CoreEngineActorManager:
         for node in nodes:
             node_ip = node.node_ip
             node_resources = available_resources[node.node_id]
+            if "GPU" not in node_resources:
+                continue
             # For now, each DP rank can only be assigned to one node
             # TODO(rui): support allocating a single DP rank
             # to multiple nodes
