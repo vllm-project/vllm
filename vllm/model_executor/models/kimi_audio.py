@@ -4,18 +4,18 @@
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from subprocess import CalledProcessError, run, Popen, PIPE
 from typing import Any, Optional, TypedDict, Union, Tuple, List, Dict
-from functools import lru_cache
 
-import os
 import numpy as np
 import torch
 import torch.nn as nn
 import transformers
 
 from transformers import AutoTokenizer, BatchFeature
-from transformers.activations import ACT2FN
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPast,
+    CausalLMOutputWithPast,
+)
 
 from vllm.config import VllmConfig
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -32,7 +32,13 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processors import KimiAudioProcessor
+from transformers.models.qwen2.modeling_qwen2 import (
+    Qwen2RMSNorm,
+    Qwen2MLP,
+    Qwen2PreTrainedModel,
+    apply_rotary_pos_emb
+)
+from ...transformers_utils.processors import KimiAudioProcessor, WhisperEncoder
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
@@ -42,19 +48,8 @@ from packaging import version
 
 assert version.parse(transformers.__version__) >= version.parse("4.34.1")
 
-from transformers.modeling_outputs import (
-    BaseModelOutputWithPast,
-    CausalLMOutputWithPast,
-)
-from vllm.transformers_utils.configs import KimiAudioConfig
+from ...transformers_utils.tokenizers import Glm4Tokenizer
 import torch.nn.functional as F
-from transformers.models.qwen2.modeling_qwen2 import (
-    Qwen2RMSNorm,
-    Qwen2PreTrainedModel,
-)
-from transformers.models.whisper.modeling_whisper import WhisperModel
-from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb
-from transformers.models.whisper import WhisperFeatureExtractor
 if version.parse(transformers.__version__) >= version.parse("4.35.0"):
     from transformers.utils import is_flash_attn_2_available as is_flash_attn_available
 else:
@@ -170,41 +165,10 @@ class RotaryEmbedding(nn.Module):
         )
 
 
-class MoonshotMLP(nn.Module):
-    def __init__(self, config, prefix: str = ""):
-        super().__init__()
-        self.config = config
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
-        self.gate_proj = ReplicatedLinear(
-            self.hidden_size, 
-            self.intermediate_size, 
-            bias=False,
-            prefix=f"{prefix}.gate_proj"
-        )
-        self.up_proj = ReplicatedLinear(
-            self.hidden_size, 
-            self.intermediate_size, 
-            bias=False,
-            prefix=f"{prefix}.up_proj"
-        )
-        self.down_proj = ReplicatedLinear(
-            self.intermediate_size, 
-            self.hidden_size, 
-            bias=False,
-            prefix=f"{prefix}.down_proj"
-        )
-        self.act_fn = ACT2FN[config.hidden_act]
-
-    def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
-
-
 class MoonshotAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: KimiAudioConfig, prefix: str = ""):
+    def __init__(self, config: KimiAudioConfig, prefix: str = ""): # type: ignore
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -426,7 +390,7 @@ class MoonshotAttention(nn.Module):
 
 
 class MoonshotDecoderLayer(nn.Module):
-    def __init__(self, config: KimiAudioConfig, prefix: str = ""):
+    def __init__(self, config: KimiAudioConfig, prefix: str = ""): # type: ignore
         super().__init__()
         self.hidden_size = config.hidden_size
         self.config = config
@@ -434,7 +398,7 @@ class MoonshotDecoderLayer(nn.Module):
         logger.warning_once("using normal flash attention")
         self.self_attn = MoonshotAttention(config=config, prefix=f"{prefix}.self_attn")
 
-        self.mlp = MoonshotMLP(config, prefix=f"{prefix}.mlp")
+        self.mlp = Qwen2MLP(config)
         self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Qwen2RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
@@ -528,210 +492,12 @@ class VQAdaptor(nn.Module):
         x = self.dropout(x)
         x = self.lin2(x)
         return self.norm(x)
-
-
-# hard-coded audio hyperparameters
-SAMPLE_RATE = 16000
-N_FFT = 400
-N_MELS = 120
-HOP_LENGTH = 160
-CHUNK_LENGTH = 30
-N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE  # 480000 samples in a 30-second chunk
-
-def load_audio(file: str, sr: int = SAMPLE_RATE):
-    """
-    Open an audio file and read as mono waveform, resampling as necessary
-
-    Parameters
-    ----------
-    file: str
-        The audio file to open
-
-    sr: int
-        The sample rate to resample the audio if necessary
-
-    Returns
-    -------
-    A NumPy array containing the audio waveform, in float32 dtype.
-    """
-
-    # This launches a subprocess to decode audio while down-mixing
-    # and resampling as necessary.  Requires the ffmpeg CLI in PATH.
-    # fmt: off
-    cmd = ["ffmpeg", "-nostdin", "-threads", "0", "-i", file, "-f", "s16le", "-ac", "1", "-acodec", "pcm_s16le", "-ar", str(sr), "-"]
-    # fmt: on
-    try:
-        out = run(cmd, capture_output=True, check=True).stdout
-    except CalledProcessError as e:
-        raise RuntimeError(f"Failed to load audio: {e.stderr.decode()}") from e
-
-    return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
-
-
-def pad_or_trim(array, length: int = N_SAMPLES, *, axis: int = -1):
-    """
-    Pad or trim the audio array to N_SAMPLES, as expected by the encoder.
-    """
-    if torch.is_tensor(array):
-        if array.shape[axis] > length:
-            array = array.index_select(
-                dim=axis, index=torch.arange(length, device=array.device)
-            )
-
-        if array.shape[axis] < length:
-            pad_widths = [(0, 0)] * array.ndim
-            pad_widths[axis] = (0, length - array.shape[axis])
-            array = F.pad(array, [pad for sizes in pad_widths[::-1] for pad in sizes])
-    else:
-        if array.shape[axis] > length:
-            array = array.take(indices=range(length), axis=axis)
-
-        if array.shape[axis] < length:
-            pad_widths = [(0, 0)] * array.ndim
-            pad_widths[axis] = (0, length - array.shape[axis])
-            array = np.pad(array, pad_widths)
-
-    return array
-
-
-@lru_cache(maxsize=None)
-def mel_filters(device, n_mels: int = 128) -> torch.Tensor:
-    """
-    load the mel filterbank matrix for projecting STFT into a Mel spectrogram.
-    Allows decoupling librosa dependency; saved using:
-
-        np.savez_compressed(
-            "mel_filters.npz",
-            mel_80=librosa.filters.mel(sr=16000, n_fft=400, n_mels=80),
-        )
-    """
-    with np.load(
-        os.path.join(os.path.dirname(__file__), "mel_filters.npz")  # todo
-        # os.path.join("assets", "mel_filters.npz")
-    ) as f:
-        return torch.from_numpy(f[f"mel_{n_mels}"]).to(device)
-
-
-def log_mel_spectrogram(
-    audio: Union[str, np.ndarray, torch.Tensor],
-    n_mels: int = 128,
-    padding: int = 0,
-    device: Optional[Union[str, torch.device]] = None,
-):
-    """
-    Compute the log-Mel spectrogram of
-
-    Parameters
-    ----------
-    audio: Union[str, np.ndarray, torch.Tensor], shape = (*)
-        The path to audio or either a NumPy array or Tensor containing the audio waveform in 16 kHz
-
-    n_mels: int
-        The number of Mel-frequency filters, only 80 is supported
-
-    padding: int
-        Number of zero samples to pad to the right
-
-    device: Optional[Union[str, torch.device]]
-        If given, the audio tensor is moved to this device before STFT
-
-    Returns
-    -------
-    torch.Tensor, shape = (80, n_frames)
-        A Tensor that contains the Mel spectrogram
-    """
-    if not torch.is_tensor(audio):
-        if isinstance(audio, str):
-            audio = load_audio(audio)
-        audio = torch.from_numpy(audio)
-
-    if device is not None:
-        audio = audio.to(device)
-    if padding > 0:
-        audio = F.pad(audio, (0, padding))
-    window = torch.hann_window(N_FFT).to(audio.device)
-    stft = torch.stft(audio, N_FFT, HOP_LENGTH, window=window, return_complex=True)
-    magnitudes = stft[..., :-1].abs() ** 2
-
-    filters = mel_filters(audio.device, n_mels)
-    mel_spec = filters @ magnitudes
-
-    log_spec = torch.clamp(mel_spec, min=1e-10).log10()
-    log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
-    log_spec = (log_spec + 4.0) / 4.0
-    return log_spec
-
-
-class WhisperEncoder(nn.Module):
-    def __init__(
-        self, 
-        model_path: str, 
-        mel_batch_size=40, 
-        unfreeze_online_whisper_model=False,
-    ):
-        super().__init__()
-        self.speech_encoder = WhisperModel.from_pretrained(model_path).encoder
-        self.unfreeze_online_whisper_model = unfreeze_online_whisper_model
-        if not self.unfreeze_online_whisper_model:
-            self.speech_encoder.eval()
-        self.mel_batch_size = mel_batch_size
-
-    def forward(self, audio, kimia_whisper_clip_silence=False):
-        if isinstance(audio, torch.Tensor):
-            audio = audio[0]
-            audio = audio.cpu().numpy()
-        time_step = 0
-        audios = []
-        while time_step * 16000 < audio.shape[0]:
-            audio_segment = audio[time_step * 16000 : (time_step + 30) * 16000]
-            audios.append(audio_segment)
-            time_step += 30
-
-        final_audio_embedding = []
-
-        for audio_segment in audios:
-            # import pdb; pdb.set_trace()
-            assert audio_segment.shape[0] <= 480000
-            L = audio_segment.shape[0]
-            token_len = (L - 1) // (
-                160 * 8
-            ) + 1  # to match huggingface logic, with use attention mask to control the length and the slice with mask[:, ::160], also match the glm4 12.5 logic
-
-            pad_audio = pad_or_trim(audio_segment.flatten())
-            mel = log_mel_spectrogram(pad_audio)  # torch.Size([80, 3000])
-            assert mel.shape[1] == 3000
-            if kimia_whisper_clip_silence:
-                input_seq_lens_list = [token_len * 4]
-                input_seq_lens = torch.LongTensor(input_seq_lens_list).to(
-                    self.embed_tokens.weight.device
-                )
-                audio_embedding = self.speech_encoder(
-                    mel.unsqueeze(0).to(self.embed_tokens.weight.device).to(torch.bfloat16),
-                    return_dict=True,
-                    input_seq_lens=input_seq_lens,
-                ).last_hidden_state
-            else:
-                audio_embedding = self.speech_encoder(
-                    mel.unsqueeze(0).to(torch.cuda.current_device()).to(torch.bfloat16),
-                    return_dict=True,
-                ).last_hidden_state
-                # audio_embedding: [1, 3000, 1280]
-                audio_embedding = audio_embedding[:, : token_len * 4, :]
-            final_audio_embedding.append(audio_embedding)
-
-        final_audio_embedding = torch.cat(final_audio_embedding, dim=1)
-        return final_audio_embedding
-
-    @torch.no_grad()
-    def tokenize_waveform(self, audio, kimia_whisper_clip_silence=False):
-        audio_embedding = self.forward(audio, kimia_whisper_clip_silence)
-        return audio_embedding.cpu()
     
 
 class MoonshotKimiaModel(Qwen2PreTrainedModel):
-    config_class = KimiAudioConfig
+    config_class = KimiAudioConfig # type: ignore
 
-    def __init__(self, config: KimiAudioConfig, prefix: str = ""):
+    def __init__(self, config: KimiAudioConfig, prefix: str = ""): # type: ignore
         super().__init__()
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -976,9 +742,9 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
         )
 
 
-class KimiAudioModel(Qwen2PreTrainedModel):
+class MoonshotKimiaForCausalLM(Qwen2PreTrainedModel):
     _tied_weights_keys = ["lm_head.weight", "mimo_output.weight"]
-    config_class = KimiAudioConfig
+    config_class = KimiAudioConfig # type: ignore
 
     def __init__(self, config, prefix: str = ""):
         super().__init__()
@@ -1134,44 +900,28 @@ class KimiAudioInputs(TypedDict):
 # === Processing Info === #
 class KimiAudioProcessingInfo(BaseProcessingInfo):
     
-    def get_hf_config(self) -> KimiAudioConfig:
-        return self.ctx.get_hf_config(KimiAudioConfig)
+    def get_hf_config(self) -> KimiAudioConfig: # type: ignore
+        return self.ctx.get_hf_config(KimiAudioConfig) # type: ignore
     
     def get_tokenizer(self) -> AutoTokenizer:
         return super().get_tokenizer()
     
-    def get_hf_processor(self, **kwargs: object) -> WhisperEncoder:
-        hf_config = self.get_hf_config()
-        mel_batch_size = hf_config.get("mel_batch_size", 20)
-        return self.ctx.get_hf_processor(**kwargs, mel_batch_size=mel_batch_size)
+    def get_hf_processor(self, **kwargs: object) -> KimiAudioProcessor:
+        return self.ctx.get_hf_processor(KimiAudioProcessor, **kwargs)
     
-    def get_eod_ids(self) -> List[int]:
-        extra_tokens = instantiate_extra_tokens(self.get_audio_tokenizer())
-        return [extra_tokens.msg_end, extra_tokens.media_end]
-    
-    def get_special_tokens(self) -> Tuple[int]:
-        hf_config = self.get_hf_config()
-        model_config = hf_config.model_config
-        kimia_text_audiodelaytokens = model_config.kimia_mimo_audiodelaytokens
-        kimia_token_offset = model_config.kimia_token_offset
-        return kimia_text_audiodelaytokens, kimia_token_offset
-
     def get_audio_tokenizer(self) -> Any:
-        from kimia_infer.audio.tokenizer import Glm4Tokenizer
         audio_tokenizer = Glm4Tokenizer("THUDM/glm-4-voice-tokenizer")
         return audio_tokenizer.to(torch.cuda.current_device())
     
-    def get_feature_extractor(self) -> WhisperEncoder:
-        from transformers import WhisperModel
-        whisper_model_path = os.path.join(
-            self.ctx.model_config.model_path, 
-            "whisper-large-v3"
-        )
-        
-        if os.path.exists(whisper_model_path):
-            return WhisperEncoder(whisper_model_path)
-        else:
-            return WhisperEncoder("openai/whisper-large-v3")
+    def get_feature_extractor(
+            self,
+            *,
+            sampling_rate: Optional[int] = None
+    ) -> WhisperEncoder:
+        hf_processor = self.get_hf_processor(sampling_rate=sampling_rate)
+        feature_extractor = hf_processor.feature_extractor  # type: ignore
+        assert isinstance(feature_extractor, WhisperEncoder)
+        return feature_extractor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         # no limits on count of audio
@@ -1237,15 +987,13 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
 class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingInfo]):
 
     @property
-    def whisper_processor(self):
-        """延迟加载Whisper处理器"""
+    def whisper_processor(self, **kwargs):
         if self._whisper_processor is None:
-            self._whisper_processor = self.info.get_whisper_processor()
+            self._whisper_processor = WhisperEncoder()
         return self._whisper_processor
     
     @property
-    def audio_tokenizer(self):
-        """延迟加载音频分词器"""
+    def audio_tokenizer(self, **kwargs):
         if self._audio_tokenizer is None:
             self._audio_tokenizer = self.info.get_audio_tokenizer()
         return self._audio_tokenizer
@@ -1301,7 +1049,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
     def _create_continuous_mask(
         self, 
         input_ids: torch.Tensor,
-        config: KimiAudioConfig
+        config: KimiAudioConfig # type: ignore
     ) -> torch.Tensor:
         """创建标记音频位置的mask"""
         # 找到media_begin和media_end之间的位置
@@ -1385,7 +1133,8 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
     info=KimiAudioProcessingInfo,
     dummy_inputs=KimiAudioDummyInputsBuilder
 )
-class MoonshotKimiaForCausalLM(nn.Module, SupportsMultiModal):
+class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal,
+                               SupportsPP):
     
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -1397,7 +1146,7 @@ class MoonshotKimiaForCausalLM(nn.Module, SupportsMultiModal):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         model_config = vllm_config.model_config
-        config: KimiAudioConfig = model_config.hf_config
+        config: KimiAudioConfig = model_config.hf_config # type: ignore
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         
@@ -1405,16 +1154,18 @@ class MoonshotKimiaForCausalLM(nn.Module, SupportsMultiModal):
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
         
-        self.audio_encoder = WhisperEncoder(
-            config.audio_config,
-            prefix=maybe_prefix(prefix, "audio_encoder")
+        self.audio_tower = Glm4Tokenizer(config.audio_config)
+        self.multi_modal_projector = WhisperEncoder()
+
+        self.language_model = init_vllm_registered_model(
+            vllm_config=vllm_config,
+            hf_config=config.text_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+            architectures=["MoonshotKimiaForCausalLM"],
         )
-    
-        self.model = KimiAudioModel(config, prefix=maybe_prefix(prefix, "model"))
         
-        self.language_model = self.model.model
-        self.lm_head = self.model.lm_head
-        self.mimo_output = self.model.mimo_output
+        self.lm_head = self.language_model.lm_head
+        self.mimo_output = self.language_model.mimo_output
         
         self.unpadded_vocab_size = config.vocab_size
         self.vocab_size = config.vocab_size
@@ -1428,6 +1179,9 @@ class MoonshotKimiaForCausalLM(nn.Module, SupportsMultiModal):
         
         self.kimia_media_begin = config.kimia_media_begin
         self.kimia_media_end = config.kimia_media_end
+
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
     
     def _validate_and_reshape_mm_tensor(self, mm_input: object, name: str) -> torch.Tensor:
         if not isinstance(mm_input, (torch.Tensor, list)):
@@ -1464,46 +1218,19 @@ class MoonshotKimiaForCausalLM(nn.Module, SupportsMultiModal):
         )
     
     def _process_audio_input(self, audio_input: KimiAudioInputs) -> torch.Tensor:
-        """
-        Process audio input through Kimi-Audio's pipeline.
-        
-        This implements the core audio processing logic from Kimi-Audio:
-        1. Process through Whisper encoder
-        2. Apply VQ adaptor projection
-        3. Handle continuous masking
-        """
         whisper_input_feature = audio_input["whisper_input_feature"]
         is_continuous_mask = audio_input["is_continuous_mask"]
         
         # Step 1: Process through Kimi-Audio's Whisper encoder
         # Input: raw audio features
         # Output: reshaped features (B, T//4, D*4)
-        whisper_features = self.whisper_adapter(whisper_input_feature)
-        
-        # Step 2: Apply VQ adaptor projection
-        # Convert from whisper feature space to text embedding space
-        # Input shape: (B, T, whisper_dim) -> (T, B, whisper_dim) for VQAdaptor
-        whisper_features_transposed = whisper_features.transpose(0, 1)
-        projected_features = self.vq_adaptor(whisper_features_transposed)
-        
-        # Step 3: Transpose back to (B, T, hidden_dim)
-        projected_features = projected_features.transpose(0, 1)
-        
-        # Step 4: Apply continuous mask
-        if is_continuous_mask is not None:
-            # Ensure mask has the same sequence length as features
-            if is_continuous_mask.shape[1] != projected_features.shape[1]:
-                # Adjust mask length to match processed features
-                mask_len = projected_features.shape[1]
-                is_continuous_mask = is_continuous_mask[:, :mask_len]
-            
-            # Apply mask: features * mask
-            projected_features = projected_features * is_continuous_mask.unsqueeze(-1)
-        
-        # Step 5: Split into individual audio segments
-        # For now, return as single tensor - in real implementation,
-        # you'd split based on media begin/end tokens
-        return [projected_features]
+        continuous_feature = self.audio_tower.tokenize_waveform(whisper_input_feature)
+        continuous_feature = continuous_feature.reshape(
+            continuous_feature.shape[0],
+            int(continuous_feature.shape[1] // 4),
+            continuous_feature.shape[2] * 4,
+        )
+        return continuous_feature
     
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
