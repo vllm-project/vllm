@@ -80,7 +80,7 @@ class Attention(nn.Module):
         return x
 
 
-@support_torch_compile
+@support_torch_compile(no_weak_ref_output=True)
 class CompiledAttention(nn.Module):
     def __init__(
         self,
@@ -144,8 +144,10 @@ class SimpleModelWithTwoGraphs(ParentModel):
         self.hidden_states[:bsz].copy_(x)
         x = self.attn_one(self.hidden_states[:bsz])
         self.hidden_states[:bsz].copy_(x)
-        x = self.attn_two(self.hidden_states[:bsz])
-        return x
+        y = self.attn_two(self.hidden_states[:bsz])
+        # Use value x in the final output to test that value of x
+        # is not overwritten by call to self.attn_two when using cudagraph
+        return x + y
 
 
 @torch.inference_mode

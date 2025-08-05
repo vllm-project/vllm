@@ -386,6 +386,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         module: torch.fx.GraphModule,
         compile_submod_names: list[str],
         vllm_config: VllmConfig,
+        no_weak_ref_output: bool,
         vllm_backend: "VllmBackend",
     ):
         super().__init__(module)
@@ -398,6 +399,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         self.vllm_backend = vllm_backend
         # When True, it annoyingly dumps the torch.fx.Graph on errors.
         self.extra_traceback = False
+        self.no_weak_ref_output = no_weak_ref_output
 
     def run(self, *args):
         fake_args = [
@@ -462,6 +464,15 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                     current_platform.get_static_graph_wrapper_cls()
                 )
 
+                # By default, convert output of last graph in a compilation unit
+                # to a weakref to save some memory. However, if there are >1
+                # submodules compiled inside the model, last graph outputs from
+                # non-last submodule should not be converted to a weakref as it
+                # may result in memory being overwritten by subsequent graph
+                # replays. In these cases, no_weak_ref_output can be set to True
+                weak_ref_output = (piecewise_backend.is_last_graph
+                                   and not self.no_weak_ref_output)
+
                 # Always assign PIECEWISE runtime mode to the
                 # CUDAGraphWrapper for piecewise_backend, to distinguish
                 # it from the FULL cudagraph runtime mode, no matter it
@@ -473,7 +484,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                     cudagraph_options=CUDAGraphOptions(
                         debug_log_enable=piecewise_backend.is_first_graph,
                         gc_disable=not piecewise_backend.is_first_graph,
-                        weak_ref_output=piecewise_backend.is_last_graph,
+                        weak_ref_output=weak_ref_output,
                     ),
                 )
             else:
@@ -534,6 +545,7 @@ class VllmBackend:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        no_weak_ref_output: bool = False,
         prefix: str = "",
     ):
         # if the model is initialized with a non-empty prefix,
@@ -556,6 +568,8 @@ class VllmBackend:
         self.compiler_manager: CompilerManager = CompilerManager(
             self.compilation_config
         )
+
+        self.no_weak_ref_output = no_weak_ref_output
 
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
@@ -742,7 +756,11 @@ class VllmBackend:
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
         PiecewiseCompileInterpreter(
-            self.split_gm, submod_names_to_compile, self.vllm_config, self
+            self.split_gm, 
+            submod_names_to_compile,
+            self.vllm_config, 
+            self.no_weak_ref_output,
+            self
         ).run(*example_inputs)
 
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")

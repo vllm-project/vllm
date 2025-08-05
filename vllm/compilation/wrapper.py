@@ -85,16 +85,18 @@ class TorchCompileWithNoGuardsWrapper:
     since we drop all guards.
     """
 
-    def __init__(self):
+    def __init__(self, no_weak_ref_output: bool = False):
         self.compiled = False
-
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
         mode = vllm_config.compilation_config.mode
         if mode is None:
             raise RuntimeError("Compilation mode cannot be NO_COMPILATION")
 
-        backend = vllm_config.compilation_config.init_backend(vllm_config)
+        backend = vllm_config.compilation_config.init_backend(
+            vllm_config,
+            no_weak_ref_output
+        )
         options = {}
 
         if isinstance(backend, str) and backend == "inductor":
