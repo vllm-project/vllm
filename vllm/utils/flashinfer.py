@@ -11,7 +11,7 @@ import functools
 import importlib
 import importlib.util
 import os
-from typing import Any, Callable, NoReturn, Optional
+from typing import Any, Callable, NoReturn
 
 import requests
 
@@ -147,22 +147,41 @@ def has_nvidia_artifactory() -> bool:
         return False
 
 
+def support_trtllm_attention(
+    num_qo_heads: int,
+    num_kv_heads: int,
+) -> bool:
+    """
+    Return ``True`` if the attention satisfies the minimum requirement
+    of TRT-LLM kernel
+    """
+    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
+    # and check if the dimensions are supported
+    return (current_platform.is_device_capability(100)
+            and has_nvidia_artifactory() and num_qo_heads % num_kv_heads == 0)
+
+
 def use_trtllm_attention(
+    num_qo_heads: int,
+    num_kv_heads: int,
     num_tokens: int,
     max_seq_len: int,
     kv_cache_dtype: str,
-    num_qo_heads: Optional[int],
-    num_kv_heads: Optional[int],
-    attn_head_size: Optional[int],
+    is_prefill: bool,
+    fused_quant: bool = False,
 ) -> bool:
-    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
-    if not (current_platform.is_device_capability(100)
-            and has_nvidia_artifactory()):
+    """
+    Return ``True`` if TRTLLM attention is usable
+    """
+    if not support_trtllm_attention(num_qo_heads, num_kv_heads):
         return False
 
-    # Check if the dimensions are supported by TRTLLM decode attention
-    if (attn_head_size is None or num_qo_heads is None or num_kv_heads is None
-            or num_qo_heads % num_kv_heads != 0):
+    if fused_quant:
+        logger.info_once("Attn+Quant fusion applied, using TRTLLM attention.")
+        return True
+
+    # prefill kernel does not support fp8 kv cache without quant fusion
+    if is_prefill and kv_cache_dtype.startswith("fp8"):
         return False
 
     env_value = envs.VLLM_USE_TRTLLM_ATTENTION
@@ -196,5 +215,6 @@ __all__ = [
     "has_flashinfer_moe",
     "has_flashinfer_cutlass_fused_moe",
     "has_nvidia_artifactory",
+    "support_trtllm_attention",
     "use_trtllm_attention",
 ]

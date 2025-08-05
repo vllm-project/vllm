@@ -128,8 +128,10 @@ class Attention(nn.Module):
         self._q_scale = torch.tensor(1.0, dtype=torch.float32)
         self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
 
-        # We also keep the float32 versions of k/v_scale for attention
-        # backends that don't support tensors (Flashinfer)
+        # We also keep q/k/v_scale on host (cpu) memory for attention
+        # backends that require the scales to be on host instead of on device.
+        # e.g. Flashinfer
+        self._q_scale_float = 1.0
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
 
@@ -191,6 +193,15 @@ class Attention(nn.Module):
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
         self.attn_type = attn_type
+
+        # Whether the Attn+Quant fusion is enabled.
+        self.enabled_fusion = compilation_config.pass_config.enable_attn_fusion
+        # True indicates that the Attention layer has been fused with
+        # a Quant op after it.
+        self.fused_quant = False
+        # The output scale on host memory. This should be the input scale of
+        # the Linear layer after this attention layer.
+        self._o_scale_float: Optional[float] = None
 
         if kv_sharing_target_layer_name is not None:
             validate_kv_sharing_target(
@@ -270,7 +281,13 @@ class Attention(nn.Module):
                                   output=output)
             else:
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name)
+                    query,
+                    key,
+                    value,
+                    output,
+                    self.layer_name,
+                    query_scale=(self._q_scale
+                                 if self.enabled_fusion else None))
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
@@ -289,6 +306,7 @@ class Attention(nn.Module):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
         self._k_scale.copy_(torch.abs(key).max() / self.k_range)
         self._v_scale.copy_(torch.abs(value).max() / self.v_range)
+        self._q_scale_float = self._q_scale.item()
         self._k_scale_float = self._k_scale.item()
         self._v_scale_float = self._v_scale.item()
         # We only calculate the scales once
@@ -476,6 +494,7 @@ def unified_attention_with_output(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    query_scale: Optional[torch.Tensor] = None,
     output_scale: Optional[torch.Tensor] = None,
 ) -> None:
     wait_for_kv_layer_from_connector(layer_name)
@@ -503,6 +522,7 @@ def unified_attention_with_output_fake(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    query_scale: Optional[torch.Tensor] = None,
     output_scale: Optional[torch.Tensor] = None,
 ) -> None:
     return
