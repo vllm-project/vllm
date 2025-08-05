@@ -139,12 +139,13 @@ def run_multi_api_server(args: argparse.Namespace):
     assert num_api_servers > 0
 
     orig_disable_mm_preprocessor_cache = args.disable_mm_preprocessor_cache
-
+    orig_disable_log_stats = args.disable_log_stats
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
 
         # Not compatible with API server scale-out
         args.disable_mm_preprocessor_cache = True
+        args.disable_log_stats = True
 
     listen_address, sock = setup_server(args)
 
@@ -166,6 +167,10 @@ def run_multi_api_server(args: argparse.Namespace):
             logger.warning(
                 "Multi-modal preprocessor cache is not compatible "
                 "with api_server_count > 1, so the cache will be disabled.")
+        if not orig_disable_log_stats:
+            logger.warning(
+                "Log stats is not compatible with api_server_count > 1, "
+                "so it will be disabled.")
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats
