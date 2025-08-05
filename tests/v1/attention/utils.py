@@ -128,6 +128,8 @@ def get_attention_backend(backend_name: _Backend):
         "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
         _Backend.TREE_ATTN:
         "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",
+        _Backend.XFORMERS_VLLM_V1:
+        "vllm.v1.attention.backends.xformers.XFormersAttentionBackend",
     }
 
     if backend_name not in backend_map:
