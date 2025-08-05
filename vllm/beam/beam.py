@@ -28,7 +28,7 @@ class BeamScorer:
         heads = [response.additional_heads[0] for response in responses]
         heads_tensor = torch.tensor(heads, dtype=torch.float)
         if len(heads_tensor) > 0:
-            penalties = self.penalty_computer.compute(heads_tensor, debug_info)
+            penalties = self.penalty_computer.compute(logit_GC=heads_tensor, debug_infos_G=debug_info)
             scores -= penalties
 
             ranking_scores = self.ranking_computer.compute(
