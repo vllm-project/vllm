@@ -139,8 +139,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                    trust_remote_code=True),
     "AquilaForCausalLM": _HfExamplesInfo("BAAI/AquilaChat2-7B",
                                          trust_remote_code=True),
-    "ArceeForCausalLM": _HfExamplesInfo("arcee-ai/AFM-4.5B-Base",
-                                        is_available_online=False),
+    "ArceeForCausalLM": _HfExamplesInfo("arcee-ai/AFM-4.5B-Base"),
     "ArcticForCausalLM": _HfExamplesInfo("Snowflake/snowflake-arctic-instruct",
                                          trust_remote_code=True),
     "BaiChuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan-7B",
@@ -387,7 +386,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                         trust_remote_code=True,
                                         hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
     "Glm4vForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.1V-9B-Thinking"),  # noqa: E501
-    "Glm4v_moeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V-Air",
+    "Glm4v_moeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V",
                                           is_available_online=False),   # noqa: E501
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m",
                                       trust_remote_code=True,
