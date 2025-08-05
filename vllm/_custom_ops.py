@@ -748,15 +748,15 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
     assert bias is None or bias.numel(
     ) == b.shape[1] and bias.dtype == out_dtype
-    assert azp is None or azp.numel() == a.shape[0]
 
     # Massage the input to be 2D
     target_shape = (*a.shape[:-1], b.shape[1])
     a = a.view(-1, a.shape[-1])
-    m = a.shape[0]
-    n = b.shape[1]
-    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+    assert azp is None or azp.numel() == a.shape[0]
 
+    out = torch.empty((a.shape[0], b.shape[1]),
+                      dtype=out_dtype,
+                      device=a.device)
     torch.ops._C.cutlass_scaled_mm_azp(out, a, b, scale_a, scale_b, azp_adj,
                                        azp, bias)
     return out.view(*target_shape)
