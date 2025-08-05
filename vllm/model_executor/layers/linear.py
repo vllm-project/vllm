@@ -7,6 +7,7 @@ from typing import Any, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import envs
@@ -224,6 +225,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+
+    def embedding(self, layer: torch.nn.Module,
+                  input_: torch.Tensor) -> torch.Tensor:
+        return F.embedding(input_, layer.weight)
 
 
 class LinearBase(torch.nn.Module):
