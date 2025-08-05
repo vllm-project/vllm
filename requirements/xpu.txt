@@ -11,6 +11,14 @@ jinja2>=3.1.6
 datasets # for benchmark scripts
 numba == 0.60.0 # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
 
+torch==2.7.0+xpu
+torchaudio
+torchvision
+pytorch-triton-xpu
+--extra-index-url=https://download.pytorch.org/whl/xpu
 
+# Please refer xpu doc, we need manually install intel-extension-for-pytorch 2.6.10+xpu due to there are some conflict dependencies with torch 2.6.0+xpu
 # FIXME: This will be fix in ipex 2.7. just leave this here for awareness.
+intel-extension-for-pytorch==2.7.10+xpu
 oneccl_bind_pt==2.7.0+xpu
+--extra-index-url=https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
