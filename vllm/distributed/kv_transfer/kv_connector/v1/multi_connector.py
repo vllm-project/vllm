@@ -52,7 +52,7 @@ class MultiConnector(KVConnectorBase_V1):
             temp_config.kv_transfer_config = KVTransferConfig(
                 **ktc, engine_id=engine_id)
             self._connectors.append(
-                KVConnectorFactory.create_connector_v1(temp_config, role))
+                KVConnectorFactory.create_connector(temp_config, role))
 
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
@@ -223,9 +223,9 @@ class MultiConnector(KVConnectorBase_V1):
         for ktc in ktcs:
             kv_transfer_config = KVTransferConfig(**ktc)
             temp_vllm_config.kv_transfer_config = kv_transfer_config
-            required_kvcache_layout = KVConnectorFactory.get_connector_class(
-                kv_transfer_config).get_required_kvcache_layout(
-                    temp_vllm_config)
+            required_kvcache_layout = (
+                KVConnectorBase_V1.get_required_kvcache_layout(
+                    temp_vllm_config))
             if required_kvcache_layout is not None:
                 layouts.add(required_kvcache_layout)
 
