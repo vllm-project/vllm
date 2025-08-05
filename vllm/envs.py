@@ -970,8 +970,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Cutstom routing strategies can be registered by
     # RoutingSimulator.register_strategy()
     # Note: custom strategies may not produce correct model outputs
-    "VLLM_MOE_ROUTING_STRATEGY":
-    lambda: os.environ.get("VLLM_MOE_ROUTING_STRATEGY", "").lower(),
+    "VLLM_MOE_ROUTING_SIMULATION_STRATEGY":
+    lambda: os.environ.get("VLLM_MOE_ROUTING_SIMULATION_STRATEGY", "").lower(),
 
     # Regex timeout for use by the vLLM tool parsing plugins.
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS":

@@ -89,11 +89,11 @@ def test_routing_strategy_integration(monkeypatch, device):
 
     for strategy in strategies:
         # Set environment variable
-        monkeypatch.setenv("VLLM_MOE_ROUTING_STRATEGY", strategy)
+        env_name = "VLLM_MOE_ROUTING_SIMULATION_STRATEGY"
+        monkeypatch.setenv(env_name, strategy)
 
         # Force reload of environment variable
-        envs.environment_variables[
-            "VLLM_MOE_ROUTING_STRATEGY"] = lambda s=strategy: s
+        envs.environment_variables[env_name] = lambda s=strategy: s
 
         # Test the select_experts method
         topk_weights, topk_ids = FusedMoE.select_experts(

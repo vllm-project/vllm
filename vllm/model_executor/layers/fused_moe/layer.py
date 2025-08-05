@@ -1278,7 +1278,7 @@ class FusedMoE(torch.nn.Module):
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 
         # Check if we should use a routing simulation strategy
-        routing_strategy = envs.VLLM_MOE_ROUTING_STRATEGY
+        routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
         if routing_strategy != "":
             return RoutingSimulator.simulate_routing(
                 hidden_states=hidden_states,
