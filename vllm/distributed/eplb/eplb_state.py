@@ -158,15 +158,15 @@ class EplbState:
 
     buffer_lock: threading.Lock = threading.Lock()
 
-    expert_buffer :list[torch.Tensor] = None
+    expert_buffer: Optional[list[torch.Tensor]] = None
 
-    rebalanced : bool=False
+    rebalanced: bool = False  
 
-    is_unchanged: list[bool] = None
+    is_unchanged: Optional[list[bool]] = None
 
-    is_received_locally: list[bool] = None
+    is_received_locally: Optional[list[bool]] = None
 
-    experts_recv_loc: dict[int, int] = None
+    experts_recv_loc: Optional[dict[int, int]] = None
 
     is_async: bool = False
 
@@ -319,6 +319,9 @@ class EplbState:
             physical_to_logical_map,
             logical_to_physical_map,
             logical_replica_count,
+            new_physical_to_logical_map,
+            new_logical_to_physical_map,
+            new_logical_replica_count,
             expert_load_pass,
             expert_load_window,
             is_async=is_async,
@@ -525,7 +528,7 @@ class EplbState:
             num_replicas,
             num_groups,
             num_nodes,
-            num_devices,
+            num_gpus,
         ))
         if not self.is_async:
             rearrange_expert_weights_inplace(
@@ -607,7 +610,7 @@ class EplbState:
         with self.buffer_lock:
             move_from_buffer(
                 expert_weights=model.expert_weights[self.layer],
-                expert_weights_buffer=self.buffer,
+                expert_weights_buffer=self.expert_buffer,
                 is_unchanged=self.is_unchanged,
                 is_received_locally=self.is_received_locally, 
                 experts_recv_loc=self.experts_recv_loc, 

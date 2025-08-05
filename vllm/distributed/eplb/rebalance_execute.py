@@ -230,11 +230,11 @@ def move_to_buffer(
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
             req.wait()
-    # wait for the communication to finish            
-    cuda_stream.synchronize()
-    with torch.cuda.stream(cuda_stream):
-        barrier(group=ep_group)
-
+    # wait for the communication to finish   
+    if cuda_stream is not None:         
+        cuda_stream.synchronize()
+        with torch.cuda.stream(cuda_stream):
+            barrier(group=ep_group)
     return is_unchanged, is_received_locally, experts_recv_loc
 
 def move_from_buffer(
