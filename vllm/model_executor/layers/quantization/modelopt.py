@@ -286,6 +286,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             cutlass_fp8_supported)
         self.cutlass_fp8_supported = cutlass_fp8_supported()
         self.flashinfer_moe_enabled = False
+        self.flashinfer_cutlass = True
         if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
             logger.info_once(
                 "Using FlashInfer MoE FP8 kernels for ModelOptFp8MoEMethod.")
@@ -495,6 +496,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
         )
+        if self.flashinfer_cutlass:
+            return torch.ops.flashinfer_fused_moe_cutlass_fp8(
+                topk_ids, topk_weights, x, layer.w13_input_scale,
+                layer.w13_weight, layer.w13_weight_scale, layer.w2_input_scale,
+                layer.w2_weight, layer.w2_weight_scale)
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_experts)
         return fused_experts(
