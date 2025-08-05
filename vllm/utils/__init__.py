@@ -3340,3 +3340,9 @@ def decorate_logs(process_name: Optional[str] = None) -> None:
     pid = os.getpid()
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
+
+
+def has_triton_kernels() -> bool:
+    """Whether the optional `triton_kernels` package is available."""
+
+    return _has_module("triton_kernels")
