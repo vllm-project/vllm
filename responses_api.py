@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
+<<<<<<< HEAD
 vllm serve /data/woosuk/os-mini-weights/pytorch-rc-20b --enforce-eager
+=======
+vllm serve /data/woosuk/os-mini-weights/pytorch-rc-20b \
+    --tokenizer /data/xmo/os-mini/models/hf-converted --enforce-eager
+>>>>>>> 4a52d33d8 (streaming support)
 """
 import argparse
 import json
@@ -230,16 +235,48 @@ def test_stateful_multi_turn():
 
 
 def test_streaming():
-    response = client.responses.create(
-        model=MODEL,
-        input="What is 13 * 24? Explain your answer.",
-        stream=True,
-    )
+    promts = [
+        "tell me a story about a cat in 20 words",
+        "What is 13 * 24? Use python to calculate the result.",
+        "When did Jensen found NVIDIA? Search it and answer the year only."
+    ]
+    for prompt in promts:
+        print(f"\n{prompt}\n")
+        response = client.responses.create(
+            model=MODEL,
+            input=prompt,
+            reasoning={"effort": "low"},
+            tools=[{
+                "type": "web_search_preview"
+            }, {
+                "type": "code_interpreter",
+                "container": {
+                    "type": "auto"
+                }
+            }],
+            stream=True,
+        )
 
-    for event in response:
-        if "text.delta" in event.type:
-            print(event.delta, end="", flush=True)
-    print()
+        events = []
+        current_event_mode = None
+
+        for event in response:
+            if current_event_mode != event.type:
+                current_event_mode = event.type
+                print(f"\n[{event.type}] ", end="", flush=True)
+
+            if "text.delta" in event.type:
+                print(event.delta, end="", flush=True)
+            elif "reasoning_text.delta" in event.type:
+                print(f"{event.delta}", end="", flush=True)
+            elif "response.code_interpreter_call_code.done" in event.type:
+                print(f"Code: {event.code}", end="", flush=True)
+            elif ("response.output_item.added" in event.type
+                  and event.item.type == "web_search_call"):
+                print(f"Web search: {event.item.action}", end="", flush=True)
+            events.append(event)
+
+        print("\n--------------------------------\n")
 
 
 def test_web_search():
@@ -600,8 +637,8 @@ if __name__ == "__main__":
     test_stateful_multi_turn()
 
     # 3. Streaming tests:
-    # print("===test_streaming:")
-    # test_streaming()
+    print("===test_streaming:")
+    test_streaming()
 
     # 4. Tool tests:
     print("===test_web_search:")

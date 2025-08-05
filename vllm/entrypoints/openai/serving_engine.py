@@ -990,6 +990,9 @@ class OpenAIServing:
             tool_output = await tool.get_result(context)
             context.append_output(tool_output)
 
+            # TODO: uncomment this and enable tool output streaming
+            # yield context
+
             # Create inputs for the next turn.
             # Render the next prompt token ids.
             prompt_token_ids = context.render_for_completion()
