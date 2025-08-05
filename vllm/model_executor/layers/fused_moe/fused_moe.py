@@ -1262,6 +1262,71 @@ direct_register_custom_op(
 )
 
 
+def flashinfer_fused_moe_cutlass_fp8(
+    token_selected_experts: torch.Tensor,
+    token_final_scales: Optional[torch.Tensor],
+    hidden_states: torch.Tensor,
+    input_scale: torch.Tensor,
+    gemm1_weights: torch.Tensor,
+    gemm1_weights_scale: torch.Tensor,
+    activation_scale: torch.Tensor,
+    gemm2_weights: torch.Tensor,
+    gemm2_weights_scale: torch.Tensor,
+) -> torch.Tensor:
+
+    quant_hidden_states, input_scale = moe_kernel_quantize_input(
+        hidden_states,
+        input_scale,
+        quant_dtype=torch.float8_e4m3fn,
+        per_act_token_quant=False)
+
+    from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
+    return flashinfer_cutlass_fused_moe(
+        input=quant_hidden_states,
+        token_selected_experts=token_selected_experts,
+        token_final_scales=token_final_scales,
+        fc1_expert_weights=gemm1_weights,
+        fc2_expert_weights=gemm2_weights,
+        output_dtype=hidden_states.dtype,
+        quant_scales=[
+            gemm1_weights_scale, activation_scale, gemm2_weights_scale,
+            input_scale
+        ],
+    )
+
+
+def flashinfer_fused_moe_cutlass_fp8_fake(
+        routing_logits: torch.Tensor,
+        routing_bias: torch.Tensor,
+        hidden_states: torch.Tensor,
+        gemm1_weights: torch.Tensor,
+        output1_scales_scalar: torch.Tensor,
+        output1_scales_gate_scalar: torch.Tensor,
+        gemm2_weights: torch.Tensor,
+        output2_scales_scalar: torch.Tensor,
+        num_experts: int,
+        top_k: int,
+        num_expert_group: int,
+        topk_group: int,
+        intermediate_size: int,
+        local_expert_offset: int,
+        local_num_experts: int,
+        routed_scaling_factor: float = 1.0,
+        use_routing_scales_on_input: bool = False,
+        tile_tokens_dim: int = 8,
+        routing_method_type: int = 0) -> torch.Tensor:
+    pass
+
+
+direct_register_custom_op(
+    op_name="flashinfer_fused_moe_cutlass_fp8",
+    op_func=flashinfer_fused_moe_cutlass_fp8,
+    mutates_args=["hidden_states"],
+    fake_impl=flashinfer_fused_moe_cutlass_fp8_fake,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
+)
+
+
 def outplace_fused_experts(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
