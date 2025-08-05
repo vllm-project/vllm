@@ -1,7 +1,4 @@
----
-title: Multimodal Inputs
----
-[](){ #multimodal-inputs }
+# Multimodal Inputs
 
 This page teaches you how to pass multi-modal inputs to [multi-modal models][supported-mm-models] in vLLM.
 
@@ -20,7 +17,7 @@ To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
 
 You can pass a single image to the `'image'` field of the multi-modal dictionary, as shown in the following examples:
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM
@@ -68,7 +65,7 @@ Full example: <gh-file:examples/offline_inference/vision_language.py>
 
 To substitute multiple images inside the same text prompt, you can pass in a list of images instead:
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM
@@ -101,9 +98,52 @@ To substitute multiple images inside the same text prompt, you can pass in a lis
 
 Full example: <gh-file:examples/offline_inference/vision_language_multi_image.py>
 
+If using the [LLM.chat](../models/generative_models.md#llmchat) method, you can pass images directly in the message content using various formats: image URLs, PIL Image objects, or pre-computed embeddings:
+
+```python
+from vllm import LLM
+from vllm.assets.image import ImageAsset
+
+llm = LLM(model="llava-hf/llava-1.5-7b-hf")
+image_url = "https://picsum.photos/id/32/512/512"
+image_pil = ImageAsset('cherry_blossom').pil_image
+image_embeds = torch.load(...)
+
+conversation = [
+    {"role": "system", "content": "You are a helpful assistant"},
+    {"role": "user", "content": "Hello"},
+    {"role": "assistant", "content": "Hello! How can I assist you today?"},
+    {
+        "role": "user",
+        "content": [{
+            "type": "image_url",
+            "image_url": {
+                "url": image_url
+            }
+        },{
+            "type": "image_pil",
+            "image_pil": image_pil
+        }, {
+            "type": "image_embeds",
+            "image_embeds": image_embeds
+        }, {
+            "type": "text",
+            "text": "What's in these images?"
+        }],
+    },
+]
+
+# Perform inference and log output.
+outputs = llm.chat(conversation)
+
+for o in outputs:
+    generated_text = o.outputs[0].text
+    print(generated_text)
+```
+
 Multi-image input can be extended to perform video captioning. We show this with [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct) as it supports videos:
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM
@@ -132,10 +172,104 @@ Multi-image input can be extended to perform video captioning. We show this with
         print(generated_text)
     ```
 
+#### Custom RGBA Background Color
+
+When loading RGBA images (images with transparency), vLLM converts them to RGB format. By default, transparent pixels are replaced with white background. You can customize this background color using the `rgba_background_color` parameter in `media_io_kwargs`.
+
+??? code
+
+    ```python
+    from vllm import LLM
+    
+    # Default white background (no configuration needed)
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
+    
+    # Custom black background for dark theme
+    llm = LLM(
+        model="llava-hf/llava-1.5-7b-hf",
+        media_io_kwargs={"image": {"rgba_background_color": [0, 0, 0]}}
+    )
+    
+    # Custom brand color background (e.g., blue)
+    llm = LLM(
+        model="llava-hf/llava-1.5-7b-hf", 
+        media_io_kwargs={"image": {"rgba_background_color": [0, 0, 255]}}
+    )
+    ```
+
+!!! note
+    - The `rgba_background_color` accepts RGB values as a list `[R, G, B]` or tuple `(R, G, B)` where each value is 0-255
+    - This setting only affects RGBA images with transparency; RGB images are unchanged
+    - If not specified, the default white background `(255, 255, 255)` is used for backward compatibility
+
 ### Video Inputs
 
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
 instead of using multi-image input.
+
+Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown in this example using Qwen2.5-VL:
+
+??? code
+
+    ```python
+    from transformers import AutoProcessor
+    from vllm import LLM, SamplingParams
+    from qwen_vl_utils import process_vision_info
+
+    model_path = "Qwen/Qwen2.5-VL-3B-Instruct/"
+    video_path = "https://content.pexels.com/videos/free-videos.mp4"
+
+    llm = LLM(
+        model=model_path,
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+        limit_mm_per_prompt={"video": 1},
+    )
+
+    sampling_params = SamplingParams(
+        max_tokens=1024,
+    )
+
+    video_messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": [
+                {"type": "text", "text": "describe this video."},
+                {
+                    "type": "video",
+                    "video": video_path,
+                    "total_pixels": 20480 * 28 * 28,
+                    "min_pixels": 16 * 28 * 28
+                }
+            ]
+        },
+    ]
+
+    messages = video_messages
+    processor = AutoProcessor.from_pretrained(model_path)
+    prompt = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    image_inputs, video_inputs = process_vision_info(messages)
+    mm_data = {}
+    if video_inputs is not None:
+        mm_data["video"] = video_inputs
+
+    llm_inputs = {
+        "prompt": prompt,
+        "multi_modal_data": mm_data,
+    }
+
+    outputs = llm.generate([llm_inputs], sampling_params=sampling_params)
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+    ```
+
+    !!! note
+        'process_vision_info' is only applicable to Qwen2.5-VL and similar models.
 
 Full example: <gh-file:examples/offline_inference/vision_language.py>
 
@@ -150,7 +284,7 @@ Full example: <gh-file:examples/offline_inference/audio_language.py>
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
 pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM
@@ -177,7 +311,7 @@ pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the cor
 
 For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embeddings:
 
-??? Code
+??? code
 
     ```python
     # Construct the prompt based on your model
@@ -228,7 +362,7 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
     If no default chat template is available, we will first look for a built-in fallback in <gh-file:vllm/transformers_utils/chat_templates/registry.py>.
     If no fallback is available, an error is raised and you have to provide the chat template manually via the `--chat-template` argument.
 
-    For certain models, we provide alternative chat templates inside <gh-dir:vllm/examples>.
+    For certain models, we provide alternative chat templates inside <gh-dir:examples>.
     For example, VLM2Vec uses <gh-file:examples/template_vlm2vec.jinja> which is different from the default one for Phi-3-Vision.
 
 ### Image Inputs
@@ -239,13 +373,13 @@ Here is a simple example using Phi-3.5-Vision.
 First, launch the OpenAI-compatible server:
 
 ```bash
-vllm serve microsoft/Phi-3.5-vision-instruct --task generate \
+vllm serve microsoft/Phi-3.5-vision-instruct --runner generate \
   --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt '{"image":2}'
 ```
 
 Then, you can use the OpenAI client as follows:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -318,12 +452,12 @@ Instead of `image_url`, you can pass a video file via `video_url`. Here is a sim
 First, launch the OpenAI-compatible server:
 
 ```bash
-vllm serve llava-hf/llava-onevision-qwen2-0.5b-ov-hf --task generate --max-model-len 8192
+vllm serve llava-hf/llava-onevision-qwen2-0.5b-ov-hf --runner generate --max-model-len 8192
 ```
 
 Then, you can use the OpenAI client as follows:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -374,6 +508,20 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
 
+#### Custom RGBA Background Color
+
+To use a custom background color for RGBA images, pass the `rgba_background_color` parameter via `--media-io-kwargs`:
+
+```bash
+# Example: Black background for dark theme
+vllm serve llava-hf/llava-1.5-7b-hf \
+  --media-io-kwargs '{"image": {"rgba_background_color": [0, 0, 0]}}'
+
+# Example: Custom gray background
+vllm serve llava-hf/llava-1.5-7b-hf \
+  --media-io-kwargs '{"image": {"rgba_background_color": [128, 128, 128]}}'
+```
+
 ### Audio Inputs
 
 Audio input is supported according to [OpenAI Audio API](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in).
@@ -387,7 +535,7 @@ vllm serve fixie-ai/ultravox-v0_5-llama-3_2-1b
 
 Then, you can use the OpenAI client as follows:
 
-??? Code
+??? code
 
     ```python
     import base64
@@ -443,7 +591,7 @@ Then, you can use the OpenAI client as follows:
 
 Alternatively, you can pass `audio_url`, which is the audio counterpart of `image_url` for image input:
 
-??? Code
+??? code
 
     ```python
     chat_completion_from_url = client.chat.completions.create(
@@ -484,11 +632,13 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
 pass a tensor of shape to the corresponding field of the multi-modal dictionary.
+
 #### Image Embedding Inputs
+
 For image embeddings, you can pass the base64-encoded tensor to the `image_embeds` field.
 The following example demonstrates how to pass image embeddings to the OpenAI server:
 
-??? Code
+??? code
 
     ```python
     image_embedding = torch.load(...)

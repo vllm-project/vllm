@@ -533,7 +533,7 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> Llama4Processor:
         return self.ctx.get_hf_processor(Llama4Processor,
-                                         use_fast=True,
+                                         use_fast=kwargs.pop("use_fast", True),
                                          **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -574,6 +574,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         tokenizer = self.info.get_tokenizer()
 
@@ -583,6 +584,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         processor = self.info.get_hf_processor(**mm_kwargs)
@@ -715,7 +717,15 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                      SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|image|>"
+
+        raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -893,32 +903,110 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
             qkv_weight = torch.cat(weight, dim=0)
             yield key, qkv_weight
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def _rename_weight_for_modelopt_checkpoint(self, name: str) -> str:
+        """Rename weights from ModelOpt llama4 fp8 checkpoints to vLLM
+        format."""
+        if name.startswith("model.") or name.startswith(
+                "language_model.model."):
+            renamed = name.replace("model.", "language_model.model.",
+                                   1) if name.startswith("model.") else name
+            # Handle expert scale parameters with flat naming
+            if "feed_forward.experts." in name and ("_input_scale" in name or
+                                                    "_weight_scale" in name):
+                # Map checkpoint naming to vLLM's expected naming
+                if "down_proj_input_scale" in renamed:
+                    return renamed.replace("down_proj_input_scale",
+                                           "w2_input_scale")
+                elif "down_proj_weight_scale" in renamed:
+                    return renamed.replace("down_proj_weight_scale",
+                                           "w2_weight_scale")
+                elif "gate_up_proj_input_scale" in renamed:
+                    return renamed.replace("gate_up_proj_input_scale",
+                                           "w13_input_scale")
+                elif "gate_up_proj_weight_scale" in renamed:
+                    return renamed.replace("gate_up_proj_weight_scale",
+                                           "w13_weight_scale")
+                return renamed
 
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
-            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
-            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        updated_params: set[str] = set()
+            # Handle attention scale parameters
+            elif "self_attn." in name and (".k_scale" in name
+                                           or ".v_scale" in name):
+                if ".k_proj.k_scale" in renamed:
+                    return renamed.replace(".k_proj.k_scale", ".attn.k_scale")
+                elif ".v_proj.v_scale" in renamed:
+                    return renamed.replace(".v_proj.v_scale", ".attn.v_scale")
+                return renamed
 
-        # language_model is an Llama4ForCausalLM instance. We load it's
-        # using llama4's load_weights routine.
-        language_model_weights, other_weights = self.separate_weights(
-            weights, prefix="language_model.")
-        loader = AutoWeightsLoader(self)
-        loaded_language_model_params = loader.load_weights(
-            language_model_weights)
-        assert loaded_language_model_params is not None
-        updated_params.update(loaded_language_model_params)
+            # Standard model.* to language_model.model.* renaming
+            return renamed
+
+        elif name.startswith("lm_head.weight"):
+            return name.replace("lm_head.weight",
+                                "language_model.lm_head.weight")
+
+        return name
+
+    def _separate_and_rename_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[str, torch.Tensor]]]:
+        """Rename weights and separate them into language_model and other
+        weights."""
+        language_model_weights = []
+        other_weights = []
+
+        for name, weight in weights:
+            renamed = self._rename_weight_for_modelopt_checkpoint(name)
+
+            if renamed.startswith("language_model."):
+                language_model_weights.append((renamed, weight))
+            else:
+                other_weights.append((renamed, weight))
+
+        return language_model_weights, other_weights
+
+    def _handle_expert_scale_broadcasting(
+            self, weights: list[tuple[str, torch.Tensor]], params_dict: dict
+    ) -> tuple[list[tuple[str, torch.Tensor]], set[str]]:
+        """Handle expert scale parameters that need broadcasting.
+
+        ModelOpt checkpoints use a single value tensor scalar for BMM style
+        experts, vLLM expects the scale to be broadcasted across all experts.
+        """
+        regular_weights = []
+        expert_scale_weights = []
+        updated_params = set()
+
+        for name, weight in weights:
+            # Check if this is an expert scale parameter that needs broadcasting
+            if ("feed_forward.experts." in name and "scale" in name
+                    and ".shared_expert" not in name):
+                if name in params_dict:
+                    param = params_dict[name]
+                    if (hasattr(param, 'data') and param.data.numel() > 1
+                            and weight.numel() == 1):
+                        # Broadcast single value to all experts
+                        param.data.fill_(weight.item())
+                        updated_params.add(name)
+                        continue
+
+                expert_scale_weights.append((name, weight))
+            else:
+                regular_weights.append((name, weight))
+
+        return regular_weights, expert_scale_weights, updated_params
+
+    def _load_other_weights(self, other_weights: Iterable[tuple[str,
+                                                                torch.Tensor]],
+                            params_dict: dict,
+                            stacked_params_mapping: list) -> set[str]:
+        """Load non-language-model weights with stacking support."""
+        updated_params = set()
 
         if self.use_data_parallel:
             other_weights = self._consolidate_qkv_weights(other_weights)
 
         for name, loaded_weight in other_weights:
+            # Try stacked parameter mapping first
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name or self.use_data_parallel:
                     continue
@@ -929,10 +1017,56 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                # Use regular weight loading
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-
                 weight_loader(param, loaded_weight)
                 updated_params.add(name)
+
+        return updated_params
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
+            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
+            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
+            # Shared expert gate_up_proj stacking
+            (".shared_expert.gate_up_proj", ".shared_expert.gate_proj", 0),
+            (".shared_expert.gate_up_proj", ".shared_expert.up_proj", 1),
+            # Feed forward gate_up_proj stacking (for non-MoE layers if any)
+            (".feed_forward.gate_up_proj", ".feed_forward.gate_proj", 0),
+            (".feed_forward.gate_up_proj", ".feed_forward.up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        updated_params: set[str] = set()
+
+        # Separate and rename weights
+        language_model_weights, other_weights = (
+            self._separate_and_rename_weights(weights))
+
+        # Handle expert scale parameters
+        regular_weights, expert_scale_weights, updated_params_from_experts = (
+            self._handle_expert_scale_broadcasting(language_model_weights,
+                                                   params_dict))
+        updated_params.update(updated_params_from_experts)
+
+        loader = AutoWeightsLoader(self)
+        loaded_language_model_params = loader.load_weights(regular_weights)
+        assert loaded_language_model_params is not None
+        updated_params.update(loaded_language_model_params)
+
+        if expert_scale_weights:
+            loaded_expert_scale_params = loader.load_weights(
+                expert_scale_weights)
+            if loaded_expert_scale_params:
+                updated_params.update(loaded_expert_scale_params)
+
+        updated_params.update(
+            self._load_other_weights(other_weights, params_dict,
+                                     stacked_params_mapping))
+
         return updated_params

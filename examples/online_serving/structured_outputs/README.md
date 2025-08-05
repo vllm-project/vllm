@@ -13,13 +13,15 @@ vllm serve Qwen/Qwen2.5-3B-Instruct
 To serve a reasoning model, you can use the following command:
 
 ```bash
-vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --reasoning-parser deepseek_r1
+vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B \
+    --reasoning-parser deepseek_r1
 ```
 
 If you want to run this script standalone with `uv`, you can use the following:
 
 ```bash
-uvx --from git+https://github.com/vllm-project/vllm#subdirectory=examples/online_serving/structured_outputs structured-output
+uvx --from git+https://github.com/vllm-project/vllm#subdirectory=examples/online_serving/structured_outputs \
+    structured-output
 ```
 
 See [feature docs](https://docs.vllm.ai/en/latest/features/structured_outputs.html) for more information.
@@ -44,7 +46,9 @@ uv run structured_outputs.py --stream
 Run certain constraints, for example `structural_tag` and `regex`, streaming:
 
 ```bash
-uv run structured_outputs.py --constraint structural_tag regex --stream
+uv run structured_outputs.py \
+    --constraint structural_tag regex \
+    --stream
 ```
 
 Run all constraints, with reasoning models and streaming:

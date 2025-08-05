@@ -18,11 +18,8 @@ EMBEDDING_MODELS = [
 ]
 
 RERANK_MODELS = [
-    RerankModelInfo(
-        "jinaai/jina-reranker-v2-base-multilingual",
-        architecture="XLMRobertaForSequenceClassification",
-        dtype="float32",
-    )
+    RerankModelInfo("jinaai/jina-reranker-v2-base-multilingual",
+                    architecture="XLMRobertaForSequenceClassification")
 ]
 
 
@@ -87,13 +84,13 @@ def test_matryoshka(
         hf_outputs = matryoshka_fy(hf_outputs, dimensions)
 
     with vllm_runner(model_info.name,
-                     task="embed",
+                     runner="pooling",
                      dtype=dtype,
                      max_model_len=None) as vllm_model:
-        assert vllm_model.model.llm_engine.model_config.is_matryoshka
+        assert vllm_model.llm.llm_engine.model_config.is_matryoshka
 
         matryoshka_dimensions = (
-            vllm_model.model.llm_engine.model_config.matryoshka_dimensions)
+            vllm_model.llm.llm_engine.model_config.matryoshka_dimensions)
         assert matryoshka_dimensions is not None
 
         if dimensions not in matryoshka_dimensions:

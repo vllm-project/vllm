@@ -1,6 +1,10 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/all.h>
 
+#ifndef USE_ROCM
+  #include "../per_token_group_quant_8bit.h"
+#endif
+
 #include <cmath>
 
 #include "../../dispatch_utils.h"
@@ -162,10 +166,11 @@ __global__ void dynamic_scaled_int8_quant_kernel(
 
   // calculate for absmax
   float thread_max = 0.f;
-  for (int i = tid; i < hidden_size; i += stride) {
-    const auto v = fabsf(static_cast<float>(row_in[i]));
-    thread_max = fmaxf(thread_max, v);
-  }
+  vectorize_read_with_alignment<16>(
+      row_in, hidden_size, tid, stride, [&] __device__(const scalar_t& src) {
+        const float v = fabsf(static_cast<float>(src));
+        thread_max = fmaxf(thread_max, v);
+      });
   using BlockReduce = cub::BlockReduce<float, 256>;
   __shared__ typename BlockReduce::TempStorage tmp;
   float block_max = BlockReduce(tmp).Reduce(thread_max, cub::Max{}, blockDim.x);
@@ -232,9 +237,10 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
 
   // 1. calculate min & max
   MinMax thread_mm;
-  for (int i = tid; i < hidden_size; i += stride) {
-    thread_mm += static_cast<float>(row_in[i]);
-  }
+  vectorize_read_with_alignment<16>(row_in, hidden_size, tid, stride,
+                                    [&] __device__(const scalar_t& src) {
+                                      thread_mm += static_cast<float>(src);
+                                    });
 
   using BlockReduce = cub::BlockReduce<MinMax, 256>;
   __shared__ typename BlockReduce::TempStorage tmp;
@@ -334,3 +340,13 @@ void dynamic_scaled_int8_quant(
         }
       });
 }
+
+#ifndef USE_ROCM
+void per_token_group_quant_int8(const torch::Tensor& input,
+                                torch::Tensor& output_q,
+                                torch::Tensor& output_s, int64_t group_size,
+                                double eps, double int8_min, double int8_max) {
+  per_token_group_quant_8bit(input, output_q, output_s, group_size, eps,
+                             int8_min, int8_max);
+}
+#endif

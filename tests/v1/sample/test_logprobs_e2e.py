@@ -13,9 +13,10 @@ EXPECTED_VALUE = 0.62
 
 # FIXME(rob): enable prefix caching once supported.
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
-MODEL_ARGS = f"pretrained={MODEL},enforce_eager=True,enable_prefix_caching=False"  # noqa: E501
+MODEL_ARGS = f"pretrained={MODEL},enforce_eager=True,enable_prefix_caching=False,gpu_memory_utilization=0.8"  # noqa: E501
 SERVER_ARGS = [
-    "--enforce_eager", "--no_enable_prefix_caching", "--disable-log-requests"
+    "--enforce_eager", "--no_enable_prefix_caching",
+    "--gpu-memory-utilization=0.8"
 ]
 NUM_CONCURRENT = 100
 

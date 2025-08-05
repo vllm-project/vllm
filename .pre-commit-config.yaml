@@ -21,7 +21,7 @@ repos:
   - id: ruff-format
     files: ^(.buildkite|benchmarks|examples)/.*
 - repo: https://github.com/crate-ci/typos
-  rev: v1.32.0
+  rev: v1.34.0
   hooks:
   - id: typos
 - repo: https://github.com/PyCQA/isort
@@ -35,12 +35,12 @@ repos:
     exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))|vllm/third_party/.*'
     types_or: [c++, cuda]
     args: [--style=file, --verbose]
-- repo: https://github.com/jackdewinter/pymarkdown
-  rev: v0.9.29
+- repo: https://github.com/igorshubovych/markdownlint-cli
+  rev: v0.45.0
   hooks:
-  - id: pymarkdown
+  - id: markdownlint
     exclude: '.*\.inc\.md'
-    args: [fix]
+    stages: [manual] # Only run in CI
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
@@ -160,10 +160,17 @@ repos:
     types: [python]
     pass_filenames: false
     additional_dependencies: [pathspec, regex]
+  - id: validate-config
+    name: Validate configuration has default values and that each field has a docstring
+    entry: python tools/validate_config.py
+    language: python
+    types: [python]
+    pass_filenames: true
+    files: vllm/config.py|tests/test_config.py|vllm/entrypoints/openai/cli_args.py
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
-    entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
+    entry: bash -c 'echo "To bypass all the pre-commit hooks, add --no-verify to git commit. To skip a specific hook, prefix the commit command with SKIP=<hook-id>."'
     language: system
     verbose: true
     pass_filenames: false

@@ -131,7 +131,7 @@ def test_rms_norm(
         torch.cuda.manual_seed(seed)
     torch.set_default_device(device)
 
-    if scale_ub is not None and quant_dtype != torch.float8_e4m3fn:
+    if scale_ub is not None and quant_dtype != FP8_DTYPE:
         # skip
         return
 

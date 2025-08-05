@@ -1113,8 +1113,6 @@ __global__ void Marlin(
     if constexpr (has_zp && !is_zp_float) {
       if (is_new_zp) {
         if constexpr (group_blocks == -1) is_first_matmul_in_slice = false;
-        FragB frag_zp_0;
-        FragB frag_zp_1;
         int zp_quant_0, zp_quant_1;
 
         if constexpr (w_type.size_bits() == 4) {

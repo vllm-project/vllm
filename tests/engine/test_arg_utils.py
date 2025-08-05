@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from argparse import ArgumentError, ArgumentTypeError
+from argparse import ArgumentError
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal, Optional, Union
 
 import pytest
 
 from vllm.config import CompilationConfig, config
 from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
                                    get_type, get_type_hints, is_not_builtin,
-                                   is_type, literal_to_kwargs, nullable_kvs,
-                                   optional_type, parse_type)
+                                   is_type, literal_to_kwargs, optional_type,
+                                   parse_type)
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -25,18 +25,10 @@ from vllm.utils import FlexibleArgumentParser
         "foo": 1,
         "bar": 2
     }),
-    (json.loads, "foo=1,bar=2", {
-        "foo": 1,
-        "bar": 2
-    }),
 ])
 def test_parse_type(type, value, expected):
     parse_type_func = parse_type(type)
-    context = nullcontext()
-    if value == "foo=1,bar=2":
-        context = pytest.warns(DeprecationWarning)
-    with context:
-        assert parse_type_func(value) == expected
+    assert parse_type_func(value) == expected
 
 
 def test_optional_type():
@@ -79,6 +71,10 @@ def test_get_type(type_hints, type, expected):
     ({Literal[1, 2]}, {
         "type": int,
         "choices": [1, 2]
+    }),
+    ({str, Literal["x", "y"]}, {
+        "type": str,
+        "metavar": ["x", "y"]
     }),
     ({Literal[1, "a"]}, Exception),
 ])
@@ -140,6 +136,8 @@ class DummyConfig:
     """List with variable length"""
     list_literal: list[Literal[1, 2]] = field(default_factory=list)
     """List with literal choices"""
+    list_union: list[Union[str, type[object]]] = field(default_factory=list)
+    """List with union type"""
     literal_literal: Literal[Literal[1], Literal[2]] = 1
     """Literal of literals with default 1"""
     json_tip: dict = field(default_factory=dict)
@@ -191,6 +189,9 @@ def test_get_kwargs():
     assert kwargs["list_literal"]["type"] is int
     assert kwargs["list_literal"]["nargs"] == "+"
     assert kwargs["list_literal"]["choices"] == [1, 2]
+    # lists with unions should become str type.
+    # If not, we cannot know which type to use for parsing
+    assert kwargs["list_union"]["type"] is str
     # literals of literals should have merged choices
     assert kwargs["literal_literal"]["choices"] == [1, 2]
     # dict should have json tip in help
@@ -203,32 +204,36 @@ def test_get_kwargs():
     assert kwargs["from_cli_config2"]["type"]('{"field": 2}').field == 4
 
 
-@pytest.mark.parametrize(("arg", "expected"), [
-    (None, dict()),
-    ("image=16", {
-        "image": 16
-    }),
-    ("image=16,video=2", {
-        "image": 16,
-        "video": 2
-    }),
-    ("Image=16, Video=2", {
-        "image": 16,
-        "video": 2
-    }),
-])
-def test_limit_mm_per_prompt_parser(arg, expected):
-    """This functionality is deprecated and will be removed in the future.
-    This argument should be passed as JSON string instead.
-    
-    TODO: Remove with nullable_kvs."""
+@pytest.mark.parametrize(
+    ("arg", "expected"),
+    [
+        (None, dict()),
+        ('{"video": {"num_frames": 123} }', {
+            "video": {
+                "num_frames": 123
+            }
+        }),
+        (
+            '{"video": {"num_frames": 123, "fps": 1.0, "foo": "bar"}, "image": {"foo": "bar"} }',  # noqa
+            {
+                "video": {
+                    "num_frames": 123,
+                    "fps": 1.0,
+                    "foo": "bar"
+                },
+                "image": {
+                    "foo": "bar"
+                }
+            }),
+    ])
+def test_media_io_kwargs_parser(arg, expected):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     if arg is None:
         args = parser.parse_args([])
     else:
-        args = parser.parse_args(["--limit-mm-per-prompt", arg])
+        args = parser.parse_args(["--media-io-kwargs", arg])
 
-    assert args.limit_mm_per_prompt == expected
+    assert args.media_io_kwargs == expected
 
 
 def test_compilation_config():
@@ -239,32 +244,40 @@ def test_compilation_config():
     assert args.compilation_config == CompilationConfig()
 
     # set to O3
-    args = parser.parse_args(["-O3"])
-    assert args.compilation_config.level == 3
+    args = parser.parse_args(["-O0"])
+    assert args.compilation_config.level == 0
 
     # set to O 3 (space)
-    args = parser.parse_args(["-O", "3"])
-    assert args.compilation_config.level == 3
+    args = parser.parse_args(["-O", "1"])
+    assert args.compilation_config.level == 1
 
     # set to O 3 (equals)
-    args = parser.parse_args(["-O=3"])
+    args = parser.parse_args(["-O=2"])
+    assert args.compilation_config.level == 2
+
+    # set to O.level 3
+    args = parser.parse_args(["-O.level", "3"])
     assert args.compilation_config.level == 3
 
     # set to string form of a dict
     args = parser.parse_args([
-        "--compilation-config",
-        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}',
+        "-O",
+        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+        '"use_inductor": false}',
     ])
     assert (args.compilation_config.level == 3 and
-            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
+            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
+            and not args.compilation_config.use_inductor)
 
     # set to string form of a dict
     args = parser.parse_args([
         "--compilation-config="
-        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}',
+        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+        '"use_inductor": true}',
     ])
     assert (args.compilation_config.level == 3 and
-            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
+            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
+            and args.compilation_config.use_inductor)
 
 
 def test_prefix_cache_default():
@@ -284,18 +297,6 @@ def test_prefix_cache_default():
     args = parser.parse_args(["--no-enable-prefix-caching"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert not engine_args.enable_prefix_caching
-
-
-@pytest.mark.parametrize(
-    ("arg"),
-    [
-        "image",  # Missing =
-        "image=4,image=5",  # Conflicting values
-        "image=video=4"  # Too many = in tokenized arg
-    ])
-def test_bad_nullable_kvs(arg):
-    with pytest.raises(ArgumentTypeError):
-        nullable_kvs(arg)
 
 
 # yapf: disable

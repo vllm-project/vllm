@@ -16,15 +16,20 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizer_base import (TokenizerBase,
-                                                    TokenizerRegistry)
+from vllm.transformers_utils.config import (
+    get_sentence_transformer_tokenizer_config)
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import make_async
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+    from vllm.lora.request import LoRARequest
+    from vllm.transformers_utils.tokenizer_base import TokenizerBase
+else:
+    ModelConfig = Any
+    LoRARequest = Any
+    TokenizerBase = Any
 
 logger = init_logger(__name__)
 
@@ -45,11 +50,12 @@ def decode_tokens(
     `skip_special_tokens=None` means to use the backend's default
     settings.
     """
+    decode_method = getattr(tokenizer, "_decode", tokenizer.decode)
     if skip_special_tokens is not None:
-        return tokenizer.decode(token_ids,
-                                skip_special_tokens=skip_special_tokens)
+        return decode_method(token_ids,
+                             skip_special_tokens=skip_special_tokens)
 
-    return tokenizer.decode(token_ids)
+    return decode_method(token_ids)
 
 
 def encode_tokens(
@@ -222,6 +228,7 @@ def get_tokenizer(
         tokenizer = MistralTokenizer.from_pretrained(str(tokenizer_name),
                                                      revision=revision)
     elif tokenizer_mode == "custom":
+        from vllm.transformers_utils.tokenizer_base import TokenizerRegistry
         tokenizer = TokenizerRegistry.get_tokenizer(str(tokenizer_name),
                                                     *args,
                                                     revision=revision,
@@ -252,7 +259,19 @@ def get_tokenizer(
             else:
                 raise e
 
-        # NOTE: We can remove this after https://github.com/THUDM/ChatGLM3/issues/1324
+        # The special_tokens in tokenizer should also be
+        # controlled by do_lower_case in encoder_config
+        encoder_config = get_sentence_transformer_tokenizer_config(
+            tokenizer_name, revision)
+        if isinstance(encoder_config, dict) and encoder_config.get(
+                "do_lower_case", False):
+            special_tokens_map = {
+                k: v.lower()
+                for k, v in tokenizer.special_tokens_map.items()
+            }
+            tokenizer.add_special_tokens(special_tokens_map)
+
+        # NOTE: We can remove this after https://github.com/zai-org/ChatGLM3/issues/1324
         if type(tokenizer).__name__ in ("ChatGLMTokenizer",
                                         "ChatGLM4Tokenizer"):
             assert isinstance(tokenizer, PreTrainedTokenizer)
@@ -271,13 +290,13 @@ cached_get_tokenizer = lru_cache(get_tokenizer)
 
 
 def cached_tokenizer_from_config(
-    model_config: "ModelConfig",
+    model_config: ModelConfig,
     **kwargs: Any,
 ):
     return cached_get_tokenizer(
         model_config.tokenizer,
         tokenizer_mode=model_config.tokenizer_mode,
-        tokenizer_revision=model_config.tokenizer_revision,
+        revision=model_config.tokenizer_revision,
         trust_remote_code=model_config.trust_remote_code,
         **kwargs,
     )
