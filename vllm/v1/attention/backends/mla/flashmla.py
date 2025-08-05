@@ -83,12 +83,6 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
                 device=self.device,
                 dtype=torch.int32)
 
-            self.arange_req_cache = torch.arange(
-                vllm_config.scheduler_config.max_num_seqs,
-                device=self.device,
-                dtype=torch.int32,
-            )
-
     def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = \
@@ -116,13 +110,10 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             assert n <= self.cg_buf_num_splits.size(0)
             num_splits_view = self.cg_buf_num_splits[:n]
             num_splits_view.copy_(num_splits)
-            # Num splits needs to monotonically increasing by 1 for the
-            # padded elements of the batch so that combine kernel returns
-            # out immediately (which happens when num_splits == 1
-            # not num_splits <= 1 unforunately)
-            buffer_padding_size = self.cg_buf_num_splits.size(0) - n
-            self.cg_buf_num_splits[n:] = \
-                num_splits[-1] + 1 + self.arange_req_cache[:buffer_padding_size]
+            # Num splits needs to monotonically increasing
+            # (with: https://github.com/vllm-project/FlashMLA/pull/3, otherwise
+            #  it needs to montonicaly increasing by 1)
+            self.cg_buf_num_splits[n:].fill_(num_splits[-1])
             num_splits = num_splits_view
 
         return FlashMLADecodeMetadata(
