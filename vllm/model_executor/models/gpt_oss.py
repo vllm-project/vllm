@@ -188,6 +188,7 @@ class TransformerBlock(torch.nn.Module):
         return output
 
 
+@support_torch_compile
 class GptOssModel(nn.Module):
 
     def __init__(self,
@@ -221,7 +222,6 @@ class GptOssModel(nn.Module):
         return x
 
 
-@support_torch_compile
 class GptOssForCausalLM(nn.Module):
 
     def __init__(
