@@ -169,7 +169,7 @@ def build_logitsprocs(
         if custom_logitsprocs:
             raise ValueError(STR_POOLING_REJECTS_LOGITSPROCS)
         logger.debug("Skipping logits processor loading because pooling models"
-                     " do not supports logits processors.")
+                     " do not support logits processors.")
         return LogitsProcessors()
     custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
     return LogitsProcessors(
