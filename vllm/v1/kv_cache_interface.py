@@ -203,14 +203,6 @@ class MambaSpec(KVCacheSpec):
 
 
 @dataclass
-class ShortConvSpec(MambaSpec):
-
-    @property
-    def type_id(self) -> str:
-        return f"short_conv_{self.shapes}_{self.dtype}"
-
-
-@dataclass
 class KVCacheTensor:
     """
     A class for specifying how the workers should initialize the KV cache.
