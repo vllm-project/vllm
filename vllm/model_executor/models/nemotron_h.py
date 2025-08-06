@@ -63,12 +63,13 @@ class NemotronHMLP(nn.Module):
     def __init__(
         self,
         config: NemotronHConfig,
+        layer_idx: int,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         prefix: str = "",
-        layer_idx: int = None,
     ) -> None:
         super().__init__()
+
         hybrid_override_pattern = config.hybrid_override_pattern
         mlp_index = hybrid_override_pattern[:layer_idx + 1].count("-") - 1
         if isinstance(config.intermediate_size, list):
