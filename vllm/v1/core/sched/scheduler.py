@@ -995,8 +995,7 @@ class Scheduler(SchedulerInterface):
             mm_positions = request.mm_positions[input_id]
             start_pos = mm_positions.offset
             num_tokens = mm_positions.length
-            if (self.encoder_cache_manager
-                    and start_pos + num_tokens <= request.num_computed_tokens):
+            if start_pos + num_tokens <= request.num_computed_tokens:
                 # The encoder output is already processed and stored
                 # in the decoder's KV cache.
                 self.encoder_cache_manager.free_encoder_input(
