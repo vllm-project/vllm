@@ -10,8 +10,7 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
                                         FullAttentionSpec, KVCacheSpec,
-                                        MambaSpec, ShortConvSpec,
-                                        SlidingWindowSpec)
+                                        MambaSpec, SlidingWindowSpec)
 from vllm.v1.request import Request
 
 
@@ -565,8 +564,7 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
-    MambaSpec: MambaManager,
-    ShortConvSpec: MambaManager,
+    MambaSpec: MambaManager
 }
 
 

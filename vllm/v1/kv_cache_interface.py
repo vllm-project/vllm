@@ -202,12 +202,6 @@ class MambaSpec(KVCacheSpec):
         return self.page_size_bytes
 
 
-@dataclass(frozen=True)
-class ShortConvSpec(MambaSpec):
-
-    mamba_type: str = "short_conv"
-
-
 @dataclass
 class KVCacheTensor:
     """
