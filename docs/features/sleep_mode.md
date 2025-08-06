@@ -59,7 +59,7 @@ VLLM_SERVER_DEV_MODE=1 python -m vllm.entrypoints.openai.api_server \
   --port 8000
 ```
 
-### HTTP Endpoints
+### HTTP endpoints
 
 - `POST /sleep?level=1` — Put the model to sleep.
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
