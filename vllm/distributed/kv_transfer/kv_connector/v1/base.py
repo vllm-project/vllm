@@ -32,7 +32,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 import torch
 
@@ -45,6 +45,12 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
+
+# s_tensor_list, d_tensor_list, s_indices, d_indices, direction
+CopyBlocksOp = Callable[[
+    dict[str, torch.Tensor], dict[
+        str, torch.Tensor], list[int], list[int], Literal["h2d", "d2h"]
+], None]
 
 logger = init_logger(__name__)
 
@@ -60,7 +66,7 @@ class KVTransferParams:
     """
     Abstract KVTransferParams used to send KVTransfer
     parameters between instances of vLLM.
-    
+
     Specific instances of KVConnector customize this
     method for serializing / deserializing msgs sent
     via the HTTP protocol.
@@ -72,7 +78,7 @@ class KVTransferParams:
                                     Any]]) -> Optional["KVTransferParams"]:
         return None
 
-class KVConnectorMetadata:
+class KVConnectorMetadata(ABC):  # noqa: B024
     """
     Abstract Metadata used to communicate between the
     Scheduler KVConnector and Worker KVConnector.
@@ -87,7 +93,7 @@ class KVConnectorBase_V1(ABC):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
             "subject to change in the future as we iterate the design.")
-        self._connector_metadata = KVConnectorMetadata()
+        self._connector_metadata: Optional[KVConnectorMetadata] = None
         self._vllm_config = vllm_config
         self._role = role
 
@@ -118,7 +124,7 @@ class KVConnectorBase_V1(ABC):
         This function should be called by the model runner every time 
         after the model execution.
         """
-        self._connector_metadata = KVConnectorMetadata()
+        self._connector_metadata = None
 
     def _get_connector_metadata(self) -> KVConnectorMetadata:
         """Get the connector metadata.
@@ -128,6 +134,9 @@ class KVConnectorBase_V1(ABC):
         Returns:
             ConnectorMetadata: the connector metadata.
         """
+
+        # Should only be called while set to valid metadata.
+        assert self._connector_metadata is not None
         return self._connector_metadata
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -137,6 +146,13 @@ class KVConnectorBase_V1(ABC):
 
         Args: kv_caches:
             dictionary of layer names, kv cache
+        """
+        return
+
+    def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
+        """
+        Set the xPU-specific ops for copying KV between host and device.
+        Needed when host buffer is used for kv transfer (e.g., in NixlConnector)
         """
         return
 
@@ -206,7 +222,9 @@ class KVConnectorBase_V1(ABC):
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """
         Notifies worker-side connector ids of requests that have
-        finished generating tokens.
+        finished generating tokens on the worker.
+        The scheduler process (via the Executors) will use this output
+        to track which workers are done.
 
         Returns:
             ids of requests that have finished asynchronous transfer
@@ -226,7 +244,7 @@ class KVConnectorBase_V1(ABC):
         kv_transfer_params = self._KVTransferParams.from_raw_dict(
             request.raw_kv_transfer_params)
         request.kv_transfer_params = kv_transfer_params
-        
+
     @abstractmethod
     def get_num_new_matched_tokens(
         self,
@@ -303,3 +321,17 @@ class KVConnectorBase_V1(ABC):
             returned by the engine.
         """
         return False, None
+
+    @classmethod
+    def get_required_kvcache_layout(
+            cls, vllm_config: "VllmConfig") -> Optional[str]:
+        """
+        Get the required KV cache layout for this connector.
+        Args:
+            vllm_config (VllmConfig): the vllm config.
+
+        Returns:
+            str: the required KV cache layout. e.g. HND, or NHD.
+            None if the connector does not require a specific layout.
+        """
+        return None
