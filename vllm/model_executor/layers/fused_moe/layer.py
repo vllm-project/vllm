@@ -33,7 +33,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import direct_register_custom_op, has_deep_ep, has_pplx
+from vllm.utils import (direct_register_custom_op, has_deep_ep, has_pplx,
+                        round_up)
 from vllm.utils.flashinfer import has_flashinfer
 
 if current_platform.is_cuda_alike():
@@ -719,6 +720,12 @@ class FusedMoE(torch.nn.Module):
 
         self.global_num_experts = num_experts + num_redundant_experts
 
+        # we padding globally so EP buffer allocation works
+        if quant_config and quant_config.get_name() == "mxfp4" and (
+                envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+            hidden_size = round_up(hidden_size, 256)
+
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -1064,6 +1071,18 @@ class FusedMoE(torch.nn.Module):
                       shard_id: str,
                       expert_id: int,
                       return_success: bool = False) -> Optional[bool]:
+
+        if self.quant_config and self.quant_config.get_name() == "mxfp4":
+            # (FIXME) for gpt-oss all experts are combined
+            if "bias" in weight_name:
+                dim1 = loaded_weight.shape[1]
+                param.data[:, :dim1].copy_(loaded_weight)
+            else:
+                dim1 = loaded_weight.shape[1]
+                dim2 = loaded_weight.shape[2]
+                param.data[:, :dim1, :dim2].copy_(loaded_weight)
+            return True if return_success else None
+
         expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
         if expert_id == -1:
             # Failed to load this param since it's not local to this rank
@@ -1476,13 +1495,20 @@ class FusedMoE(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
+        og_hidden_states = hidden_states.shape[-1]
+        if self.hidden_size != og_hidden_states:
+            hidden_states = F.pad(hidden_states,
+                                  (0, self.hidden_size - og_hidden_states),
+                                  mode='constant',
+                                  value=0.0)
         # TODO: Once the OOM issue for the TPU backend is resolved, we will
         # switch to using the moe_forward custom op.
         if current_platform.is_tpu():
             return self.forward_impl(hidden_states, router_logits)
         else:
-            return torch.ops.vllm.moe_forward(hidden_states, router_logits,
-                                              self.layer_name)
+            return torch.ops.vllm.moe_forward(
+                hidden_states, router_logits,
+                self.layer_name)[..., :og_hidden_states]
 
     def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
                              full_router_logits: torch.Tensor):
