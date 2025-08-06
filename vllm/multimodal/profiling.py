@@ -156,7 +156,7 @@ class MultiModalProfiler(Generic[_I]):
         return self.processor.dummy_inputs
 
     def get_mm_limits(self) -> Mapping[str, int]:
-        return self.processing_info.get_allowed_mm_limits()
+        return self.processor.allowed_mm_limits
 
     def _get_dummy_mm_inputs(
         self,

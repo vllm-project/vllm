@@ -333,6 +333,9 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     elif attn_backend == "TRITON_ATTN_VLLM_V1":
         attn_metadata_builder_cls, _ = get_attention_backend(
             _Backend.TRITON_ATTN_VLLM_V1)
+    elif attn_backend == "TREE_ATTN":
+        attn_metadata_builder_cls, _ = get_attention_backend(
+            _Backend.TREE_ATTN)
     else:
         raise ValueError(f"Unsupported attention backend: {attn_backend}")
 

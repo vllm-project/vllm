@@ -123,11 +123,11 @@ class Glm4MoE(nn.Module):
                                      config.n_routed_experts,
                                      bias=False,
                                      quant_config=None,
+                                     params_dtype=torch.float32,
                                      prefix=f"{prefix}.gate")
 
-        # noaux_tc is not set in transformers new config now
-        self.gate.e_score_correction_bias = (nn.Parameter(
-            torch.empty(config.n_routed_experts)))
+        self.gate.e_score_correction_bias = nn.Parameter(
+            torch.empty(config.n_routed_experts, dtype=torch.float32))
 
         # Load balancing settings.
         vllm_config = get_current_vllm_config()
@@ -181,7 +181,7 @@ class Glm4MoE(nn.Module):
 
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
-        router_logits, _ = self.gate(hidden_states)
+        router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits) * self.routed_scaling_factor
