@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from typing import Optional, Union
 
 import torch
-from torch.distributed import ProcessGroup, all_gather, all_reduce
+from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import (get_ep_group, get_node_count,
@@ -119,6 +119,14 @@ class EplbState:
     A sliding window of expert load.
 
     Shape: (window_size, num_moe_layers, num_physical_experts)
+
+    NOTE: The expert_load_view now records load for all physical experts
+    rather than just local experts. This ensures consistent load statistics
+    across different dispatch methods (naive all-to-all, DeepEP, pplx-kernels).
+    The recorded load will be multiplied by dp_size when using naive all-to-all
+    due to each DP rank contributing the same token set to the calculation.
+    See:
+    https://github.com/vllm-project/vllm/pull/22167#pullrequestreview-3086143856
     """
     expert_load_window_step: int = 0
     """
@@ -353,29 +361,18 @@ class EplbState:
             self.expert_load_pass.zero_()
 
         if log_stats:
-            logical_expert_load = torch.zeros(
-                (model.num_moe_layers, model.num_logical_experts),
-                dtype=self.expert_load_pass.dtype,
-                device=self.expert_load_pass.device,
-            )
-            logical_expert_load.scatter_add_(
-                dim=-1,
-                index=self.physical_to_logical_map.long(),
-                src=self.expert_load_pass,
-            )
+            # total_expert_load_pass: (num_moe_layers, num_physical_experts)
+            total_expert_load_pass = self.expert_load_pass.clone()
 
             # Collect load metrics from all ranks
             ep_group = get_ep_group().device_group
             assert ep_group is not None
+            all_reduce(total_expert_load_pass, group=ep_group)
 
-            # `num_tokens`: (num_moe_layers,)
-            num_tokens = logical_expert_load.sum(dim=-1)
-            num_tokens_list = [
-                torch.empty_like(num_tokens) for _ in range(ep_group.size())
-            ]
-            all_gather(num_tokens_list, num_tokens, group=ep_group)
-            # Stack to get (num_ranks, num_moe_layers)
-            num_tokens_per_rank = torch.stack(num_tokens_list).float()
+            # num_tokens_per_rank: (num_moe_layers, num_ranks)
+            num_tokens_per_rank = total_expert_load_pass.reshape(
+                total_expert_load_pass.shape[0], ep_group.size(),
+                -1).sum(dim=-1).float()
 
             # Compute balancedness ratio:
             # for each layer:
@@ -447,8 +444,8 @@ class EplbState:
             )
             logical_expert_load_window.scatter_add_(
                 dim=-1,
-                index=self.physical_to_logical_map.unsqueeze(0).expand(
-                    self.expert_load_window_size, -1, -1).long(),
+                index=self.physical_to_logical_map.unsqueeze(0).expand_as(
+                    self.expert_load_window).long(),
                 src=self.expert_load_window,
             )
 
