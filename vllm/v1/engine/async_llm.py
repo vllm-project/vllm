@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import logging
 import time
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
@@ -36,7 +37,7 @@ from vllm.v1.engine.output_processor import (OutputProcessor,
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
+from vllm.v1.metrics.loggers import LoggingStatLogger, StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
 
@@ -127,11 +128,15 @@ class AsyncLLM(EngineClient):
 
         # Loggers.
         self.logger_manager: Optional[StatLoggerManager] = None
+        factories = []
+        if logger.isEnabledFor(logging.INFO) and client_count <= 1:
+            factories.append(LoggingStatLogger)
+        factories.extend(stat_loggers or [])
         if self.log_stats:
             self.logger_manager = StatLoggerManager(
                 vllm_config=vllm_config,
                 engine_idxs=self.engine_core.engine_ranks_managed,
-                custom_stat_loggers=stat_loggers,
+                custom_stat_loggers=factories,
             )
             self.logger_manager.log_engine_initialized()
 
