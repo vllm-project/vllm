@@ -73,7 +73,7 @@ VLLM_SERVER_DEV_MODE=1 python -m vllm.entrypoints.openai.api_server \
 
 #### HTTP endpoints
 
-- `POST /sleep?level=1` — Put the model to sleep.
+- `POST /sleep?level=1` — Put the model to sleep (`level=1`).
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
 - `GET /is_sleeping` — Check if the model is sleeping.
 
