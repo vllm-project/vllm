@@ -107,8 +107,10 @@ async def test_streaming_with_parallel_sampling(
         NUM_REQUESTS = 10
         N = 5
         NUM_TOKENS = 20
-        prompt = "<|im_start|>user\nTell me the long history of the Earth is<|im_end|>\n<|im_start|>assistant\n<think>"
-
+        prompt = (
+            f"<|im_start|>user\nTell me the long history "
+            f"of the Earth is<|im_end|>\n<|im_start|>assistant\n<think>"
+        )
         request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
 
         async def run_generate(engine, request_id, prompt, output_kind,
@@ -135,26 +137,30 @@ async def test_streaming_with_parallel_sampling(
                 indices = [comp.index
                            for comp in completions]  # index = parallel samples
                 total_indices += len(indices)
-                texts = [comp.text for comp in completions]
+                #texts = [comp.text for comp in completions]
 
                 for comp in completions:
                     current_len = len(comp.token_ids)
-                    prev_len = prev_token_counts[comp.index]
+                    #prev_len = prev_token_counts[comp.index]
                     token_all[comp.index] += current_len
 
                     if output_kind == RequestOutputKind.DELTA:
-                        # Each chunk doesn't always deliver only 1 token due to coalescing
+                        # Each chunk doesn't always deliver only 1 token
+                        # due to coalescing
                         # assert current_len == 1, (
-                        #     f"{request_id} - DELTA: Expected 1 token, got {current_len} "
+                        #     f"{request_id} - DELTA: Expected 1 token, "
+                        #     f"got {current_len} "
                         #     f"for index {comp.index}"
                         # )
                         pass
 
                     elif output_kind == RequestOutputKind.CUMULATIVE:
-                        # Token count doesn's always increase by 1 due to coalescing
+                        # Token count doesn's always increase by 1
+                        # due to coalescing
                         # expected = prev_len + 1
                         # assert current_len == expected, (
-                        #     f"{request_id} - CUMULATIVE: Expected {expected} tokens, got {current_len} "
+                        #     f"{request_id} - CUMULATIVE: Expected {expected} "
+                        #     f"tokens, got {current_len} "
                         #     f"for index {comp.index}"
                         # )
                         pass
@@ -170,8 +176,8 @@ async def test_streaming_with_parallel_sampling(
 
                 total_validated += 1
 
-            assert total_validated > 0, f"{request_id} produced no output groups"
-
+            assert total_validated > 0, (
+                f"{request_id} produced no output groups")
             return total_indices, token_all, total_validated
 
         tasks = [
@@ -190,21 +196,23 @@ async def test_streaming_with_parallel_sampling(
             if output_kind == RequestOutputKind.FINAL_ONLY:
                 # FINAL_ONLY must return only one output group
                 assert total_validated == 1, (
-                    f"{request_id} - FINAL_ONLY: Expected 1 output group, got {total_validated}"
-                )
+                    f"{request_id} - FINAL_ONLY: Expected 1 output group, "
+                    f"got {total_validated}")
 
             if output_kind == RequestOutputKind.DELTA:
                 #assert total_indices == N*NUM_TOKENS # fail due to coalesing
                 for idx, total in token_all.items():
                     assert total == NUM_TOKENS, (
-                        f"{request_id} - DELTA: Total tokens aggregated for index {idx} = {total}, "
+                        f"{request_id} - DELTA: Total tokens aggregated "
+                        f"for index {idx} = {total}, "
                         f"but expected {NUM_TOKENS}")
 
             if output_kind == RequestOutputKind.CUMULATIVE:
                 #assert total_indices == N*NUM_TOKENS # fail due to coalesing
                 assert len(set(token_all.values())) == 1
                 assert list(
-                    token_all.values())[0] == NUM_TOKENS * (NUM_TOKENS + 1) // 2
+                    token_all.values())[0] == NUM_TOKENS * (NUM_TOKENS +
+                                                            1) // 2
 
 
 @pytest.mark.parametrize(
