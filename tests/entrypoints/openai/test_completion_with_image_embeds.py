@@ -19,6 +19,7 @@ MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
 CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
 MAXIMUM_IMAGES = 2
 
+
 @pytest.fixture(scope="module")
 def default_server_args() -> list[str]:
     return [
