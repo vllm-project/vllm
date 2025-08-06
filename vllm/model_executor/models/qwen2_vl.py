@@ -1395,11 +1395,12 @@ class Tarsier2Processor(Qwen2VLProcessor):
         **kwargs,
     ):
         self.image_processor = Tarsier2ImageProcessor(**vision_config)
-        super().__init__(image_processor=self.image_processor,
-                         tokenizer=tokenizer,
-                         video_processor=Qwen2VLVideoProcessor(),
-                         chat_template=None,
-                         **kwargs)
+        super().__init__(
+            image_processor=self.image_processor,
+            tokenizer=tokenizer,
+            video_processor=Qwen2VLVideoProcessor(**vision_config),
+            chat_template=None,
+            **kwargs)
 
 
 class Tarsier2ProcessingInfo(Qwen2VLProcessingInfo):
