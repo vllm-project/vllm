@@ -6,7 +6,6 @@ from .deepseekv3_tool_parser import DeepSeekV3ToolParser
 from .glm4_moe_tool_parser import Glm4MoeModelToolParser
 from .granite_20b_fc_tool_parser import Granite20bFCToolParser
 from .granite_tool_parser import GraniteToolParser
-from .openai_tool_parser import OpenAIToolParser
 from .hermes_tool_parser import Hermes2ProToolParser
 from .hunyuan_a13b_tool_parser import HunyuanA13BToolParser
 from .internlm2_tool_parser import Internlm2ToolParser
@@ -16,6 +15,7 @@ from .llama4_pythonic_tool_parser import Llama4PythonicToolParser
 from .llama_tool_parser import Llama3JsonToolParser
 from .minimax_tool_parser import MinimaxToolParser
 from .mistral_tool_parser import MistralToolParser
+from .openai_tool_parser import OpenAIToolParser
 from .phi4mini_tool_parser import Phi4MiniJsonToolParser
 from .pythonic_tool_parser import PythonicToolParser
 from .qwen3coder_tool_parser import Qwen3CoderToolParser

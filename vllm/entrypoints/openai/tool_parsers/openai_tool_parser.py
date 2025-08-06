@@ -40,8 +40,9 @@ class OpenAIToolParser(ToolParser):
             "text-based extraction.")
 
     def extract_tool_calls_from_ids(
-            self, token_ids: Sequence[int],
-            ) -> ExtractedToolCallInformation:
+        self,
+        token_ids: Sequence[int],
+    ) -> ExtractedToolCallInformation:
         parser = parse_output_into_messages(token_ids)
         tool_calls = []
         reasoning_content = None
@@ -99,23 +100,23 @@ class OpenAIToolParser(ToolParser):
             delta_message = DeltaMessage(
                 content=self.stream_parser.last_content_delta)
         elif (self.stream_parser.current_channel == "commentary"
-              and self.stream_parser.current_recipient
-              and self.stream_parser.current_recipient.startswith(
-                  "functions.")):
+              and self.stream_parser.current_recipient and
+              self.stream_parser.current_recipient.startswith("functions.")):
             if self.stream_parser.current_recipient != prev_recipient:
                 # New tool call
                 tool_info = {
                     "name":
-                    self.stream_parser.current_recipient.split("functions.")[1],
-                    "args": "",
+                    self.stream_parser.current_recipient.split("functions.")
+                    [1],
+                    "args":
+                    "",
                 }
                 self.tool_calls_info.append(tool_info)
                 delta_message = DeltaMessage(tool_calls=[
-                    DeltaToolCall(
-                        index=len(self.tool_calls_info) - 1,
-                        type="function",
-                        function=DeltaFunctionCall(
-                            name=tool_info["name"], arguments=""))
+                    DeltaToolCall(index=len(self.tool_calls_info) - 1,
+                                  type="function",
+                                  function=DeltaFunctionCall(
+                                      name=tool_info["name"], arguments=""))
                 ])
             elif self.stream_parser.last_content_delta:
                 # Arguments for current tool call
@@ -124,11 +125,10 @@ class OpenAIToolParser(ToolParser):
                     self.tool_calls_info[current_tool_index][
                         "args"] += self.stream_parser.last_content_delta
                     delta_message = DeltaMessage(tool_calls=[
-                        DeltaToolCall(
-                            index=current_tool_index,
-                            function=DeltaFunctionCall(
-                                arguments=self.stream_parser.last_content_delta)
-                        )
+                        DeltaToolCall(index=current_tool_index,
+                                      function=DeltaFunctionCall(
+                                          arguments=self.stream_parser.
+                                          last_content_delta))
                     ])
 
         return delta_message

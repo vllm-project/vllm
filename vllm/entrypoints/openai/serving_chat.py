@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Callable, Final, Optional, Union, TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Final, Optional, Union
 
 import jinja2
 import partial_json_parser
@@ -22,8 +22,7 @@ from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          random_tool_call_id)
 from vllm.entrypoints.harmony_utils import (
     get_developer_message, get_stop_tokens_for_assistant_actions,
-    get_streamable_parser_for_assistant, get_system_message, parse_chat_input,
-    parse_chat_output, render_for_completion)
+    get_system_message, parse_chat_input, render_for_completion)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb, ChatCompletionLogProbs,
@@ -470,11 +469,6 @@ class OpenAIServingChat(OpenAIServing):
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
-        if self.use_harmony:
-            harmony_parsers = [
-                get_streamable_parser_for_assistant()
-                for _ in range(num_choices)
-            ]
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
@@ -639,15 +633,16 @@ class OpenAIServingChat(OpenAIServing):
                     if self.use_harmony:
                         if TYPE_CHECKING:
                             assert tool_parser is not None
-                        delta_message = tool_parser.extract_tool_calls_streaming(
+                        delta_message = tool_parser.extract_tool_calls_streaming(  # noqa: E501
                             previous_text="",
                             current_text="",
                             delta_text="",
                             previous_token_ids=[],
                             current_token_ids=output.token_ids,
                             delta_token_ids=output.token_ids,
-                            request=request)
-                        delta_text = delta_message.content if delta_message else ""
+                            request=request,
+                        )
+                        delta_text = delta_message.content if delta_message else ""  # noqa: E501
                     else:
                         delta_text = output.text
 
@@ -1047,13 +1042,13 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs = None
 
             if self.use_harmony:
-                tool_parser = self.tool_parser(
-                    tokenizer)
+                tool_parser = self.tool_parser(tokenizer)
                 tool_call_info = tool_parser.extract_tool_calls_from_ids(
                     token_ids)
                 message = ChatMessage(
                     role=role,
-                    reasoning_content=None if not request.include_reasoning else tool_call_info.reasoning_content,
+                    reasoning_content=None if not request.include_reasoning
+                    else tool_call_info.reasoning_content,
                     content=tool_call_info.content,
                     tool_calls=tool_call_info.tool_calls)
 
@@ -1062,8 +1057,8 @@ class OpenAIServingChat(OpenAIServing):
                     message=message,
                     logprobs=logprobs,
                     finish_reason="tool_calls"
-                    if tool_call_info.tools_called else output.finish_reason
-                    if output.finish_reason else "stop",
+                    if tool_call_info.tools_called else
+                    output.finish_reason if output.finish_reason else "stop",
                     stop_reason=output.stop_reason,
                 )
                 choices.append(choice_data)
