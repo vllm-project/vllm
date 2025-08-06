@@ -644,9 +644,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         return_bias: bool = True,
     ):
         self.output_sizes = output_sizes
-        self.comm_group = comm_group or get_tp_group()
-        self.comm_group_size = self.comm_group.world_size
-        self.comm_group_rank = self.comm_group.rank_in_group
 
         assert all(output_size % self.comm_group_size == 0
                    for output_size in output_sizes)
@@ -657,6 +654,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                          skip_bias_add=skip_bias_add,
                          params_dtype=params_dtype,
                          quant_config=quant_config,
+                         comm_group=comm_group,
                          prefix=prefix,
                          return_bias=return_bias)
 
