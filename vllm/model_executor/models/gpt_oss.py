@@ -462,7 +462,6 @@ class GptOssForCausalLM(nn.Module):
                 # Handle all other weights with potential renaming
                 renamed_name = maybe_rename(name)
                 if renamed_name not in params_dict:
-                    print(f"Warning: {renamed_name} not found in params_dict")
                     continue
                 param = params_dict[renamed_name]
                 weight_loader = getattr(param, "weight_loader",
