@@ -444,8 +444,6 @@ def reference_moe_impl(config: Config, weights: WeightTensors,
         a_global_scale = ((FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(
             rank_tensors.hidden_states.flatten(), dim=-1)).to(torch.float32)
 
-        print(f"A = {rank_tensors.hidden_states.dtype}")
-
         assert w1_blockscale.shape[1] % 128 == 0
         assert w1_blockscale.shape[2] % 4 == 0
         assert w2_blockscale.shape[1] % 128 == 0
