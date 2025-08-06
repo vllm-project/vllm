@@ -35,6 +35,7 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_mistral_chat_template,
                                          parse_chat_messages_futures,
                                          resolve_chat_template_content_format)
+from vllm.entrypoints.context import ConversationContext
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionResponse,
@@ -947,6 +948,61 @@ class OpenAIServing:
             engine_prompt["cache_salt"] = request.cache_salt
 
         return conversation, [request_prompt], [engine_prompt]
+
+    async def _generate_with_builtin_tools(
+        self,
+        request_id: str,
+        request_prompt: RequestPrompt,
+        engine_prompt: EngineTokensPrompt,
+        sampling_params: SamplingParams,
+        context: ConversationContext,
+        lora_request: Optional[LoRARequest] = None,
+        priority: int = 0,
+        **kwargs,
+    ):
+        orig_priority = priority
+        while True:
+            self._log_inputs(
+                request_id,
+                request_prompt,
+                params=sampling_params,
+                lora_request=lora_request,
+            )
+            generator = self.engine_client.generate(
+                engine_prompt,
+                sampling_params,
+                request_id,
+                lora_request=lora_request,
+                priority=priority,
+                **kwargs,
+            )
+            async for res in generator:
+                context.append_output(res)
+                # NOTE(woosuk): The stop condition is handled by the engine.
+                yield context
+
+            if not context.need_builtin_tool_call():
+                # The model did not ask for a tool call, so we're done.
+                break
+
+            # Call the tool and update the context with the result.
+            tool_output = await context.call_tool()
+            context.append_output(tool_output)
+
+            # TODO: uncomment this and enable tool output streaming
+            # yield context
+
+            # Create inputs for the next turn.
+            # Render the next prompt token ids.
+            prompt_token_ids = context.render_for_completion()
+            engine_prompt = EngineTokensPrompt(
+                prompt_token_ids=prompt_token_ids)
+            request_prompt = prompt_token_ids
+            # Update the sampling params.
+            sampling_params.max_tokens = (self.max_model_len -
+                                          len(prompt_token_ids))
+            # OPTIMIZATION
+            priority = orig_priority - 1
 
     def _load_prompt_embeds(
         self,
