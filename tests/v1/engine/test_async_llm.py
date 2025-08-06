@@ -125,7 +125,7 @@ async def test_streaming_with_parallel_sampling(
             total_indices = 0
             from collections import defaultdict
             prev_token_counts = defaultdict(int)
-            ttoken_all: defaultdict[str, int] = defaultdict(int)
+            token_all: defaultdict[str, int] = defaultdict(int)
 
             async for output_group in engine.generate(
                     request_id=request_id,
