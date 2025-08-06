@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from collections.abc import Sequence
 
-from openai_harmony import Role, StreamableParser
 
-from vllm.entrypoints.harmony_utils import (get_encoding,
+from vllm.entrypoints.harmony_utils import (get_streamable_parser_for_assistant,
                                             parse_output_into_messages)
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
@@ -15,20 +15,15 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
-from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-logger = init_logger(__name__)
+if TYPE_CHECKING:
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 @ToolParserManager.register_module("openai")
 class OpenAIToolParser(ToolParser):
-
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
-        self.encoding = get_encoding()
-        self.stream_parser: StreamableParser | None = None
-        self.tool_calls_info: list[dict] = []
 
     def extract_tool_calls(
         self,
@@ -83,51 +78,49 @@ class OpenAIToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        if self.stream_parser is None:
-            self.stream_parser = StreamableParser(self.encoding,
-                                                  role=Role.ASSISTANT)
-            self.tool_calls_info = []
+        stream_parser = get_streamable_parser_for_assistant()
+        tool_calls_info = []
 
-        prev_recipient = self.stream_parser.current_recipient
+        prev_recipient = stream_parser.current_recipient
         for token_id in delta_token_ids:
-            self.stream_parser.process(token_id)
+            stream_parser.process(token_id)
 
         delta_message = None
-        if self.stream_parser.current_channel == "analysis":
+        if stream_parser.current_channel == "analysis":
             delta_message = DeltaMessage(
-                reasoning_content=self.stream_parser.last_content_delta)
-        elif self.stream_parser.current_channel == "final":
+                reasoning_content=stream_parser.last_content_delta)
+        elif stream_parser.current_channel == "final":
             delta_message = DeltaMessage(
-                content=self.stream_parser.last_content_delta)
-        elif (self.stream_parser.current_channel == "commentary"
-              and self.stream_parser.current_recipient and
-              self.stream_parser.current_recipient.startswith("functions.")):
-            if self.stream_parser.current_recipient != prev_recipient:
+                content=stream_parser.last_content_delta)
+        elif (stream_parser.current_channel == "commentary"
+              and stream_parser.current_recipient and
+              stream_parser.current_recipient.startswith("functions.")):
+            if stream_parser.current_recipient != prev_recipient:
                 # New tool call
                 tool_info = {
                     "name":
-                    self.stream_parser.current_recipient.split("functions.")
+                    stream_parser.current_recipient.split("functions.")
                     [1],
                     "args":
                     "",
                 }
-                self.tool_calls_info.append(tool_info)
+                tool_calls_info.append(tool_info)
                 delta_message = DeltaMessage(tool_calls=[
-                    DeltaToolCall(index=len(self.tool_calls_info) - 1,
+                    DeltaToolCall(index=len(tool_calls_info) - 1,
                                   type="function",
                                   function=DeltaFunctionCall(
                                       name=tool_info["name"], arguments=""))
                 ])
-            elif self.stream_parser.last_content_delta:
+            elif stream_parser.last_content_delta:
                 # Arguments for current tool call
-                current_tool_index = len(self.tool_calls_info) - 1
+                current_tool_index = len(tool_calls_info) - 1
                 if current_tool_index >= 0:
-                    self.tool_calls_info[current_tool_index][
-                        "args"] += self.stream_parser.last_content_delta
+                    tool_calls_info[current_tool_index][
+                        "args"] += stream_parser.last_content_delta
                     delta_message = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=current_tool_index,
                                       function=DeltaFunctionCall(
-                                          arguments=self.stream_parser.
+                                          arguments=stream_parser.
                                           last_content_delta))
                     ])
 
