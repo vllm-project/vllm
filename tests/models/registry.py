@@ -169,6 +169,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "DeepseekV3ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V3",  # noqa: E501
                                          trust_remote_code=True),
+    "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst",
+                                        min_transformers_version="4.53"),
     "Ernie4_5ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT",
                                             min_transformers_version="4.54"),
     "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT",
@@ -198,6 +200,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                        {"6b": "EleutherAI/gpt-j-6b"}),
     "GPTNeoXForCausalLM": _HfExamplesInfo("EleutherAI/pythia-70m",
                                           {"1b": "EleutherAI/pythia-1.4b"}),
+    "GptOssForCausalLM": _HfExamplesInfo("openai/gpt-oss-20b",
+                                         trust_remote_code=True,
+                                         is_available_online=False),
     "GraniteForCausalLM": _HfExamplesInfo("ibm/PowerLM-3b"),
     "GraniteMoeForCausalLM": _HfExamplesInfo("ibm/PowerMoE-3b"),
     "GraniteMoeHybridForCausalLM": _HfExamplesInfo("ibm-granite/granite-4.0-tiny-preview"),  # noqa: E501
@@ -235,6 +240,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
     "Mamba2ForCausalLM": _HfExamplesInfo("mistralai/Mamba-Codestral-7B-v0.1"),
     "FalconMambaForCausalLM": _HfExamplesInfo("tiiuae/falcon-mamba-7b-instruct"),  # noqa: E501
+    "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
+                                        trust_remote_code=True),
     "MiniCPMForCausalLM": _HfExamplesInfo("openbmb/MiniCPM-2B-sft-bf16",
                                          trust_remote_code=True),
     "MiniCPM3ForCausalLM": _HfExamplesInfo("openbmb/MiniCPM3-4B",
@@ -297,13 +304,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          tokenizer="meta-llama/Llama-2-7b",
                                          trust_remote_code=True),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
-    "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
-                                        trust_remote_code=True),
-    "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst",
-                                        min_transformers_version="4.53"),
-    "GptOssForCausalLM": _HfExamplesInfo("TODO",
-                                         trust_remote_code=True,
-                                         is_available_online=False),
     # [Encoder-decoder]
     "BartModel": _HfExamplesInfo("facebook/bart-base"),
     "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),
