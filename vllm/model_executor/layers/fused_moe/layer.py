@@ -721,7 +721,7 @@ class FusedMoE(torch.nn.Module):
         self.global_num_experts = num_experts + num_redundant_experts
 
         # we padding globally so EP buffer allocation works
-        if quant_config.get_name() == "mxfp4" and (
+        if quant_config and quant_config.get_name() == "mxfp4" and (
                 envs.VLLM_USE_FLASHINFER_MXFP4_MOE
                 or envs.VLLM_USE_FLASHINFER_MXFP4_BF16_MOE):
             hidden_size = round_up(hidden_size, 256)
