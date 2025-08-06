@@ -14,7 +14,6 @@ def is_rocm_rotatry_embedding_enabled() -> bool:
     return (current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER)
 
 
-
 def rocm_aiter_rotary_emb_without_key_forward_hip_impl(
     positions: torch.Tensor,
     sin: torch.Tensor,
@@ -46,6 +45,7 @@ def rocm_aiter_rotary_emb_without_key_forward_hip_impl(
             reuse_freqs_front_part=True,
             nope_first=is_nope_first,
         )
+
 
 def rocm_aiter_rotary_emb_with_key_forward_hip_impl(
     positions: torch.Tensor,
@@ -95,6 +95,7 @@ def rocm_aiter_rotary_emb_with_key_forward_hip_fake(
 ) -> None:
     pass
 
+
 def rocm_aiter_rotary_emb_without_key_forward_hip_fake(
     positions: torch.Tensor,
     sin: torch.Tensor,
@@ -102,7 +103,7 @@ def rocm_aiter_rotary_emb_without_key_forward_hip_fake(
     query: torch.Tensor,
     offsets: Optional[torch.Tensor] = None,
     rotate_style: int = 0,
-    is_nope_first: bool =False,
+    is_nope_first: bool = False,
 ) -> None:
     pass
 

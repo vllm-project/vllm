@@ -167,9 +167,9 @@ def get_rope(
                 if k in ("extrapolation_factor", "attn_factor", "beta_fast",
                          "beta_slow", "mscale", "mscale_all_dim")
             }
-            rotary_emb = DeepseekScalingRotaryEmbedding(head_size, rotary_dim,
-                                    original_max_position, base, is_neox_style,
-                                    scaling_factor, dtype, **extra_kwargs)
+            rotary_emb = DeepseekScalingRotaryEmbedding(
+                head_size, rotary_dim, original_max_position, base,
+                is_neox_style, scaling_factor, dtype, **extra_kwargs)
         elif scaling_type == "longrope":
             short_factor = rope_scaling["short_factor"]
             long_factor = rope_scaling["long_factor"]
