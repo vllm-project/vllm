@@ -88,12 +88,16 @@ async def generate(
     return count, request_id
 
 
-@pytest.mark.parametrize(
-    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.CUMULATIVE, RequestOutputKind.FINAL_ONLY])
+@pytest.mark.parametrize("output_kind", [
+    RequestOutputKind.DELTA, RequestOutputKind.CUMULATIVE,
+    RequestOutputKind.FINAL_ONLY
+])
 @pytest.mark.asyncio
-async def test_streaming_with_parallel_sampling(monkeypatch: pytest.MonkeyPatch, output_kind: RequestOutputKind):
-    """test parallel sampling along with ouput_kind""" 
-    engine_args = AsyncEngineArgs(model="Qwen/Qwen3-0.6B", gpu_memory_utilization=0.8)
+async def test_streaming_with_parallel_sampling(
+        monkeypatch: pytest.MonkeyPatch, output_kind: RequestOutputKind):
+    """test parallel sampling along with ouput_kind"""
+    engine_args = AsyncEngineArgs(model="Qwen/Qwen3-0.6B",
+                                  gpu_memory_utilization=0.8)
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
         with set_default_torch_num_threads(1):
@@ -107,7 +111,8 @@ async def test_streaming_with_parallel_sampling(monkeypatch: pytest.MonkeyPatch,
 
         request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
 
-        async def run_generate(engine, request_id, prompt, output_kind, num_tokens, num_index):
+        async def run_generate(engine, request_id, prompt, output_kind,
+                               num_tokens, num_index):
             sampling_params = SamplingParams(
                 max_tokens=num_tokens,
                 min_tokens=num_tokens,
@@ -123,12 +128,12 @@ async def test_streaming_with_parallel_sampling(monkeypatch: pytest.MonkeyPatch,
             token_all = defaultdict(int)
 
             async for output_group in engine.generate(
-                request_id=request_id,
-                prompt=prompt,
-                sampling_params=sampling_params
-            ):
+                    request_id=request_id,
+                    prompt=prompt,
+                    sampling_params=sampling_params):
                 completions = output_group.outputs
-                indices = [comp.index for comp in completions] # index = parallel samples
+                indices = [comp.index
+                           for comp in completions]  # index = parallel samples
                 total_indices += len(indices)
                 texts = [comp.text for comp in completions]
 
@@ -136,50 +141,52 @@ async def test_streaming_with_parallel_sampling(monkeypatch: pytest.MonkeyPatch,
                     current_len = len(comp.token_ids)
                     prev_len = prev_token_counts[comp.index]
                     token_all[comp.index] += current_len
-                    
+
                     if output_kind == RequestOutputKind.DELTA:
                         # Each chunk doesn't always deliver only 1 token due to coalescing
                         # assert current_len == 1, (
                         #     f"{request_id} - DELTA: Expected 1 token, got {current_len} "
                         #     f"for index {comp.index}"
-                        # )                        
+                        # )
                         pass
-                        
+
                     elif output_kind == RequestOutputKind.CUMULATIVE:
                         # Token count doesn's always increase by 1 due to coalescing
                         # expected = prev_len + 1
                         # assert current_len == expected, (
                         #     f"{request_id} - CUMULATIVE: Expected {expected} tokens, got {current_len} "
                         #     f"for index {comp.index}"
-                        # )                        
+                        # )
                         pass
 
                     elif output_kind == RequestOutputKind.FINAL_ONLY:
                         assert len(indices) == num_index
 
                     else:
-                        raise ValueError(f"Unsupported output kind: {output_kind}")
+                        raise ValueError(
+                            f"Unsupported output kind: {output_kind}")
 
                     prev_token_counts[comp.index] = current_len
 
                 total_validated += 1
 
             assert total_validated > 0, f"{request_id} produced no output groups"
-            
+
             return total_indices, token_all, total_validated
-                
+
         tasks = [
             asyncio.create_task(
-                run_generate(engine, request_id, prompt, output_kind, NUM_TOKENS, N)
-            )
-            for request_id in request_ids]
+                run_generate(engine, request_id, prompt, output_kind,
+                             NUM_TOKENS, N)) for request_id in request_ids
+        ]
 
         results = await asyncio.gather(*tasks)
         assert not engine.output_processor.has_unfinished_requests()
-  
-        for i, (total_indices, token_all, total_validated) in enumerate(results):
+
+        for i, (total_indices, token_all,
+                total_validated) in enumerate(results):
             request_id = request_ids[i]  # Get corresponding request_id
-            
+
             if output_kind == RequestOutputKind.FINAL_ONLY:
                 # FINAL_ONLY must return only one output group
                 assert total_validated == 1, (
@@ -191,13 +198,13 @@ async def test_streaming_with_parallel_sampling(monkeypatch: pytest.MonkeyPatch,
                 for idx, total in token_all.items():
                     assert total == NUM_TOKENS, (
                         f"{request_id} - DELTA: Total tokens aggregated for index {idx} = {total}, "
-                        f"but expected {NUM_TOKENS}"
-                    )
-                    
+                        f"but expected {NUM_TOKENS}")
+
             if output_kind == RequestOutputKind.CUMULATIVE:
                 #assert total_indices == N*NUM_TOKENS # fail due to coalesing
                 assert len(set(token_all.values())) == 1
-                assert list(token_all.values())[0] == NUM_TOKENS*(NUM_TOKENS+1)/2
+                assert list(
+                    token_all.values())[0] == NUM_TOKENS * (NUM_TOKENS + 1) / 2
 
 
 @pytest.mark.parametrize(
