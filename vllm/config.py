@@ -4132,7 +4132,6 @@ class CUDAGraphMode(enum.Enum):
     FULL = 2
     FULL_DECODE_ONLY = (FULL, NONE)
     FULL_AND_PIECEWISE = (FULL, PIECEWISE)
-    FULL_DOUBLE = (FULL, FULL)
 
     def decode_mode(self) -> 'CUDAGraphMode':
         return CUDAGraphMode(self.value[0]) if \
