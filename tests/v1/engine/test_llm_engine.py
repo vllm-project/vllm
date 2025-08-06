@@ -184,8 +184,10 @@ def test_llmengine_streaming_with_parallel_sampling(model, output_kind,
     prompts = ["The history of the Earth is" for i in range(NUM_REQUESTS)]
     request_ids = []
     from collections import defaultdict
-    partial_tokens = defaultdict(lambda: defaultdict(list))
-    finished_requests = set()
+    partial_tokens: defaultdict[
+        str, defaultdict[int, list[int]]
+    ] = defaultdict(lambda: defaultdict(list))
+    finished_requests: set[int] = set()
 
     for i, prompt in enumerate(prompts):
         request_id = f"req-{i}"
