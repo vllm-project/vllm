@@ -537,10 +537,10 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         attention_instances = {}
         for i in range(start, end):
             # Handle interleaved sliding window attention
-            sliding_window = None
+            per_layer_sliding_window = None
             if (hasattr(self.config, "layer_types")
                     and self.config.layer_types[i] == "sliding_attention"):
-                sliding_window = self.config.sliding_window
+                per_layer_sliding_window = self.config.sliding_window
 
             attention_instances[i] = Attention(
                 num_heads=num_heads,
@@ -551,7 +551,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
-                per_layer_sliding_window=sliding_window,
+                per_layer_sliding_window=per_layer_sliding_window,
                 prefix=f"{i}.attn")
         return attention_instances
 
