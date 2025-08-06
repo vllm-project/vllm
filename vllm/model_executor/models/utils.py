@@ -534,16 +534,10 @@ class PPMissingLayer(torch.nn.Identity):
 
     def __init__(self, *args, **kwargs):
         super().__init__()
-        self.return_tuple = kwargs.get("return_tuple", False)
 
     def forward(self, *args, **kwargs):
-        """
-        Return the first arg from args or the first value from kwargs.
-
-        Wraps the input in a tuple if `self.return_tuple` is True.
-        """
-        input = args[0] if args else next(iter(kwargs.values()))
-        return (input, ) if self.return_tuple else input
+        """Return the first arg from args or the first value from kwargs."""
+        return args[0] if args else next(iter(kwargs.values()))
 
 
 _CPU_OFFLOAD_BYTES = 0

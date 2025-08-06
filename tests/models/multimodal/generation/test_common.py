@@ -337,6 +337,10 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.fuyu_vllm_to_hf_output,
         num_logprobs=10,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        # FIXME(Isotr0py): This model is broken in Transformers v4.54.1, we
+        # should enable this again after the fix is released:
+        # https://github.com/huggingface/transformers/pull/39915
+        marks=[pytest.mark.skip("HF model is broken")],
     ),
     "gemma3": VLMTestInfo(
         models=["google/gemma-3-4b-it"],
