@@ -737,7 +737,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
-        if multimodal_config.get_limit_per_prompt("image"):
+        if multimodal_config and multimodal_config.get_limit_per_prompt(
+                "image"):
             self.vision_model = Llama4VisionModel(
                 config.vision_config,
                 None,
