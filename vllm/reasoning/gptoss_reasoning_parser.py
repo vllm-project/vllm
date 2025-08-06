@@ -29,20 +29,14 @@ class GptOssReasoningParser(ReasoningParser):
             "<|start|>assistant<|channel|>final<|message|>")
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-
-        def find_last_index(lst, value):
-            return len(lst) - 1 - list(reversed(lst)).index(value)
-
-        last_start = find_last_index(input_ids,
-                                     self.reasoning_end_token_ids[0])
-        if last_start is None:
-            return False
-        for i in range(5):
-            if last_start + i >= len(input_ids):
-                return False
-            if input_ids[last_start + i] != self.reasoning_end_token_ids[i]:
-                return False
-        return True
+        end_token_ids = self.reasoning_end_token_ids
+        assert len(end_token_ids) > 0, "reasoning_end_token_ids is empty"
+        # Check if the end sequence is present in the input_ids.
+        # We search from the end of input_ids to find the last match.
+        for i in range(len(input_ids) - len(end_token_ids), -1, -1):
+            if input_ids[i:i + len(end_token_ids)] == end_token_ids:
+                return True
+        return False
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         raise RuntimeError(
