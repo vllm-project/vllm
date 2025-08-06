@@ -1411,8 +1411,8 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         cls,
         vllm_config: "VllmConfig",
         use_v1: bool = True,
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
-        """Calculate shapes for Mamba's convolutional and state caches.
+    ) -> tuple[tuple[int, ...], ...]:
+        """Calculate shape for MiniMaxText01LinearAttention cache.
 
         Args:
             vllm_config: vLLM config
@@ -1420,8 +1420,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
         Returns:
             Tuple containing:
-            - conv_state_shape: Shape for convolutional state cache
-            - temporal_state_shape: Shape for state space model cache
+            - state_shape: Shape of the cache
         """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
@@ -1430,4 +1429,4 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                        parallel_config.tensor_parallel_size,
                        hf_config.head_dim, hf_config.head_dim)
 
-        return [state_shape]
+        return (state_shape, )
