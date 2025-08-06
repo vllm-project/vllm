@@ -25,7 +25,7 @@ check_num_gpus() {
     if [ ! -d "/opt/rocm" ]; then
 	num_gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
     else
-	num_gpus=$(lspci | grep Instinct | wc -l)
+	num_gpus=$(rocm-smi --showid | grep Instinct | wc -l)
     fi
 
     if [ "$num_gpus" -lt 2 ]; then
