@@ -577,10 +577,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 req_state = self.requests[req_id]
                 self.input_batch.add_request(req_state, req_index=adx)
 
-            # Refresh sampling metadata if pooling requests were added/removed
-            if (scheduler_output.finished_req_ids or unscheduled_req_ids
-                    or req_ids_to_add):
-                self.input_batch.refresh_sampling_metadata()
+            # Refresh sampling metadata with added/removed pooling requests
+            self.input_batch.refresh_sampling_metadata()
         else:
             # Autoregressive models only: add the new or resumed requests to
             # the persistent batch. The smaller empty indices are filled first.
