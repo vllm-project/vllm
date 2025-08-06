@@ -339,8 +339,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             custom_routing_function, e_score_correction_bias,
             apply_router_weight_on_input, scoring_func, activation,
             expert_load_view, logical_to_physical_map,
-            logical_replica_count), ("Triton kernels are not supported for \
-                    mxfp4 MoE with the current configuration.")
+            logical_replica_count), ("MXFP4 are not supported\
+                                      with this configuration.")
 
         if (envs.VLLM_USE_FLASHINFER_MXFP4_MOE
                 or envs.VLLM_USE_FLASHINFER_MXFP4_BF16_MOE):
