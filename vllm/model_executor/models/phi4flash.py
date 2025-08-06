@@ -116,7 +116,7 @@ class SambaYAttention(nn.Module):
             self.Wqkv = nn.Linear(self.hidden_size, op_size, bias=True)
 
         # disable sliding window for the second half of the model
-        is_sliding = config.layer_types[layer_idx] == "sliding_window"
+        is_sliding = config.layer_types[layer_idx] == "sliding_attention"
         sliding_window = config.sliding_window if is_sliding else None
 
         assert self.num_heads % 2 == 0, 'num_heads should be even'

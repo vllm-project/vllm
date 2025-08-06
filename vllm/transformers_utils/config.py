@@ -433,9 +433,21 @@ def get_config(
                     raise e
         config = _maybe_remap_hf_config_attrs(config)
 
-        # TODO: Remove this workaround once the configuration_phi4flash.py
-        # has been updated in microsoft/Phi-4-mini-flash-reasoning
-        config.sliding_window = next(filter(None, config.sliding_window), None)
+        # Phi4Flash misuses this config as list[int]. Convert it to int and add
+        # the layer_types list[str] to make it HF compatible
+        if (config.model_type == "phi4flash"):
+            # TODO: Remove after the following PR is merged:
+            # https://huggingface.co/microsoft/Phi-4-mini-flash-reasoning/discussions/7
+            sliding_window = next(filter(None, config.sliding_window), None)
+            config.sliding_window = sliding_window
+            # TODO: Remove after the following PR is merged:
+            # https://huggingface.co/microsoft/Phi-4-mini-flash-reasoning/discussions/6
+            num_hidden_layers = config.num_hidden_layers
+            is_sliding = lambda i: i < num_hidden_layers // 2 and i % 2 == 1
+            config.layer_types = [
+                "sliding_attention" if is_sliding(i) else "full_attention"
+                for i in range(num_hidden_layers)
+            ]
 
     elif config_format == ConfigFormat.MISTRAL:
         # This function loads a params.json config which
