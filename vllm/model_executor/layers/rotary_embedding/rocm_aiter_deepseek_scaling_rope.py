@@ -206,7 +206,7 @@ class AiterDeepseekScalingRotaryEmbedding(AiterRotaryEmbedding):
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = torch.arange(
             self.max_position_embeddings * self.scaling_factor,
-            device="cuda",
+            device=current_platform.device_type,
             dtype=torch.float32,
         )
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
