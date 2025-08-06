@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Optional
 
 import pytest
 
-from vllm import LLM
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm import LLM, EngineArgs, LLMEngine
+from vllm.sampling_params import GuidedDecodingParams, SamplingParams, RequestOutputKind
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 if TYPE_CHECKING:
@@ -149,6 +149,114 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
             raise AssertionError(
                 f"{len(completion_counts)} unique completions; expected"
                 f" {n}. Repeats: {repeats}")
+
+
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-0.6B"])
+@pytest.mark.parametrize("num_index", [2, 5])
+@pytest.mark.parametrize(
+    "output_kind", [None, RequestOutputKind.CUMULATIVE, RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+def test_llmengine_streaming_with_parallel_sampling(model, output_kind, num_index) -> None:
+    """Test output_kind in LLMEngine when parallel sampling (index) `n>1`.
+    """   
+    engine_args = EngineArgs(model=model, gpu_memory_utilization=0.5)
+    engine = LLMEngine.from_engine_args(engine_args)
+    
+    NUM_REQUESTS = 10
+    NUM_TOKENS = 20
+      
+    sampling_params = SamplingParams(
+        max_tokens=NUM_TOKENS,
+        min_tokens=NUM_TOKENS,
+        n=num_index,
+        **({"output_kind": output_kind} if output_kind is not None else {}),
+        temperature=0.9,
+    )
+
+    if output_kind == None:
+        assert sampling_params.output_kind == RequestOutputKind.CUMULATIVE, "default is CUMULATIVE"
+    
+    prompts = [f"The history of the Earth is" for i in range(NUM_REQUESTS)]
+    request_ids = []
+    from collections import defaultdict
+    partial_tokens = defaultdict(lambda: defaultdict(list))
+    finished_requests = set()
+    
+    for i, prompt in enumerate(prompts):
+        request_id = f"req-{i}"
+        request_ids.append(request_id)
+        engine.add_request(request_id, prompt, sampling_params)
+    
+    while len(finished_requests) < len(request_ids):
+        for request_output in engine.step():
+            request_id = request_output.request_id
+           
+            # Accumulate outputs by using the `index` field
+            for output in request_output.outputs:
+                partial_tokens[request_id][output.index].extend(output.token_ids)
+
+            if request_output.finished:
+                finished_requests.add(request_id)
+                index_count = len(set(comp.index for comp in request_output.outputs))
+                token_count = len(request_output.outputs[0].token_ids)
+                # total generated token counts per index
+                token_all = [len(partial_tokens[request_id][i]) for i in partial_tokens[request_id]]
+ 
+                # 1st assert: checks the last output
+                # 2nd assert: checks the number of parallel sampling number
+                # 3rd assert: verifies each index generated the same number of tokens in sum
+                if sampling_params.output_kind == RequestOutputKind.CUMULATIVE:
+                    assert index_count == 1 and token_count == NUM_TOKENS
+                    assert len(partial_tokens[request_id]) == num_index
+                    assert len(set(token_all)) == 1 and token_all[0] == NUM_TOKENS*(NUM_TOKENS+1)/2
+                elif sampling_params.output_kind == RequestOutputKind.DELTA:
+                    assert index_count == 1 and token_count == 1
+                    assert len(partial_tokens[request_id]) == num_index
+                    assert len(set(token_all)) == 1 and token_all[0] == NUM_TOKENS    
+                elif sampling_params.output_kind == RequestOutputKind.FINAL_ONLY:
+                    assert index_count == num_index and token_count == NUM_TOKENS
+                    assert len(partial_tokens[request_id]) == num_index
+                    assert len(set(token_all)) == 1 and token_all[0] == NUM_TOKENS                   
+                else:
+                    assert False, "output_kind is missing"        
+
+
+@pytest.mark.parametrize("num_index", [2, 5])
+@pytest.mark.parametrize(
+    "output_kind", [None, RequestOutputKind.CUMULATIVE, RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+def test_llm_streaming_with_parallel_sampling(vllm_model, num_index, output_kind) -> None:
+    """Test output_kind in LLM class when parallel sampling (index) `n>1`.
+    """
+    NUM_REQUESTS = 10
+    NUM_TOKENS = 20
+    prompts = [f"The history of the Earth is" for i in range(NUM_REQUESTS)]
+    
+    sampling_params = SamplingParams(
+        max_tokens=NUM_TOKENS,
+        min_tokens=NUM_TOKENS,
+        n=num_index,
+        **({"output_kind": output_kind} if output_kind is not None else {}),
+        temperature=0.9,
+    )
+
+    llm = vllm_model.llm
+    outputs = llm.generate(prompts, sampling_params)
+    
+    # ATM output_kind is overwritten to FINAL_ONLY
+    assert sampling_params.output_kind == RequestOutputKind.FINAL_ONLY,(
+        f"output_kind={output_kind} overwritten to FINAL_ONLY,"
+        f"got {sampling_params.output_kind} instead")
+       
+    for output in outputs:
+        index_count = len(set(comp.index for comp in output.outputs))
+        token_ids = output.outputs[0].token_ids
+        
+        assert index_count == num_index
+        
+        if index_count == 1:
+            if len(token_ids) == 1: 
+                raise AssertionError("works like streaming DELTA")
+            else:
+                raise AssertionError("works like streaming CUMULATIVE")
 
 
 def test_engine_metrics(vllm_runner, monkeypatch, example_prompts):
