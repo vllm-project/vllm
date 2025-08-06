@@ -31,6 +31,20 @@ llm.sleep(level=1)
 llm.wake_up()# or llm.wake_up(tags=["weights"]) for fine-grained control
 ```
 
+### RLHF Weight updates
+
+During RLHF training, vLLM allows you to selectively wake up only the model weights or the KV cache using the tags argument in wake_up(). This fine-grained control is especially useful when updating model weights: by waking up just the weights (e.g., llm.wake_up(tags=["weights"])), you avoid allocating memory for the KV cache until after the weight update is complete. This approach helps prevent GPU out-of-memory (OOM) errors, particularly with large models, by minimizing peak memory usage during weight synchronization and update operations.
+
+```python
+# Put engine to deep sleep (level=2)
+llm.sleep(level=2)
+# ... Get the new weights
+# Wake up only weights to avoid OOM
+llm.wake_up(tags=["weights"])
+# ... Update the weights
+# Optionally, wake up KV cache after weights are updated
+llm.wake_up(tags=["kv_cache"])
+```
 ---
 
 ### Online inference
@@ -52,25 +66,10 @@ VLLM_SERVER_DEV_MODE=1 python -m vllm.entrypoints.openai.api_server \
 
 These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`
 
-### RLHF Weight updates
-
-During RLHF training, vLLM allows you to selectively wake up only the model weights or the KV cache using the tags argument in wake_up(). This fine-grained control is especially useful when updating model weights: by waking up just the weights (e.g., llm.wake_up(tags=["weights"])), you avoid allocating memory for the KV cache until after the weight update is complete. This approach helps prevent GPU out-of-memory (OOM) errors, particularly with large models, by minimizing peak memory usage during weight synchronization and update operations.
-
-```python
-# Put engine to deep sleep (level=2)
-llm.sleep(level=2)
-# Simulate weight update (e.g., after RLHF training)
-new_weights = train_model.state_dict()
-# Wake up only weights to avoid OOM
-llm.wake_up(tags=["weights"])
-llm.inplace_update_weights(new_weights)
-del new_weights
-# Optionally, wake up KV cache after weights are updated
-llm.wake_up(tags=["kv_cache"])
-```
-
 ### Notes
 
 - **Sleep levels**: Level 1 sleep will offload the model weights and discard the kv cache. The content of kv cache is forgotten. Level 1 sleep is good for sleeping and waking up the engine to run the same model again. The model weights are backed up in CPU memory. Please make sure there's enough CPU memory to store the model weights. Level 2 sleep will discard both the model weights and the kv cache. The content of both the model weights and kv cache is forgotten. Level 2 sleep is good for sleeping and waking up the engine to run a different model or update the model, where previous model weights are not needed.
+
+- **Partial wake-up**: Use `tags=["weights"]` or `tags=["kv_cache"]` to control which resources are restored, useful for RLHF and weight updates.
 
 - **Platform support**: Supported on CUDA platform.
