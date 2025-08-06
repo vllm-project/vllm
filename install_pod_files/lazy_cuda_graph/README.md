@@ -1098,3 +1098,29 @@ DEBUG 08-06 11:51:06 [core.py:681] EngineCore waiting for work.
 (APIServer pid=210846) INFO:     Shutting down
 (APIServer pid=210846) INFO:     Waiting for application shutdown.
 (APIServer pid=210846) INFO:     Application shutdown complete.
+
+
+### LAZY but freezing the GC
+
+============ Serving Benchmark Result ============
+Successful requests:                     10        
+Benchmark duration (s):                  4.72      
+Total input tokens:                      1369      
+Total generated tokens:                  1196      
+Request throughput (req/s):              2.12      
+Output token throughput (tok/s):         253.24    
+Total Token throughput (tok/s):          543.12    
+---------------Time to First Token----------------
+Mean TTFT (ms):                          55.10     
+Median TTFT (ms):                        60.95     
+P99 TTFT (ms):                           61.79     
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          24.75     
+Median TPOT (ms):                        12.69     
+P99 TPOT (ms):                           63.33     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           8.29      
+Median ITL (ms):                         5.00      
+P99 ITL (ms):                            281.93    
+==================================================
+
