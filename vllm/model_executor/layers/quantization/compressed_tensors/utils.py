@@ -14,7 +14,9 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
         CompressedTensorsConfig)
 
-__all__ = ["is_activation_quantization_format", "get_linear_quantization", "is_match"]
+__all__ = [
+    "is_activation_quantization_format", "get_linear_quantization", "is_match"
+]
 
 
 def is_activation_quantization_format(format: str) -> bool:
