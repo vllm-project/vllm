@@ -77,14 +77,14 @@ class AdditionalHeadsMixin:
         ]
     
     def _build_classification_head(self, num_hidden_layers: int, hidden_dim: Optional[int]) -> nn.Sequential:
-        """Build a binary classification head with the specified number of hidden layers."""        
+        """Build a binary classification head with the specified number of hidden layers. Returns logits."""        
         if num_hidden_layers == 0:
-            return nn.Sequential(nn.Linear(self.config.hidden_size, 1), nn.Sigmoid())
+            return nn.Sequential(nn.Linear(self.config.hidden_size, 1))
 
         layers = [nn.Linear(self.config.hidden_size, hidden_dim), nn.ReLU()]
         for _ in range(num_hidden_layers - 1):
             layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.ReLU()])
-        layers.extend([nn.Linear(hidden_dim, 1), nn.Sigmoid()])
+        layers.append(nn.Linear(hidden_dim, 1))
         return nn.Sequential(*layers)
     
     def _load_classification_heads_from_files(self) -> Set[str]:
@@ -124,7 +124,7 @@ class AdditionalHeadsMixin:
         self, hidden_states: torch.Tensor, additional_heads_extra_inputs: Optional[List[Dict[str, Any]]] = None
     ) -> torch.Tensor:
         """
-        Compute outputs for all additional heads.
+        Compute logit outputs for all additional heads.
         Returns a tensor of shape [batch_size, num_heads] with outputs for each head.
         """
         head_outputs = []
