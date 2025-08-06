@@ -5,7 +5,7 @@ import queue
 import signal
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
@@ -930,7 +930,7 @@ class DPEngineCoreProc(EngineCoreProc):
         # finished with DP peers every N steps.
         self.step_counter = 0
         self.current_wave = 0
-        self.last_counts = (0, 0)
+        self.last_counts: tuple[int, int, Counter] = (0, 0, Counter())
 
         # Initialize the engine.
         dp_rank = vllm_config.parallel_config.data_parallel_rank

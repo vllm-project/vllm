@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import itertools
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
@@ -952,9 +952,12 @@ class Scheduler(SchedulerInterface):
                 self.encoder_cache_manager.free_encoder_input(
                     request, input_id)
 
-    def get_request_counts(self) -> tuple[int, int]:
-        """Returns (num_running_reqs, num_waiting_reqs)."""
-        return len(self.running), len(self.waiting)
+    def get_request_counts(self) -> tuple[int, int, Counter[int]]:
+        """Returns (num_running_reqs, num_waiting_reqs, 
+        num_waiting_reqs_by_priority)."""
+        num_waiting_by_priority = Counter(seq_group.priority
+                                          for seq_group in self.waiting)
+        return len(self.running), len(self.waiting), num_waiting_by_priority
 
     def add_request(self, request: Request) -> None:
         self.waiting.add_request(request)
@@ -1044,7 +1047,13 @@ class Scheduler(SchedulerInterface):
             return None
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
+
+        # Compute the priority counts.
+        num_waiting_by_priority = Counter(seq_group.priority
+                                          for seq_group in self.waiting)
+
         return SchedulerStats(
+            num_waiting_reqs_by_priority=dict(num_waiting_by_priority),
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             kv_cache_usage=self.kv_cache_manager.usage,

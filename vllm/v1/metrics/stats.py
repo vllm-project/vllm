@@ -29,9 +29,9 @@ class PrefixCacheStats:
 @dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
-
     num_running_reqs: int = 0
     num_waiting_reqs: int = 0
+    num_waiting_reqs_by_priority: dict[int, int] = field(default_factory=dict)
 
     # These are used for internal DP load-balancing.
     step_counter: int = 0
