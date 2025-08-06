@@ -777,7 +777,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
-            start_idx = self.tp_rank * shard_size
+            start_idx = self.comm_group_rank * shard_size
             if not is_sharded_weight:
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                      shard_size)
@@ -954,6 +954,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                          skip_bias_add=skip_bias_add,
                          params_dtype=params_dtype,
                          quant_config=quant_config,
+                         comm_group=get_tp_group(),
                          prefix=prefix,
                          return_bias=return_bias)
 
@@ -1068,8 +1069,8 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         if is_gguf_weight:
             output_dim = getattr(param, "output_dim", None)
-            shard_size = loaded_weight.size(output_dim) // self.tp_size
-            start_idx = self.tp_rank * shard_size
+            shard_size = loaded_weight.size(output_dim) // self.comm_group_size
+            start_idx = self.comm_group_rank * shard_size
 
             if loaded_shard_id is not None:
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx,
@@ -1195,9 +1196,9 @@ class QKVParallelLinear(ColumnParallelLinear):
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
             if loaded_shard_id == "q":
-                shard_id = self.tp_rank
+                shard_id = self.comm_group_rank
             else:
-                shard_id = self.tp_rank // self.num_kv_head_replicas
+                shard_id = self.comm_group_rank // self.num_kv_head_replicas
             start_idx = shard_id * shard_size
 
             if not is_sharded_weight:
