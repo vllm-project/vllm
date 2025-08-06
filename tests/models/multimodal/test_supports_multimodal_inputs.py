@@ -15,8 +15,8 @@ from ..utils import build_model_context
 @pytest.mark.parametrize(
     "model_id,limit_mm_per_prompt,expected",
     [
-        ("Qwen/Qwen2.5-1.5B-Instruct", None, False),
-        ("Qwen/Qwen2.5-VL-3B-Instruct", None, True),
+        ("Qwen/Qwen2-0.5B-Instruct", {}, False),
+        ("Qwen/Qwen2.5-VL-3B-Instruct", {}, True),
         ("Qwen/Qwen2.5-VL-3B-Instruct", {
             "image": 0,
             "video": 0
