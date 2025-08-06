@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.layers.additional_heads import AdditionalHeadsMixin
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -933,3 +934,9 @@ def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
             if weight_name.startswith(f"model.layers.{layer_idx+i}."):
                 return layer_idx + i
     return None
+
+
+class DeepseekV3ForCausalLMWithAdditionalHeads(DeepseekV3ForCausalLM, AdditionalHeadsMixin):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        DeepseekV3ForCausalLM.__init__(self, vllm_config=vllm_config, prefix=prefix)
+        AdditionalHeadsMixin.__init__(self, vllm_config=vllm_config)

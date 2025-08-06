@@ -52,6 +52,7 @@ _TEXT_GENERATION_MODELS = {
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
     "DeepseekV3ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
+    "DeepseekV3ForCausalLMWithAdditionalHeads": ("deepseek_v2", "DeepseekV3ForCausalLMWithAdditionalHeads"),
     "Dots1ForCausalLM": ("dots1", "Dots1ForCausalLM"),
     "Ernie4_5_ForCausalLM": ("ernie45", "Ernie4_5_ForCausalLM"),
     "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
