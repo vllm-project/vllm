@@ -87,7 +87,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
-    VLLM_SKIP_NVLINK_CHECK: bool = False
+    VLLM_SKIP_INTERCONNECT_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
@@ -688,10 +688,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SKIP_P2P_CHECK":
     lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
 
-    # Allow custom all-reduce optimizations for systems without full NVLink
-    # support with more than 2 GPUs
-    "VLLM_SKIP_NVLINK_CHECK":
-    lambda: os.getenv("VLLM_SKIP_NVLINK_CHECK", "0") == "1",
+    # Allow custom all-reduce optimizations for systems without full high-speed
+    # interconnect support (e.g. NVLink, XGMI) with more than 2 GPUs
+    "VLLM_SKIP_INTERCONNECT_CHECK":
+    lambda: os.getenv("VLLM_SKIP_INTERCONNECT_CHECK", "0") == "1",
 
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel
