@@ -57,14 +57,12 @@ class HarmonyContext(ConversationContext):
         messages: list,
         tool_sessions: dict[str, Tool],
     ):
-        # TODO: Remove the hack of Union[ClientSession, Tool] by using MCP
-        # when demo.
         self._messages = messages
         self.tool_sessions = tool_sessions
 
         self.parser = get_streamable_parser_for_assistant()
         self.num_init_messages = len(messages)
-        # TODO
+        # TODO(woosuk): Implement the following fields.
         self.num_prompt_tokens = 0
         self.num_cached_tokens = 0
         self.num_output_tokens = 0
