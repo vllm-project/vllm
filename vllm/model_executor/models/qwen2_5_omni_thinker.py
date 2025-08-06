@@ -722,13 +722,24 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 "exactly same result as the transformers implementation "
                 "in the audio tower part.")
 
-        self.audio_tower = Qwen2_5OmniAudioEncoder(thinker_config.audio_config)
-        self.visual = Qwen2_5_VisionTransformer(
-            vision_config=thinker_config.vision_config,
-            norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "visual"),
-        )
+        if multimodal_config.get_limit_per_prompt("audio"):
+            self.audio_tower = Qwen2_5OmniAudioEncoder(
+                thinker_config.audio_config)
+        else:
+            self.audio_tower = None
+
+        if multimodal_config.get_limit_per_prompt(
+                "image") or multimodal_config.get_limit_per_prompt("video"):
+            self.visual = Qwen2_5_VisionTransformer(
+                vision_config=thinker_config.vision_config,
+                norm_eps=getattr(thinker_config.text_config, "rms_norm_eps",
+                                 1e-6),
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+        else:
+            self.visual = None
+
         self.quant_config = quant_config
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
@@ -886,9 +897,15 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
+        skip_prefixes = ["talker.", "token2wav."]
+        if self.audio_tower is None:
+            skip_prefixes.extend(["audio_tower."])
+        if self.visual is None:
+            skip_prefixes.extend(["visual."])
+
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=["talker.", "token2wav."],
+            skip_prefixes=skip_prefixes,
         )
         loaded_weights = loader.load_weights(weights,
                                              mapper=self.hf_to_vllm_mapper)
