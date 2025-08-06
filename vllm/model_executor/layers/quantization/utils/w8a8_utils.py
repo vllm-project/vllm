@@ -316,7 +316,9 @@ class Fp8LinearOp:
         # as it breaks with dynamic shapes.
         if pad_output is None:
             config = get_current_vllm_config().compilation_config
-            pad_output = config.level < CompilationLevel.PIECEWISE and \
+            # TODO: temporary solution, see: https://github.com/vllm-project/vllm/pull/22360
+            level = config.level or CompilationLevel.NO_COMPILATION
+            pad_output = level < CompilationLevel.PIECEWISE and \
                          not cutlass_fp8_supported and \
                          not current_platform.is_rocm()
 
