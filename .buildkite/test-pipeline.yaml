@@ -488,7 +488,7 @@ steps:
   - vllm/
   - tests/encoder_decoder
   commands:
-  - echo TODO # TODO: bart is not yet supported in V1
+  - pytest -v -s encoder_decoder
 
 - label: OpenAI-Compatible Tool Use # 20 min
   mirror_hardwares: [amdexperimental]
