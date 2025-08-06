@@ -349,7 +349,8 @@ class EagleProposer:
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> list[torch.Tensor]:
-        tree_attn_metadata_builder = self.runner.attn_metadata_builders[0]
+        tree_attn_metadata_builder = \
+            self.runner.attn_groups[0][0].metadata_builder
         assert isinstance(tree_attn_metadata_builder,
                           TreeAttentionMetadataBuilder)
 
