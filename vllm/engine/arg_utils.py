@@ -7,13 +7,14 @@ import copy
 import dataclasses
 import functools
 import json
+import os
 import sys
 import threading
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
-from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
-                    Literal, Optional, Type, TypeVar, Union, cast, get_args,
-                    get_origin)
+from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, Iterable,
+                    List, Literal, Optional, Type, TypeVar, Union, cast,
+                    get_args, get_origin)
 
 import regex as re
 import torch
@@ -30,7 +31,8 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          LoRAConfig, ModelConfig, ModelDType, ModelImpl,
                          MultiModalConfig, ObservabilityConfig, ParallelConfig,
                          PoolerConfig, PrefixCachingHashAlgo, RunnerOption,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
+                         SchedulerConfig, SchedulerPolicy,
+                         SignatureVerificationConfig, SpeculativeConfig,
                          TaskOption, TokenizerMode, VllmConfig, get_attr_docs,
                          get_field)
 from vllm.logger import init_logger
@@ -451,6 +453,16 @@ class EngineArgs:
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
 
+    verification_method: Optional[str] = None
+    signature: Optional[str] = None
+    ignore_git_paths: bool = True
+    identity: str = ""
+    identity_provider: str = ""
+    use_staging: bool = False
+    certificate_chain: Optional[Iterable[str]] = None
+    log_fingerprints: bool = False
+    public_key: Optional[str] = None
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -854,6 +866,28 @@ class EngineArgs:
         vllm_group.add_argument("--additional-config",
                                 **vllm_kwargs["additional_config"])
 
+        # Signature verification arguments
+        sv_kwargs = get_kwargs(SignatureVerificationConfig)
+        sv_group = parser.add_argument_group(
+            title="SignatureVerificationConfig",
+            description=SignatureVerificationConfig.__doc__,
+        )
+        sv_group.add_argument("--verification-method",
+                              **sv_kwargs["verification_method"])
+        sv_group.add_argument("--signature", **sv_kwargs["signature"])
+        sv_group.add_argument("--ignore-paths", **sv_kwargs["ignore_paths"])
+        sv_group.add_argument("--ignore-git-paths",
+                              **sv_kwargs["ignore_git_paths"])
+        sv_group.add_argument("--use-staging", **sv_kwargs["use_staging"])
+        sv_group.add_argument("--identity", **sv_kwargs["identity"])
+        sv_group.add_argument("--identity-provider",
+                              **sv_kwargs["identity_provider"])
+        sv_group.add_argument("--certificate-chain",
+                              **sv_kwargs["certificate_chain"])
+        sv_group.add_argument("--log-fingerprints",
+                              **sv_kwargs["log_fingerprints"])
+        sv_group.add_argument("--public-key", **sv_kwargs["public_key"])
+
         # Other arguments
         parser.add_argument('--disable-log-stats',
                             action='store_true',
@@ -885,6 +919,23 @@ class EngineArgs:
                 and self.model in MODELS_ON_S3 and self.load_format == "auto"):
             self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
             self.load_format = "runai_streamer"
+
+        svc = SignatureVerificationConfig(
+            verification_method=self.verification_method,
+            signature=self.signature,
+            ignore_git_paths=self.ignore_git_paths,
+            identity=self.identity,
+            identity_provider=self.identity_provider,
+            use_staging=self.use_staging,
+            certificate_chain=self.certificate_chain,
+            log_fingerprints=self.log_fingerprints,
+            public_key=self.public_key,
+        )
+
+        if svc.signature_verification_requested() and \
+           os.path.exists(self.model) and \
+           os.path.isdir(self.model):
+            svc.verify_signature(self.model)
 
         return ModelConfig(
             model=self.model,
@@ -931,6 +982,7 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
+            signature_verification_config=svc,
         )
 
     def validate_tensorizer_args(self):
