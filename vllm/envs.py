@@ -686,7 +686,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SKIP_P2P_CHECK":
     lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
 
-    # Allow custom all-reduce optimizations for systems without full NVLink support with more than 2 GPUs
+    # Allow custom all-reduce optimizations for systems without full NVLink 
+    # support with more than 2 GPUs
     "VLLM_SKIP_NVLINK_CHECK":
     lambda: os.getenv("VLLM_SKIP_NVLINK_CHECK", "0") == "1",
 
