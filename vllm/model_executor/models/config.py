@@ -270,8 +270,9 @@ class GptOssConfig(VerifyAndUpdateConfig):
                 # Step size 16 for larger batch sizes
                 cuda_graph_sizes += [i for i in range(256, 1025, 16)]
                 scheduler_config.cuda_graph_sizes = cuda_graph_sizes
-                logger.info("Overriding cuda graph sizes to %s",
-                            cuda_graph_sizes)
+                logger.info(
+                    "Overriding max cuda graph capture size to "
+                    "%d for performance.", 1024)
 
 
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
