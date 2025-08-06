@@ -5,7 +5,7 @@ import logging
 import time
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
-from typing import Any, cast, Optional, Union
+from typing import Any, Optional, Union, cast
 
 import numpy as np
 
