@@ -6,15 +6,16 @@ within a vision language model."""
 from typing import Optional, Union
 
 import torch
-from flash_attn import flash_attn_varlen_func
-from flash_attn.layers.rotary import apply_rotary_emb
+from einops import rearrange, repeat
 from torch import nn
 from torch.nn import functional as F
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutputWithNoAttention
-from transformers.modeling_utils import PreTrainedModel
 
+from vllm.platforms import _Backend
 from vllm.transformers_utils.configs.ovis2_5 import Siglip2NavitConfig
+
+from .vision import get_vit_attn_backend
 
 
 class VisionRotaryEmbedding(nn.Module):
@@ -125,14 +126,58 @@ class Siglip2VisionEmbeddings(nn.Module):
         return patch_embeds
 
 
-# copied from qwen2.5-vl
-def apply_rotary_pos_emb_flashatt(
-        q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor,
-        sin: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+# copy from flash_attn/layers/rotary.py
+def rotate_half(x, interleaved=False):
+    if not interleaved:
+        x1, x2 = x.chunk(2, dim=-1)
+        return torch.cat((-x2, x1), dim=-1)
+    else:
+        x1, x2 = x[..., ::2], x[..., 1::2]
+        return rearrange(torch.stack((-x2, x1), dim=-1),
+                         "... d two -> ... (d two)",
+                         two=2)
+
+
+def apply_rotary_emb_torch(x, cos, sin, interleaved=False):
+    """
+    x: (batch_size, seqlen, nheads, headdim)
+    cos, sin: (seqlen, rotary_dim / 2) or (batch_size, seqlen, rotary_dim / 2)
+    """
+    ro_dim = cos.shape[-1] * 2
+    assert ro_dim <= x.shape[-1]
+    cos = repeat(
+        cos,
+        "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
+    sin = repeat(
+        sin,
+        "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
+    return torch.cat(
+        [
+            x[..., :ro_dim] * cos +
+            rotate_half(x[..., :ro_dim], interleaved) * sin, x[..., ro_dim:]
+        ],
+        dim=-1,
+    )
+
+
+def apply_rotary_pos_emb(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_flash_attn_backend: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
     cos = cos.chunk(2, dim=-1)[0].contiguous()
     sin = sin.chunk(2, dim=-1)[0].contiguous()
-    q_embed = apply_rotary_emb(q.float(), cos.float(), sin.float()).type_as(q)
-    k_embed = apply_rotary_emb(k.float(), cos.float(), sin.float()).type_as(k)
+    if is_flash_attn_backend:
+        from flash_attn.layers.rotary import apply_rotary_emb
+        apply_rotary_emb_func = apply_rotary_emb
+    else:
+        apply_rotary_emb_func = apply_rotary_emb_torch
+    q_embed = apply_rotary_emb_func(q.float(), cos.float(),
+                                    sin.float()).type_as(q)
+    k_embed = apply_rotary_emb_func(k.float(), cos.float(),
+                                    sin.float()).type_as(k)
     return q_embed, k_embed
 
 
@@ -161,6 +206,18 @@ class Siglip2Attention(nn.Module):
 
         self.use_rope = config.use_rope
 
+        # Detect attention implementation.
+        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        if self.attn_backend not in {
+                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA,
+                _Backend.ROCM_AITER_FA
+        }:
+            raise RuntimeError(
+                f"Ovis2.5 does not support {self.attn_backend} backend now.")
+        self.is_flash_attn_backend = self.attn_backend in {
+            _Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA
+        }
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -182,16 +239,48 @@ class Siglip2Attention(nn.Module):
 
         if self.use_rope:
             cos, sin = position_embeddings
-            queries, keys = apply_rotary_pos_emb_flashatt(
-                queries.unsqueeze(0), keys.unsqueeze(0), cos, sin)
+            queries, keys = apply_rotary_pos_emb(queries.unsqueeze(0),
+                                                 keys.unsqueeze(0), cos, sin,
+                                                 self.is_flash_attn_backend)
             queries = queries.squeeze(0)
             keys = keys.squeeze(0)
 
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        attn_output = flash_attn_varlen_func(queries, keys, values, cu_seqlens,
-                                             cu_seqlens, max_seqlen,
-                                             max_seqlen).reshape(
-                                                 seq_length, -1)
+        if self.is_flash_attn_backend:
+            if self.attn_backend == _Backend.ROCM_AITER_FA:
+                from aiter import flash_attn_varlen_func
+            else:
+                from flash_attn import flash_attn_varlen_func
+            attn_output = flash_attn_varlen_func(
+                queries, keys, values, cu_seqlens, cu_seqlens, max_seqlen,
+                max_seqlen).reshape(seq_length, -1)
+        elif self.attn_backend == _Backend.TORCH_SDPA:
+            # Execute attention entry by entry for speed & less VRAM.
+            batch_size = cu_seqlens.shape[0] - 1
+            queries_ = queries.view(batch_size, max_seqlen, self.num_heads,
+                                    self.head_dim)
+            keys_ = keys.view(batch_size, max_seqlen, self.num_heads,
+                              self.head_dim)
+            values_ = values.view(batch_size, max_seqlen, self.num_heads,
+                                  self.head_dim)
+            outputs = []
+            for i in range(1, len(cu_seqlens)):
+                start_idx = cu_seqlens[i - 1]
+                end_idx = cu_seqlens[i]
+                q_i = queries_[:, start_idx:end_idx]
+                k_i = keys_[:, start_idx:end_idx]
+                v_i = values_[:, start_idx:end_idx]
+                q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
+                                 for x in [q_i, k_i, v_i])
+                output_i = F.scaled_dot_product_attention(q_i,
+                                                          k_i,
+                                                          v_i,
+                                                          dropout_p=0.0)
+                output_i = rearrange(output_i, "b h s d -> b s h d ")
+                outputs.append(output_i)
+            attn_output = torch.cat(outputs, dim=1)
+            attn_output = rearrange(attn_output,
+                                    "b s h d -> (s b) (h d)").contiguous()
         attn_output = self.out_proj(attn_output)
         return attn_output
 
@@ -488,32 +577,12 @@ class Siglip2VisionTransformer(nn.Module):
             last_hidden_state=last_hidden_state, hidden_states=hidden_states)
 
 
-class Siglip2PreTrainedModel(PreTrainedModel):
-    config_class = Siglip2NavitConfig
-    base_model_prefix = "siglip2_navit"
-    supports_gradient_checkpointing = True
-
-    _no_split_modules = [
-        "Siglip2VisionEmbeddings",
-        "Siglip2EncoderLayer",
-    ]
-    _supports_flash_attn_2 = True
-    _supports_sdpa = False
-    _supports_flex_attn = False
-    _supports_attention_backend = True
-
-
-class Siglip2NavitModel(Siglip2PreTrainedModel):
-    config_class = Siglip2NavitConfig
-    main_input_name = "pixel_values"
+class Siglip2NavitModel(torch.nn.Module):
 
     def __init__(self, config: Siglip2NavitConfig):
-        super().__init__(config)
+        super().__init__()
 
         self.vision_model = Siglip2VisionTransformer(config)
-
-    def get_input_embeddings(self) -> nn.Module:
-        return self.vision_model.embeddings.patch_embedding
 
     def forward(
         self,

@@ -279,8 +279,8 @@ class Ovis2_5Processor(ProcessorMixin):
                      height: int,
                      width: int,
                      factor: int = 28,
-                     min_pixels: Optional[int] = 56 * 56,
-                     max_pixels: Optional[int] = 14 * 14 * 4 * 1280):
+                     min_pixels: int = 56 * 56,
+                     max_pixels: int = 14 * 14 * 4 * 1280):
         """Rescales the image so that the following conditions are met:
         1. Both dimensions (height and width) are divisible by 'factor'.
         2. The total number of pixels is within the range 
