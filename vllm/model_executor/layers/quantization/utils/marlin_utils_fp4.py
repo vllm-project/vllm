@@ -22,7 +22,7 @@ def is_fp4_marlin_supported():
     return current_platform.has_device_capability(80)
 
 
-def fp4_marlin_process_scales(marlin_scales):
+def nvfp4_marlin_process_scales(marlin_scales):
     if not (marlin_scales >= 0).all():
         logger.warning_once(
             "NVFP4 Marlin assumes the scales to be >=0, but has encountered "
@@ -56,7 +56,20 @@ def fp4_marlin_process_scales(marlin_scales):
     return marlin_scales
 
 
-def fp4_marlin_process_global_scale(global_scale):
+def mxfp4_marlin_process_scales(marlin_scales):
+    # 8 is the number of scale number using by one thread
+    marlin_scales = marlin_scales.view(marlin_scales.size(0) // 2, 2, -1, 8)
+    marlin_scales = marlin_scales.permute(0, 2, 1, 3).reshape(
+        marlin_scales.size(0) * 2, -1)
+
+    # fit the layout of fp8 dequantization
+    marlin_scales = marlin_scales.view(-1, 4)[:, [0, 2, 1, 3]].view(
+        marlin_scales.size(0), -1)
+
+    return marlin_scales
+
+
+def nvfp4_marlin_process_global_scale(global_scale):
     assert global_scale.dtype in [torch.half, torch.bfloat16]
     fp4_exponent = 2
     if global_scale.dtype == torch.half:
@@ -150,11 +163,11 @@ def prepare_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
                                          size_k=part_size_k,
                                          size_n=part_size_n,
                                          group_size=16)
-    weight_scale = fp4_marlin_process_scales(weight_scale)
+    weight_scale = nvfp4_marlin_process_scales(weight_scale)
     layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
 
     weight_scale_2 = layer.weight_scale_2.to(param_dtype)
-    weight_scale_2 = fp4_marlin_process_global_scale(weight_scale_2)
+    weight_scale_2 = nvfp4_marlin_process_global_scale(weight_scale_2)
     layer.weight_scale_2 = torch.nn.Parameter(weight_scale_2,
                                               requires_grad=False)
 
@@ -222,19 +235,19 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
                                                   size_k=size_k,
                                                   size_n=size_n,
                                                   group_size=16)
-            marlin_scales = fp4_marlin_process_scales(marlin_scales)
+            marlin_scales = nvfp4_marlin_process_scales(marlin_scales)
             tensor_list.append(marlin_scales)
 
         scales = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
         scales = torch.nn.Parameter(scales, requires_grad=False)
         setattr(layer, name + "_weight_scale", scales)
 
-        global_scale = fp4_marlin_process_global_scale(global_scale)
+        global_scale = nvfp4_marlin_process_global_scale(global_scale)
         global_scale = torch.nn.Parameter(global_scale, requires_grad=False)
         setattr(layer, name + "_weight_scale_2", global_scale)
 
 
-def rand_marlin_weight_fp4_like(weight, group_size):
+def rand_marlin_weight_nvfp4_like(weight, group_size):
     assert group_size > 0
     size_n, size_k = weight.shape
     device = weight.device
@@ -276,8 +289,58 @@ def rand_marlin_weight_fp4_like(weight, group_size):
                                           size_k=size_k,
                                           size_n=size_n,
                                           group_size=group_size)
-    marlin_scales = fp4_marlin_process_scales(marlin_scales)
+    marlin_scales = nvfp4_marlin_process_scales(marlin_scales)
 
-    global_scale = fp4_marlin_process_global_scale(global_scale)
+    global_scale = nvfp4_marlin_process_global_scale(global_scale)
 
     return weight_ref.T, marlin_qweight, marlin_scales, global_scale
+
+
+def rand_marlin_weight_mxfp4_like(weight, group_size):
+    assert group_size > 0
+    size_n, size_k = weight.shape
+    device = weight.device
+
+    scales = torch.randint(100,
+                           125, (size_n, size_k // group_size),
+                           dtype=torch.uint8,
+                           device=weight.device)
+    scales = scales.view(torch.float8_e8m0fnu)
+
+    fp4_weight = torch.randint(0,
+                               256, (size_n, size_k // 2),
+                               dtype=torch.uint8,
+                               device=weight.device)
+    fp4_weight_part_1 = ((fp4_weight & 0b10000000) |
+                         ((fp4_weight & 0b01110000) >> 2))
+    fp4_weight_part_1 = fp4_weight_part_1.view(torch.float8_e4m3fn)
+    fp4_weight_part_1 = fp4_weight_part_1.to(weight.dtype) * (2**6)
+
+    fp4_weight2 = fp4_weight << 4
+    fp4_weight_part_2 = ((fp4_weight2 & 0b10000000) |
+                         ((fp4_weight2 & 0b01110000) >> 2))
+    fp4_weight_part_2 = fp4_weight_part_2.view(torch.float8_e4m3fn)
+    fp4_weight_part_2 = fp4_weight_part_2.to(weight.dtype) * (2**6)
+
+    weight_ref = torch.cat(
+        [fp4_weight_part_2.unsqueeze(2),
+         fp4_weight_part_1.unsqueeze(2)], 2).view(size_n, size_k)
+    weight_ref = weight_ref * \
+        scales.repeat_interleave(group_size, 1).to(weight.dtype)
+
+    marlin_qweight = ops.gptq_marlin_repack(
+        b_q_weight=fp4_weight.view(torch.int32).T.contiguous(),
+        perm=torch.empty(0, dtype=torch.int, device=device),
+        size_k=size_k,
+        size_n=size_n,
+        num_bits=4,
+    )
+
+    marlin_scales = marlin_permute_scales(s=scales.T.to(weight.dtype),
+                                          size_k=size_k,
+                                          size_n=size_n,
+                                          group_size=group_size)
+    
+    marlin_scales = mxfp4_marlin_process_scales(marlin_scales)
+
+    return weight_ref.T, marlin_qweight, marlin_scales.to(torch.float8_e8m0fnu)
