@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import Any
+from typing import Any, Optional
 
 from openai_harmony import ToolNamespaceConfig
 
@@ -16,15 +16,25 @@ class ToolServer(ABC):
 
     @abstractmethod
     def has_tool(self, tool_name: str) -> bool:
+        """
+        Return True if the tool is supported, False otherwise.
+        """
         pass
 
     @abstractmethod
-    def get_tool_description(self, tool_name: str) -> ToolNamespaceConfig:
+    def get_tool_description(self,
+                             tool_name: str) -> Optional[ToolNamespaceConfig]:
+        """
+        Return the tool description for the given tool name.
+        If the tool is not supported, return None.
+        """
         pass
 
     @abstractmethod
-    def get_tool_session(self,
-                         tool_name: str) -> AbstractAsyncContextManager[Any]:
+    def new_session(self, tool_name: str) -> AbstractAsyncContextManager[Any]:
+        """
+        Create a session for the tool.
+        """
         ...
 
 
@@ -44,7 +54,8 @@ class DemoToolServer(ToolServer):
     def has_tool(self, tool_name: str) -> bool:
         return tool_name in self.tools
 
-    def get_tool_description(self, tool_name: str) -> ToolNamespaceConfig:
+    def get_tool_description(self,
+                             tool_name: str) -> Optional[ToolNamespaceConfig]:
         if tool_name not in self.tools:
             return None
         if tool_name == "browser":
@@ -55,5 +66,5 @@ class DemoToolServer(ToolServer):
             raise ValueError(f"Unknown tool {tool_name}")
 
     @asynccontextmanager
-    async def get_tool_session(self, tool_name: str):
+    async def new_session(self, tool_name: str):
         yield self.tools[tool_name]
