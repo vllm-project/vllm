@@ -2597,10 +2597,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 f"Unknown KV cache spec type: {type(kv_cache_spec)}")
 
         attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
-            kv_cache_spec=kv_cache_spec,
-            layer_names=layer_names,
-            vllm_config=self.vllm_config,
-            device=self.device,
+            kv_cache_spec,
+            layer_names,
+            self.vllm_config,
+            self.device,
         )
 
         if self.full_cuda_graph:

@@ -2,20 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import ClassVar
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
-from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata,
-    reorder_batch_to_split_decodes_and_prefills)
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
 class Mamba1AttentionBackend(AttentionBackend):
@@ -36,6 +31,8 @@ class Mamba1AttentionMetadata:
 class Mamba1AttentionMetadataBuilder(
         AttentionMetadataBuilder[Mamba1AttentionMetadata]):
 
+    reorder_batch_threshold: ClassVar[int] = 1
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -48,17 +45,6 @@ class Mamba1AttentionMetadataBuilder(
         self.device = device
         self.vllm_config = vllm_config
         self.layer_names = layer_names
-
-    def reorder_batch(
-        self,
-        input_batch: "InputBatch",
-        scheduler_output: "SchedulerOutput",
-    ) -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(
-            input_batch,
-            scheduler_output,
-            decode_threshold=1,
-        )
 
     def build(
         self,
