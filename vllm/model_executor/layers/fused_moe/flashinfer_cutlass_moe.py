@@ -59,8 +59,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 per_act_token_quant=False,
                 block_shape=None,
             ))
-        assert quant_dtype == "nvfp4", ("Only nvfp4 quantization is "
-                                        "currently supported.")
+        assert quant_dtype in ("nvfp4", torch.float8_e4m3fn), (
+            "Only nvfp4,fp8 quantization are currently supported."
+        )
         self.ep_rank = ep_rank
         self.ep_size = ep_size
         self.tp_rank = tp_rank
@@ -149,29 +150,41 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: Optional[bool],
     ):
-        # Flashinfer CUTLASS kernel takes scalar global scales,
-        # min because inv_scale.
+        if self.quant_dtype == torch.float8_e4m3fn:
+            quant_scales = [
+                self.g1_alphas, self.a2_gscale, self.g2_alphas,
+                self.a1_gscale
+            ]
+            
+            a1q_scale = None  # not passing input_sf in fp8
+            fc1_expert_weights = w1
+            fc2_expert_weights = w2
+        else:
+            # Ensure w1_scale and w2_scale are not None before calling view
+            assert w1_scale is not None and w2_scale is not None, (
+                "w1_scale and w2_scale must not "
+                "be None for FlashInferExperts")
+            # Flashinfer CUTLASS kernel takes scalar global scales,
+            # min because inv_scale.
+            quant_scales = [
+                self.a1_gscale,
+                w1_scale.view(torch.int32),
+                self.g1_alphas,
+                self.a2_gscale,
+                w2_scale.view(torch.int32),
+                self.g2_alphas,
+            ]
+            # FlashInfer API requires weight to be long for nvfp4
+            fc1_expert_weights = w1.view(torch.long)
+            fc2_expert_weights = w2.view(torch.long)
 
-        # Ensure w1_scale and w2_scale are not None before calling view
-        assert w1_scale is not None and w2_scale is not None, (
-            "w1_scale and w2_scale must not "
-            "be None for FlashInferExperts")
 
-        quant_scales = [
-            self.a1_gscale,
-            w1_scale.view(torch.int32),
-            self.g1_alphas,
-            self.a2_gscale,
-            w2_scale.view(torch.int32),
-            self.g2_alphas,
-        ]
         _ = flashinfer_cutlass_fused_moe(
             input=hidden_states,
             token_selected_experts=topk_ids.to(torch.int),
             token_final_scales=topk_weights,
-            # FlashInfer API requires weight to be long for nvfp4
-            fc1_expert_weights=w1.view(torch.long),
-            fc2_expert_weights=w2.view(torch.long),
+            fc1_expert_weights=fc1_expert_weights,
+            fc2_expert_weights=fc2_expert_weights,
             output_dtype=self.out_dtype,
             quant_scales=quant_scales,
             input_sf=a1q_scale,

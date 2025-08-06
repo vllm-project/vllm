@@ -133,6 +133,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
+    VLLM_FLASHINFER_MOE_FP8_BACKEND: str = "flashinfer"
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: str = "throughput"
     VLLM_XGRAMMAR_CACHE_MB: int = 0

@@ -1,15 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from enum import Enum
 from typing import Optional
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts, is_valid_flashinfer_cutlass_fused_moe)
+    FlashInferExperts)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     FlashInferCutlassMoEPrepareAndFinalize)
+
+logger = init_logger(__name__)
+
+
+class FlashInferMoEBakcend(Enum):
+    CUTLASS = "cutlass"
+    FLASHINFER = "flashinfer"
 
 
 def calculate_tile_tokens_dim(num_tokens, top_k, num_experts):
@@ -151,78 +162,62 @@ def register_moe_scaling_factors(layer: torch.nn.Module) -> None:
     layer.register_parameter(
         'output2_scales_scalar',
         torch.nn.Parameter(output2_scales, requires_grad=False))
-
-
-def build_flashinfer_fp8_cutlass_moe_kernel(
-    moe_parallel_config: FusedMoEParallelConfig, ) -> mk.FusedMoEModularKernel:
-    """Create *and return* a FlashInfer CUTLASS fused-MoE modular kernel"""
-    experts = FlashInferExperts(
-        use_fp8_w8a8=True,
-        use_dp=moe_parallel_config.dp_size > 1,
-        ep_rank=moe_parallel_config.ep_rank,
-        ep_size=moe_parallel_config.ep_size,
-        tp_rank=moe_parallel_config.tp_rank,
-        tp_size=moe_parallel_config.tp_size,
-    )
-    return mk.FusedMoEModularKernel(
-        FlashInferCutlassMoEPrepareAndFinalize(quant_dtype=torch.uint8),
-        experts,
+    layer.register_parameter(
+        'w2_input_scale_inv',
+        torch.nn.Parameter(1.0 / layer.w2_input_scale, requires_grad=False)
     )
 
 
-def flashinfer_fp8_cutlass_moe_forward(
-    fused_experts: mk.FusedMoEModularKernel,
+def build_flashinfer_cutlass_moe_fp8_prepare_finalize(
+    moe: FusedMoEConfig,
+    a1_gscale: torch.Tensor,
+) -> mk.FusedMoEPrepareAndFinalize:
+    """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
+    use_dp = moe.moe_parallel_config.dp_size > 1
+    return FlashInferCutlassMoEPrepareAndFinalize(use_dp, a1_gscale=a1_gscale)
+
+
+def select_cutlass_fp8_gemm_impl(
+    moe: FusedMoEConfig,
     layer: torch.nn.Module,
-    x: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    activation: str,
-    global_num_experts: int,
-    expert_map: Optional[torch.Tensor],
-    apply_router_weight_on_input: bool,
-) -> torch.Tensor:
-    """Common forward wrapper for FlashInfer NV-FP4 fused-MoE"""
+) -> mk.FusedMoEPermuteExpertsUnpermute:
+    """Return a GEMM *experts* implementation for fused-MoE layers"""
+    
+    from vllm.model_executor.models.llama4 import Llama4MoE
+    assert layer.custom_routing_function == Llama4MoE.custom_routing_function, \
+        "FusedMoE flashinfer kernels are only supported for Llama4"
 
-    assert is_valid_flashinfer_cutlass_fused_moe(
-        x, layer.w13_weight,
-        layer.w2_weight), ("FlashInfer CUTLASS fused-MoE not applicable!")
-
-    a1_gscale = layer.w13_input_scale_quant
-    a2_gscale = layer.w2_input_scale_quant
-
-    extra_expert_args = {
-        "g1_alphas": layer.g1_alphas,
-        "g2_alphas": layer.g2_alphas,
-        # Avoid confusion with a1_scale and a2_scale
-        # where are batch size related.
-        "a1_gscale": a1_gscale,
-        "a2_gscale": a2_gscale,
-        "out_dtype": x.dtype,
-    }
-    extra_prepare_args = {
-        "use_dp": layer.dp_size > 1,
-        "local_tokens": x.shape[0],
-        "a1_gscale": a1_gscale,
-    }
-    extra_finalize_args = {
-        "use_dp": layer.dp_size > 1,
-        "local_tokens": x.shape[0],
-    }
-
-    return fused_experts(
-        hidden_states=x,
-        w1=layer.w13_weight,
-        w2=layer.w2_weight,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        inplace=False,  # TODO(shuw): fix later, now output is high prec
-        activation=activation,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
-        w1_scale=layer.w13_blockscale_swizzled,
-        w2_scale=layer.w2_blockscale_swizzled,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-        extra_expert_args=extra_expert_args,
-        extra_prepare_args=extra_prepare_args,
-        extra_finalize_args=extra_finalize_args,
+    return FlashInferExperts(
+        g1_alphas=layer.output1_scales_gate_scalar,
+        g2_alphas=layer.output2_scales_scalar,
+        a1_gscale=layer.w13_input_scale,
+        a2_gscale=layer.w2_input_scale_inv,
+        out_dtype=moe.in_dtype,
+        quant_dtype=torch.float8_e4m3fn,
+        ep_rank=moe.moe_parallel_config.ep_rank,
+        ep_size=moe.moe_parallel_config.ep_size,
+        tp_rank=moe.moe_parallel_config.tp_rank,
+        tp_size=moe.moe_parallel_config.tp_size,
     )
+
+
+def get_flashinfer_moe_backend() -> Optional[FlashInferMoEBakcend]:
+    if FlashInferMoEBakcend.CUTLASS.value == \
+        envs.VLLM_FLASHINFER_MOE_FP8_BACKEND:
+        logger.info_once(
+            "Using FlashInfer CUTLASS MoE FP8 kernels" \
+            "for ModelOptFp8MoEMethod."
+        )
+        return FlashInferMoEBakcend.CUTLASS
+    elif FlashInferMoEBakcend.FLASHINFER.value == \
+        envs.VLLM_FLASHINFER_MOE_FP8_BACKEND:
+        logger.info_once(
+            "Using FlashInfer MoE FP8 kernels for ModelOptFp8MoEMethod.")
+        return FlashInferMoEBakcend.FLASHINFER
+
+    logger.warning_once(
+        "Supported flashinfer backends: " \
+        "{[e.value for e in FlashInferMoEBakcend]}" \
+        "got {envs.VLLM_FLASHINFER_MOE_FP8_BACKEND=}"
+    )
+    return None
