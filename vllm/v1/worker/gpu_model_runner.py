@@ -2814,45 +2814,52 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     min_cg_support = builder.cudagraph_support
                     min_cg_builder_name = builder.__class__.__name__
 
+            # Flexible resolve the cudagraph mode
             cudagraph_mode = self.compilation_config.cudagraph_mode
             # check cudagraph for mixed batch is supported
             if cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL \
                 and min_cg_support != AttentionCGSupport.ALWAYS:
-                msg = f"CUDAGraphMode.{cudagraph_mode.name} is not supported "+\
-                    f"with {min_cg_builder_name} backend (support: " +\
-                    f"{min_cg_support})"
+                msg = (f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
+                       f"with {min_cg_builder_name} backend (support: "
+                       f"{min_cg_support})")
                 if min_cg_support == AttentionCGSupport.NEVER:
-                    if self.compilation_config.is_attention_splitting:
-                        msg += "; setting cudagraph_mode=PIECEWISE"
-                        self.compilation_config.cudagraph_mode = \
-                            CUDAGraphMode.PIECEWISE
-                    else:
-                        msg += "; please try cudagraph_mode=PIECEWISE, and "\
-                            "make sure compilation level is piecewise"
-                        raise ValueError(msg)
+                    # if not supported any full cudagraphs, just raise it.
+                    msg += "; please try cudagraph_mode=PIECEWISE, and "\
+                        "make sure compilation level is piecewise"
+                    raise ValueError(msg)
+
+                # attempt to resolve the full cudagraph related mode
+                if self.compilation_config.is_attention_splitting:
+                    msg += "; resolving cudagraph_mode=FULL_AND_PIECEWISE"
+                    cudagraph_mode = self.compilation_config.cudagraph_mode = \
+                        CUDAGraphMode.FULL_AND_PIECEWISE
                 else:
-                    if self.compilation_config.is_attention_splitting:
-                        msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
-                        self.compilation_config.cudagraph_mode = \
-                            CUDAGraphMode.FULL_AND_PIECEWISE
-
-                    else:
-                        msg += "; setting cudagraph_mode=FULL_DECODE_ONLY"
-                        self.compilation_config.cudagraph_mode = \
-                            CUDAGraphMode.FULL_DECODE_ONLY
-
+                    msg += "; resolving cudagraph_mode=FULL_DECODE_ONLY"
+                    cudagraph_mode = self.compilation_config.cudagraph_mode = \
+                        CUDAGraphMode.FULL_DECODE_ONLY
                 logger.warning(msg)
 
-            # check cg for decode is supported and compatible with sepc-decode
+            # check full cudagraph for decode is supported and/or compatible
+            # with sepc-decode
             if cudagraph_mode.separate_routine() and \
-                cudagraph_mode.decode_mode() == CUDAGraphMode.FULL and \
-                self.uniform_decode_query_len > 1:
-                assert min_cg_support.value >= AttentionCGSupport.\
-                    UNIFORM_BATCH.value, (
-                    f"CUDAGraphMode.{cudagraph_mode.name} is not support"
-                    f"with spec-decode for attention backend "
-                    f"{min_cg_builder_name} "
-                    f"(support: {min_cg_support})")
+                cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+                error_msg = None
+                if min_cg_support == AttentionCGSupport.NEVER:
+                    error_msg = (
+                        f"CUDAGraphMode.{cudagraph_mode.name} is not "
+                        f"supported with {min_cg_builder_name} backend ("
+                        f"support:{min_cg_support})")
+
+                if self.uniform_decode_query_len > 1 and min_cg_support.value \
+                    < AttentionCGSupport.UNIFORM_BATCH.value:
+                    error_msg = (
+                        f"CUDAGraphMode.{cudagraph_mode.name} is not supported"
+                        f" with spec-decode for attention backend "
+                        f"{min_cg_builder_name} (support: {min_cg_support})")
+                if error_msg is not None:
+                    error_msg += "; please try cudagraph_mode=PIECEWISE, "\
+                        "and make sure compilation level is piecewise"
+                    raise ValueError(error_msg)
 
             # logging perference mode for decode if needed when
             # cudagraph_mode=FULL.
