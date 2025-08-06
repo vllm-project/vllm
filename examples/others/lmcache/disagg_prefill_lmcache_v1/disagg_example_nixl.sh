@@ -21,8 +21,9 @@ check_hf_token() {
 }
 
 check_num_gpus() {
-    # can you check if the number of GPUs are >=2 via nvidia-smi?
-    if [ ! -d "/opt/rocm" ]; then
+    # can you check if the number of GPUs are >=2 via nvidia-smi/rocm-smi?
+    which rocm-smi > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
 	num_gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
     else
 	num_gpus=$(rocm-smi --showid | grep Instinct | wc -l)
