@@ -1028,7 +1028,9 @@ class DeepseekV3ForCausalLMWithAdditionalHeads(DeepseekV3ForCausalLM):
         self._heads_loaded = True
         return loaded
 
-    def compute_additional_head(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def compute_additional_head(
+        self, hidden_states: torch.Tensor, additional_heads_extra_inputs: Optional[list[dict[str, Any]]] = None
+    ) -> torch.Tensor:
         head_outputs = []
         for name in self.head_names:
             head = self.classifier_heads[name]
