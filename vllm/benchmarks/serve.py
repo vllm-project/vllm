@@ -949,6 +949,9 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
+    return asyncio.run(main_async(args))
+
+async def main_async(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -1025,8 +1028,7 @@ def main(args: argparse.Namespace):
     gc.collect()
     gc.freeze()
 
-    benchmark_result = asyncio.run(
-        benchmark(
+    benchmark_result = await benchmark(
             endpoint_type=args.endpoint_type,
             api_url=api_url,
             base_url=base_url,
@@ -1052,7 +1054,7 @@ def main(args: argparse.Namespace):
             ramp_up_start_rps=args.ramp_up_start_rps,
             ramp_up_end_rps=args.ramp_up_end_rps,
             ready_check_timeout_sec=args.ready_check_timeout_sec,
-        ))
+        )
 
     # Save config and results to json
     if args.save_result or args.append_result:
