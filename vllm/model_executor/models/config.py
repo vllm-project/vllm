@@ -247,13 +247,13 @@ class GraniteMoeHybridModelConfig(VerifyAndUpdateConfig):
             config.max_model_len)
 
 
-class GptOssConfig(VerifyAndUpdateConfig):
+class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         decoding_config = vllm_config.decoding_config
         if decoding_config.reasoning_backend == "":
-            decoding_config.reasoning_backend = "openai"
+            decoding_config.reasoning_backend = "GptOss"
 
         # Increase the max capture size from 512 to 1024 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
@@ -373,5 +373,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "GraniteMoeHybridForCausalLM": GraniteMoeHybridModelConfig,
-    "GptOssForCausalLM": GptOssConfig,
+    "GptOssForCausalLM": GptOssForCausalLMConfig,
 }
