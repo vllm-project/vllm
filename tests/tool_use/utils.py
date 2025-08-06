@@ -261,18 +261,16 @@ PRODUCT_TOOL: ChatCompletionToolParam = {
         "parameters": {
             "type": "object",
             "properties": {
+                "inserted": {
+                    "type": "boolean",
+                    "description": "inserted.",
+                },
                 "product_id": {
                     "type": "integer",
-                    "description": "The product ID of the product."
+                    "description": "The product ID of the product.",
                 },
-                "include_reviews": {
-                    "type":
-                    "boolean",
-                    "description":
-                    "Whether to include customer reviews in the response."
-                }
             },
-            "required": ["product_id", "include_reviews"]
+            "required": ["product_id", "inserted"],
         },
     },
 }
@@ -399,6 +397,6 @@ MESSAGES_ASKING_FOR_PRODUCT_INFO: list[ChatCompletionMessageParam] = [
         "user",
         "content":
         "Hi! Do you have any detailed information about the product id "
-        "7355608? Please include customer reviews.",
+        "7355608 and inserted true?",
     },
 ]

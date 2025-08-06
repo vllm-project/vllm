@@ -234,9 +234,9 @@ async def test_product_info_tool_call(client: openai.AsyncOpenAI):
     parsed_arguments = json.loads(tool_calls[0].function.arguments)
     assert isinstance(parsed_arguments, dict)
     assert isinstance(parsed_arguments.get("product_id"), int)
-    assert isinstance(parsed_arguments.get("include_reviews"), bool)
+    assert isinstance(parsed_arguments.get("inserted"), bool)
     assert parsed_arguments.get("product_id") == 7355608
-    assert parsed_arguments.get("include_reviews") is True
+    assert parsed_arguments.get("inserted") is True
 
     assert stop_reason == "tool_calls"
 
@@ -306,9 +306,9 @@ async def test_product_info_tool_call(client: openai.AsyncOpenAI):
     streamed_args = json.loads(function_args_str)
     assert isinstance(streamed_args, dict)
     assert isinstance(streamed_args.get("product_id"), int)
-    assert isinstance(streamed_args.get("include_reviews"), bool)
+    assert isinstance(streamed_args.get("inserted"), bool)
     assert streamed_args.get("product_id") == 7355608
-    assert streamed_args.get("include_reviews") is True
+    assert streamed_args.get("inserted") is True
 
     # make sure everything matches non-streaming except for ID
     assert function_name == tool_calls[0].function.name
