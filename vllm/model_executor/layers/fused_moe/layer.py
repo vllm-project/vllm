@@ -722,8 +722,8 @@ class FusedMoE(torch.nn.Module):
 
         # we padding globally so EP buffer allocation works
         if quant_config and quant_config.get_name() == "mxfp4" and (
-                envs.VLLM_USE_FLASHINFER_MOE_MXFP8_MXFP4
-                or envs.VLLM_USE_FLASHINFER_MOE_BF16_MXFP4):
+                envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
             hidden_size = round_up(hidden_size, 256)
 
         # For smuggling this layer into the fused moe custom op
