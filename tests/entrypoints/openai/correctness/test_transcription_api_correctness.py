@@ -40,6 +40,10 @@ async def transcribe_audio(client, tokenizer, y, sr):
             model=tokenizer.name_or_path,
             language="en",
             temperature=0.0,
+            # 15 minutes
+            # The default is too aggressive in some cases,
+            # depending on the test environment.
+            timeout=900,
         )
         end_time = time.perf_counter()
         # NOTE there's no streaming in transcriptions, can't measure ttft
