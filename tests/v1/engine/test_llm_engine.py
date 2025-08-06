@@ -184,9 +184,8 @@ def test_llmengine_streaming_with_parallel_sampling(model, output_kind,
     prompts = ["The history of the Earth is" for i in range(NUM_REQUESTS)]
     request_ids = []
     from collections import defaultdict
-    partial_tokens: defaultdict[
-        str, defaultdict[int, list[int]]
-    ] = defaultdict(lambda: defaultdict(list))
+    partial_tokens: defaultdict[str, defaultdict[
+        int, list[int]]] = defaultdict(lambda: defaultdict(list))
     finished_requests: set[str] = set()
 
     for i, prompt in enumerate(prompts):
@@ -234,7 +233,7 @@ def test_llmengine_streaming_with_parallel_sampling(model, output_kind,
                     assert len(
                         set(token_all)) == 1 and token_all[0] == NUM_TOKENS
                 else:
-                    assert False, "output_kind is missing"
+                    raise AssertionError("output_kind is missing")
 
 
 @pytest.mark.parametrize("num_index", [2, 5])
