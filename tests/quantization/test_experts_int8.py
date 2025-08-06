@@ -9,6 +9,8 @@ import pytest
 
 from tests.quantization.utils import is_quant_method_supported
 
+from ..models.registry import HF_EXAMPLE_MODELS
+
 MODELS = ["ai21labs/Jamba-tiny-random", "pfnet/plamo-2-1b"]
 
 
@@ -25,6 +27,8 @@ def test_model_experts_int8_startup(
     dtype: str,
     max_tokens: int,
 ) -> None:
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_transformers_version(on_fail="skip")
 
     with vllm_runner(model, dtype=dtype,
                      quantization="experts_int8") as vllm_model:
