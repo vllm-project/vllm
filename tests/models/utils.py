@@ -7,6 +7,7 @@ from typing import Any, NamedTuple, Optional, Union
 
 import torch
 import torch.nn.functional as F
+from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, RunnerOption
 from vllm.inputs import InputContext
@@ -351,3 +352,63 @@ class RerankModelInfo(NamedTuple):
     architecture: str = ""
     dtype: str = "auto"
     enable_test: bool = True
+
+
+def dummy_hf_overrides(
+    hf_config: PretrainedConfig,
+    model_arch: str,
+    exist_overrides: Optional[dict[str, Any]] = None,
+) -> PretrainedConfig:
+    """
+    Dummy HF overrides function used to create dummy model
+    with only minimum nums of layer.
+    """
+    hf_config.update(exist_overrides or {})
+
+    text_config = hf_config.get_text_config()
+
+    # Ensure at least 2 expert per group
+    # Since `grouped_topk` assumes top-2
+    n_group = getattr(text_config, 'n_group', None)
+    num_experts = n_group * 2 if n_group is not None else 2
+
+    # we use three layers for Gemma-3n to check
+    # both normal layer and kv_shared_layer
+    num_hidden_layers = (3 if model_arch == "Gemma3nForConditionalGeneration"
+                         else 1)
+    text_config.update({
+        "num_layers": 1,
+        "num_hidden_layers": num_hidden_layers,
+        "num_experts": num_experts,
+        "num_experts_per_tok": 2,
+        "num_local_experts": num_experts,
+        # Otherwise there will not be any expert layers
+        "first_k_dense_replace": 0,
+        # To avoid OOM on DeepSeek-V3
+        "n_routed_experts": num_experts,
+        # For Gemma-3n
+        "num_kv_shared_layers": 1,
+    })
+
+    if hasattr(hf_config, "vision_config"):
+        hf_config.vision_config.update({
+            "num_layers": 1,
+            "num_hidden_layers": 1,
+        })
+
+    # e.g.: ibm-granite/granite-speech-3.3-2b
+    if hasattr(hf_config, "encoder_config"):
+        hf_config.encoder_config.update({
+            "num_layers": 1,
+            "num_hidden_layers": 1,
+        })
+
+    # e.g.: Qwen/Qwen2-Audio-7B-Instruct
+    if hasattr(hf_config, "audio_config"):
+        hf_config.audio_config.update({
+            "num_layers": 1,
+            "num_hidden_layers": 1,
+            "encoder_layers": 1,
+        })
+
+    return hf_config
