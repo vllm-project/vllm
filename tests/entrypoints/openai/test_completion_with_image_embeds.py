@@ -3,6 +3,7 @@
 
 import base64
 import io
+import json
 
 import openai  # use the official client for correctness check
 import pytest
@@ -16,7 +17,7 @@ from ...utils import RemoteOpenAIServer
 # any model with a chat template should work here
 MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
 CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
-
+MAXIMUM_IMAGES = 2
 
 @pytest.fixture(scope="module")
 def default_server_args() -> list[str]:
@@ -24,12 +25,12 @@ def default_server_args() -> list[str]:
         "--dtype",
         "bfloat16",
         "--max-model-len",
-        "4096",
+        "2048",
         "--max-num-seqs",
-        "128",
+        "4",
         "--enforce-eager",
-        "--limit-mm-per-prompt.image",
-        "20000",
+        "--limit-mm-per-prompt",
+        json.dumps({"image": MAXIMUM_IMAGES}),
     ]
 
 
