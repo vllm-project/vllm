@@ -164,7 +164,9 @@ def build_logitsprocs(
     custom_logitsprocs: Sequence[Union[str, type[LogitsProcessor]]] = (),
 ) -> LogitsProcessors:
     if is_pooling_model:
-        # Pooling models do not support logitsprocs
+        if custom_logitsprocs:
+            raise ValueError(
+                "Pooling models do not support custom logits processors.")
         return LogitsProcessors()
     custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
     return LogitsProcessors(
