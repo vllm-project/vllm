@@ -54,6 +54,13 @@ if __name__ == "__main__":
         default=True,
         help="plot perf diagrams or not --no-plot --plot",
     )
+    parser.add_argument(
+        "-x",
+        "--xaxis",
+        type=str,
+        default="# of max concurrency.",
+        help="column name to use as X Axis in comparision graph",
+    )
     args = parser.parse_args()
     files = args.file
     print("comparing : " + ", ".join(files))
@@ -77,7 +84,7 @@ if __name__ == "__main__":
     debug = args.debug
     plot = args.plot
     # For Plot feature, assign y axis from one of info_cols
-    y_axis_index = 4
+    y_axis_index = info_cols.index(args.xaxis) if args.xaxis in info_cols else 4
     with open("perf_comparison.html", "w") as text_file:
         for i in range(len(data_cols_to_compare)):
             output_df, raw_data_cols = compare_data_columns(
@@ -94,7 +101,7 @@ if __name__ == "__main__":
 
             output_df_sorted = output_df.sort_values(by=info_cols[0])
             output_groups = output_df_sorted.groupby(
-                [info_cols[0], info_cols[1], info_cols[2], info_cols[3]]
+                [info_cols[0], info_cols[1], info_cols[2], info_cols[3]], dropna=False
             )
             for name, group in output_groups:
                 html = group.to_html()
