@@ -121,6 +121,25 @@ async def test_custom_logitsprocs(client: openai.AsyncOpenAI, model_name: str):
         # Alternate whether to activate dummy logitproc for each request
         use_dummy_logitproc = not use_dummy_logitproc
 
+@pytest.fixture(scope="function",
+                params=[[], ["--logits-processors", DUMMY_LOGITPROC_FQCN]])
+def pooling_server(default_server_args, request, monkeypatch):
+    """Consider two server configurations:
+    (1) --logits-processors cli arg specifies dummy logits processor via fully-
+    qualified class name (FQCN)
+    (2) No --logits-processors cli arg; monkeypatch dummy logits processor
+    entrypoint
+    """
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    if request.param:
+        # Append FQCN argument
+        default_server_args = default_server_args + request.param
+    else:
+        # Monkeypatch dummy logit processor entrypoint
+        monkeypatch.setenv("VLLM_MOCK_LP_ENTRYPOINT", "1")
+
+    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+        yield remote_server
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
