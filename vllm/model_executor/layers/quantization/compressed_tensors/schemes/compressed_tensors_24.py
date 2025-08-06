@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
 from compressed_tensors import CompressionFormat, ModelCompressor
@@ -25,6 +25,10 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+        CompressedTensorsConfig)
+
 __all__ = ["CompressedTensors24"]
 
 from vllm.platforms import current_platform
@@ -37,14 +41,17 @@ class CompressedTensors24(CompressedTensorsScheme):
         quantized: bool = False,
         weight_quant: Optional[QuantizationArgs] = None,
         input_quant: Optional[QuantizationArgs] = None,
-        model_compression_config: Optional[dict[str, Any]] = None,
+        config: Optional[CompressedTensorsConfig] = None,
     ):
         self.quantized = quantized
         self.weight_quant = weight_quant
         self.input_quant = input_quant
         self.model_compressor = (
-            ModelCompressor.from_compression_config(model_compression_config)
-            if model_compression_config is not None else None)
+            ModelCompressor(
+                quantization_config=config.quant_config,
+                sparsity_config=config.sparsity_config,
+                # do not pass transform config for now
+            ) if config is not None else None)
         self.do_sparse_decompress = (
             self.model_compressor is not None
             and self.model_compressor.sparsity_config.format

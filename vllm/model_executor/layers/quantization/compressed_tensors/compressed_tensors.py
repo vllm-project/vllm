@@ -477,15 +477,14 @@ class CompressedTensorsConfig(QuantizationConfig):
                                     sparsity_scheme=sparsity_scheme):
             # Have a valid sparsity scheme
             # Validate layer is supported by Cutlass 2:4 Kernel
-            model_compression_config = (None if sparsity_scheme is None
-                                        or sparsity_scheme.format == "dense"
-                                        else self.config)
+            config = (None if sparsity_scheme is None
+                      or sparsity_scheme.format == "dense" else self)
 
             scheme = CompressedTensors24(
                 quantized=weight_quant is not None or input_quant is not None,
                 weight_quant=weight_quant,
                 input_quant=input_quant,
-                model_compression_config=model_compression_config,
+                config=config,
             )
 
         # TODO (@ksayers): Move this check into `_get_scheme_from_parts`
