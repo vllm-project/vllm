@@ -31,7 +31,7 @@ llm.sleep(level=1)
 llm.wake_up()# or llm.wake_up(tags=["weights"]) for fine-grained control
 ```
 
-### RLHF Weight updates
+### RLHF weight updates
 
 During RLHF training, vLLM allows you to selectively wake up only the model weights or the KV cache using the tags argument in wake_up(). This fine-grained control is especially useful when updating model weights: by waking up just the weights (e.g., llm.wake_up(tags=["weights"])), you avoid allocating memory for the KV cache until after the weight update is complete. This approach helps prevent GPU out-of-memory (OOM) errors, particularly with large models, by minimizing peak memory usage during weight synchronization and update operations.
 
