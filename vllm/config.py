@@ -861,6 +861,14 @@ class ModelConfig:
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self._model_info.supports_multimodal:
+
+            # If all mulitmodal input limits are explicitly set to 0, then
+            # the model is treated as a text-only model.
+            if (self.limit_mm_per_prompt
+                    and all(limit == 0
+                            for limit in self.limit_mm_per_prompt.values())):
+                return None
+
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,
@@ -1645,12 +1653,7 @@ class ModelConfig:
 
     @property
     def is_multimodal_model(self) -> bool:
-        if self.multimodal_config is None:
-            return False
-        limits = self.multimodal_config.limit_per_prompt.values()
-        if not limits:
-            return True
-        return any(limit > 0 for limit in limits)
+        return self.multimodal_config is not None
 
     @property
     def is_cross_encoder(self) -> bool:
