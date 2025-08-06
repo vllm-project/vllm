@@ -67,6 +67,13 @@ plugins:
       exclude:
         - argparse/*
         - examples/*
+  - minify:
+      minify_html: true
+      minify_js: true
+      minify_css: true
+      cache_safe: true
+      js_files: [docs/mkdocs/javascript/*.js]
+      css_files: [docs/mkdocs/stylesheets/*.css]
   # For API reference generation
   - api-autonav:
       modules: ["vllm"]
