@@ -35,12 +35,9 @@ class PEFTHelper:
     use_rslora: bool = field(default=False)
     # True to use Weight-Decomposed Low-Rank Adaptation (DoRA, see: https://arxiv.org/abs/2402.09353)
     use_dora: bool = field(default=False)
-    # long context lora field
-    context_length: int = field(default=0)
     # Extra vllm field, start with 'vllm_' to avoid conflict
     vllm_lora_scaling_factor: float = field(default=1.0)
     vllm_max_position_embeddings: Optional[int] = field(default=False)
-    vllm_long_context_scaling_factor: Optional[float] = field(default=None)
 
     def _validate_features(self) -> list[str]:
         """
@@ -59,12 +56,6 @@ class PEFTHelper:
             self.vllm_lora_scaling_factor = self.lora_alpha / math.sqrt(self.r)
         else:
             self.vllm_lora_scaling_factor = self.lora_alpha / self.r
-        if self.context_length:
-            if self.vllm_max_position_embeddings is None:
-                self.vllm_max_position_embeddings = self.context_length
-            self.vllm_long_context_scaling_factor = float(
-                math.ceil(self.context_length /
-                          self.vllm_max_position_embeddings))
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "PEFTHelper":

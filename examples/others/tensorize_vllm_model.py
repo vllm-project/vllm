@@ -84,18 +84,22 @@ Or for deserializing:
 Once a model is serialized, tensorizer can be invoked with the `LLM` class 
 directly to load models:
 
-    llm = LLM(model="facebook/opt-125m",
-              load_format="tensorizer",
-              model_loader_extra_config=TensorizerConfig(
-                    tensorizer_uri = path_to_tensors,
-                    num_readers=3,
-                    )
-              )
+```python
+from vllm import LLM
+llm = LLM(
+    "s3://my-bucket/vllm/facebook/opt-125m/v1", 
+    load_format="tensorizer"
+)
+```
+
             
 A serialized model can be used during model loading for the vLLM OpenAI
-inference server. `model_loader_extra_config` is exposed as the CLI arg
-`--model-loader-extra-config`, and accepts a JSON string literal of the
-TensorizerConfig arguments desired.
+inference server:
+
+```
+vllm serve s3://my-bucket/vllm/facebook/opt-125m/v1 \
+    --load-format tensorizer
+```
 
 In order to see all of the available arguments usable to configure 
 loading with tensorizer that are given to `TensorizerConfig`, run:
@@ -116,10 +120,9 @@ the LoRA artifacts are in your model artifacts directory and specifying
 `--enable-lora`. For instance:
 
 ```
-vllm serve <model_path> \
+vllm serve s3://my-bucket/vllm/facebook/opt-125m/v1 \
     --load-format tensorizer \
-    --model-loader-extra-config '{"tensorizer_uri": "<model_path>.tensors"}' \
-    --enable-lora
+    --enable-lora 
 ```
 """
 

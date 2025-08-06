@@ -37,7 +37,7 @@ def test_num_computed_tokens_update(num_scheduler_steps: int,
                         num_scheduler_steps=num_scheduler_steps,
                         enable_chunked_prefill=enable_chunked_prefill,
                         enforce_eager=enforce_eager)
-    engine: LLMEngine = runner.model.llm_engine
+    engine: LLMEngine = runner.llm.llm_engine
 
     # In multi-step + chunked-prefill there is no separate single prompt step.
     # What is scheduled will run for num_scheduler_steps always.

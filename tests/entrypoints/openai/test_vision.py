@@ -36,11 +36,11 @@ EXPECTED_MM_BEAM_SEARCH_RES = [
     ],
     [
         "The image shows a Venn diagram with three over",
-        "This image shows a Venn diagram with three over",
+        "The image shows a Venn diagram with three intersect",
     ],
     [
         "This image displays a gradient of colors ranging from",
-        "This image displays a gradient of colors transitioning from",
+        "The image displays a gradient of colors ranging from",
     ],
 ]
 
@@ -48,7 +48,7 @@ EXPECTED_MM_BEAM_SEARCH_RES = [
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task",
+        "--runner",
         "generate",
         "--max-model-len",
         "2048",

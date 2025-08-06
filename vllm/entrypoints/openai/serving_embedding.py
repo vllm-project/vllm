@@ -24,6 +24,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput)
+from vllm.pooling_params import PoolingParams
 
 logger = init_logger(__name__)
 
@@ -45,23 +46,17 @@ def _get_embedding(
 
 class EmbeddingMixin(OpenAIServing):
 
+    @override
     async def _preprocess(
         self,
         ctx: ServeContext,
     ) -> Optional[ErrorResponse]:
         ctx = cast(EmbeddingServeContext, ctx)
         try:
-            (
-                ctx.lora_request,
-                ctx.prompt_adapter_request,
-            ) = self._maybe_get_adapters(ctx.request)
+            ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
             tokenizer = await self.engine_client.get_tokenizer(ctx.lora_request
                                                                )
-
-            if ctx.prompt_adapter_request is not None:
-                raise NotImplementedError("Prompt adapter is not supported "
-                                          "for embedding models")
 
             if isinstance(ctx.request, EmbeddingChatRequest):
                 (
@@ -97,6 +92,7 @@ class EmbeddingMixin(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
+    @override
     def _build_response(
         self,
         ctx: ServeContext,
@@ -167,8 +163,9 @@ class OpenAIServingEmbedding(EmbeddingMixin):
         for the API specification. This API mimics the OpenAI Embedding API.
         """
         model_name = self._get_model_name(request.model)
-        request_id = (f"{self.request_id_prefix}-"
-                      f"{self._base_request_id(raw_request)}")
+        request_id = (
+            f"{self.request_id_prefix}-"
+            f"{self._base_request_id(raw_request, request.request_id)}")
 
         ctx = EmbeddingServeContext(
             request=request,
@@ -191,11 +188,20 @@ class OpenAIServingEmbedding(EmbeddingMixin):
 
         ctx.truncate_prompt_tokens = ctx.request.truncate_prompt_tokens
 
-        pooling_params = ctx.request.to_pooling_params()
+        return None
+
+    @override
+    def _create_pooling_params(
+        self,
+        ctx: ServeContext[EmbeddingRequest],
+    ) -> Union[PoolingParams, ErrorResponse]:
+        pooling_params = super()._create_pooling_params(ctx)
+        if isinstance(pooling_params, ErrorResponse):
+            return pooling_params
 
         try:
-            pooling_params.verify(self.model_config)
+            pooling_params.verify("embed", self.model_config)
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        return None
+        return pooling_params

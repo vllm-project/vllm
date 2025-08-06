@@ -9,7 +9,6 @@ from typing import Annotated, Any, Optional, Union
 
 import msgspec
 from pydantic import BaseModel
-from typing_extensions import deprecated
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
@@ -84,27 +83,6 @@ class GuidedDecodingParams:
                 "You can only use one kind of guided decoding but multiple are "
                 f"specified: {self.__dict__}")
 
-        if self.backend is not None and ":" in self.backend:
-            self._extract_backend_options()
-
-    @deprecated(
-        "Passing guided decoding backend options inside backend in the format "
-        "'backend:...' is deprecated. This will be removed in v0.10.0. Please "
-        "use the dedicated arguments '--disable-fallback', "
-        "'--disable-any-whitespace' and '--disable-additional-properties' "
-        "instead.")
-    def _extract_backend_options(self):
-        """Extract backend options from the backend string."""
-        assert isinstance(self.backend, str)
-        self.backend, options = self.backend.split(":")
-        options_set = set(options.strip().split(","))
-        if "no-fallback" in options_set:
-            self.disable_fallback = True
-        if "disable-any-whitespace" in options_set:
-            self.disable_any_whitespace = True
-        if "no-additional-properties" in options_set:
-            self.disable_additional_properties = True
-
 
 class RequestOutputKind(Enum):
     # Return entire output so far in every RequestOutput
@@ -178,6 +156,7 @@ class SamplingParams(
             Note that the implementation follows the OpenAI API: The API will
             always return the log probability of the sampled token, so there
             may be up to `logprobs+1` elements in the response.
+            When set to -1, return all `vocab_size` log probabilities.
         prompt_logprobs: Number of log probabilities to return per prompt token.
         detokenize: Whether to detokenize the output. Defaults to True.
         skip_special_tokens: Whether to skip special tokens in the output.
@@ -436,9 +415,10 @@ class SamplingParams(
             raise ValueError(
                 f"min_tokens must be less than or equal to "
                 f"max_tokens={self.max_tokens}, got {self.min_tokens}.")
-        if self.logprobs is not None and self.logprobs < 0:
+        if (self.logprobs is not None and self.logprobs != -1
+                and self.logprobs < 0):
             raise ValueError(
-                f"logprobs must be non-negative, got {self.logprobs}.")
+                f"logprobs must be non-negative or -1, got {self.logprobs}.")
         if self.prompt_logprobs is not None and self.prompt_logprobs < 0:
             raise ValueError(f"prompt_logprobs must be non-negative, got "
                              f"{self.prompt_logprobs}.")

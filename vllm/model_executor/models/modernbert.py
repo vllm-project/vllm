@@ -1,25 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
-from typing import Optional
+from collections.abc import Iterable, Set
+from typing import Optional, Union
 
 import torch
 from torch import nn
 from transformers import ModernBertConfig
 
 from vllm.attention import Attention, AttentionType
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.pooler import ClassifierPooler
+from vllm.model_executor.layers.pooler import (ClassifierPooler,
+                                               DispatchPooler, Pooler,
+                                               PoolingMethod,
+                                               PoolingParamsUpdate,
+                                               PoolingType)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
+from vllm.tasks import PoolingTask
 
 from .interfaces import SupportsCrossEncoding, SupportsV0Only
 from .utils import WeightsMapper, maybe_prefix
@@ -195,7 +199,6 @@ class ModernBertEncoderLayer(nn.Module):
         return hidden_states
 
 
-@support_torch_compile
 class ModernBertModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"layers.": "encoder_layer.layers."})
@@ -252,10 +255,13 @@ class ModernBertModel(nn.Module):
         return norm_outputs
 
 
-class ModernBertPooler(nn.Module):
+class ModernBertPooler(Pooler):
 
     def __init__(self, config: ModernBertConfig):
         super().__init__()
+
+        pooling_type = PoolingType[config.classifier_pooling.upper()]
+        self.pooling = PoolingMethod.from_pooling_type(pooling_type)
         self.dense = nn.Linear(config.hidden_size, config.hidden_size,
                                config.classifier_bias)
         self.pooling_type = config.classifier_pooling
@@ -264,21 +270,34 @@ class ModernBertPooler(nn.Module):
                                  eps=config.norm_eps,
                                  bias=config.norm_bias)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        pooled_output = hidden_states
-        if self.pooling_type == "mean":
-            pooled_output = pooled_output.mean(dim=0, keepdim=False)
-        elif self.pooling_type == "cls":
-            pooled_output = pooled_output[0, :]
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return self.pooling.get_supported_tasks()
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return self.pooling.get_pooling_updates(task)
+
+    def _head(self, pooled_output: torch.Tensor):
+        return self.norm(self.act(self.dense(pooled_output)))
+
+    def forward(
+        self,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+        pooling_metadata: PoolingMetadata,
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+        pooled_output = self.pooling(hidden_states, pooling_metadata)
+
+        if isinstance(pooled_output, list):
+            pooled_output = [self._head(output) for output in pooled_output]
         else:
-            raise ValueError("Pooling type should be either `cls` or `mean`, "
-                             f"but got {self.pooling_type}")
-        pooled_output = self.norm(self.act(self.dense(pooled_output)))
+            pooled_output = self._head(pooled_output)
+
         return pooled_output
 
 
 class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
                                           SupportsCrossEncoding):
+
+    is_pooling_model = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -287,9 +306,28 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
         self.model = ModernBertModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "modernbert"))
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self._pooler = ClassifierPooler(vllm_config.model_config,
-                                        self.classifier,
-                                        ModernBertPooler(config))
+
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler({
+            "encode":
+            Pooler.for_encode(pooler_config),
+            "classify":
+            ClassifierPooler(
+                pooling=ModernBertPooler(config),
+                classifier=self.classifier,
+                act_fn=ClassifierPooler.act_fn_for_seq_cls(
+                    vllm_config.model_config),
+            ),
+            "score":
+            ClassifierPooler(
+                pooling=ModernBertPooler(config),
+                classifier=self.classifier,
+                act_fn=ClassifierPooler.act_fn_for_cross_encoder(
+                    vllm_config.model_config),
+            ),
+        })
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
@@ -317,13 +355,6 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
 
     def forward(
         self,

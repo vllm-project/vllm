@@ -4,7 +4,7 @@
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 
-#include "cuda_compat.h"
+#include "../../cuda_compat.h"
 #include "dispatch_utils.h"
 
 #include "ggml-common.h"

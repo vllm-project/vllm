@@ -21,7 +21,7 @@ repos:
   - id: ruff-format
     files: ^(.buildkite|benchmarks|examples)/.*
 - repo: https://github.com/crate-ci/typos
-  rev: v1.32.0
+  rev: v1.34.0
   hooks:
   - id: typos
 - repo: https://github.com/PyCQA/isort
@@ -35,12 +35,12 @@ repos:
     exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))|vllm/third_party/.*'
     types_or: [c++, cuda]
     args: [--style=file, --verbose]
-- repo: https://github.com/jackdewinter/pymarkdown
-  rev: v0.9.29
+- repo: https://github.com/igorshubovych/markdownlint-cli
+  rev: v0.45.0
   hooks:
-  - id: pymarkdown
+  - id: markdownlint
     exclude: '.*\.inc\.md'
-    args: [fix]
+    stages: [manual] # Only run in CI
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
@@ -166,7 +166,7 @@ repos:
     language: python
     types: [python]
     pass_filenames: true
-    files: vllm/config.py|tests/test_config.py
+    files: vllm/config.py|tests/test_config.py|vllm/entrypoints/openai/cli_args.py
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

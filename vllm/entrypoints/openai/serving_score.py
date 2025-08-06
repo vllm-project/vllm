@@ -27,7 +27,6 @@ from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import make_async, merge_async_iterators
 
@@ -55,14 +54,11 @@ class ServingScores(OpenAIServing):
         texts_1: list[str],
         texts_2: list[str],
         request: Union[RerankRequest, ScoreRequest],
-        request_id=str,
+        request_id: str,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[Union[LoRARequest, None]] = None,
-        prompt_adapter_request: Optional[Union[PromptAdapterRequest,
-                                               None]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-    ) -> list[PoolingRequestOutput]:
-
+    ) -> Union[list[PoolingRequestOutput], ErrorResponse]:
         input_texts = texts_1 + texts_2
 
         engine_prompts: list[TokensPrompt] = []
@@ -89,6 +85,11 @@ class ServingScores(OpenAIServing):
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         pooling_params = request.to_pooling_params()
 
+        try:
+            pooling_params.verify("embed", self.model_config)
+        except ValueError as e:
+            return self.create_error_response(str(e))
+
         for i, engine_prompt in enumerate(engine_prompts):
 
             request_id_item = f"{request_id}-{i}"
@@ -96,8 +97,7 @@ class ServingScores(OpenAIServing):
             self._log_inputs(request_id_item,
                              input_texts[i],
                              params=pooling_params,
-                             lora_request=lora_request,
-                             prompt_adapter_request=prompt_adapter_request)
+                             lora_request=lora_request)
 
             generators.append(
                 self.engine_client.encode(
@@ -169,14 +169,11 @@ class ServingScores(OpenAIServing):
         data_1: Union[list[str], list[ScoreContentPartParam]],
         data_2: Union[list[str], list[ScoreContentPartParam]],
         request: Union[RerankRequest, ScoreRequest],
-        request_id=str,
+        request_id: str,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[Union[LoRARequest, None]] = None,
-        prompt_adapter_request: Optional[Union[PromptAdapterRequest,
-                                               None]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-    ) -> list[PoolingRequestOutput]:
-
+    ) -> Union[list[PoolingRequestOutput], ErrorResponse]:
         request_prompts: list[str] = []
         engine_prompts: list[TokensPrompt] = []
 
@@ -245,7 +242,12 @@ class ServingScores(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        pooling_params = request.to_pooling_params(use_cross_encoder=True)
+        pooling_params = request.to_pooling_params()
+
+        try:
+            pooling_params.verify("score", self.model_config)
+        except ValueError as e:
+            return self.create_error_response(str(e))
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
@@ -253,8 +255,7 @@ class ServingScores(OpenAIServing):
             self._log_inputs(request_id_item,
                              request_prompts[i],
                              params=pooling_params,
-                             lora_request=lora_request,
-                             prompt_adapter_request=prompt_adapter_request)
+                             lora_request=lora_request)
 
             generator = self.engine_client.encode(
                 engine_prompt,
@@ -286,16 +287,8 @@ class ServingScores(OpenAIServing):
         request_id: str,
         raw_request: Optional[Request] = None,
         truncate_prompt_tokens: Optional[int] = None,
-    ) -> list[PoolingRequestOutput]:
-
-        (
-            lora_request,
-            prompt_adapter_request,
-        ) = self._maybe_get_adapters(request)
-
-        if prompt_adapter_request is not None:
-            raise NotImplementedError("Prompt adapter is not supported "
-                                      "for scoring models")
+    ) -> Union[list[PoolingRequestOutput], ErrorResponse]:
+        lora_request = self._maybe_get_adapters(request)
 
         tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
@@ -333,7 +326,6 @@ class ServingScores(OpenAIServing):
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                prompt_adapter_request=prompt_adapter_request,
                 trace_headers=trace_headers)
 
         else:
@@ -345,7 +337,6 @@ class ServingScores(OpenAIServing):
                 request_id=request_id,
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                prompt_adapter_request=prompt_adapter_request,
                 trace_headers=trace_headers)
 
     async def create_score(
@@ -374,6 +365,8 @@ class ServingScores(OpenAIServing):
                 raw_request,
                 request.truncate_prompt_tokens,
             )
+            if isinstance(final_res_batch, ErrorResponse):
+                return final_res_batch
 
             return self.request_output_to_score_response(
                 final_res_batch,
@@ -420,6 +413,9 @@ class ServingScores(OpenAIServing):
                 raw_request,
                 request.truncate_prompt_tokens,
             )
+            if isinstance(final_res_batch, ErrorResponse):
+                return final_res_batch
+
             return self.request_output_to_rerank_response(
                 final_res_batch,
                 request_id,
