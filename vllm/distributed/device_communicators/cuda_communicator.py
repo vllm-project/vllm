@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+from .all_reduce_registry import get_allreduce_backend, list_allreduce_backends
 from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
@@ -36,6 +37,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
+
+        # Setup plugin allreduce backend if specified
+        self._setup_plugin_allreduce_backend()
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -90,8 +94,30 @@ class CudaCommunicator(DeviceCommunicatorBase):
             else:
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
+    def _setup_plugin_allreduce_backend(self):
+        """Setup plugin all_reduce backend if specified."""
+        # Initialize the plugin backend to None
+        self._plugin_allreduce_backend = None
+
+        backend_name = envs.VLLM_ALLREDUCE_BACKEND
+        if backend_name is not None:
+            backend = get_allreduce_backend(backend_name)
+            if backend is not None:
+                self._plugin_allreduce_backend = backend
+                logger.info(f"Using plugin all_reduce backend: {backend_name}")
+            else:
+                available = list(list_allreduce_backends().keys())
+                logger.warning(
+                    f"Requested all_reduce backend '{backend_name}' not found. "
+                    f"Available backends: {available}. "
+                    f"Falling back to default behavior.")
+
     def all_reduce(self, input_):
-        # always try quick reduce first, then custom allreduce,
+        # Check plugin backend first for performance
+        if self._plugin_allreduce_backend is not None:
+            return self._plugin_allreduce_backend(input_, self.device_group)
+
+        # Default behavior: always try quick reduce first, then custom allreduce,
         # and then pynccl. (quick reduce just for ROCM MI3*)
         qr_comm = self.qr_comm
         if qr_comm is not None and not qr_comm.disabled and \
