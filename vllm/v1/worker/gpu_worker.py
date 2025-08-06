@@ -32,6 +32,7 @@ from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
+from vllm.utils.flashinfer import has_flashinfer
 
 logger = init_logger(__name__)
 
@@ -310,6 +311,10 @@ class Worker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
+
+        if has_flashinfer():
+            self.model_runner.flashinfer_autotune()
+
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
 
