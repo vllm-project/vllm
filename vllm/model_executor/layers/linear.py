@@ -644,9 +644,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         return_bias: bool = True,
     ):
         self.output_sizes = output_sizes
-
-        assert all(output_size % self.comm_group_size == 0
-                   for output_size in output_sizes)
         super().__init__(input_size=input_size,
                          output_size=sum(output_sizes),
                          bias=bias,
