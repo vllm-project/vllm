@@ -320,6 +320,10 @@ class Attention(nn.Module):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
+    def get_kv_cache(self) -> torch.Tensor:
+        forward_context: ForwardContext = get_forward_context()
+        return self.kv_cache[forward_context.virtual_engine]
+
 
 class MultiHeadAttention(nn.Module):
     """Multi-headed attention without any cache, used for ViT."""
@@ -408,7 +412,6 @@ class MultiHeadAttention(nn.Module):
             out = out.transpose(1, 2)
 
         return out.reshape(bsz, q_len, -1)
-
 
 def wait_for_kv_layer_from_connector(layer_name: str):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():

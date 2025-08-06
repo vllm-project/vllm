@@ -304,6 +304,9 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
+    def get_kv_cache(self) -> torch.Tensor:
+        return self.self_attn.attn.get_kv_cache()
+
 
 @support_torch_compile
 class LlamaModel(nn.Module):
@@ -555,6 +558,12 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
         num_layers = len(self.model.layers)
         return (2, num_layers // 2, num_layers - 3)
+
+    def get_layer_kv_caches(self) -> list[torch.Tensor]:
+        kv_caches = []
+        for layer in self.model.layers:
+            kv_caches.append(layer.get_kv_cache())
+        return kv_caches
 
     def _init_model(self,
                     vllm_config: VllmConfig,
