@@ -80,7 +80,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         return "compressed-tensors"
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
-        # quantization (no kv)
+        # quantization
         for config_group in self.quant_config.config_groups.values():
             config_group.targets = hf_to_vllm_mapper.apply_list(
                 config_group.targets)

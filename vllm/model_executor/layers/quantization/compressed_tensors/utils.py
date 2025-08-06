@@ -26,6 +26,15 @@ def is_activation_quantization_format(format: str) -> bool:
 def get_linear_quantization(
     config: "CompressedTensorsConfig"
 ) -> tuple[QuantizationArgs, QuantizationArgs]:
+    """
+    Returns the quantization which is used for all `Linear` layers of a model,
+    if it exists. This is a gross generalization to assist with selecting
+    MoE kernels and should be removed in the future.
+
+    :param config: Compressed Tensors config
+    :return: input and weight quantization of Linear layers if it exists,
+        otherwise raise a ValueError
+    """
     for scheme in config.quant_config.config_groups.values():
         if scheme.targets == "Linear":
             return (scheme.input_activations, scheme.weights)
