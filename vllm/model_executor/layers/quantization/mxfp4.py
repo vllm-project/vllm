@@ -20,8 +20,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import next_power_of_2, round_up
 
-if (envs.VLLM_USE_FLASHINFER_MXFP4_MOE
-        or envs.VLLM_USE_FLASHINFER_MXFP4_BF16_MOE):
+if (envs.VLLM_USE_FLASHINFER_MOE_MXFP8_MXFP4
+        or envs.VLLM_USE_FLASHINFER_MOE_BF16_MXFP4):
     # from flashinfer.fused_moe import cutlass_fused_moe
     from flashinfer import (mxfp8_quantize, shuffle_matrix_a,
                             shuffle_matrix_sf_a, trtllm_fp4_block_scale_moe)
@@ -100,8 +100,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             intermediate_size_per_partition
         # pad the intermediate size to be a multiple of 2 * mxfp4_block
         # for to hold non-uniform sharded tensor as well as swizzling
-        if (envs.VLLM_USE_FLASHINFER_MXFP4_MOE
-                or envs.VLLM_USE_FLASHINFER_MXFP4_BF16_MOE):
+        if (envs.VLLM_USE_FLASHINFER_MOE_MXFP8_MXFP4
+                or envs.VLLM_USE_FLASHINFER_MOE_BF16_MXFP4):
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 256)
             hidden_size = round_up(hidden_size, 256)
@@ -162,8 +162,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer):
-        if (envs.VLLM_USE_FLASHINFER_MXFP4_MOE
-                or envs.VLLM_USE_FLASHINFER_MXFP4_BF16_MOE):
+        if (envs.VLLM_USE_FLASHINFER_MOE_MXFP8_MXFP4
+                or envs.VLLM_USE_FLASHINFER_MOE_BF16_MXFP4):
             layer.gemm1_alpha = Parameter(torch.tensor(
                 [1.702] * self.num_experts, dtype=torch.float32).cuda(),
                                           requires_grad=False)
@@ -344,11 +344,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             logical_replica_count), ("MXFP4 are not supported\
                                       with this configuration.")
 
-        if (envs.VLLM_USE_FLASHINFER_MXFP4_MOE
-                or envs.VLLM_USE_FLASHINFER_MXFP4_BF16_MOE):
+        if (envs.VLLM_USE_FLASHINFER_MOE_MXFP8_MXFP4
+                or envs.VLLM_USE_FLASHINFER_MOE_BF16_MXFP4):
             assert not self.moe.use_ep, (
                 "EP is not supported for flashinfer mxfp4 moe backend yet.")
-            if envs.VLLM_USE_FLASHINFER_MXFP4_BF16_MOE:
+            if envs.VLLM_USE_FLASHINFER_MOE_BF16_MXFP4:
                 assert x.dtype == torch.bfloat16
                 x_quant = x
                 x_scale = None
