@@ -37,6 +37,7 @@ class PrepareFinalizeInfo:
     supported_dtypes: list[Union[torch.dtype, str]]
     blocked_quantization_support: bool
     backend: Optional[str]
+    supports_apply_weight_on_input: bool = True
 
 
 @dataclass
@@ -75,6 +76,7 @@ def register_prepare_and_finalize(
     blocked_quantization_support: bool,
     backend: Optional[str],
     force_multigpu: bool = False,
+    supports_apply_weight_on_input: bool = True,
 ):
     global PREPARE_FINALIZE_INFO
     global MK_ALL_PREPARE_FINALIZE_TYPES
@@ -87,6 +89,7 @@ def register_prepare_and_finalize(
         supported_dtypes,
         blocked_quantization_support,
         backend,
+        supports_apply_weight_on_input,
     )
     MK_ALL_PREPARE_FINALIZE_TYPES.append(kind)
     if backend is not None or force_multigpu:
@@ -218,6 +221,7 @@ if has_flashinfer_cutlass_fused_moe():
         blocked_quantization_support=True,
         backend=None,
         force_multigpu=True,
+        supports_apply_weight_on_input=False,
     )
 
     register_experts(
@@ -365,6 +369,12 @@ def make_prepare_finalize(
         return MoEPrepareAndFinalizeNoEP()
 
 
+def _slice(rank: int, num_local_experts: int, t: torch.Tensor) -> torch.Tensor:
+    s = rank * num_local_experts
+    e = s + num_local_experts
+    return t[s:e]
+
+
 def make_fused_experts(
     fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
     moe: FusedMoEConfig,
@@ -441,9 +451,12 @@ def make_fused_experts(
     elif fused_experts_type == CutlassExpertsFp4:
         assert w1_gs is not None and w2_gs is not None
         num_experts = moe.num_local_experts
+        rank = moe.moe_parallel_config.dp_rank
         kwargs = {
-            "g1_alphas": (1 / w1_gs),
-            "g2_alphas": (1 / w2_gs),
+            "g1_alphas":
+            _slice(rank, num_experts, (1 / w1_gs)),
+            "g2_alphas":
+            _slice(rank, num_experts, (1 / w2_gs)),
             "a1_gscale":
             torch.ones((num_experts, ), device="cuda", dtype=torch.float32),
             "a2_gscale":
@@ -466,9 +479,12 @@ def make_fused_experts(
     elif fused_experts_type == FlashInferExperts:
         assert w1_gs is not None and w2_gs is not None
         num_experts = moe.num_local_experts
+        rank = moe.moe_parallel_config.dp_rank
         kwargs = {
-            "g1_alphas": (1 / w1_gs),
-            "g2_alphas": (1 / w2_gs),
+            "g1_alphas":
+            _slice(rank, num_experts, (1 / w1_gs)),
+            "g2_alphas":
+            _slice(rank, num_experts, (1 / w2_gs)),
             "a1_gscale":
             torch.ones((num_experts, ), device="cuda", dtype=torch.float32),
             "a2_gscale":
