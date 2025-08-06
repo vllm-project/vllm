@@ -16,7 +16,7 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption)
-from vllm.entrypoints.context import SimpleContext
+from vllm.entrypoints.context import ConversationContext, SimpleContext
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -276,7 +276,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         sampling_params: SamplingParams,
-        result_generator: AsyncIterator[RequestOutput],
+        result_generator: AsyncIterator[ConversationContext],
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
@@ -284,17 +284,17 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> Union[ErrorResponse, ResponsesResponse]:
         if created_time is None:
             created_time = int(time.time())
-        final_res: Optional[RequestOutput] = None
 
         try:
-            async for res in result_generator:
-                final_res = res
+            async for context in result_generator:
+                pass
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
+        final_res = context.last_output
         assert final_res is not None
         assert len(final_res.outputs) == 1
         final_output = final_res.outputs[0]
