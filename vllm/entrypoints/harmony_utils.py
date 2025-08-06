@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import datetime
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Literal, Optional
 
 from openai.types.responses.tool import Tool
@@ -120,7 +120,7 @@ def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
 
 
 def parse_chat_output(
-        token_ids: list[int]) -> tuple[Optional[str], Optional[str], bool]:
+        token_ids: Sequence[int]) -> tuple[Optional[str], Optional[str], bool]:
     parser = parse_output_into_messages(token_ids)
     output_msgs = parser.messages
     if len(output_msgs) == 0:
