@@ -3476,11 +3476,11 @@ class PoolerConfig:
     max_embed_len: Optional[int] = None
     """
     Maximum input length allowed for embedding generation. When set, allows 
-    inputs longer than max_model_len to be accepted for embedding models.
+    inputs longer than max_embed_len to be accepted for embedding models.
     This parameter enables accepting long inputs without requiring 
     VLLM_ALLOW_LONG_MAX_MODEL_LEN environment variable. When an input exceeds
     max_embed_len, it will be handled according to the original max_model_len
-    validation logic. Defaults to None (use max_model_len validation).
+    validation logic. Defaults to None (i.e. set to max_model_len).
     """
 
     def compute_hash(self) -> str:

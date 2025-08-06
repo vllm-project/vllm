@@ -14,6 +14,8 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
+# yapf conflicts with isort for this docstring
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               EmbeddingCompletionRequest,
                                               EmbeddingRequest,
@@ -24,7 +26,9 @@ from vllm.entrypoints.openai.serving_engine import (EmbeddingServeContext,
                                                     OpenAIServing,
                                                     ServeContext,
                                                     TextTokensPrompt)
+# yapf: enable
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
@@ -216,7 +220,6 @@ class EmbeddingMixin(OpenAIServing):
         # Process all chunks for MEAN aggregation
         chunks_to_process = chunks
         chunk_indices = list(range(len(chunks)))
-        logger.info("Using chunked processing with MEAN aggregation")
 
         for i, (chunk_idx, chunk_tokens) in enumerate(
                 zip(chunk_indices, chunks_to_process)):
@@ -290,12 +293,10 @@ class EmbeddingMixin(OpenAIServing):
                 max_length_value = self.max_model_len
 
             validation_error_msg = (
-                "This model's {length_type} is {max_length} tokens. "
-                "However, you requested {token_num} tokens in the input for "
-                "embedding generation. Please reduce the length of the input."
-            ).format(length_type=length_type,
-                     max_length=max_length_value,
-                     token_num=token_num)
+                f"This model's {length_type} is {max_length_value} tokens. "
+                f"However, you requested {token_num} tokens in the input for "
+                f"embedding generation. Please reduce the length of the input."
+            )
 
             # Check if input exceeds effective max length
             if token_num > effective_max_len:
@@ -532,7 +533,8 @@ class EmbeddingMixin(OpenAIServing):
                                 PoolingRequestOutput, result)
                         except ValueError:
                             return self.create_error_response(
-                                f"Invalid request ID format: {result.request_id}")
+                                f"Invalid request ID "
+                                f"format: {result.request_id}")
 
                 # Finalize aggregated results
                 final_res_batch: list[PoolingRequestOutput] = []
@@ -542,47 +544,51 @@ class EmbeddingMixin(OpenAIServing):
                     if prompt_idx in prompt_aggregators:
                         # Finalize MEAN aggregation for this chunked prompt
                         aggregator = prompt_aggregators[prompt_idx]
-                        
+
                         weighted_sum = aggregator['weighted_sum']
                         total_weight = aggregator['total_weight']
-                        
-                        if (weighted_sum is not None and 
-                            isinstance(weighted_sum, torch.Tensor) and
-                            isinstance(total_weight, (int, float)) and
-                            total_weight > 0):
-                            
+
+                        if (weighted_sum is not None
+                                and isinstance(weighted_sum, torch.Tensor)
+                                and isinstance(total_weight, (int, float))
+                                and total_weight > 0):
+
                             # Compute final mean embedding
                             final_embedding = weighted_sum / total_weight
-                            
-                            # Create a PoolingRequestOutput for the aggregated result
+
+                            # Create a PoolingRequestOutput
+                            # for the aggregated result
                             from vllm.outputs import EmbeddingOutput
                             embedding_output = EmbeddingOutput(
                                 embedding=final_embedding.tolist())
-                            
+
                             # Get original prompt token IDs for this prompt
                             original_prompt = ctx.request_prompts[prompt_idx]
-                            if not self._is_text_tokens_prompt(original_prompt):
+                            if not self._is_text_tokens_prompt(
+                                    original_prompt):
                                 return self.create_error_response(
                                     f"Chunked prompt {prompt_idx} is not a "
                                     f"TextTokensPrompt")
-                            
-                            original_token_ids = cast(TextTokensPrompt, 
-                                                    original_prompt)["prompt_token_ids"]
-                            
+
+                            original_token_ids = cast(
+                                TextTokensPrompt,
+                                original_prompt)["prompt_token_ids"]
+
                             pooling_output = PoolingRequestOutput(
                                 request_id=aggregator['request_id'],
                                 prompt_token_ids=original_token_ids,
                                 outputs=embedding_output,
-                                finished=True
-                            )
-                            
+                                finished=True)
+
                             final_res_batch.append(pooling_output)
                         else:
                             return self.create_error_response(
-                                f"Failed to aggregate chunks for prompt {prompt_idx}")
+                                f"Failed to aggregate chunks "
+                                f"for prompt {prompt_idx}")
                     elif prompt_idx in short_prompts_results:
                         final_res_batch.append(
-                            short_prompts_results[prompt_idx])
+                            cast(PoolingRequestOutput,
+                                 short_prompts_results[prompt_idx]))
                     else:
                         return self.create_error_response(
                             f"Result not found for prompt {prompt_idx}")
