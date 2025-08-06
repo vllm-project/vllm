@@ -5,12 +5,11 @@ from typing import Optional
 
 import torch
 
-import vllm.envs as envs
 from vllm.model_executor.custom_op import CustomOp
-from vllm.platforms import current_platform
 
 from .common import apply_rotary_emb_dispatch, apply_rotary_emb_torch
 from .rocm_aiter_rope_ops import is_rocm_rotatry_embedding_enabled
+
 
 @CustomOp.register("rotary_embedding")
 class RotaryEmbedding(CustomOp):
@@ -122,7 +121,8 @@ class RotaryEmbedding(CustomOp):
                                  self.cos_sin_cache, self.is_neox_style)
         return query, key
 
-    def forward_hip(self,
+    def forward_hip(
+        self,
         positions: torch.Tensor,
         # if     is_nope_first
         # [[batch_size, seq_len, num_heads, nope_size+rope_size]
@@ -133,13 +133,20 @@ class RotaryEmbedding(CustomOp):
         offsets: Optional[torch.Tensor] = None,
         is_nope_first=False,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        # currently only rotary embedding ops from AITER package are 
+        # currently only rotary embedding ops from AITER package are
         # supported for HiP forward.
         if not self.is_rocm_aiter_enabled:
             return self.forward_native(positions, query, key, offsets)
 
-        cos_sin = self.cos_sin_cache.index_select(0, positions)
-        cos, sin = cos_sin.chunk(2, dim=-1)
+        if self.cos_sin_cache.device != query.device or \
+            self.cos_sin_cache.dtype != query.dtype:
+            self.cos_sin_cache = self.cos_sin_cache.to(query.device,
+                                                       dtype=query.dtype)
+        cos, sin = self.cos_sin_cache.chunk(2, dim=-1)
+
+        cos = cos.unsqueeze(-2).unsqueeze(-2)
+        sin = sin.unsqueeze(-2).unsqueeze(-2)
+
         rotate_style = 0 if self.is_neox_style else 1
 
         num_tokens = positions.numel()
@@ -163,17 +170,15 @@ class RotaryEmbedding(CustomOp):
 
         if key_ is None:
             torch.ops.vllm.rocm_aiter_rotary_emb_without_key_forward_hip(
-                positions, cos, sin, query_,
-                offsets, rotate_style, is_nope_first
-            )
+                positions, sin, cos, query_, offsets, rotate_style,
+                is_nope_first)
             return query.view(query_shape), None
 
         torch.ops.vllm.rocm_aiter_rotary_emb_with_key_forward_hip(
-            positions, cos, sin, query_, key_,
-            offsets, rotate_style, is_nope_first)
+            positions, sin, cos, query_, key_, offsets, rotate_style,
+            is_nope_first)
 
         return query.view(query_shape), key.view(key_shape)
-            
 
     def forward_xpu(
         self,
