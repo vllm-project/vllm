@@ -10,9 +10,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
 from .common import apply_rotary_emb_dispatch, apply_rotary_emb_torch
-
-def is_rocm_rotatry_embedding_enabled() -> bool:
-    return (current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER)
+from .rocm_aiter_rope_ops import is_rocm_rotatry_embedding_enabled
 
 @CustomOp.register("rotary_embedding")
 class RotaryEmbedding(CustomOp):
@@ -164,13 +162,13 @@ class RotaryEmbedding(CustomOp):
             key_ = key[..., -self.rotary_dim:] if key is not None else None
 
         if key_ is None:
-            torch.ops.vllm.rocm_aiter_rotary_emb_with_key_forward_hip(
+            torch.ops.vllm.rocm_aiter_rotary_emb_without_key_forward_hip(
                 positions, cos, sin, query_,
                 offsets, rotate_style, is_nope_first
             )
             return query.view(query_shape), None
 
-        torch.ops.vllm.rocm_aiter_rotary_emb_without_key_forward_hip(
+        torch.ops.vllm.rocm_aiter_rotary_emb_with_key_forward_hip(
             positions, cos, sin, query_, key_,
             offsets, rotate_style, is_nope_first)
 

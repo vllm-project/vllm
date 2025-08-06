@@ -20,11 +20,10 @@ def rocm_aiter_rotary_emb_without_key_forward_hip_impl(
     sin: torch.Tensor,
     cos: torch.Tensor,
     query: torch.Tensor,
-    query_shape: tuple[int, ...],
     offsets: Optional[torch.Tensor] = None,
     rotate_style: int = 0,
-    is_nope_first=False,
-) -> torch.Tensor:
+    is_nope_first: bool = False,
+) -> None:
     import aiter as ops
     if offsets is None:
         ops.rope_cached_positions_fwd_inplace(
@@ -47,7 +46,6 @@ def rocm_aiter_rotary_emb_without_key_forward_hip_impl(
             reuse_freqs_front_part=True,
             nope_first=is_nope_first,
         )
-    return query.view(query_shape)
 
 def rocm_aiter_rotary_emb_with_key_forward_hip_impl(
     positions: torch.Tensor,
@@ -57,7 +55,7 @@ def rocm_aiter_rotary_emb_with_key_forward_hip_impl(
     key: torch.Tensor,
     offsets: Optional[torch.Tensor] = None,
     rotate_style: int = 0,
-    is_nope_first=False,
+    is_nope_first: bool = False,
 ) -> None:
     import aiter as ops
     if offsets is None:
@@ -93,7 +91,7 @@ def rocm_aiter_rotary_emb_with_key_forward_hip_fake(
     key: torch.Tensor,
     offsets: Optional[torch.Tensor] = None,
     rotate_style: int = 0,
-    is_nope_first=False,
+    is_nope_first: bool = False,
 ) -> None:
     pass
 
@@ -104,7 +102,7 @@ def rocm_aiter_rotary_emb_without_key_forward_hip_fake(
     query: torch.Tensor,
     offsets: Optional[torch.Tensor] = None,
     rotate_style: int = 0,
-    is_nope_first=False,
+    is_nope_first: bool =False,
 ) -> None:
     pass
 
