@@ -274,7 +274,7 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
-LogprobsMode = Literal["raw_logprobs", "raw_logits", "sampled_logprobs",
+LogprobsMode = Literal["raw_logprobs", "raw_logits", "final_logprobs",
                        "processed_logprobs", "processed_logits"]
 
 

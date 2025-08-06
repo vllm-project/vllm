@@ -457,7 +457,7 @@ def test_all_logprobs(example_prompts, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.parametrize("logprobs_mode", [
-    "raw_logprobs", "raw_logits", "sampled_logprobs", "processed_logprobs",
+    "raw_logprobs", "raw_logits", "final_logprobs", "processed_logprobs",
     "processed_logits"
 ])
 def test_logprobs_mode(logprobs_mode: LogprobsMode,

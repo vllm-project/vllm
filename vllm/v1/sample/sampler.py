@@ -66,11 +66,11 @@ class Sampler(nn.Module):
                 raw_logprobs = logits.clone()
 
         # Sample the next token.
-        sampled, sampled_logprobs = self.sample(logits, sampling_metadata)
+        sampled, final_logprobs = self.sample(logits, sampling_metadata)
         if (num_logprobs is not None
-                and self.logprobs_mode == "sampled_logprobs"):
-            assert sampled_logprobs is not None
-            raw_logprobs = sampled_logprobs
+                and self.logprobs_mode == "final_logprobs"):
+            assert final_logprobs is not None
+            raw_logprobs = final_logprobs
         # Convert sampled token ids to int64 (long) type to ensure compatibility
         # with subsequent operations that may use these values as indices.
         # This conversion is necessary because FlashInfer sampling operations
@@ -139,7 +139,9 @@ class Sampler(nn.Module):
 
         # Apply top_k and/or top_p.
         if (sampling_metadata.max_num_logprobs is not None
-                and self.logprobs_mode == "sampled_logprobs"):
+                and self.logprobs_mode == "final_logprobs"):
+            # Apply top_k and/or top_p here to avoid unnecessary computation
+            # in `TopKTopPSampler` efficient implementations.
             logprobs = self.compute_logprobs(
                 apply_top_k_top_p(logits, sampling_metadata.top_k,
                                   sampling_metadata.top_p))
