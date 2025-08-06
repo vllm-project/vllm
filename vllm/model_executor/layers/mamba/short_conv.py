@@ -14,6 +14,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
                                                               update_metadata)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
@@ -34,7 +35,7 @@ class ConvCacheParams:
 
 
 @CustomOp.register("short_conv")
-class ShortConv(CustomOp):
+class ShortConv(MambaBase, CustomOp):
 
     def __init__(self, config, dim: int, layer_idx: int, prefix: str = ""):
         super().__init__()
@@ -263,6 +264,10 @@ class ShortConv(CustomOp):
             divide(self.conv_dim, world_size),
         )
         return (conv_state_shape, )
+
+    @property
+    def mamba_type(self) -> str:
+        return "short_conv"
 
 
 def short_conv(

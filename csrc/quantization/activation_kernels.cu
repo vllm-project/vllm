@@ -4,7 +4,7 @@
 
 #include <cmath>
 #include "core/math.hpp"
-#include "cuda_compat.h"
+#include "../cuda_compat.h"
 #include "dispatch_utils.h"
 
 #include "quantization/fp8/common.cuh"

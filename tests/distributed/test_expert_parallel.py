@@ -6,7 +6,7 @@ from typing import Literal, NamedTuple, Optional
 
 import pytest
 
-from vllm.config import TaskOption
+from vllm.config import RunnerOption
 from vllm.logger import init_logger
 
 from ..utils import compare_two_settings, create_new_process_for_each_test
@@ -31,14 +31,14 @@ class EPTestOptions(NamedTuple):
 class EPTestSettings:
     parallel_setups: list[ParallelSetup]
     distributed_backends: list[str]
-    task: TaskOption
+    runner: RunnerOption
     test_options: EPTestOptions
 
     @staticmethod
     def detailed(
         *,
         tp_base: int = 2,
-        task: TaskOption = "auto",
+        runner: RunnerOption = "auto",
         trust_remote_code: bool = False,
         tokenizer_mode: Optional[str] = None,
         load_format: Optional[str] = None,
@@ -63,7 +63,7 @@ class EPTestSettings:
                               chunked_prefill=False),
             ],
             distributed_backends=["mp", "ray"],
-            task=task,
+            runner=runner,
             test_options=EPTestOptions(trust_remote_code=trust_remote_code,
                                        tokenizer_mode=tokenizer_mode,
                                        load_format=load_format,
@@ -74,7 +74,7 @@ class EPTestSettings:
     def fast(
         *,
         tp_base: int = 2,
-        task: TaskOption = "auto",
+        runner: RunnerOption = "auto",
         trust_remote_code: bool = False,
         tokenizer_mode: Optional[str] = None,
         load_format: Optional[str] = None,
@@ -87,7 +87,7 @@ class EPTestSettings:
                               chunked_prefill=False),
             ],
             distributed_backends=["mp"],
-            task=task,
+            runner=runner,
             test_options=EPTestOptions(trust_remote_code=trust_remote_code,
                                        tokenizer_mode=tokenizer_mode,
                                        load_format=load_format,
@@ -100,7 +100,7 @@ class EPTestSettings:
         for parallel_setup in self.parallel_setups:
             for distributed_backend in self.distributed_backends:
                 yield (model_name, parallel_setup, distributed_backend,
-                       self.task, opts)
+                       self.runner, opts)
 
 
 # NOTE: You can adjust tp_base locally to fit the model in GPU
@@ -118,7 +118,7 @@ def _compare_tp(
     model_name: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
-    task: TaskOption,
+    runner: RunnerOption,
     test_options: EPTestOptions,
     num_gpus_available: int,
     *,
@@ -154,8 +154,8 @@ def _compare_tp(
         common_args.append("--enable-chunked-prefill")
     if eager_mode:
         common_args.append("--enforce-eager")
-    if task != "auto":
-        common_args.extend(["--task", task])
+    if runner != "auto":
+        common_args.extend(["--runner", runner])
     if trust_remote_code:
         common_args.append("--trust-remote-code")
     if tokenizer_mode:
@@ -203,7 +203,7 @@ def _compare_tp(
 
 
 @pytest.mark.parametrize(
-    ("model_name", "parallel_setup", "distributed_backend", "task",
+    ("model_name", "parallel_setup", "distributed_backend", "runner",
      "test_options"),
     [
         params for model_name, settings in TEST_MODELS.items()
@@ -215,14 +215,14 @@ def test_ep(
     model_name: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
-    task: TaskOption,
+    runner: RunnerOption,
     test_options: EPTestOptions,
     num_gpus_available,
 ):
     _compare_tp(model_name,
                 parallel_setup,
                 distributed_backend,
-                task,
+                runner,
                 test_options,
                 num_gpus_available,
                 method="generate")
