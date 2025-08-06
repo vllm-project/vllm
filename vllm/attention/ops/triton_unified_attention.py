@@ -89,7 +89,6 @@ def kernel_unified_attention_2d(
         BLOCK_Q: tl.constexpr,  # int
         num_seqs: tl.int32,
         BLOCK_M: tl.constexpr,  # int
-        HAS_SINK: tl.constexpr,  # bool
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -339,7 +338,6 @@ def kernel_unified_attention_3d(
         num_seqs: tl.int32,
         BLOCK_M: tl.constexpr,  # int
         NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
-        HAS_SINK: tl.constexpr,  # bool
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -737,7 +735,6 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
-            HAS_SINK=(sinks is not None),
         )
     else:
         # for initial version, NUM_SEGMENTS = 16 is chosen as a default
@@ -811,7 +808,6 @@ def unified_attention(
                 num_seqs=num_seqs,
                 BLOCK_M=BLOCK_M,
                 NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
-                HAS_SINK=(sinks is not None),
             )
 
         reduce_segments[(q.shape[0], num_query_heads)](
