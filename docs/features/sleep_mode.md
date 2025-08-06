@@ -54,7 +54,6 @@ llm.wake_up(tags=["weights"])
 llm.wake_up(tags=["kv_cache"])
 ```
 
----
 
 ### Online inference
 
