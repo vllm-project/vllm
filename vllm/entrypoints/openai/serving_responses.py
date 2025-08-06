@@ -295,6 +295,7 @@ class OpenAIServingResponses(OpenAIServing):
             return self.create_error_response(str(e))
 
         assert context is not None
+        assert isinstance(context, SimpleContext)
         final_res = context.last_output
         assert final_res is not None
         assert len(final_res.outputs) == 1
