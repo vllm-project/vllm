@@ -137,12 +137,19 @@ def benchmark_mrope(
             key.clone(),
             cos,
             sin,
-            mrope_section,
+            rope_scaling["mrope_section"],
             is_neox_style,
             head_dim,
             head_dim,
         )
-        triton_mrope(query.clone(), key.clone(), cos, sin, mrope_section, head_dim)
+        triton_mrope(
+            query.clone(),
+            key.clone(),
+            cos,
+            sin,
+            rope_scaling["mrope_section"],
+            head_dim,
+        )
 
     torch.cuda.synchronize()
 
@@ -159,7 +166,7 @@ def benchmark_mrope(
             key_clone,
             cos,
             sin,
-            mrope_section,
+            rope_scaling["mrope_section"],
             is_neox_style,
             head_dim,
             head_dim,
@@ -174,7 +181,9 @@ def benchmark_mrope(
         key_clone = key.clone()
         torch.cuda.synchronize()
         start_time = time.time()
-        triton_mrope(query_clone, key_clone, cos, sin, mrope_section, head_dim)
+        triton_mrope(
+            query_clone, key_clone, cos, sin, rope_scaling["mrope_section"], head_dim
+        )
         torch.cuda.synchronize()
         triton_times.append(time.time() - start_time)
 
@@ -311,7 +320,6 @@ if __name__ == "__main__":
                 q_size = num_heads * head_dim
                 kv_size = num_kv_heads * head_dim
                 is_neox_style = True
-                mrope_section = config.rope_scaling["mrope_section"]
                 rope_theta = config.rope_theta
                 max_position = config.max_position_embeddings
 
