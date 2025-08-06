@@ -130,7 +130,7 @@ def support_torch_compile(
 
     `compile_cond` is a function that takes a `VllmConfig` object as input and
     returns a boolean value indicating whether to compile the model or not.
-    This is useful if you want to compile the model only when certaijAn
+    This is useful if you want to compile the model only when certain
     conditions are met.
     """
 
