@@ -236,7 +236,6 @@ def get_logits_processors(processors: Optional[LogitsProcessors],
 
 
 ResponseInputOutputItem: TypeAlias = Union[ResponseInputItemParam,
-                                           "ResponseReasoningItem",
                                            ResponseFunctionToolCall]
 
 

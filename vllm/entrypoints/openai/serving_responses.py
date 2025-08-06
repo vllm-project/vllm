@@ -507,7 +507,8 @@ class OpenAIServingResponses(OpenAIServing):
             # instructions are ignored.
             prev_msgs = self.msg_store[prev_response.id]
             # Remove the previous chain-of-thoughts if there is a new "final"
-            # message.
+            # message. Note that this also removes these messages from the
+            # msg_store.
             if len(prev_msgs) > 0:
                 assert isinstance(prev_msgs[-1], OpenAIHarmonyMessage)
                 if prev_msgs[-1].channel == "final":
