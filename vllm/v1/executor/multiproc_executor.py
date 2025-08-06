@@ -4,6 +4,7 @@ import multiprocessing
 import os
 import pickle
 import signal
+import sys
 import threading
 import time
 import traceback
@@ -27,11 +28,10 @@ from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.executor.multiproc_worker_utils import (
-    set_multiprocessing_worker_envs)
+    _add_prefix, set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
-from vllm.utils import (decorate_logs, get_distributed_init_method,
-                        get_loopback_ip, get_mp_context, get_open_port,
-                        set_process_title)
+from vllm.utils import (get_distributed_init_method, get_loopback_ip,
+                        get_mp_context, get_open_port, set_process_title)
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -40,8 +40,6 @@ logger = init_logger(__name__)
 
 
 class MultiprocExecutor(Executor):
-
-    supports_pp: bool = True
 
     def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
@@ -52,13 +50,18 @@ class MultiprocExecutor(Executor):
         self.failure_callback: Optional[FailureCallback] = None
         self.io_thread_pool: Optional[ThreadPoolExecutor] = None
 
+        cp_parallel_size = int(os.getenv("VLLM_CP_SIZE", '1'))
+        self.parallel_config.context_parallel_size = cp_parallel_size
+        self.parallel_config.world_size = self.parallel_config.world_size * cp_parallel_size
+
         self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
         pp_parallel_size = self.parallel_config.pipeline_parallel_size
-        assert self.world_size == tensor_parallel_size * pp_parallel_size, (
+        assert self.world_size == tensor_parallel_size * pp_parallel_size * cp_parallel_size, (
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
-            f"_parallel_size ({pp_parallel_size}). ")
+            f"_parallel_size ({pp_parallel_size}) x context. "
+            f"_parallel_size ({cp_parallel_size}). ")
 
         # Set multiprocessing envs that are common to V0 and V1
         set_multiprocessing_worker_envs(self.parallel_config)
@@ -73,8 +76,8 @@ class MultiprocExecutor(Executor):
         # and ModelRunnerOutputs
         max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
         self.rpc_broadcast_mq = MessageQueue(self.world_size,
-                                             self.world_size,
-                                             max_chunk_bytes=max_chunk_bytes)
+                                                self.world_size,
+                                                max_chunk_bytes=max_chunk_bytes)
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Create workers
@@ -317,7 +320,7 @@ class MultiprocExecutor(Executor):
         # 16-23, PP rank 2
         # 24-31, PP rank 3
         # so world_size - tp_size = 32 - 8 = 24 should be PP rank = -1 (i.e. 3)
-        return self.world_size - self.parallel_config.tensor_parallel_size
+        return self.world_size - self.parallel_config.tensor_parallel_size * int(os.getenv("VLLM_CP_SIZE", '1'))
 
 
 @dataclass
@@ -384,11 +387,11 @@ class WorkerProc:
         pp_str = f"PP{rank // tp_size}" if pp_size > 1 else ""
         tp_str = f"TP{rank % tp_size}" if tp_size > 1 else ""
         suffix = f"{pp_str}{'_' if pp_str and tp_str else ''}{tp_str}"
-        process_name = "VllmWorker"
         if suffix:
             set_process_title(suffix, append=True)
-            process_name = f"{process_name} {suffix}"
-        decorate_logs(process_name)
+        pid = os.getpid()
+        _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
+        _add_prefix(sys.stderr, f"VllmWorker rank={rank}", pid)
 
         # Initialize MessageQueue for receiving SchedulerOutput
         self.rpc_broadcast_mq = MessageQueue.create_from_handle(

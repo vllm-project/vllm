@@ -51,31 +51,20 @@ def check_vllm_server(url: str, timeout=5, retries=3) -> bool:
     return False
 
 
-def run_simple_prompt(base_url: str, model_name: str, input_prompt: str,
-                      use_chat_endpoint: bool) -> str:
+def run_simple_prompt(base_url: str, model_name: str,
+                      input_prompt: str) -> str:
     client = openai.OpenAI(api_key="EMPTY", base_url=base_url)
-    if use_chat_endpoint:
-        completion = client.chat.completions.create(
-            model=model_name,
-            messages=[{
-                "role": "user",
-                "content": [{
-                    "type": "text",
-                    "text": input_prompt
-                }]
-            }],
-            max_completion_tokens=MAX_OUTPUT_LEN,
-            temperature=0.0,
-            seed=42)
-        return completion.choices[0].message.content
-    else:
-        completion = client.completions.create(model=model_name,
-                                               prompt=input_prompt,
-                                               max_tokens=MAX_OUTPUT_LEN,
-                                               temperature=0.0,
-                                               seed=42)
+    completion = client.completions.create(model=model_name,
+                                           prompt=input_prompt,
+                                           max_tokens=MAX_OUTPUT_LEN,
+                                           temperature=0.0,
+                                           seed=42)
 
-        return completion.choices[0].text
+    # print("-" * 50)
+    # print(f"Completion results for {model_name}:")
+    # print(completion)
+    # print("-" * 50)
+    return completion.choices[0].text
 
 
 def main():
@@ -136,12 +125,10 @@ def main():
             f"vllm server: {args.service_url} is not ready yet!")
 
     output_strs = dict()
-    for i, prompt in enumerate(SAMPLE_PROMPTS):
-        use_chat_endpoint = (i % 2 == 1)
+    for prompt in SAMPLE_PROMPTS:
         output_str = run_simple_prompt(base_url=service_url,
                                        model_name=args.model_name,
-                                       input_prompt=prompt,
-                                       use_chat_endpoint=use_chat_endpoint)
+                                       input_prompt=prompt)
         print(f"Prompt: {prompt}, output: {output_str}")
         output_strs[prompt] = output_str
 

@@ -9,10 +9,8 @@ from vllm.platforms import current_platform
 
 if current_platform.is_cuda_alike():
     from .fusion import FusionPass
-    from .fusion_attn import AttnFusionPass
-
-if current_platform.is_cuda():
     from .collective_fusion import AllReduceFusionPass, AsyncTPPass
+    from .fusion_attn import AttnFusionPass
 
 from .activation_quant_fusion import ActivationQuantFusionPass
 from .fix_functionalization import FixFunctionalizationPass

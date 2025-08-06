@@ -256,7 +256,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
     def __call__(
         self,
         *,
-        text: str,
+        prompt: str,
         images: list[Image.Image],
         inference_mode: bool = True,
         **kwargs,
@@ -264,7 +264,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
         """
 
         Args:
-            text (str): the formatted prompt;
+            prompt (str): the formatted prompt;
             images (list[ImageType]): the list of images;
             inference_mode (bool): if True, then remove the last eos token;
             **kwargs:
@@ -278,7 +278,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
         """
 
         prepare = self.process_one(
-            prompt=text,
+            prompt=prompt,
             images=images,
             inference_mode=inference_mode,
         )

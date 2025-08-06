@@ -4,6 +4,7 @@
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
+import os
 
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
@@ -170,6 +171,10 @@ class KVCacheManager:
                                                self.block_size, request)
             self.req_to_block_hashes[request.request_id] = block_hashes
 
+        if self.log_stats:
+            assert self.prefix_cache_stats is not None
+            self.prefix_cache_stats.requests += 1
+
         # NOTE: When all tokens hit the cache, we must recompute the last token
         # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
         # This can trigger recomputation of an entire block, rather than just
@@ -183,7 +188,6 @@ class KVCacheManager:
 
         if self.log_stats:
             assert self.prefix_cache_stats is not None
-            self.prefix_cache_stats.requests += 1
             self.prefix_cache_stats.queries += request.num_tokens
             self.prefix_cache_stats.hits += num_new_computed_tokens
 
@@ -253,8 +257,14 @@ class KVCacheManager:
 
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
-        num_computed_tokens = (request.num_computed_tokens +
-                               num_new_computed_tokens)
+
+        cp_size = int(os.getenv("VLLM_CP_SIZE", '1'))
+        if cp_size > 1 and request.status == RequestStatus.RUNNING:  #decode
+            num_computed_tokens = (request.num_computed_tokens_cp[0] +
+                                num_new_computed_tokens)
+        else:
+            num_computed_tokens = (request.num_computed_tokens +
+                                num_new_computed_tokens)
         num_tokens_need_slot = min(
             num_computed_tokens + num_new_tokens + num_lookahead_tokens,
             self.max_model_len)

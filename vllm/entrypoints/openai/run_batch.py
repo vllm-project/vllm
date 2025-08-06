@@ -324,10 +324,10 @@ async def run_batch(
     else:
         served_model_names = [args.model]
 
-    if args.enable_log_requests:
-        request_logger = RequestLogger(max_log_len=args.max_log_len)
-    else:
+    if args.disable_log_requests:
         request_logger = None
+    else:
+        request_logger = RequestLogger(max_log_len=args.max_log_len)
 
     base_model_paths = [
         BaseModelPath(name=name, model_path=args.model)

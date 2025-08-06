@@ -1,8 +1,7 @@
 # TPU
 
-## Supported Models
-
-### Text-only Language Models
+# TPU Supported Models
+## Text-only Language Models
 
 | Model                                               | Architecture                   | Supported |
 |-----------------------------------------------------|--------------------------------|-----------|

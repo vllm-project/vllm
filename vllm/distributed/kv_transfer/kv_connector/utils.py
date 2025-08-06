@@ -13,10 +13,8 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1)
 from vllm.logger import init_logger
-from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 
 logger = init_logger(__name__)
 
@@ -105,13 +103,15 @@ def get_kv_connector_cache_layout():
     # used for faster transfer.
     vllm_config = get_current_vllm_config()
     kv_config = vllm_config.kv_transfer_config
-    if kv_config is not None:
-        required_kvcache_layout = (
-            KVConnectorBase_V1.get_required_kvcache_layout(vllm_config))
-        if required_kvcache_layout is not None:
-            return required_kvcache_layout
-        logger.info_once("Connectors do not specify a " \
-                         "kv cache layout, defaulting to NHD.")
+    if kv_config is not None and vllm_config.model_config is None:
+        logger.warning_once("Unable to detect current VLLM config. " \
+        "Defaulting to NHD kv cache layout.")
+    elif kv_config is not None:
+        use_mla = vllm_config.model_config.use_mla
+        if not use_mla and kv_config.kv_connector == "NixlConnector":
+            logger.info_once("NixlConnector detected. Setting KV cache " \
+            "layout to HND for better xfer performance.")
+            return "HND"
     return "NHD"
 
 
@@ -128,7 +128,7 @@ class KVOutputAggregator:
     def aggregate(self,
                   outputs: list[ModelRunnerOutput],
                   output_rank: int = 0) -> ModelRunnerOutput:
-        # aggregate kv_connector_output from all workers
+        # aggregate finished_sending, finished_recving from all workers
 
         def update_finished_set(req_ids: Optional[set[str]],
                                 remaining_count_dict: dict[str, int],
@@ -142,7 +142,6 @@ class KVOutputAggregator:
         finished_sending = set[str]()
         finished_recving = set[str]()
         for output in outputs:
-            output = output.kv_connector_output
             update_finished_set(output.finished_sending,
                                 self._send_remaining_count, finished_sending)
             update_finished_set(output.finished_recving,
@@ -151,10 +150,13 @@ class KVOutputAggregator:
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
 
-        output.kv_connector_output = KVConnectorOutput(
-            finished_sending=finished_sending or None,
-            finished_recving=finished_recving or None,
-        )
+        # set the aggregated finished_sending / finished_recving
+        # if output.finished_sending/recving is not empty, but the other ranks
+        # still have unfinished send/recv, we want to set the aggregated
+        # finished_sending/recving to None until all ranks have finished
+        # send/recv
+        output.finished_sending = finished_sending if finished_sending else None
+        output.finished_recving = finished_recving if finished_recving else None
 
         return output
 

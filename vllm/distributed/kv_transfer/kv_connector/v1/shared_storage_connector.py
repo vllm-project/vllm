@@ -32,11 +32,10 @@ class ReqMeta:
     slot_mapping: torch.Tensor
     # Is store or load
     is_store: bool
-    mm_hashes: list[str]
 
     @staticmethod
     def make_meta(token_ids: list[int], block_ids: list[int], block_size: int,
-                  is_store: bool, mm_hashes: list[str]) -> "ReqMeta":
+                  is_store: bool) -> "ReqMeta":
         valid_num_tokens = align_to_block_size(len(token_ids), block_size)
         token_ids_tensor = torch.tensor(token_ids)[:valid_num_tokens]
         block_ids_tensor = torch.tensor(block_ids)
@@ -49,7 +48,6 @@ class ReqMeta:
             token_ids=token_ids_tensor,
             slot_mapping=slot_mapping,
             is_store=is_store,
-            mm_hashes=mm_hashes,
         )
 
 
@@ -66,11 +64,9 @@ class SharedStorageConnectorMetadata(KVConnectorMetadata):
         block_ids: list[int],
         block_size: int,
         is_store: bool,
-        mm_hashes: list[str],
     ) -> None:
         self.requests.append(
-            ReqMeta.make_meta(token_ids, block_ids, block_size, is_store,
-                              mm_hashes))
+            ReqMeta.make_meta(token_ids, block_ids, block_size, is_store))
 
 
 class SharedStorageConnector(KVConnectorBase_V1):
@@ -173,7 +169,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
                         forward_context.virtual_engine]
 
                 filename = self._generate_filename_debug(
-                    layer_name, request.token_ids, request.mm_hashes)
+                    layer_name, request.token_ids)
                 kv_cache = safetensors.torch.load_file(
                     filename)["kv_cache"].cuda()
                 inject_kv_into_layer(kv_cache_layer, kv_cache,
@@ -225,7 +221,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         for request in connector_metadata.requests:
             if request.is_store:
                 filename = self._generate_filename_debug(
-                    layer_name, request.token_ids, request.mm_hashes)
+                    layer_name, request.token_ids)
                 kv_cache = extract_kv_from_layer(kv_layer,
                                                  request.slot_mapping)
                 tensors = {"kv_cache": kv_cache.detach().cpu()}
@@ -303,8 +299,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 meta.add_request(token_ids=new_req.prompt_token_ids,
                                  block_ids=new_req.block_ids[0],
                                  block_size=self._block_size,
-                                 is_store=False,
-                                 mm_hashes=new_req.mm_hashes)
+                                 is_store=False)
                 total_need_load += 1
             else:
                 # NOTE: here, we set the store and load being exclusive,
@@ -315,8 +310,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
                     meta.add_request(token_ids=new_req.prompt_token_ids,
                                      block_ids=new_req.block_ids[0],
                                      block_size=self._block_size,
-                                     is_store=True,
-                                     mm_hashes=new_req.mm_hashes)
+                                     is_store=True)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
@@ -344,8 +338,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 meta.add_request(token_ids=token_ids,
                                  block_ids=block_ids,
                                  block_size=self._block_size,
-                                 is_store=False,
-                                 mm_hashes=request.mm_hashes)
+                                 is_store=False)
                 total_need_load += 1
 
         assert total_need_load == len(self._requests_need_load)
@@ -366,28 +359,20 @@ class SharedStorageConnector(KVConnectorBase_V1):
             len(request.prompt_token_ids) - 1, self._block_size)
         foldername = self._generate_foldername_debug(torch.tensor(
             request.prompt_token_ids)[:num_tokens_to_check],
-                                                     request.mm_hashes,
                                                      create_folder=False)
         return os.path.exists(foldername)
 
     def _generate_foldername_debug(
         self,
-        token_ids: torch.Tensor,
-        mm_hashes: list[str],
+        input_ids: torch.Tensor,
         create_folder=False,
     ) -> str:
         """Generate a folder name based on the hash of the bytes of the input 
         ids.
         """
-        token_bytes = token_ids.numpy().tobytes()
-        # Add mm_hashes to the bytes being hashed to avoid path traversal and
-        # to create a canonical key.
-        if mm_hashes:
-            mm_str = "-".join(mm_hashes)
-            token_bytes += mm_str.encode('utf-8')
-        input_ids_hash = hashlib.md5(token_bytes,
+        input_ids_bytes = input_ids.numpy().tobytes()
+        input_ids_hash = hashlib.md5(input_ids_bytes,
                                      usedforsecurity=False).hexdigest()
-
         foldername = os.path.join(self._storage_path, input_ids_hash)
         if create_folder:
             os.makedirs(foldername, exist_ok=True)
@@ -396,14 +381,12 @@ class SharedStorageConnector(KVConnectorBase_V1):
     def _generate_filename_debug(
         self,
         layer_name: str,
-        token_ids: torch.Tensor,
-        mm_hashes: list[str],
+        input_ids: torch.Tensor,
     ) -> str:
         """Generate a file name based on the layer name and the hash 
         of the bytes of the input ids.
         """
-        foldername = self._generate_foldername_debug(token_ids,
-                                                     mm_hashes=mm_hashes,
+        foldername = self._generate_foldername_debug(input_ids,
                                                      create_folder=True)
         return os.path.join(foldername, f"{layer_name}.safetensors")
 

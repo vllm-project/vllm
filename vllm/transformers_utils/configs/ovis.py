@@ -3,9 +3,8 @@
 
 # yapf: disable
 # ruff: noqa: E501
-# adapted from https://huggingface.co/AIDC-AI/Ovis2-1B/blob/main/configuration_aimv2.py
+# copied from https://huggingface.co/AIDC-AI/Ovis2-1B/blob/main/configuration_aimv2.py
 # and https://huggingface.co/AIDC-AI/Ovis2-1B/blob/main/configuration_ovis.py
-# Ovis Config with AimV2 config registration removed for Transformers compatibility
 from typing import Any, Optional, Union
 
 from transformers import AutoConfig, PretrainedConfig
@@ -13,8 +12,10 @@ from transformers import AutoConfig, PretrainedConfig
 
 class AIMv2Config(PretrainedConfig):
     """This is the configuration class to store the configuration of an [`AIMv2Model`].
+
     Instantiating a configuration with the defaults will yield a similar configuration
     to that of the [apple/aimv2-large-patch14-224](https://huggingface.co/apple/aimv2-large-patch14-224).
+
     Args:
         hidden_size: Dimension of the hidden representations.
         intermediate_size: Dimension of the SwiGLU representations.
@@ -64,6 +65,13 @@ class AIMv2Config(PretrainedConfig):
         self.projection_dropout = projection_dropout
         self.qkv_bias = qkv_bias
         self.use_bias = use_bias
+
+
+IGNORE_ID = -100
+IMAGE_TOKEN_ID = -200
+IMAGE_TOKEN = "<image>"
+IMAGE_ATOM_ID = -300
+IMAGE_INDICATOR_IDS = [-301, -302, -303, -304, -305]
 
 
 # ----------------------------------------------------------------------

@@ -295,12 +295,9 @@ def initialize_ray_cluster(
             logger.warning(
                 "No existing RAY instance detected. "
                 "A new instance will be launched with current node resources.")
-            ray.init(address=ray_address,
-                     num_gpus=parallel_config.world_size,
-                     runtime_env=parallel_config.ray_runtime_env)
+            ray.init(address=ray_address, num_gpus=parallel_config.world_size)
     else:
-        ray.init(address=ray_address,
-                 runtime_env=parallel_config.ray_runtime_env)
+        ray.init(address=ray_address)
 
     device_str = current_platform.ray_device_key
     if not device_str:

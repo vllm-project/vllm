@@ -65,8 +65,7 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         """Test basic request lifecycle."""
 
         # First request.
-        engine_core.add_request(
-            *engine_core.preprocess_add_request(make_request()))
+        engine_core.add_request(make_request())
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 0
 
@@ -75,8 +74,7 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         assert len(engine_core.scheduler.running) == 1
 
         # Second request.
-        engine_core.add_request(
-            *engine_core.preprocess_add_request(make_request()))
+        engine_core.add_request(make_request())
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 1
 
@@ -85,10 +83,8 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         assert len(engine_core.scheduler.running) == 2
 
         # Add two requests in a row.
-        engine_core.add_request(
-            *engine_core.preprocess_add_request(make_request()))
-        engine_core.add_request(
-            *engine_core.preprocess_add_request(make_request()))
+        engine_core.add_request(make_request())
+        engine_core.add_request(make_request())
         assert len(engine_core.scheduler.waiting) == 2
         assert len(engine_core.scheduler.running) == 2
 
@@ -108,7 +104,7 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         req = make_request()
         request_id = req.request_id
 
-        engine_core.add_request(*engine_core.preprocess_add_request(req))
+        engine_core.add_request(req)
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 0
         assert engine_core.scheduler.has_unfinished_requests()
@@ -135,8 +131,8 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         req1 = make_request()
         req2 = make_request()
 
-        engine_core.add_request(*engine_core.preprocess_add_request(req0))
-        engine_core.add_request(*engine_core.preprocess_add_request(req1))
+        engine_core.add_request(req0)
+        engine_core.add_request(req1)
         assert len(engine_core.scheduler.waiting) == 2
         assert len(engine_core.scheduler.running) == 0
 
@@ -144,7 +140,7 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         assert len(engine_core.scheduler.waiting) == 0
         assert len(engine_core.scheduler.running) == 2
 
-        engine_core.add_request(*engine_core.preprocess_add_request(req2))
+        engine_core.add_request(req2)
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 2
 
@@ -170,12 +166,12 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         req0 = make_request()
         req1 = make_request()
         req0.request_id = req1.request_id = "test"
-        engine_core.add_request(*engine_core.preprocess_add_request(req0))
+        engine_core.add_request(req0)
 
         while (outs := engine_core.step()[0].get(0)) and outs.outputs:
             pass
 
-        engine_core.add_request(*engine_core.preprocess_add_request(req1))
+        engine_core.add_request(req1)
         while (outs := engine_core.step()[0].get(0)) and outs.outputs:
             pass
 
@@ -211,7 +207,7 @@ def test_engine_core_advanced_sampling(monkeypatch: pytest.MonkeyPatch):
             repetition_penalty=0.1,
             stop_token_ids=[1001, 1002],
         )
-        engine_core.add_request(*engine_core.preprocess_add_request(request))
+        engine_core.add_request(request)
 
         def _check_engine_state():
             assert len(engine_core.scheduler.waiting) == 1
@@ -230,7 +226,7 @@ def test_engine_core_advanced_sampling(monkeypatch: pytest.MonkeyPatch):
             top_p=0.99,
             top_k=50,
         )
-        engine_core.add_request(*engine_core.preprocess_add_request(request2))
+        engine_core.add_request(request2)
         _check_engine_state()
 
 
@@ -240,7 +236,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
     Test that the engine can handle multiple concurrent batches.
     """
 
-    def make_request_with_max_tokens(req_id: str,
+    def make_request_with_max_tokens(req_id: int,
                                      max_tokens: int) -> EngineCoreRequest:
         request = make_request()
         request.request_id = req_id
@@ -301,16 +297,16 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         assert engine_core.batch_queue is not None
 
         # Add two requests in a row. Each request have 12 prompt tokens.
-        req0 = make_request_with_max_tokens("0", 5)
-        engine_core.add_request(*engine_core.preprocess_add_request(req0))
-        req1 = make_request_with_max_tokens("1", 5)
-        engine_core.add_request(*engine_core.preprocess_add_request(req1))
+        req0 = make_request_with_max_tokens(0, 5)
+        engine_core.add_request(req0)
+        req1 = make_request_with_max_tokens(1, 5)
+        engine_core.add_request(req1)
 
         # Schedule Batch 1: (10, req0)
         assert engine_core.step_with_batch_queue()[0] is None
         assert engine_core.batch_queue.qsize() == 1
         scheduler_output = engine_core.batch_queue.queue[-1][1]
-        assert scheduler_output.num_scheduled_tokens["0"] == 10
+        assert scheduler_output.num_scheduled_tokens[0] == 10
         # num_computed_tokens should have been updated immediately.
         assert engine_core.scheduler.requests[
             req0.request_id].num_computed_tokens == 10
@@ -319,11 +315,11 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         assert engine_core.step_with_batch_queue()[0] is None
         assert engine_core.batch_queue.qsize() == 2
         scheduler_output = engine_core.batch_queue.queue[-1][1]
-        assert scheduler_output.num_scheduled_tokens["0"] == 2
-        assert scheduler_output.num_scheduled_tokens["1"] == 8
+        assert scheduler_output.num_scheduled_tokens[0] == 2
+        assert scheduler_output.num_scheduled_tokens[1] == 8
         # num_computed_tokens should have been updated immediately.
-        assert engine_core.scheduler.requests["0"].num_computed_tokens == 12
-        assert engine_core.scheduler.requests["1"].num_computed_tokens == 8
+        assert engine_core.scheduler.requests[0].num_computed_tokens == 12
+        assert engine_core.scheduler.requests[1].num_computed_tokens == 8
 
         assert engine_core.scheduler.get_num_unfinished_requests() == 2
 
@@ -335,7 +331,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         engine_core.step_with_batch_queue()
         assert engine_core.batch_queue.qsize() == 2
         scheduler_output = engine_core.batch_queue.queue[-1][1]
-        assert scheduler_output.num_scheduled_tokens["1"] == 4
+        assert scheduler_output.num_scheduled_tokens[1] == 4
 
         # Batch queue is full. Finish Batch 2. Get first token of req0.
         output = engine_core.step_with_batch_queue()[0].get(0)
@@ -347,7 +343,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         engine_core.step_with_batch_queue()
         assert engine_core.batch_queue.qsize() == 2
         scheduler_output = engine_core.batch_queue.queue[-1][1]
-        assert scheduler_output.num_scheduled_tokens["0"] == 1
+        assert scheduler_output.num_scheduled_tokens[0] == 1
 
         # Batch queue is full. Finish Batch 3. Get first token of req1.
         output = engine_core.step_with_batch_queue()[0].get(0)
@@ -359,14 +355,14 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         engine_core.step_with_batch_queue()
         assert engine_core.batch_queue.qsize() == 2
         scheduler_output = engine_core.batch_queue.queue[-1][1]
-        assert scheduler_output.num_scheduled_tokens["1"] == 1
+        assert scheduler_output.num_scheduled_tokens[1] == 1
 
         # Loop until req0 is finished.
         step = 0
         req_id = 0
         expected_num_tokens = [
-            engine_core.scheduler.requests["0"].num_tokens + 1,
-            engine_core.scheduler.requests["1"].num_tokens + 1,
+            engine_core.scheduler.requests[0].num_tokens + 1,
+            engine_core.scheduler.requests[1].num_tokens + 1,
         ]
         while engine_core.scheduler.get_num_unfinished_requests() == 2:
             output = engine_core.step_with_batch_queue()[0]
@@ -417,53 +413,3 @@ def test_engine_core_tp(monkeypatch: pytest.MonkeyPatch):
             get_worker_cache_config_field, args=("num_cpu_blocks", ))
         assert all(x is not None for x in num_gpu_blocks)
         assert all(x is not None for x in num_cpu_blocks)
-
-
-@create_new_process_for_each_test()
-def test_engine_core_invalid_request_id_type(monkeypatch: pytest.MonkeyPatch):
-    """Test that engine raises TypeError for non-string request_id."""
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-
-        engine_args = EngineArgs(model=MODEL_NAME)
-        vllm_config = engine_args.create_engine_config()
-        executor_class = Executor.get_class(vllm_config)
-
-        with set_default_torch_num_threads(1):
-            engine_core = EngineCore(vllm_config=vllm_config,
-                                     executor_class=executor_class,
-                                     log_stats=True)
-
-        # Test with UUID object (common mistake)
-        uuid_request = make_request()
-        uuid_request.request_id = uuid.uuid4()  # UUID object instead of string
-
-        with pytest.raises(TypeError,
-                           match="request_id must be a string, got.*UUID"):
-            engine_core.add_request(
-                *engine_core.preprocess_add_request(uuid_request))
-
-        # Test with integer
-        int_request = make_request()
-        int_request.request_id = 12345
-
-        with pytest.raises(TypeError,
-                           match="request_id must be a string, got.*int"):
-            engine_core.add_request(
-                *engine_core.preprocess_add_request(int_request))
-
-        # Test with None
-        none_request = make_request()
-        none_request.request_id = None
-
-        with pytest.raises(TypeError,
-                           match="request_id must be a string, got.*NoneType"):
-            engine_core.add_request(
-                *engine_core.preprocess_add_request(none_request))
-
-        # Verify engine is still functional after errors
-        valid_request = make_request()
-        engine_core.add_request(
-            *engine_core.preprocess_add_request(valid_request))
-        assert len(engine_core.scheduler.waiting) == 1
-        assert len(engine_core.scheduler.running) == 0

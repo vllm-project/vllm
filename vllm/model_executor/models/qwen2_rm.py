@@ -117,5 +117,8 @@ class Qwen2ForProcessRewardModel(Qwen2RewardBaseModel):
             Pooler.for_encode(
                 pooler_config,
                 default_pooling_type=PoolingType.STEP,
+                default_normalize=False,
+                default_softmax=True,
+                default_step_tag_id=151651,
             )
         })

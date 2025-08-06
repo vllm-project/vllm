@@ -1,4 +1,4 @@
-First, install the recommended compiler. We recommend using `gcc/g++ >= 12.3.0` as the default compiler to avoid potential problems. For example, on Ubuntu 22.4, you can run:
+First, install recommended compiler. We recommend to use `gcc/g++ >= 12.3.0` as the default compiler to avoid potential problems. For example, on Ubuntu 22.4, you can run:
 
 ```bash
 sudo apt-get update  -y
@@ -6,34 +6,28 @@ sudo apt-get install -y --no-install-recommends ccache git curl wget ca-certific
 sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 ```
 
-Second, clone the vLLM project:
+Second, clone vLLM project:
 
 ```bash
 git clone https://github.com/vllm-project/vllm.git vllm_source
 cd vllm_source
 ```
 
-Third, install required dependencies:
+Third, install Python packages for vLLM CPU backend building:
 
 ```bash
-uv pip install -r requirements/cpu-build.txt --torch-backend auto
-uv pip install -r requirements/cpu.txt --torch-backend auto
+pip install --upgrade pip
+pip install -v -r requirements/cpu-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
+pip install -v -r requirements/cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
-??? console "pip"
-    ```bash
-    pip install --upgrade pip
-    pip install -v -r requirements/cpu-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
-    pip install -v -r requirements/cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
-    ```
-
-Finally, build and install vLLM:
+Finally, build and install vLLM CPU backend:
 
 ```bash
 VLLM_TARGET_DEVICE=cpu python setup.py install
 ```
 
-If you want to develop vLLM, install it in editable mode instead.
+If you want to develop vllm, install it in editable mode instead.
 
 ```bash
 VLLM_TARGET_DEVICE=cpu python setup.py develop

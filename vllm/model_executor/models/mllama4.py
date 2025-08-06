@@ -533,7 +533,7 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> Llama4Processor:
         return self.ctx.get_hf_processor(Llama4Processor,
-                                         use_fast=kwargs.pop("use_fast", True),
+                                         use_fast=True,
                                          **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -906,13 +906,11 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _rename_weight_for_modelopt_checkpoint(self, name: str) -> str:
         """Rename weights from ModelOpt llama4 fp8 checkpoints to vLLM
         format."""
-        if name.startswith("model.") or name.startswith(
-                "language_model.model."):
-            renamed = name.replace("model.", "language_model.model.",
-                                   1) if name.startswith("model.") else name
+        if name.startswith("model."):
             # Handle expert scale parameters with flat naming
             if "feed_forward.experts." in name and ("_input_scale" in name or
                                                     "_weight_scale" in name):
+                renamed = name.replace("model.", "language_model.model.", 1)
                 # Map checkpoint naming to vLLM's expected naming
                 if "down_proj_input_scale" in renamed:
                     return renamed.replace("down_proj_input_scale",
@@ -931,6 +929,7 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
             # Handle attention scale parameters
             elif "self_attn." in name and (".k_scale" in name
                                            or ".v_scale" in name):
+                renamed = name.replace("model.", "language_model.model.", 1)
                 if ".k_proj.k_scale" in renamed:
                     return renamed.replace(".k_proj.k_scale", ".attn.k_scale")
                 elif ".v_proj.v_scale" in renamed:
@@ -938,7 +937,7 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 return renamed
 
             # Standard model.* to language_model.model.* renaming
-            return renamed
+            return name.replace("model.", "language_model.model.", 1)
 
         elif name.startswith("lm_head.weight"):
             return name.replace("lm_head.weight",

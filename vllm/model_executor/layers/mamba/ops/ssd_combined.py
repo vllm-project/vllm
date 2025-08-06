@@ -36,8 +36,7 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    chunk_offsets=None,
                                    cu_seqlens=None,
                                    dt_softplus=False,
-                                   dt_limit=(0.0, float("inf")),
-                                   out=None):
+                                   dt_limit=(0.0, float("inf"))):
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
     assert nheads % ngroups == 0
@@ -135,7 +134,7 @@ def _mamba_chunk_scan_combined_fwd(x,
     # - in each (pseudo) chunk, we detect if the previous (pseudo) chunk had
     #   a seq_idx change, in which case we take states information from
     #   init_states.
-    out_x = _chunk_scan_fwd(
+    out, out_x = _chunk_scan_fwd(
         CB,
         x,
         dt,
@@ -148,10 +147,9 @@ def _mamba_chunk_scan_combined_fwd(x,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
         initial_states=initial_states,
-        out=out,
     )
     if cu_seqlens is None:
-        return out_x, dt, dA_cumsum, states, final_states
+        return out, out_x, dt, dA_cumsum, states, final_states
     else:
         assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
         varlen_states = chunk_state_varlen(
@@ -163,7 +161,7 @@ def _mamba_chunk_scan_combined_fwd(x,
             states.squeeze(0),
             initial_states=initial_states,
         )
-        return out_x, dt, dA_cumsum, states, final_states, varlen_states
+        return out, out_x, dt, dA_cumsum, states, final_states, varlen_states
 
 
 def mamba_chunk_scan_combined(x,
@@ -182,7 +180,6 @@ def mamba_chunk_scan_combined(x,
                               cu_seqlens=None,
                               dt_softplus=False,
                               dt_limit=(0.0, float("inf")),
-                              out=None,
                               return_final_states=False,
                               return_varlen_states=False):
     """
@@ -200,14 +197,15 @@ def mamba_chunk_scan_combined(x,
         seq_idx: (batch, seqlen)
         cu_seqlens: (num_sequences + 1) or None, only used if return_varlen_states is True
         dt_softplus: Whether to apply softplus to dt
-        out: Preallocated output tensor
+    Return:
+        out: (batch, seqlen, nheads, headdim)
     """
 
     if not return_varlen_states:
         cu_seqlens = None
     else:
         assert cu_seqlens is not None, "cu_seqlens must be provided if return_varlen_states is True"
-    out_x, dt_out, dA_cumsum, states, final_states, *rest = _mamba_chunk_scan_combined_fwd(
+    out, out_x, dt_out, dA_cumsum, states, final_states, *rest = _mamba_chunk_scan_combined_fwd(
         x,
         dt,
         A,
@@ -223,14 +221,12 @@ def mamba_chunk_scan_combined(x,
         chunk_offsets=chunk_offsets,
         cu_seqlens=cu_seqlens,
         dt_softplus=dt_softplus,
-        dt_limit=dt_limit,
-        out=out)
+        dt_limit=dt_limit)
     if not return_varlen_states:
-        if not return_final_states:
-            return
-        else:
-            return final_states
+        return out if not return_final_states else (out, final_states)
     else:
         varlen_states = rest[0]
-        return (varlen_states) if not return_final_states else (final_states,
+        return (out,
+                varlen_states) if not return_final_states else (out,
+                                                                final_states,
                                                                 varlen_states)

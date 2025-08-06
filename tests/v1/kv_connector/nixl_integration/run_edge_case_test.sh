@@ -57,6 +57,7 @@ run_tests_for_model() {
   BASE_CMD="CUDA_VISIBLE_DEVICES=0 VLLM_NIXL_SIDE_CHANNEL_PORT=5559 vllm serve $model_name \
   --port $PREFILL_PORT \
   --enforce-eager \
+  --disable-log-requests \
   --gpu-memory-utilization 0.2 \
   --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'"
 
@@ -75,6 +76,7 @@ run_tests_for_model() {
   BASE_CMD="CUDA_VISIBLE_DEVICES=1 VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve $model_name \
   --port $DECODE_PORT \
   --enforce-eager \
+  --disable-log-requests \
   --gpu-memory-utilization 0.2 \
   --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'"
 

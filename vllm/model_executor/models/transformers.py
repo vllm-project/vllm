@@ -48,6 +48,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import is_list_of
 
 from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
@@ -90,7 +91,7 @@ def log_replacement(name: str, old_module: nn.Module, new_module: nn.Module):
 def replace_linear_class(
     linear: nn.Linear, style: Literal["colwise", "rowwise"],
     quant_config: QuantizationConfig
-) -> Union[ColumnParallelLinear, RowParallelLinear, ReplicatedLinear]:
+) -> Union[ColumnParallelLinear, RowParallelLinear]:
     """
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
 
@@ -187,6 +188,10 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             image_sizes=([height, width], ), **mm_processor_kwargs)
         image_tokens = mm_tokens["num_image_tokens"][0]
         return image_tokens
+
+    def get_hf_processor(self):
+        processor = cached_get_processor(self.ctx.model_config.model)
+        return processor
 
     def get_max_image_size(self):
         return 10_000, 10_000  # hardcode for arbitrary very large size
@@ -445,7 +450,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
         # Set correct attn and init on "meta" to delay allocating GPU tensors
         # TODO: @raushan, use the public `model.set_attn_implementation()`
-        # method once its checks are fixed in Transformers.
+        # method after v4.54.0 is released
         self.text_config._attn_implementation = "vllm"
         with init_on_device_without_buffers("meta"), config_override:
             self.model: PreTrainedModel = AutoModel.from_config(
@@ -520,7 +525,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         for i in range(len(layers)):
             if start_layer <= i and i < end_layer:
                 continue
-            layers[i] = PPMissingLayer()
+            layers[i] = PPMissingLayer(return_tuple=True)
 
         # Layers after module list
         for name in pp_plan[module_list_idx + 1:]:
@@ -533,16 +538,14 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         Apply the model's tensor parallelization plan.
         Currently only supports linear layers.
         """
-        tp_plan = getattr(self.model.config, "base_model_tp_plan", None) or {}
+        if not self.model.supports_tp_plan:
+            if self.tp_size <= 1:
+                return
 
-        if not tp_plan and self.tp_size > 1:
             raise ValueError(
                 f"{type(self.model)} does not support tensor parallel yet!")
 
-        # Some weight loaders expect linear layers to inherit from vLLM's
-        # LinearBase class, so we set a default style which causes any
-        # unspecified linear layers to be replaced with ReplicatedLinear
-        tp_plan[".*"] = "replicated"
+        tp_plan = self.model._tp_plan
 
         def _tensor_parallel(module: nn.Module, prefix: str = ""):
             for child_name, child_module in module.named_children():
@@ -554,7 +557,6 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                             child_module, style, self.quant_config)
                         setattr(module, child_name, new_module)
                         log_replacement(qual_name, child_module, new_module)
-                        break
                 else:
                     _tensor_parallel(child_module, prefix=qual_name)
 
@@ -652,18 +654,6 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=self.skip_prefixes)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-
-@support_torch_compile
-class TransformersModel(TransformersBase):
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            # Add `model.` prefix for base model checkpoints
-            "": "model.",
-            # Remove `model.` from places it should not be
-            "model.model.": "model.",
-            "model.score": "score",
-        })
 
 
 @support_torch_compile

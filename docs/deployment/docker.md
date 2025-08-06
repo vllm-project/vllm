@@ -10,23 +10,23 @@ The image can be used to run OpenAI compatible server and is available on Docker
 ```bash
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
-    --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
+    --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
     -p 8000:8000 \
     --ipc=host \
     vllm/vllm-openai:latest \
-    --model Qwen/Qwen3-0.6B
+    --model mistralai/Mistral-7B-v0.1
 ```
 
 This image can also be used with other container engines such as [Podman](https://podman.io/).
 
 ```bash
-podman run --device nvidia.com/gpu=all \
+podman run --gpus all \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
   -p 8000:8000 \
   --ipc=host \
-  docker.io/vllm/vllm-openai:latest \
-  --model Qwen/Qwen3-0.6B
+  vllm/vllm-openai:latest \
+  --model mistralai/Mistral-7B-v0.1
 ```
 
 You can add any other [engine-args](../configuration/engine_args.md) you need after the image tag (`vllm/vllm-openai:latest`).
@@ -106,7 +106,8 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
     -t vllm/vllm-gh200-openai:latest \
     --build-arg max_jobs=66 \
     --build-arg nvcc_threads=2 \
-    --build-arg torch_cuda_arch_list="9.0 10.0+PTX"
+    --build-arg torch_cuda_arch_list="9.0 10.0+PTX" \
+    --build-arg vllm_fa_cmake_gpu_arches="90-real"
     ```
 
 !!! note

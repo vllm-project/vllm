@@ -196,11 +196,10 @@ class GroupCoordinator:
     #   3     |   1  |  3   |     1      |       3
     local_rank: int  # local rank used to assign devices
     rank_in_group: int  # rank inside the group
-    cpu_group: Optional[ProcessGroup]  # group for CPU communication
-    device_group: Optional[ProcessGroup]  # group for device communication
+    cpu_group: ProcessGroup  # group for CPU communication
+    device_group: ProcessGroup  # group for device communication
     use_device_communicator: bool  # whether to use device communicator
-    device_communicator: Optional[
-        DeviceCommunicatorBase]  # device communicator
+    device_communicator: DeviceCommunicatorBase  # device communicator
     mq_broadcaster: Optional[Any]  # shared memory broadcaster
 
     def __init__(
@@ -251,7 +250,7 @@ class GroupCoordinator:
 
         self.use_device_communicator = use_device_communicator
 
-        self.device_communicator = None
+        self.device_communicator: DeviceCommunicatorBase = None  # type: ignore
         if use_device_communicator and self.world_size > 1:
             device_comm_cls = resolve_obj_by_qualname(
                 current_platform.get_device_communicator_cls())
@@ -365,8 +364,6 @@ class GroupCoordinator:
             return self._all_reduce_out_place(input_)
 
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
-        if self.device_communicator is None:
-            raise ValueError("No device communicator found")
         return self.device_communicator.all_reduce(input_)
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
@@ -387,16 +384,12 @@ class GroupCoordinator:
 
     def _all_gather_out_place(self, input_: torch.Tensor,
                               dim: int) -> torch.Tensor:
-        if self.device_communicator is None:
-            raise ValueError("No device communicator found")
         return self.device_communicator.all_gather(input_, dim)
 
     def all_gatherv(self,
                     input_: Union[torch.Tensor, list[torch.Tensor]],
                     dim: int = 0,
                     sizes: Optional[list[int]] = None):
-        if self.device_communicator is None:
-            raise ValueError("No device communicator found")
         return self.device_communicator.all_gatherv(input_, dim, sizes)
 
     def reduce_scatter(self,
@@ -421,14 +414,10 @@ class GroupCoordinator:
                         input_: torch.Tensor,
                         dim: int = -1,
                         sizes: Optional[list[int]] = None) -> torch.Tensor:
-        if self.device_communicator is None:
-            raise ValueError("No device communicator found")
         return self.device_communicator.reduce_scatterv(input_, dim, sizes)
 
     def _reduce_scatter_out_place(self, input_: torch.Tensor,
                                   dim: int) -> torch.Tensor:
-        if self.device_communicator is None:
-            raise ValueError("No device communicator found")
         return self.device_communicator.reduce_scatter(input_, dim)
 
     def gather(self,
@@ -444,8 +433,6 @@ class GroupCoordinator:
         # Bypass the function if we are using only 1 GPU.
         if world_size == 1:
             return input_
-        if self.device_communicator is None:
-            raise ValueError("No device communicator found")
         return self.device_communicator.gather(input_, dst, dim)
 
     def broadcast(self, input_: torch.Tensor, src: int = 0):
@@ -680,8 +667,6 @@ class GroupCoordinator:
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
         if self.use_cpu_custom_send_recv:
-            if self.device_communicator is None:
-                raise ValueError("No device communicator found")
             self.device_communicator.send_tensor_dict(  # type: ignore
                 tensor_dict, dst)
             return None
@@ -742,8 +727,6 @@ class GroupCoordinator:
         assert src < self.world_size, f"Invalid src rank ({src})"
 
         if self.use_cpu_custom_send_recv:
-            if self.device_communicator is None:
-                raise ValueError("No device communicator found")
             return self.device_communicator.recv_tensor_dict(  # type: ignore
                 src)
 
@@ -799,10 +782,8 @@ class GroupCoordinator:
         torch.distributed.barrier(group=self.cpu_group)
 
     def send(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
-        """Sends a tensor to the destination rank in a blocking way"""
+        """Sends a tensor to the destination rank in a non-blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
-        if self.device_communicator is None:
-            raise ValueError("No device communicator found")
         self.device_communicator.send(tensor, dst)
 
     def recv(self,
@@ -811,8 +792,6 @@ class GroupCoordinator:
              src: Optional[int] = None) -> torch.Tensor:
         """Receives a tensor from the source rank."""
         """NOTE: `src` is the local rank of the source rank."""
-        if self.device_communicator is None:
-            raise ValueError("No device communicator found")
         return self.device_communicator.recv(size, dtype, src)
 
     def destroy(self):
@@ -921,6 +900,24 @@ def get_pp_group() -> GroupCoordinator:
     return _PP
 
 
+_CP: Optional[GroupCoordinator] = None
+
+
+def get_cp_group() -> GroupCoordinator:
+    assert _CP is not None, ("context parallel group is not initialized")
+    return _CP
+
+
+def get_context_model_parallel_world_size():
+    """Return world size for the tensor model parallel group."""
+    return get_cp_group().world_size
+
+
+def get_context_model_parallel_rank():
+    """Return my rank for the tensor model parallel group."""
+    return get_cp_group().rank_in_group
+
+
 # kept for backward compatibility
 get_pipeline_model_parallel_group = get_pp_group
 
@@ -1024,6 +1021,7 @@ def init_distributed_environment(
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
+    context_model_parallel_size: int = 1,
     backend: Optional[str] = None,
 ) -> None:
     """
@@ -1034,7 +1032,6 @@ def initialize_model_parallel(
             parallelism.
         pipeline_model_parallel_size: number of GPUs used for pipeline model
             parallelism.
-        backend: name of torch distributed communication backend.
 
     Let's say we have a total of 8 GPUs denoted by g0 ... g7 and we
     use 2 GPUs to parallelize the model tensor, and 4 GPUs to parallelize
@@ -1072,7 +1069,7 @@ def initialize_model_parallel(
     # to get group_ranks for each dimension, transpose that dimension to the
     # last dimension, then reshape to 2D, then unbind the last dimension
     all_ranks = torch.arange(world_size).reshape(
-        -1, data_parallel_size, pipeline_model_parallel_size,
+        -1, data_parallel_size, pipeline_model_parallel_size, context_model_parallel_size,
         tensor_model_parallel_size)  # noqa
 
     # Build the tensor model-parallel groups.
@@ -1092,7 +1089,7 @@ def initialize_model_parallel(
     global _PP
     assert _PP is None, (
         "pipeline model parallel group is already initialized")
-    group_ranks = all_ranks.transpose(2, 3).reshape(
+    group_ranks = all_ranks.transpose(2, 4).reshape(
         -1, pipeline_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _PP = init_model_parallel_group(group_ranks,
@@ -1103,7 +1100,7 @@ def initialize_model_parallel(
     global _DP
     assert _DP is None, ("data parallel group is already initialized")
     group_ranks = all_ranks.transpose(1,
-                                      3).reshape(-1,
+                                      4).reshape(-1,
                                                  data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _DP = init_model_parallel_group(group_ranks,
@@ -1113,7 +1110,7 @@ def initialize_model_parallel(
 
     global _EP
     assert _EP is None, ("expert parallel group is already initialized")
-    group_ranks = all_ranks.transpose(1, 2).reshape(
+    group_ranks = all_ranks.transpose(1, 3).reshape(   #暂时排除CP,处理模型内部逻辑时再加上
         -1, data_parallel_size * tensor_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _EP = init_model_parallel_group(group_ranks,
@@ -1121,16 +1118,27 @@ def initialize_model_parallel(
                                     backend,
                                     group_name="ep")
 
+    global _CP
+    assert _CP is None, ("context parallel group is already initialized")
+    group_ranks = all_ranks.transpose(3, 4).reshape(
+        -1, context_model_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+    _CP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank,
+                                    backend,
+                                    group_name="cp")
+
     logger.info(
         "rank %s in world size %s is assigned as "
-        "DP rank %s, PP rank %s, TP rank %s, EP rank %s", rank, world_size,
+        "DP rank %s, PP rank %s, TP rank %s, EP rank %s, CP rank %s", rank, world_size,
         _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group,
-        _EP.rank_in_group)
+        _EP.rank_in_group, _CP.rank_in_group)
 
 
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
+    context_model_parallel_size: int,
     backend: Optional[str] = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
@@ -1141,19 +1149,24 @@ def ensure_model_parallel_initialized(
         get_world_group().device_group)
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size, backend)
+                                  pipeline_model_parallel_size, context_model_parallel_size, backend)
         return
 
     assert (
         get_tensor_model_parallel_world_size() == tensor_model_parallel_size
-    ), ("tensor parallel group already initialized, but of unexpected size. "
-        f"got: {get_tensor_model_parallel_world_size()=} vs. "
-        f"wanted: {tensor_model_parallel_size=}")
+    ), ("tensor parallel group already initialized, but of unexpected size: "
+        f"{get_tensor_model_parallel_world_size()=} vs. "
+        f"{tensor_model_parallel_size=}")
     pp_world_size = get_pp_group().world_size
     assert (pp_world_size == pipeline_model_parallel_size), (
-        "pipeline parallel group already initialized, but of unexpected size. "
-        f"got: {pp_world_size=} vs. "
-        f"wanted: {pipeline_model_parallel_size=}")
+        "pipeline parallel group already initialized, but of unexpected size: "
+        f"{pp_world_size=} vs. "
+        f"{pipeline_model_parallel_size=}")
+    cp_world_size = get_cp_group().world_size
+    assert (cp_world_size == context_model_parallel_size), (
+        "context parallel group already initialized, but of unexpected size: "
+        f"{cp_world_size=} vs. "
+        f"{context_model_parallel_size=}")
 
 
 def prepare_communication_buffer_for_model(model: torch.nn.Module):
@@ -1246,6 +1259,11 @@ def destroy_model_parallel():
         _EP.destroy()
     _EP = None
 
+    global _CP
+    if _CP:
+        _CP.destroy()
+    _CP = None
+
 
 def destroy_distributed_environment():
     global _WORLD, _NODE_COUNT
@@ -1260,6 +1278,8 @@ def destroy_distributed_environment():
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     destroy_model_parallel()
     destroy_distributed_environment()
+    with contextlib.suppress(AssertionError):
+        torch.distributed.destroy_process_group()
     if shutdown_ray:
         import ray  # Lazy import Ray
         ray.shutdown()

@@ -4,7 +4,8 @@ set -xu
 
 
 remove_docker_container() { 
-    docker rm -f tpu-test || true;
+    docker rm -f tpu-test || true; 
+    docker rm -f vllm-tpu || true;
 }
 
 trap remove_docker_container EXIT

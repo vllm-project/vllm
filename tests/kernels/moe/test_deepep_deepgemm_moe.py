@@ -20,8 +20,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.platforms import current_platform
 from vllm.utils import has_deep_ep, has_deep_gemm
-from vllm.utils.deep_gemm import (is_blackwell_deep_gemm_used,
-                                  is_deep_gemm_supported)
+from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
 
 from .parallel_utils import ProcessGroupInfo, parallel_launch
 from .utils import make_test_weights
@@ -47,7 +46,7 @@ requires_deep_ep = pytest.mark.skipif(
 )
 
 requires_deep_gemm = pytest.mark.skipif(
-    not is_deep_gemm_supported(),
+    not has_deep_gemm(),
     reason="Requires deep_gemm kernels",
 )
 
