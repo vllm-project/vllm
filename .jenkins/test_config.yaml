@@ -37,31 +37,11 @@ stages:
         command: >-
           export PT_HPU_LAZY_MODE=1 && 
           cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-deepseek.txt -t 1
-      #- name: v1_gsm8k_small_g3_tp1
-      #  flavor: g3
-      #  command: >-
-      #    export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_CONTIGUOUS_PA=false && 
-      #    cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 1
       - name: v0_gsm8k_g3_gemma3_tp1
         flavor: g3.s
         command: >-
           export PT_HPU_LAZY_MODE=1 &&
           cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-gemma.txt -t 1
-      - name: v1_gsm8k_small_g3_tp2
-        flavor: g3.s
-        command: >-
-          export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_CONTIGUOUS_PA=false && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 2
-      #- name: v1_gsm8k_small_g2_tp1
-      #  flavor: g2
-      #  command: >-
-      #    export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_CONTIGUOUS_PA=false && 
-      #    cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 1
-      - name: v1_gsm8k_small_g2_tp2
-        flavor: g2.s
-        command: >-
-          export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_CONTIGUOUS_PA=false && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 2
   - name: test_gsm8k_small_models_apc
     steps:
       - name: gsm8k_small_g3_tp1_apc
@@ -81,18 +61,6 @@ stages:
         command: >-
           export VLLM_USE_V1=0 export VLLM_MERGED_PREFILL=true &&
           cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 1
-      # V1 tests require running with TP=2 due to a bug
-      # v1_gsm8k_small_g2_tp2_merged_prefill fails due to acc mismatch on 250 samples. Commented out for now
-      # - name: v1_gsm8k_small_g2_tp2_merged_prefill
-      #   flavor: g2.s
-      #   command: >-
-      #     export VLLM_USE_V1=1 export VLLM_MERGED_PREFILL=true &&
-      #     cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 2
-      - name: v1_gsm8k_small_g2_tp2_merged_prefill_apc
-        flavor: g2.s
-        command: >-
-          export VLLM_USE_V1=1 export VLLM_MERGED_PREFILL=true &&
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 2 -a
   - name: test_gsm8k_large_models
     steps:
       - name: v0_gsm8k_large_g3_tp2_part1
@@ -109,21 +77,6 @@ stages:
         flavor: g2.m
         command: >-
           export PT_HPU_LAZY_MODE=1 && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-large.txt -t 4
-      - name: v1_gsm8k_large_g3_tp2_part1
-        flavor: g3.s
-        command: >-
-          export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_CONTIGUOUS_PA=false && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-large.txt -t 2
-      - name: v1_gsm8k_large_g3_tp2_part2
-        flavor: g3.s
-        command: >-
-          export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_CONTIGUOUS_PA=false && 
-          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-large-2.txt -t 2
-      - name: v1_gsm8k_large_g2_tp4
-        flavor: g2.m
-        command: >-
-          export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_CONTIGUOUS_PA=false && 
           cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-large.txt -t 4
   - name: test_gsm8k_fp8
     steps:
@@ -303,22 +256,6 @@ stages:
     #     pip install -e tests/vllm_test_utils &&
     #     export VLLM_SKIP_WARMUP=true &&  PT_HPU_LAZY_MODE=1 &&
     #     pytest -v tests/entrypoints/llm/test_guided_generate.py -s -vvv --log-cli-level=INFO
-    # - name: test_v1_basic_uts
-    # steps:
-    # - name: test_v1_core_engine_worker_g2
-    #   flavor: g2
-    #   command: >-
-    #     export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_SKIP_WARMUP=true && 
-    #     pytest -v -s -vvv --log-cli-level=INFO tests/v1/core -k "not kv_connector" && 
-    #     pytest -v -s -vvv --log-cli-level=INFO tests/v1/engine && 
-    #     pytest -v -s -vvv --log-cli-level=INFO tests/v1/worker 
-    # - name: test_v1_core_engine_worker_g3
-    #   flavor: g3
-    #   command: >-
-    #     export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_SKIP_WARMUP=true && 
-    #     pytest -v -s -vvv --log-cli-level=INFO tests/v1/core -k "not kv_connector" && 
-    #     pytest -v -s -vvv --log-cli-level=INFO tests/v1/engine && 
-    #     pytest -v -s -vvv --log-cli-level=INFO tests/v1/worker 
   - name: tests_embedding
     steps:
       - name: embedding_small_lazy_g3_tp1

@@ -48,12 +48,6 @@ class HpuPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool,
                              use_mla: bool) -> str:
-        if use_v1 and not use_mla:
-            logger.info("Using HPUAttentionV1 backend.")
-            return "vllm.v1.attention.backends.hpu_attn.HPUAttentionBackendV1"
-        if use_v1 and use_mla:
-            logger.info("Using HPUAttentionMLA backend.")
-            return "vllm.attention.backends.hpu_attn.HPUMLAAttentionBackend"
         if use_mla:
             logger.info("Using HPUAttentionMLA backend.")
             return "vllm.attention.backends.hpu_attn.HPUMLAAttentionBackend"
@@ -79,20 +73,22 @@ class HpuPlatform(Platform):
 
         if parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_V1:
+                raise ValueError(
+                    "In-tree HPU support for v1 has been removed "
+                    "from vllm-fork. Please use vLLM-Gaudi plugin "
+                    "(https://github.com/vllm-project/vllm-gaudi) "
+                    "for V1 support")
+            if scheduler_config.is_multi_step:
                 parallel_config.worker_cls = \
-                    "vllm.v1.worker.hpu_worker.HPUWorker"
+                    "vllm.worker.multi_step_hpu_worker.MultiStepHPUWorker"
+            elif vllm_config.speculative_config:
+                parallel_config.worker_cls = \
+                    "vllm.spec_decode.spec_decode_worker.create_spec_worker"
+                parallel_config.sd_worker_cls = \
+                    "vllm.worker.hpu_worker.HPUWorker"
             else:
-                if scheduler_config.is_multi_step:
-                    parallel_config.worker_cls = \
-                        "vllm.worker.multi_step_hpu_worker.MultiStepHPUWorker"
-                elif vllm_config.speculative_config:
-                    parallel_config.worker_cls = \
-                        "vllm.spec_decode.spec_decode_worker.create_spec_worker"
-                    parallel_config.sd_worker_cls = \
-                        "vllm.worker.hpu_worker.HPUWorker"
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.worker.hpu_worker.HPUWorker"
+                parallel_config.worker_cls = \
+                    "vllm.worker.hpu_worker.HPUWorker"
 
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
@@ -146,4 +142,4 @@ class HpuPlatform(Platform):
     @classmethod
     def supports_v1(cls, model_config: ModelConfig) -> bool:
         # V1 support on HPU is experimental
-        return True
+        return False
