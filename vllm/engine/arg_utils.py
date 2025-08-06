@@ -1590,9 +1590,16 @@ class EngineArgs:
         # for non-pooling tasks.
         # For pooling tasks the default is False
         if model_config.runner_type != "pooling":
+            if not self.enable_chunked_prefill:
+                logger.warning(
+                    "V1 always uses chunked prefill for non-pooling tasks."
+                    "Overriding user-provided setting.")
             self.enable_chunked_prefill = True
-            if self.enable_prefix_caching is None:
-                self.enable_prefix_caching = True
+            if not self.enable_prefix_caching:
+                logger.warning(
+                    "V1 always uses prefix caching for non-pooling tasks."
+                    "Overriding user-provided setting.")
+            self.enable_prefix_caching = True
         else:
 
             pooling_type = model_config.pooler_config.pooling_type
