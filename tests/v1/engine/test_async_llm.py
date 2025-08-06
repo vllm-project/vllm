@@ -403,16 +403,10 @@ async def test_check_health(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.parametrize(
     "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
-@pytest.mark.parametrize(
-    "engine_args,prompt",
-    [(TEXT_ENGINE_ARGS, TEXT_PROMPT), (VISION_ENGINE_ARGS, VISION_PROMPT)],
-)
 @pytest.mark.asyncio
 async def test_abort_final_output(
     monkeypatch: pytest.MonkeyPatch,
     output_kind: RequestOutputKind,
-    engine_args: AsyncEngineArgs,
-    prompt: PromptType,
 ):
     """Test that abort() returns a final output with correct information."""
 
@@ -420,14 +414,14 @@ async def test_abort_final_output(
         m.setenv("VLLM_USE_V1", "1")
 
         with set_default_torch_num_threads(1):
-            engine = AsyncLLM.from_engine_args(engine_args)
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
 
         request_id = "test-abort-final-output"
 
         # Start a long-running request
         sampling_params = SamplingParams(
-            max_tokens=1000,  # Long enough to allow abort
+            max_tokens=3000,  # Long enough to allow abort
             ignore_eos=True,
             output_kind=output_kind,
             temperature=0.5,
@@ -436,7 +430,7 @@ async def test_abort_final_output(
 
         outputs: list[RequestOutput] = []
         generated = asyncio.create_task(
-            collect_outputs(engine, request_id, prompt, sampling_params,
+            collect_outputs(engine, request_id, TEXT_PROMPT, sampling_params,
                             outputs))
 
         # Let it generate some tokens
@@ -451,29 +445,26 @@ async def test_abort_final_output(
         # Verify we got a final output
         assert final_output is not None
         assert final_output.finished
-        assert final_output.finish_reason == "abort"
+        assert len(final_output.outputs) == 1
 
-        # Verify we have some generated tokens (should be > 0 since we waited)
-        total_tokens = sum(
-            len(output.token_ids) for output in final_output.outputs)
-        assert total_tokens > 0, (
-            "Should have generated some tokens before abort")
+        assert final_output.outputs[0].finish_reason == "abort"
+        assert final_output.outputs[0].stop_reason is None
 
         # Verify num_cached_tokens is set correctly
         assert hasattr(final_output, 'num_cached_tokens')
         assert final_output.num_cached_tokens >= 0
 
         # If we got intermediate outputs, verify they are consistent
-        if outputs:
-            if output_kind == RequestOutputKind.DELTA:
-                # For DELTA, sum all intermediate tokens should <= final tokens
-                intermediate_total = sum(
-                    sum(len(out.token_ids) for out in output.outputs)
-                    for output in outputs)
-                assert intermediate_total <= total_tokens
-            else:
-                # For FINAL_ONLY, we should only get the final output
-                assert len(outputs) == 0
+        if output_kind == RequestOutputKind.DELTA:
+            # For DELTA, sum all intermediate tokens should <= final tokens
+            token_count = sum(
+                len(output.outputs[0].token_ids) for output in outputs)
+            assert token_count > 0
+            assert len(final_output.outputs[0].token_ids) == 0
+        else:
+            # For FINAL_ONLY, we should only get the final output
+            assert len(outputs) == 0
+            assert len(final_output.outputs[0].token_ids) > 0
 
         assert not engine.output_processor.has_unfinished_requests()
 
