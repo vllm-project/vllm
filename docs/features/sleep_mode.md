@@ -77,6 +77,7 @@ VLLM_SERVER_DEV_MODE=1 python -m vllm.entrypoints.openai.api_server \
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
 - `GET /is_sleeping` — Check if the model is sleeping.
 
-These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`
+!!! note
+    These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`.
 
 
