@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
-import copy
+import copy, time
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
@@ -358,11 +358,23 @@ class Worker(WorkerBase):
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
 
+        # logger.info("DIEGO: Executing the model")
         # Adding capture model in execution time
-        if scheduler_output.total_num_scheduled_tokens not in self._token_compiled_cudagraphs:
+        # if scheduler_output.total_num_scheduled_tokens not in self._token_compiled_cudagraphs:
+        #     logger.info("DIEGO: CUDAgraph in execution time for %d input tokens", scheduler_output.total_num_scheduled_tokens)
+        #     self._token_compiled_cudagraphs.add(scheduler_output.total_num_scheduled_tokens)
+        #     self.model_runner.capture_model(scheduler_output.total_num_scheduled_tokens)
+        
+        # Just compilation with dummy run
+        if scheduler_output.total_num_scheduled_tokens not in self._token_compiled_cudagraphs and scheduler_output.total_num_scheduled_tokens != 0:
             logger.info("DIEGO: CUDAgraph in execution time for %d input tokens", scheduler_output.total_num_scheduled_tokens)
             self._token_compiled_cudagraphs.add(scheduler_output.total_num_scheduled_tokens)
-            self.model_runner.capture_model(scheduler_output.total_num_scheduled_tokens)
+            start_time = time.perf_counter()
+            self.model_runner._dummy_run(scheduler_output.total_num_scheduled_tokens, capture_attn_cudagraph=False, skip_eplb=True)
+            end_time = time.perf_counter()
+            elapsed_time = end_time - start_time
+            logger.info("Graph capturing finished in %.3f secs", elapsed_time)
+            
         
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
