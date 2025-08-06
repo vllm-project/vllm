@@ -30,7 +30,6 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -188,7 +187,7 @@ class OpenAIServingResponses(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         # Schedule the request and get the result generator.
-        generators: list[AsyncGenerator[RequestOutput, None]] = []
+        generators: list[AsyncGenerator[ConversationContext, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 default_max_tokens = self.max_model_len - len(
