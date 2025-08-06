@@ -109,7 +109,6 @@ python3 disagg_proxy_p2p_nccl_xpyd.py &
         --max-num-seqs 256 \
         --trust-remote-code \
         --gpu-memory-utilization 0.9 \
-        --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20001"}}' > /var/vllm.log 2>&1 &
     ```
@@ -131,7 +130,6 @@ python3 disagg_proxy_p2p_nccl_xpyd.py &
         --max-num-seqs 256 \
         --trust-remote-code \
         --gpu-memory-utilization 0.7 \
-        --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20002"}}' > /var/vllm.log 2>&1 &
     ```
@@ -153,7 +151,6 @@ python3 disagg_proxy_p2p_nccl_xpyd.py &
         --max-num-seqs 256 \
         --trust-remote-code \
         --gpu-memory-utilization 0.7 \
-        --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20003"}}' > /var/vllm.log 2>&1 &
     ```
@@ -175,7 +172,6 @@ python3 disagg_proxy_p2p_nccl_xpyd.py &
         --max-num-seqs 256 \
         --trust-remote-code \
         --gpu-memory-utilization 0.7 \
-        --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20004"}}' > /var/vllm.log 2>&1 &
     ```
@@ -206,7 +202,6 @@ python3 disagg_proxy_p2p_nccl_xpyd.py &
         --max-num-seqs 256 \
         --trust-remote-code \
         --gpu-memory-utilization 0.9 \
-        --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20001"}}' > /var/vllm.log 2>&1 &
     ```
@@ -228,7 +223,6 @@ python3 disagg_proxy_p2p_nccl_xpyd.py &
         --max-num-seqs 256 \
         --trust-remote-code \
         --gpu-memory-utilization 0.9 \
-        --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20002"}}' > /var/vllm.log 2>&1 &
     ```
@@ -250,7 +244,6 @@ python3 disagg_proxy_p2p_nccl_xpyd.py &
         --max-num-seqs 256 \
         --trust-remote-code \
         --gpu-memory-utilization 0.9 \
-        --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20003"}}' > /var/vllm.log 2>&1 &
     ```
@@ -272,7 +265,6 @@ python3 disagg_proxy_p2p_nccl_xpyd.py &
         --max-num-seqs 256 \
         --trust-remote-code \
         --gpu-memory-utilization 0.7 \
-        --disable-log-request \
         --kv-transfer-config \
         '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20004"}}' > /var/vllm.log 2>&1 &
     ```
