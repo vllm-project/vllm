@@ -722,14 +722,16 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 "exactly same result as the transformers implementation "
                 "in the audio tower part.")
 
-        if multimodal_config.get_limit_per_prompt("audio"):
+        if multimodal_config and multimodal_config.get_limit_per_prompt(
+                "audio"):
             self.audio_tower = Qwen2_5OmniAudioEncoder(
                 thinker_config.audio_config)
         else:
             self.audio_tower = None
 
-        if multimodal_config.get_limit_per_prompt(
-                "image") or multimodal_config.get_limit_per_prompt("video"):
+        if multimodal_config and (
+                multimodal_config.get_limit_per_prompt("image")
+                or multimodal_config.get_limit_per_prompt("video")):
             self.visual = Qwen2_5_VisionTransformer(
                 vision_config=thinker_config.vision_config,
                 norm_eps=getattr(thinker_config.text_config, "rms_norm_eps",

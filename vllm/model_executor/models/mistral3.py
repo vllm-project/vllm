@@ -428,7 +428,8 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
             config.projector_hidden_act = "gelu"
 
         # TODO: Optionally initializes this for supporting embeddings.
-        if multimodal_config.get_limit_per_prompt("image"):
+        if multimodal_config and multimodal_config.get_limit_per_prompt(
+                "image"):
             self.vision_tower = init_vision_tower_for_llava(
                 config,
                 quant_config,

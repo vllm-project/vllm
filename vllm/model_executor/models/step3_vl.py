@@ -837,7 +837,8 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
 
-        if multimodal_config.get_limit_per_prompt("image"):
+        if multimodal_config and multimodal_config.get_limit_per_prompt(
+                "image"):
             self.vision_model = Step3VisionTransformer(config.vision_config,
                                                        None,
                                                        prefix=maybe_prefix(
