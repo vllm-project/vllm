@@ -58,6 +58,7 @@ from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         STR_DUAL_CHUNK_FLASH_ATTN_VAL, LayerBlockType,
                         LazyLoader, common_broadcastable_dtype, random_uuid)
+from vllm.v1.tree_spec_decode.tree_drafter_params import TreeDrafterParams
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -1981,6 +1982,9 @@ class SpeculativeConfig:
         ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
 
+    # params generated in the post-init stage for tree drafting.
+    tree_drafter_params: SkipValidation[TreeDrafterParams] = None
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2241,18 +2245,22 @@ class SpeculativeConfig:
                             f"num_speculative_tokens:{self.num_speculative_tokens}"
                             f" must be divisible by {n_predict=}")
 
-                if self.speculative_token_tree is None:
-                    # Generate chain of tokens.
-                    self.speculative_token_tree = str([
-                        (i + 1) * (0, )
-                        for i in range(self.num_speculative_tokens)
-                    ])
-                else:
-                    # Sort the token tree breadth-first.
-                    tree_choices = ast.literal_eval(
-                        self.speculative_token_tree)
-                    self.speculative_token_tree = str(
-                        sorted(tree_choices, key=lambda t: (len(t), t)))
+                if envs.VLLM_ATTENTION_BACKEND == "TREE_ATTN":
+                    spec_token_tree = self.speculative_token_tree
+                    if spec_token_tree is None:
+                        # Generate chain of tokens.
+                        spec_token_tree = str([
+                            (i + 1) * (0, )
+                            for i in range(self.num_speculative_tokens)
+                        ])
+                    # Construct tree drafter params from the spec token tree.
+                    self.tree_drafter_params = (
+                        TreeDrafterParams.from_spec_token_tree(spec_token_tree)
+                    )
+                    num_tree_drafts = len(self.tree_drafter_params.draft_nodes)
+                    assert (num_tree_drafts == self.num_speculative_tokens), (
+                        "len(speculative_token_tree) must equal "
+                        "num_speculative_tokens.")
 
                 self.draft_tensor_parallel_size = \
                     SpeculativeConfig._verify_and_get_draft_tp(

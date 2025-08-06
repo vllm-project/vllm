@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import ast
 from dataclasses import replace
 from importlib.util import find_spec
 from typing import Optional, Protocol
@@ -21,12 +20,13 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
-                                                  TreeAttentionMetadataBuilder)
+from vllm.v1.attention.backends.tree_attn import TreeAttentionMetadataBuilder
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.tree_spec_decode.utils import (apply_accepted_draft_indices,
+                                            copy_kv_cache_slots)
 
 logger = init_logger(__name__)
 
@@ -118,32 +118,22 @@ class EagleProposer:
                 rocm_types.append(AiterFlashAttentionMetadata)
             self.allowed_attn_types = tuple(rocm_types)
         else:
-            self.allowed_attn_types = (FlashAttentionMetadata,
-                                       TreeAttentionMetadata)
+            self.allowed_attn_types = (FlashAttentionMetadata, )
 
-        # Parse the speculative token tree.
-        spec_token_tree = self.speculative_config.speculative_token_tree
-        self.tree_choices: list[tuple[int,
-                                      ...]] = ast.literal_eval(spec_token_tree)
-        tree_depth = len(self.tree_choices[-1])
-        # Precompute per-level properties of the tree.
-        num_drafts_per_level = [0] * tree_depth
-        for node in self.tree_choices:
-            num_drafts_per_level[len(node) - 1] += 1
-        self.cu_drafts_per_level = [num_drafts_per_level[0]]
-        self.child_drafts_per_level = [num_drafts_per_level[0]]
-        for level in range(1, tree_depth):
-            self.cu_drafts_per_level.append(self.cu_drafts_per_level[-1] +
-                                            num_drafts_per_level[level])
-            self.child_drafts_per_level.append(num_drafts_per_level[level] //
-                                               num_drafts_per_level[level - 1])
-        # Precompute draft position offsets in flattened tree.
-        self.tree_draft_pos_offsets = torch.arange(
-            1,
-            len(self.tree_choices) + 1,
-            device=device,
-            dtype=torch.int32,
-        ).repeat(max_batch_size, 1)
+        # Get tree drafter params.
+        tree_drafter_params = self.speculative_config.tree_drafter_params
+        self.use_tree_spec_decode = tree_drafter_params is not None
+        if self.use_tree_spec_decode:
+            self.cu_drafts_per_level = tree_drafter_params.cu_drafts_per_level
+            self.child_drafts_per_level = (
+                tree_drafter_params.child_drafts_per_level)
+            # Precompute draft token positions in flattened tree.
+            self.flattened_tree_positions = torch.arange(
+                1,
+                len(tree_drafter_params.draft_nodes) + 1,
+                device=device,
+                dtype=torch.int32,
+            ).repeat(max_batch_size, 1)
 
     def propose(
         self,
@@ -228,7 +218,7 @@ class EagleProposer:
         positions = target_positions[last_token_indices]
         hidden_states = hidden_states[last_token_indices]
 
-        if isinstance(attn_metadata, TreeAttentionMetadata):
+        if self.use_tree_spec_decode:
             # Draft using tree attention.
             draft_token_ids_list = self.propose_tree(
                 batch_size=batch_size,
@@ -361,7 +351,6 @@ class EagleProposer:
                           TreeAttentionMetadataBuilder)
 
         total_num_drafts = self.cu_drafts_per_level[0]
-        level_num_drafts = total_num_drafts
         # Sample a draft token for each child at the tree root level.
         num_children = self.child_drafts_per_level[0]
         if num_children == 1:
@@ -382,14 +371,19 @@ class EagleProposer:
         tree_hidden_states = torch.empty(0,
                                          device=self.hidden_states.device,
                                          dtype=self.hidden_states.dtype)
-        # Precompute the draft token positions.
-        flattened_draft_positions = (
+        # Precompute the draft token query positions.
+        flattened_query_positions = (
             positions.view(batch_size, -1) +
-            self.tree_draft_pos_offsets[:batch_size, :])
+            self.flattened_tree_positions[:batch_size, :])
         tree_depth = len(self.cu_drafts_per_level)
-        for level in range(tree_depth - 1):
+        for level in range(1, tree_depth - 1):
+            # Update the # drafts counters for the current level.
+            level_num_drafts = self.cu_drafts_per_level[
+                level] - total_num_drafts
+            total_num_drafts = self.cu_drafts_per_level[level]
+
             # Get draft positions for RoPE.
-            draft_positions = positions + (level + 1)
+            draft_positions = positions + level
             exceeds_max_model_len = (positions +
                                      total_num_drafts) >= self.max_model_len
             # Mask out the position ids that exceed the max model length.
@@ -430,7 +424,7 @@ class EagleProposer:
             )
             attn_metadata = tree_attn_metadata_builder.build_for_drafting(
                 common_attn_metadata=common_attn_metadata,
-                draft_index=level + 1,
+                draft_index=level,
             )
 
             # Apply new attention metadata to all layers.
@@ -446,8 +440,7 @@ class EagleProposer:
             attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
 
             # Compute the slot mapping.
-            query_positions = flattened_draft_positions[:, level:level +
-                                                        query_len]
+            query_positions = flattened_query_positions[:, :query_len]
             block_numbers = query_positions // self.block_size
             block_ids = attn_metadata.block_table.gather(dim=1,
                                                          index=block_numbers)
@@ -461,8 +454,7 @@ class EagleProposer:
 
             # Copy inputs to buffer for cudagraph.
             num_tokens = attn_metadata.num_actual_tokens
-            input_ids = tree_input_ids.view(-1)
-            self.input_ids[:num_tokens] = input_ids
+            self.input_ids[:num_tokens] = tree_input_ids.view(-1)
             self.positions[:num_tokens] = tree_positions.view(-1)
             self.hidden_states[:num_tokens] = tree_hidden_states.view(
                 num_tokens, -1)
@@ -498,7 +490,7 @@ class EagleProposer:
             )
 
             # Sample a draft token for each child at the next tree level.
-            num_children = self.child_drafts_per_level[level + 1]
+            num_children = self.child_drafts_per_level[level]
             if num_children == 1:
                 draft_token_ids = logits.argmax(dim=-1).view(batch_size, -1)
             else:
@@ -507,17 +499,15 @@ class EagleProposer:
                                                  batch_size, -1)
             draft_token_ids_list.append(draft_token_ids)
 
-            # Update the # drafts counters for the next tree level.
-            level_num_drafts = self.cu_drafts_per_level[level +
-                                                        1] - total_num_drafts
-            total_num_drafts = self.cu_drafts_per_level[level + 1]
         return draft_token_ids_list
 
     def prepare_inputs(
         self,
         common_attn_metadata: CommonAttentionMetadata,
         # [batch_size]
-        num_rejected_tokens: torch.Tensor
+        num_rejected_tokens: torch.Tensor,
+        sampled_token_indices: list[list[int]],
+        kv_caches: list[torch.Tensor],
     ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
         """
         This function is used to prepare the inputs for the spec decode.
@@ -606,6 +596,27 @@ class EagleProposer:
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
             causal=True,
         )
+
+        if self.use_tree_spec_decode:
+            # During tree spec decoding, the accepted draft tokens may not be
+            # consecutive. In such cases, we must recompute the token indices,
+            # and update the KV cache slots.
+
+            # Compute the accepted token indices.
+            apply_accepted_draft_indices(sampled_token_indices,
+                                         new_query_start_loc_np,
+                                         token_indices_np)
+            accepted_token_indices = torch.from_numpy(token_indices_np).to(
+                device, non_blocking=True)
+            # Copy the KVs for the accepted tokens to the beginning of
+            # the sequence.
+            copy_kv_cache_slots(
+                kv_caches,
+                common_attn_metadata.slot_mapping,
+                accepted_token_indices,
+                token_indices,
+            )
+            return spec_common_attn_metadata, accepted_token_indices
 
         return spec_common_attn_metadata, token_indices
 

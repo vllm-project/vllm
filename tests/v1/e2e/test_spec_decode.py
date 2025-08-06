@@ -159,10 +159,8 @@ def test_eagle_correctness(
     attn_backend: str,
 ):
     if attn_backend == "TREE_ATTN":
-        # TODO: Fix this flaky test
         pytest.skip(
-            "TREE_ATTN is flaky in the test disable for now until it can be "
-            "resolved (see https://github.com/vllm-project/vllm/issues/22922)")
+            "TREE_ATTN is tested separately in test_tree_eagle_correctness.")
 
     # Generate test prompts inside the function instead of using fixture
     test_prompts = get_test_prompts(mm_enabled)
@@ -220,6 +218,86 @@ def test_eagle_correctness(
         # Heuristic: expect at least 66% of the prompts to match exactly
         # Upon failure, inspect the outputs to check for inaccuracy.
         assert matches > int(0.66 * len(ref_outputs))
+        del spec_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.parametrize("model_setup", [
+    ("eagle", "meta-llama/Llama-3.1-8B-Instruct",
+     "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1),
+    ("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
+     "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1),
+],
+                         ids=[
+                             "llama3_eagle",
+                             "llama3_eagle3",
+                         ])
+@pytest.mark.parametrize(
+    "spec_token_tree",
+    [
+        [(0, )],  # A single token
+        [(0, ), (0, 0), (0, 0, 0)],  # Chain
+        [(0, ), (1, ), (2, )],  # Parallel
+        [(0, ), (1, ), (2, ), (0, 0), (0, 1), (1, 0), (1, 1), (2, 0),
+         (2, 1)],  # Tree
+    ])
+def test_tree_eagle_correctness(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    model_setup: tuple[str, str, str, int],
+    spec_token_tree: list[tuple[int, ...]],
+):
+    # Generate test prompts inside the function instead of using fixture
+    test_prompts = get_test_prompts(False)
+    '''
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using eagle speculative decoding.
+    model_setup: (method, model_name, eagle_model_name, tp_size)
+    '''
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        m.setenv("VLLM_ATTENTION_BACKEND", "TREE_ATTN")
+        method, model_name, spec_model_name, tp_size = model_setup
+
+        ref_llm = LLM(model=model_name,
+                      max_model_len=2048,
+                      tensor_parallel_size=tp_size)
+        ref_outputs = ref_llm.chat(test_prompts, sampling_config)
+        del ref_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
+
+        spec_llm = LLM(
+            model=model_name,
+            trust_remote_code=True,
+            tensor_parallel_size=tp_size,
+            speculative_config={
+                "method": method,
+                "model": spec_model_name,
+                "num_speculative_tokens": len(spec_token_tree),
+                "spec_token_tree": str(spec_token_tree),
+                "max_model_len": 2048,
+            },
+            max_model_len=2048,
+        )
+        spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+        matches = 0
+        misses = 0
+        for ref_output, spec_output in zip(ref_outputs, spec_outputs):
+            if ref_output.outputs[0].text == spec_output.outputs[0].text:
+                matches += 1
+            else:
+                misses += 1
+                print(f"ref_output: {ref_output.outputs[0].text}")
+                print(f"spec_output: {spec_output.outputs[0].text}")
+
+        # Heuristic: expect at least 50% of the prompts to match exactly
+        # Upon failure, inspect the outputs to check for inaccuracy. This
+        # threshold is lower than the other tests because the tree attention
+        # backend uses triton kernels, which seem to introduce more floating
+        # point non-determinism when compared to FA3.
+        assert matches > int(0.50 * len(ref_outputs))
         del spec_llm
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
