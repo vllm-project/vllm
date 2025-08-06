@@ -16,6 +16,7 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption)
+from vllm.entrypoints.context import SimpleContext
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -195,21 +196,19 @@ class OpenAIServingResponses(OpenAIServing):
                 sampling_params = request.to_sampling_params(
                     default_max_tokens, self.default_sampling_params)
 
-                self._log_inputs(request.request_id,
-                                 request_prompts[i],
-                                 params=sampling_params,
-                                 lora_request=lora_request)
-
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
 
-                generator = self.engine_client.generate(
-                    engine_prompt,
-                    sampling_params,
-                    request.request_id,
+                context = SimpleContext()
+                generator = self._generate_with_builtin_tools(
+                    request_id=request.request_id,
+                    request_prompt=request_prompts[i],
+                    engine_prompt=engine_prompt,
+                    sampling_params=sampling_params,
+                    context=context,
                     lora_request=lora_request,
-                    trace_headers=trace_headers,
                     priority=request.priority,
+                    trace_headers=trace_headers,
                 )
                 generators.append(generator)
         except ValueError as e:
