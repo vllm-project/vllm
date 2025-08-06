@@ -10,7 +10,6 @@ from vllm.config import (LoadConfig, ModelConfig, PoolerConfig, VllmConfig,
                          get_field, update_config)
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
-from vllm.utils import build_model_context
 
 
 def test_compile_config_repr_succeeds():
@@ -403,12 +402,3 @@ def test_get_and_verify_max_len(model_id, max_model_len, expected_max_len,
     else:
         actual_max_len = model_config.get_and_verify_max_len(max_model_len)
         assert actual_max_len == expected_max_len
-
-
-@pytest.mark.parametrize("limit,is_multimodal", [(0, False), (1, True)])
-def test_is_multimodal_model_respects_limit(limit, is_multimodal):
-    ctx = build_model_context(
-        "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-        limit_mm_per_prompt={"image": limit},
-    )
-    assert ctx.model_config.is_multimodal_model is is_multimodal

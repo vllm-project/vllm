@@ -729,9 +729,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         else:
             self.audio_tower = None
 
-        if multimodal_config and (
-                multimodal_config.get_limit_per_prompt("image")
-                or multimodal_config.get_limit_per_prompt("video")):
+        if multimodal_config.get_limit_per_prompt(
+                "image") or multimodal_config.get_limit_per_prompt("video"):
             self.visual = Qwen2_5_VisionTransformer(
                 vision_config=thinker_config.vision_config,
                 norm_eps=getattr(thinker_config.text_config, "rms_norm_eps",
