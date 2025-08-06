@@ -88,6 +88,7 @@ def kernel_unified_attention_2d(
         BLOCK_Q: tl.constexpr,  # int
         num_seqs: tl.int32,
         BLOCK_M: tl.constexpr,  # int
+        HAS_SINK: tl.constexpr,  # bool
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -132,7 +133,7 @@ def kernel_unified_attention_2d(
 
     block_table_offset = seq_idx * block_table_stride
 
-    if sink_ptr is None:
+    if not HAS_SINK:
         M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     else:
         M = tl.load(
@@ -729,6 +730,7 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
+            HAS_SINK=(sinks is not None),
         )
     else:
         # for initial version, NUM_SEGMENTS = 16 is chosen as a default
