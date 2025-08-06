@@ -179,8 +179,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                           min_transformers_version="4.54"),
     "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),  # noqa: E501
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
-    "FalconH1ForCausalLM":_HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base",
-                                          min_transformers_version="4.53"),
+    "FalconH1ForCausalLM":_HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-1.1-2b-it"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
@@ -223,7 +222,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini",
-                                        extras={"tiny": "ai21labs/Jamba-tiny-dev"}),  # noqa: E501
+                                        extras={
+                                            "tiny": "ai21labs/Jamba-tiny-dev",
+                                            "random": "ai21labs/Jamba-tiny-random",  # noqa: E501
+                                        }),
     "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.2-1B-Instruct",
                                         extras={"guard": "meta-llama/Llama-Guard-3-1B",  # noqa: E501
                                                 "hermes": "NousResearch/Hermes-3-Llama-3.1-8B", # noqa: E501
@@ -239,8 +241,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "MiniCPM3ForCausalLM": _HfExamplesInfo("openbmb/MiniCPM3-4B",
                                          trust_remote_code=True),
-    "MiniMaxForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01-hf",
-                                          min_transformers_version="4.53"),
+    "MiniMaxForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01-hf"),
     "MiniMaxText01ForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01",
                                                 trust_remote_code=True,
                                                 revision="a59aa9cbc53b9fb8742ca4e9e1531b9802b6fdc3"),  # noqa: E501
@@ -272,6 +273,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "PhiMoEForCausalLM": _HfExamplesInfo("microsoft/Phi-3.5-MoE-instruct",
                                          trust_remote_code=True),
     "Plamo2ForCausalLM": _HfExamplesInfo("pfnet/plamo-2-1b",
+                                         max_transformers_version="4.53",
+                                         transformers_version_reason="vLLM impl inherits PreTrainedModel and clashes with get_input_embeddings",  # noqa: E501
                                         trust_remote_code=True),
     "QWenLMHeadModel": _HfExamplesInfo("Qwen/Qwen-7B-Chat",
                                        trust_remote_code=True),
@@ -299,8 +302,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
                                         trust_remote_code=True),
-    "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst",
-                                        min_transformers_version="4.53"),
+    "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst"),
     # [Encoder-decoder]
     "BartModel": _HfExamplesInfo("facebook/bart-base"),
     "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),
@@ -326,8 +328,12 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "NomicBertModel": _HfExamplesInfo("nomic-ai/nomic-embed-text-v2-moe",
                                                trust_remote_code=True, v0_only=True),  # noqa: E501
     "Qwen2Model": _HfExamplesInfo("ssmits/Qwen2-7B-Instruct-embed-base"),
-    "Qwen2ForRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-RM-72B"),
-    "Qwen2ForProcessRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-PRM-7B"),
+    "Qwen2ForRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-RM-72B",
+                                           max_transformers_version="4.53",
+                                           transformers_version_reason="HF model uses remote code that is not compatible with latest Transformers"),  # noqa: E501
+    "Qwen2ForProcessRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-PRM-7B",
+                                                  max_transformers_version="4.53",
+                                                  transformers_version_reason="HF model uses remote code that is not compatible with latest Transformers"),  # noqa: E501
     "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2", v0_only=True),  # noqa: E501
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1", v0_only=True),  # noqa: E501
     "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small", v0_only=True),  # noqa: E501

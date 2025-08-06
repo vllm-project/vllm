@@ -7,7 +7,7 @@ requests >= 2.26.0
 tqdm
 blake3
 py-cpuinfo
-transformers >= 4.53.2
+transformers >= 4.55.0
 huggingface-hub[hf_xet] >= 0.33.0  # Required for Xet downloads.
 tokenizers >= 0.21.1  # Required for fast incremental detokenization.
 protobuf # Required by LlamaTokenizer.
