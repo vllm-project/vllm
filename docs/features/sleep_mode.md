@@ -2,7 +2,7 @@
 
 vLLM's Sleep Mode allows you to temporarily release most GPU memory used by a model, including model weights and KV cache, without stopping the server or unloading the Docker container. This is especially useful for RLHF, training, or cost-saving scenarios where GPU resources need to be freed between inference workloads.
 
-## **Benefits**
+## Benefits
 
 - **Frees GPU memory**: Offloads model weights to CPU RAM and discards KV cache, releasing up to 90%+ of GPU memory for other tasks.
 - **Fast resume**: Quickly wake up the engine and resume inference without full model reload.
@@ -10,7 +10,7 @@ vLLM's Sleep Mode allows you to temporarily release most GPU memory used by a 
 - **Supports distributed workloads**: Works with tensor parallelism.
 - **Fine-grained control**: Optionally wake up only model weights or KV cache to avoid OOM during weight updates.
 
-## **Usage**
+## Usage
 
 ### Offline inference
 
@@ -21,7 +21,7 @@ from vllm import LLM
 llm = LLM("Qwen/Qwen3-0.6B", enable_sleep_mode=True)
 ```
 
-### **Python API**
+### Python API
 
 ```python
 # Put the engine to sleep (level=1: offload weights to CPU RAM, discard KV cache)
@@ -59,7 +59,7 @@ VLLM_SERVER_DEV_MODE=1 python -m vllm.entrypoints.openai.api_server \
   --port 8000
 ```
 
-### **HTTP Endpoints**
+### HTTP Endpoints
 
 - `POST /sleep?level=1` — Put the model to sleep.
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
