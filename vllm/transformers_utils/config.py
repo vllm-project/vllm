@@ -433,6 +433,10 @@ def get_config(
                     raise e
         config = _maybe_remap_hf_config_attrs(config)
 
+        # TODO: Remove this workaround once the configuration_phi4flash.py
+        # has been updated in microsoft/Phi-4-mini-flash-reasoning
+        config.sliding_window = next(filter(None, config.sliding_window), None)
+
     elif config_format == ConfigFormat.MISTRAL:
         # This function loads a params.json config which
         # should be used when loading models in mistral format

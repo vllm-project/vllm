@@ -269,6 +269,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Phi3ForCausalLM": _HfExamplesInfo("microsoft/Phi-3-mini-4k-instruct"),
     "Phi4FlashForCausalLM": _HfExamplesInfo("microsoft/Phi-4-mini-flash-reasoning", # noqa: E501
                                         trust_remote_code=True,
+                                        revision="refs/pr/6",
                                         v0_only=True,
                                         max_model_len=10240),
     "PhiMoEForCausalLM": _HfExamplesInfo("microsoft/Phi-3.5-MoE-instruct",
