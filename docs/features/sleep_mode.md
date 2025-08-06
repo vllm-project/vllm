@@ -58,7 +58,7 @@ llm.wake_up(tags=["kv_cache"])
 
 ### Online inference
 
-To Enable sleep mode in a vLLM server you need to initialize it with the flag `VLLM_SERVER_DEV_MODE=1` and pass `--enable-sleep-mode` to the vLLM server
+To enable sleep mode in a vLLM server you need to initialize it with the flag `VLLM_SERVER_DEV_MODE=1` and pass `--enable-sleep-mode` to the vLLM server.
 
 #### Server in development mode
 
