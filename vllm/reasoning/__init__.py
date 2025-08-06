@@ -4,6 +4,7 @@
 from .abs_reasoning_parsers import ReasoningParser, ReasoningParserManager
 from .deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 from .glm4_moe_reasoning_parser import Glm4MoeModelReasoningParser
+from .gptoss_reasoning_parser import GptOssReasoningParser
 from .granite_reasoning_parser import GraniteReasoningParser
 from .hunyuan_a13b_reasoning_parser import HunyuanA13BReasoningParser
 from .mistral_reasoning_parser import MistralReasoningParser
@@ -20,4 +21,5 @@ __all__ = [
     "Glm4MoeModelReasoningParser",
     "MistralReasoningParser",
     "Step3ReasoningParser",
+    "GptOssReasoningParser",
 ]
