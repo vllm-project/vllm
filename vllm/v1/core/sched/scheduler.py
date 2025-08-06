@@ -167,10 +167,10 @@ class Scheduler(SchedulerInterface):
                         f"got {speculative_config.relax_ratio}.")
                 if not speculative_config.reasoning_parser:
                     raise ValueError("No reasoning_parser specified.")
-                logger.info("Enable relaxed thinking, relax_ratio = %s, "
-                            "relax_top_k = %s", 
-                            speculative_config.relax_ratio, 
-                            speculative_config.relax_top_k)
+                logger.info(
+                    "Enable relaxed thinking, relax_ratio = %s, "
+                    "relax_top_k = %s", speculative_config.relax_ratio, 
+                    speculative_config.relax_top_k)
                 tokenizer = AutoTokenizer.from_pretrained(
                     self.vllm_config.model_config.tokenizer)
                 try:
@@ -185,18 +185,23 @@ class Scheduler(SchedulerInterface):
 
                 logger.info("Use reasoning parser: %s", reasoning_parser)
 
-                if speculative_config.reasoning_parser == 'deepseek_r1':
+                if hasattr(reasoning_parser, "start_token_id") and \
+                    hasattr(reasoning_parser, "end_token_id"):
                     self.think_start_token_id = \
                         reasoning_parser.start_token_id
                     self.think_end_token_id = reasoning_parser.end_token_id
-                elif speculative_config.reasoning_parser == 'qwen3':
+                elif hasattr(reasoning_parser, "think_start_token_id") \
+                    and hasattr(reasoning_parser, "think_end_token_id"):
                     self.think_start_token_id = \
                         reasoning_parser.think_start_token_id
                     self.think_end_token_id = \
                         reasoning_parser.think_end_token_id
                 else:
-                    raise ValueError("Invalid reasoning_parser, options "
-                                     "are ['deepseek_r1', 'qwen3'].")
+                    raise AttributeError(
+                        "The reasoning_parser is missing the required token "
+                        "ID attributes. Please ensure it has either "
+                        "(`start_token_id`, `end_token_id`) or "
+                        "(`think_start_token_id`, `think_end_token_id`).")
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
