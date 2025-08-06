@@ -197,6 +197,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                        {"6b": "EleutherAI/gpt-j-6b"}),
     "GPTNeoXForCausalLM": _HfExamplesInfo("EleutherAI/pythia-70m",
                                           {"1b": "EleutherAI/pythia-1.4b"}),
+    "GptOssForCausalLM": _HfExamplesInfo("openai/gpt-oss-20b"),
     "GraniteForCausalLM": _HfExamplesInfo("ibm/PowerLM-3b"),
     "GraniteMoeForCausalLM": _HfExamplesInfo("ibm/PowerMoE-3b"),
     "GraniteMoeHybridForCausalLM": _HfExamplesInfo("ibm-granite/granite-4.0-tiny-preview"),  # noqa: E501
