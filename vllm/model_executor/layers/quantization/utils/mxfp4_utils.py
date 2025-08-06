@@ -7,6 +7,19 @@ from vllm.utils import direct_register_custom_op
 OCP_MX_BLOCK_SIZE = 32
 
 
+def _can_support_mxfp4(use_grouped_topk, topk_group, num_expert_group,
+                       expert_map, custom_routing_function,
+                       e_score_correction_bias, apply_router_weight_on_input,
+                       scoring_func, activation, expert_load_view,
+                       logical_to_physical_map, logical_replica_count):
+    return not (use_grouped_topk or topk_group or num_expert_group
+                or expert_map or custom_routing_function
+                or e_score_correction_bias or apply_router_weight_on_input
+                or scoring_func != "softmax" or activation != "silu"
+                or expert_load_view or logical_to_physical_map
+                or logical_replica_count)
+
+
 def _dequant_mxfp4(x: torch.Tensor, scale: torch.Tensor,
                    float_dtype: torch.dtype) -> torch.Tensor:
     try:

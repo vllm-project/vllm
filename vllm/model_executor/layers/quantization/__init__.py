@@ -6,38 +6,14 @@ from typing import Literal, get_args
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
-QuantizationMethods = Literal[
-    "aqlm",
-    "awq",
-    "deepspeedfp",
-    "tpu_int8",
-    "fp8",
-    "ptpc_fp8",
-    "fbgemm_fp8",
-    "modelopt",
-    "modelopt_fp4",
-    "marlin",
-    "bitblas",
-    "gguf",
-    "gptq_marlin_24",
-    "gptq_marlin",
-    "gptq_bitblas",
-    "awq_marlin",
-    "gptq",
-    "compressed-tensors",
-    "bitsandbytes",
-    "qqq",
-    "hqq",
-    "experts_int8",
-    "neuron_quant",
-    "ipex",
-    "quark",
-    "moe_wna16",
-    "torchao",
-    "auto-round",
-    "rtn",
-    "inc",
-]
+QuantizationMethods = Literal["aqlm", "awq", "deepspeedfp", "tpu_int8", "fp8",
+                              "ptpc_fp8", "fbgemm_fp8", "modelopt",
+                              "modelopt_fp4", "marlin", "bitblas", "gguf",
+                              "gptq_marlin_24", "gptq_marlin", "gptq_bitblas",
+                              "awq_marlin", "gptq", "compressed-tensors",
+                              "bitsandbytes", "qqq", "hqq", "experts_int8",
+                              "neuron_quant", "ipex", "quark", "moe_wna16",
+                              "torchao", "auto-round", "rtn", "inc", "mxfp4"]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 # The customized quantization methods which will be added to this dict.
@@ -110,6 +86,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .marlin import MarlinConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
+    from .mxfp4 import Mxfp4Config
     from .neuron_quant import NeuronQuantConfig
     from .ptpc_fp8 import PTPCFp8Config
     from .qqq import QQQConfig
@@ -148,6 +125,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "auto-round": AutoRoundConfig,
         "rtn": RTNConfig,
         "inc": INCConfig,
+        "mxfp4": Mxfp4Config,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)
