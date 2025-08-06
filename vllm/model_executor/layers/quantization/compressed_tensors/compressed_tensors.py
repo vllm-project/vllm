@@ -15,7 +15,6 @@ from compressed_tensors.quantization import (QuantizationStrategy,
                                              QuantizationType)
 from compressed_tensors.transform import (TransformArgs, TransformConfig,
                                           TransformLocation, TransformScheme)
-from compressed_tensors.utils import is_match
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -35,7 +34,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    is_activation_quantization_format)
+    is_activation_quantization_format, is_match)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported)
