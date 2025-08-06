@@ -127,8 +127,8 @@ class MultiModalRegistry:
                 mm_config.get_limit_per_prompt(modality) == 0
                 for modality in supported_modalities):
             logger.info_once(
-                "All limits of modalities supported by the model are set to 0, "
-                "running in text-only mode.")
+                "All limits of multimodal modalities supported by the model "
+                "are set to 0, running in text-only mode.")
             return False
 
         return True
