@@ -469,6 +469,7 @@ def reference_moe_impl(config: Config, weights: WeightTensors,
                                                 dtype=dtype,
                                                 device=w2_q.device,
                                                 block_size=quant_blocksize)
+        a_scale = None
         w1_scale = None
         w2_scale = None
         quant_dtype = None
@@ -476,6 +477,7 @@ def reference_moe_impl(config: Config, weights: WeightTensors,
         block_shape = None
     else:
         a = rank_tensors.hidden_states
+        a_scale = rank_tensors.hidden_states_scale
         w1 = weights.w1
         w1_scale = weights.w1_scale
         w2 = weights.w2
@@ -493,7 +495,7 @@ def reference_moe_impl(config: Config, weights: WeightTensors,
                          expert_map=None,
                          w1_scale=w1_scale,
                          w2_scale=w2_scale,
-                         a1_scale=rank_tensors.hidden_states_scale,
+                         a1_scale=a_scale,
                          quant_dtype=quant_dtype,
                          per_act_token_quant=per_act_token_quant,
                          block_shape=block_shape,
