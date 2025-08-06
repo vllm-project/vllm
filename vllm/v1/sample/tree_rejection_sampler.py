@@ -65,9 +65,8 @@ class TreeRejectionSampler(RejectionSampler):
 
         # Precompute indices for logits corresponding to tree-internal
         # tokens across batches.
-        num_tree_internal_tokens = self.cu_tokens_per_level[-2]
-        self.tree_internal_index_offsets = torch.arange(
-            num_tree_internal_tokens, device=device)
+        self.tree_internal_size = self.cu_tokens_per_level[-2]
+        self.tree_index_offsets = torch.arange(self.tree_size, device=device)
 
     def forward(
         self,
@@ -113,101 +112,23 @@ class TreeRejectionSampler(RejectionSampler):
         #    3  4   5  6    level 2
 
         device = target_logits.device
+        draft_tree_size = self.tree_size - 1
+        tree_internal_index_offsets = (
+            self.tree_index_offsets[:self.tree_internal_size])
+        draft_index_offsets = self.tree_index_offsets[:draft_tree_size]
+
         num_reqs = len(metadata.num_draft_tokens)
-        # [8, 8, 0, 0, 0, 0, 0, 0]
+        # [1, 8, 8, 0, 0, 0, 0, 0]
         num_draft_tokens = torch.tensor(metadata.num_draft_tokens,
                                         device=device)
-        draft_tree_size = self.tree_size - 1
-        # [1, 1, 0, 0, 0, 0, 0, 0]
-        tree_decode_mask = num_draft_tokens == draft_tree_size
+        # [0, 1, 1, 0, 0, 0, 0, 0]
+        is_tree_decode = num_draft_tokens == draft_tree_size
         # [0, 1, 2, 3, 4, 5, 6, 7]
         start_indices = torch.arange(num_reqs, device=device)
-        # [0, 9, 18, 19, 20, 21, 22, 23]
+        # [0, 2, 11, 20, 21, 22, 23, 24]
         start_indices[1:] += metadata.cu_num_draft_tokens[:-1]
 
-        # Compute target probabilities for all logits corresponding to internal
-        # nodes in the tree.
-        vocab_size = target_logits.shape[-1]
-        # [0, 9]
-        tree_decode_start_indices = start_indices[tree_decode_mask]
-        # [[0, 1, 2],
-        #  [9, 10, 11]]
-        tree_internal_indices = tree_decode_start_indices.unsqueeze(
-            1) + self.tree_internal_index_offsets
-        num_tree_decodes, num_logits_per_batch = tree_internal_indices.shape
-        tree_internal_logits = target_logits[tree_internal_indices.flatten()]
-        target_probs = self.compute_probs(
-            tree_internal_logits,
-            num_logits_per_batch,
-            sampling_metadata,
-        ).view(num_tree_decodes, -1, vocab_size)
-
-        # Sample tokens from the target probabilities.
-        # TODO(TheEpicDolphin): Add support for probabilistic-style rejection
-        # sampling, as used in EAGLE.
-        target_token_ids = target_probs.argmax(dim=-1).cpu()
-
-        # Reshape the draft token ids to [num_tree_decodes, draft_tree_size].
-        draft_token_ids = metadata.draft_token_ids.view(num_tree_decodes, -1)
-
-        # Move sampled target and draft token tensors to CPU.
-        # [[311, 6435, 96618],
-        #  [279, 11, 15861]]
-        target_token_ids_cpu = target_token_ids.cpu()
-        # [[311, 8844, 2349, 387, 4732, 96618, 311, 334],
-        #  [3634, 279, 323, 11, 438, 15861, 3634, 7016]]
-        draft_token_ids_cpu = draft_token_ids.cpu()
-
-        # For each batch, find longest path from the root node.
-        path_lengths = torch.zeros(
-            # +1 for the root token.
-            (num_tree_decodes, draft_tree_size + 1),
-            dtype=torch.int32)
-        path_lengths[:, 0] = 1
-        for level in range(1, self.tree_depth):
-            # level 2:
-            # (3, 9)
-            start, end = self.draft_slices[level]
-            # [1, 1, 1, 2, 2, 2]
-            parent_indices = self.parent_indices[level]
-            # [[0, 0, 0, 0, 0, 0],
-            #  [0, 1, 0, 1, 0, 0]]
-            sample_match = draft_token_ids_cpu[:, start - 1:end -
-                                               1] == target_token_ids_cpu[:,
-                                                                          parent_indices]
-            nonzero_length = path_lengths[:, parent_indices] > 0
-            # [[1, 2, 0, 0, 0, 0, 0, 0, 0],  ->  [[1, 2, 0, 0, 0, 0, 0, 0, 0],
-            #  [1, 0, 2, 0, 0, 0, 0, 0, 0]]       [1, 0, 2, 0, 0, 0, 3, 0, 0]]
-            path_lengths[:,
-                         start:end].masked_fill_(sample_match & nonzero_length,
-                                                 level + 1)
-        # [1, 6]
-        accepted_token_index_offsets = path_lengths.argmax(dim=-1).to(device)
-
-        # Get boolean masks for the paths to the accepted tokens.
-        # [0, 1]
-        tree_batch_indices = self.batch_indices[:num_tree_decodes]
-        # [[[1, 0, 0, 0, 0, 0, 0],  <- batch 0
-        #   [1, 1, 0, 0, 0, 0, 0],
-        #   [1, 0, 1, 0, 0, 0, 0],
-        #   [1, 1, 0, 1, 0, 0, 0],
-        #   [1, 1, 0, 0, 1, 0, 0],
-        #   [1, 0, 1, 0, 0, 1, 0],
-        #   [1, 0, 1, 0, 0, 0, 1]],
-        #  [[1, 0, 0, 0, 0, 0, 0],  <- batch 1
-        #   [1, 1, 0, 0, 0, 0, 0],
-        #   [1, 0, 1, 0, 0, 0, 0],
-        #   [1, 1, 0, 1, 0, 0, 0],
-        #   [1, 1, 0, 0, 1, 0, 0],
-        #   [1, 0, 1, 0, 0, 1, 0],
-        #   [1, 0, 1, 0, 0, 0, 1]]]
-        tree_mask = self.expanded_tree_mask[:num_tree_decodes]
-        # [1, 6] => [[1, 0, 0, 0, 0, 0], <- batch 0
-        #            [0, 1, 0, 0, 0, 1]]  <- batch 1
-        path_masks = tree_mask[tree_batch_indices,
-                               accepted_token_index_offsets]
-
-        # Create output buffer.
+        # Create output token ids buffer.
         output_token_ids = torch.empty(
             # +1 for the bonus token.
             (num_reqs, draft_tree_size + 1),
@@ -217,15 +138,116 @@ class TreeRejectionSampler(RejectionSampler):
         )
         output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
 
-        # Set accepted draft tokens.
-        accepted_draft_tokens = draft_token_ids[path_masks]
-        scatter_mask = torch.zeros_like(output_token_ids, dtype=torch.bool)
-        scatter_mask[tree_decode_mask, :-1] = path_masks
-        output_token_ids.masked_scatter_(scatter_mask, accepted_draft_tokens)
+        # [0, 0, 0, 0, 0, 0, 0, 0]
+        accepted_index_offsets = torch.zeros_like(is_tree_decode,
+                                                  dtype=torch.int32)
+
+        num_tree_decodes = is_tree_decode.sum()
+        if num_tree_decodes > 0:
+            # Compute target probabilities for all logits corresponding to
+            # internal nodes in the tree.
+            vocab_size = target_logits.shape[-1]
+            # [0, 9]
+            tree_decode_start_indices = start_indices[is_tree_decode]
+            # [[0, 1, 2],
+            #  [9, 10, 11]]
+            tree_internal_indices = (tree_decode_start_indices.unsqueeze(1) +
+                                     tree_internal_index_offsets)
+            tree_internal_logits = target_logits[
+                tree_internal_indices.flatten()]
+            target_probs = self.compute_tree_target_probs(
+                tree_internal_logits,
+                is_tree_decode,
+                num_tree_decodes,
+                sampling_metadata,
+            ).view(num_tree_decodes, -1, vocab_size)
+
+            # Sample tokens from the target probabilities.
+            # TODO(TheEpicDolphin): Add support for probabilistic-style
+            # rejection sampling, as used in EAGLE.
+            target_token_ids = target_probs.argmax(dim=-1)
+
+            # Get the draft token ids for batches with full draft trees.
+            # [0, 0]
+            draft_start_indices = torch.zeros(num_tree_decodes,
+                                              device=device,
+                                              dtype=torch.int32)
+            # [0, 8]
+            draft_start_indices[1:] = (
+                metadata.cu_num_draft_tokens[is_tree_decode][:-1])
+            # [[0, 1, 2, ... , 7]
+            #  [8, 9, 10, ... , 15]]
+            tree_draft_indices = (draft_start_indices.unsqueeze(1) +
+                                  draft_index_offsets)
+            draft_token_ids = metadata.draft_token_ids[tree_draft_indices]
+
+            # Move sampled target and draft token tensors to CPU.
+            # [[311, 6435, 96618],
+            #  [279, 11, 15861]]
+            target_token_ids_cpu = target_token_ids.cpu()
+            # [[311, 8844, 2349, 387, 4732, 96618, 311, 334],
+            #  [3634, 279, 323, 11, 438, 15861, 3634, 7016]]
+            draft_token_ids_cpu = draft_token_ids.cpu()
+
+            # For each tree decode batch, find longest path from the root node.
+            path_lengths_cpu = torch.zeros(
+                # +1 for the root token.
+                (num_tree_decodes, draft_tree_size + 1),
+                dtype=torch.int32,
+                device="cpu")
+            path_lengths_cpu[:, 0] = 1
+            for level in range(1, self.tree_depth):
+                # level 2:
+                # (3, 9)
+                start, end = self.draft_slices[level]
+                # [1, 1, 1, 2, 2, 2]
+                parent_indices = self.parent_indices[level]
+                # [[0, 0, 0, 0, 0, 0],
+                #  [0, 1, 0, 1, 0, 0]]
+                sample_match = (draft_token_ids_cpu[:, start - 1:end - 1] ==
+                                target_token_ids_cpu[:, parent_indices])
+                nonzero_length = path_lengths_cpu[:, parent_indices] > 0
+                # [[1, 2, 0, 0, 0, 0, 0, 0, 0],-> [[1, 2, 0, 0, 0, 0, 0, 0, 0],
+                #  [1, 0, 2, 0, 0, 0, 0, 0, 0]]    [1, 0, 2, 0, 0, 0, 3, 0, 0]]
+                path_lengths_cpu[:, start:end].masked_fill_(
+                    sample_match & nonzero_length, level + 1)
+            # [1, 6, 0, 0, 0, 0, 0, 0]
+            path_lengths = path_lengths_cpu.argmax(dim=-1).to(
+                device, dtype=torch.int32)
+            accepted_index_offsets[is_tree_decode] = path_lengths
+
+            # Get boolean masks for the paths to the accepted tokens.
+            # [0, 1]
+            tree_batch_indices = self.batch_indices[:num_tree_decodes]
+            # [[[1, 0, 0, 0, 0, 0, 0],  <- batch 0
+            #   [1, 1, 0, 0, 0, 0, 0],
+            #   [1, 0, 1, 0, 0, 0, 0],
+            #   [1, 1, 0, 1, 0, 0, 0],
+            #   [1, 1, 0, 0, 1, 0, 0],
+            #   [1, 0, 1, 0, 0, 1, 0],
+            #   [1, 0, 1, 0, 0, 0, 1]],
+            #  [[1, 0, 0, 0, 0, 0, 0],  <- batch 1
+            #   [1, 1, 0, 0, 0, 0, 0],
+            #   [1, 0, 1, 0, 0, 0, 0],
+            #   [1, 1, 0, 1, 0, 0, 0],
+            #   [1, 1, 0, 0, 1, 0, 0],
+            #   [1, 0, 1, 0, 0, 1, 0],
+            #   [1, 0, 1, 0, 0, 0, 1]]]
+            tree_mask = self.expanded_tree_mask[:num_tree_decodes]
+            # [1, 6] => [[1, 0, 0, 0, 0, 0], <- batch 0
+            #            [0, 1, 0, 0, 0, 1]]  <- batch 1
+            path_masks = tree_mask[tree_batch_indices, path_lengths]
+
+            # Set accepted draft tokens.
+            accepted_draft_tokens = draft_token_ids[path_masks]
+            scatter_mask = torch.zeros_like(output_token_ids, dtype=torch.bool)
+            scatter_mask[is_tree_decode, :-1] = path_masks
+            output_token_ids.masked_scatter_(scatter_mask,
+                                             accepted_draft_tokens)
 
         # Sample and add a bonus token to the accepted paths.
-        bonus_token_indices = start_indices
-        bonus_token_indices[tree_decode_mask] += accepted_token_index_offsets
+        # [0, 2 + 1, 11 + 6, 20, 21, 22, 23, 24]
+        bonus_token_indices = start_indices + accepted_index_offsets
         bonus_sampler_output = self.main_sampler(
             logits=target_logits[bonus_token_indices],
             sampling_metadata=sampling_metadata,
@@ -234,22 +256,30 @@ class TreeRejectionSampler(RejectionSampler):
                          -1] = bonus_sampler_output.sampled_token_ids.view(-1)
         return output_token_ids
 
-    def compute_probs(self, logits: torch.Tensor, logits_per_batch: int,
-                      sampling_metadata: SamplingMetadata):
+    def compute_tree_target_probs(self, logits: torch.Tensor,
+                                  is_tree_decode: torch.Tensor,
+                                  num_tree_decodes: int,
+                                  sampling_metadata: SamplingMetadata):
         if sampling_metadata.all_greedy:
             return logits
 
+        # How many times to repeat the temperature, top-k, and top-p
+        # for each tree-decode batch.
+        num_repeats = logits.shape[0] // num_tree_decodes
+
         assert sampling_metadata.temperature is not None
-        temperature = sampling_metadata.temperature.repeat_interleave(
-            logits_per_batch)
+        temperature = sampling_metadata.temperature[is_tree_decode]
+        temperature = temperature.repeat_interleave(num_repeats)
         logits.div_(temperature.view(-1, 1))
 
         top_k = None
         if sampling_metadata.top_k is not None:
-            top_k = sampling_metadata.top_k.repeat_interleave(logits_per_batch)
+            top_k = sampling_metadata.top_k[is_tree_decode]
+            top_k = top_k.repeat_interleave(num_repeats)
         top_p = None
         if sampling_metadata.top_p is not None:
-            top_p = sampling_metadata.top_p.repeat_interleave(logits_per_batch)
+            top_p = sampling_metadata.top_p[is_tree_decode]
+            top_p = top_p.repeat_interleave(num_repeats)
         logits = apply_top_k_top_p(logits, top_k, top_p)
         output_probs = logits.softmax(dim=-1, dtype=torch.float32)
         return output_probs

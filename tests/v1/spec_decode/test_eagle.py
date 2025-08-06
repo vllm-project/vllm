@@ -125,7 +125,7 @@ def test_prepare_inputs():
     proposer = _create_proposer("eagle", 1)
 
     updated_metadata, token_indices = proposer.prepare_inputs(
-        common_attn_metadata, num_rejected_tokens.cpu())
+        common_attn_metadata, num_rejected_tokens.cpu(), [], [])
 
     assert torch.equal(updated_metadata.query_start_loc,
                        expected_cu_num_tokens)
@@ -405,7 +405,9 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
         [(0, ), (1, ), (2, ), (0, 0), (0, 1), (1, 0), (1, 1), (2, 0),
          (2, 1)],  # Tree
     ])
-def test_propose_tree(spec_token_tree):
+def test_propose_tree(spec_token_tree, monkeypatch):
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "TREE_ATTN")
+
     # Get GPU device.
     device = torch.device(current_platform.device_type)
 

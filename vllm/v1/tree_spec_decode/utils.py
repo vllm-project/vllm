@@ -39,8 +39,9 @@ def apply_draft_offsets(
         req_idx = input_batch.req_id_to_index[req_id]
         start = query_start_loc_np[req_idx]
         end = query_start_loc_np[req_idx + 1]
+        num_drafts = end - start - 1
         token_positions_np[start + 1:end] = (token_positions_np[start] +
-                                             draft_token_offsets)
+                                             draft_token_offsets[:num_drafts])
 
 
 def apply_accepted_draft_indices(
