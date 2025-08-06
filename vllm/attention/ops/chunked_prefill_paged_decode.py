@@ -296,8 +296,16 @@ def chunked_prefill_paged_decode(
                                     16)
 
     use_custom = use_rocm_custom_paged_attention(
-        query.dtype, head_size, block_size, num_queries_per_kv, max_seq_len,
-        sliding_window, kv_cache_dtype, alibi_slopes, sinks)
+        query.dtype,
+        head_size,
+        block_size,
+        num_queries_per_kv,
+        max_seq_len,
+        sliding_window,
+        kv_cache_dtype,
+        alibi_slopes,
+        sinks,
+    )
     if use_custom:
         _PARTITION_SIZE_ROCM = 256
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE_ROCM - 1) //
