@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention layer with TreeAttention."""
+"""Attention layer with XFormersAttention."""
 
-import ast
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -18,6 +17,15 @@ from vllm.v1.attention.backends.utils import (
     reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+try:
+    from xformers import ops as xops
+    from xformers.ops.fmha.attn_bias import (
+        AttentionBias, PagedBlockDiagonalCausalWithOffsetPaddedKeysMask)
+
+    XFORMERS_AVAILABLE = True
+except ImportError:
+    XFORMERS_AVAILABLE = False
+
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
@@ -27,7 +35,7 @@ from vllm import _custom_ops as ops
 logger = init_logger(__name__)
 
 
-class TreeAttentionBackend(AttentionBackend):
+class XFormersAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
 
@@ -37,7 +45,37 @@ class TreeAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
+        return [
+            32,
+            40,
+            48,
+            56,
+            64,
+            72,
+            80,
+            88,
+            96,
+            104,
+            112,
+            120,
+            128,
+            136,
+            144,
+            152,
+            160,
+            168,
+            176,
+            184,
+            192,
+            200,
+            208,
+            216,
+            224,
+            232,
+            240,
+            248,
+            256,
+        ]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
@@ -52,15 +90,15 @@ class TreeAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "TREE_ATTN_VLLM_V1"
+        return "XFORMERS_VLLM_V1"
 
     @staticmethod
-    def get_impl_cls() -> type["TreeAttentionImpl"]:
-        return TreeAttentionImpl
+    def get_impl_cls() -> type["XFormersAttentionImpl"]:
+        return XFormersAttentionImpl
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
-        return TreeAttentionMetadata
+        return XFormersAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -74,8 +112,8 @@ class TreeAttentionBackend(AttentionBackend):
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
-    def get_builder_cls() -> type["TreeAttentionMetadataBuilder"]:
-        return TreeAttentionMetadataBuilder
+    def get_builder_cls() -> type["XFormersAttentionMetadataBuilder"]:
+        return XFormersAttentionMetadataBuilder
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -83,7 +121,7 @@ class TreeAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class TreeAttentionMetadata:
+class XFormersAttentionMetadata:
     num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int
     query_start_loc: torch.Tensor
@@ -97,14 +135,15 @@ class TreeAttentionMetadata:
     num_prefills: int = 0
     num_decodes: int = 0
 
-    tree_attn_bias: Optional[torch.Tensor] = None
+    # Biases for different attention types.
+    attn_bias: Optional["AttentionBias"] = None
 
-    # Cached Prefill/decode metadata.
-    _cached_prefill_metadata: Optional["TreeAttentionMetadata"] = None
-    _cached_decode_metadata: Optional["TreeAttentionMetadata"] = None
+    # Self-attention prefill/decode metadata cache
+    _cached_prefill_metadata: Optional["XFormersAttentionMetadata"] = None
+    _cached_decode_metadata: Optional["XFormersAttentionMetadata"] = None
 
     @property
-    def prefill_metadata(self) -> Optional["TreeAttentionMetadata"]:
+    def prefill_metadata(self) -> Optional["XFormersAttentionMetadata"]:
         if self.num_prefills == 0:
             return None
 
@@ -117,7 +156,7 @@ class TreeAttentionMetadata:
         q_seqlens = torch.diff(q_start_loc)
         kv_seqlens = self.seq_lens[self.num_decodes:]
         # Construct & cache prefill-phase attention metadata structure
-        self._cached_prefill_metadata = TreeAttentionMetadata(
+        self._cached_prefill_metadata = XFormersAttentionMetadata(
             num_actual_tokens=self.num_prefill_tokens,
             max_query_len=int(q_seqlens.max().item()),
             query_start_loc=q_start_loc - q_start_loc[0],
@@ -129,7 +168,7 @@ class TreeAttentionMetadata:
         return self._cached_prefill_metadata
 
     @property
-    def decode_metadata(self) -> Optional["TreeAttentionMetadata"]:
+    def decode_metadata(self) -> Optional["XFormersAttentionMetadata"]:
         if self.num_decode_tokens == 0:
             return None
 
@@ -138,25 +177,25 @@ class TreeAttentionMetadata:
             # metadata structure
             return self._cached_decode_metadata
 
-        q_start_loc = self.query_start_loc[:self.num_decodes + 1]
+        q_start_loc = self.query_start_loc
         q_seqlens = torch.diff(q_start_loc)
-        kv_seqlens = self.seq_lens[:self.num_decodes]
+        decode_kv_seqlens = self.seq_lens[:self.num_decodes]
         # Construct & cache decode-phase attention metadata structure
-        self._cached_decode_metadata = TreeAttentionMetadata(
+        self._cached_decode_metadata = XFormersAttentionMetadata(
             num_actual_tokens=self.num_decode_tokens,
-            max_query_len=int(q_seqlens.max().item()),
-            query_start_loc=q_start_loc,
-            max_seq_len=int(kv_seqlens.max().item()),
-            seq_lens=kv_seqlens,
+            max_query_len=int(q_seqlens[:self.num_decodes].max().item()),
+            query_start_loc=q_start_loc[:self.num_decodes + 1],
+            max_seq_len=int(decode_kv_seqlens.max().item()),
+            seq_lens=decode_kv_seqlens,
             block_table=self.block_table[:self.num_decodes],
             slot_mapping=self.slot_mapping[:self.num_decode_tokens],
-            tree_attn_bias=self.tree_attn_bias,
+            attn_bias=self.attn_bias,
         )
         return self._cached_decode_metadata
 
 
-class TreeAttentionMetadataBuilder(
-        AttentionMetadataBuilder[TreeAttentionMetadata]):
+class XFormersAttentionMetadataBuilder(
+        AttentionMetadataBuilder[XFormersAttentionMetadata]):
 
     def __init__(
         self,
@@ -165,51 +204,52 @@ class TreeAttentionMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        assert XFORMERS_AVAILABLE
         self.kv_cache_spec = kv_cache_spec
         self.block_size = kv_cache_spec.block_size
-
-        spec_config = vllm_config.speculative_config
-        spec_token_tree = (spec := spec_config) and spec.speculative_token_tree
-        tree_choices: list[tuple[int,
-                                 ...]] = (ast.literal_eval(spec_token_tree)
-                                          if spec_token_tree is not None else
-                                          [(0, )])
-        # Construct the tree attention bias.
-        depth_counts = _get_depth_counts(tree_choices)
-        self.tree_attn_bias = _prepare_tree_attn_bias(
-            tree_choices,
-            depth_counts,
-            dtype=torch.float32,
-            device=device,
-        )
+        self._num_decodes = 0
+        self._num_decode_tokens = 0
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(
-            input_batch,
-            scheduler_output,
-            decode_threshold=self.tree_attn_bias.shape[0])
+        return reorder_batch_to_split_decodes_and_prefills(input_batch,
+                                                           scheduler_output,
+                                                           decode_threshold=1)
 
     def build(
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-    ) -> TreeAttentionMetadata:
-        decode_threshold = self.tree_attn_bias.shape[0]
+    ) -> XFormersAttentionMetadata:
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(common_attn_metadata,
-                                       decode_threshold=decode_threshold))
+                                       decode_threshold=1))
 
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         q_start_loc = common_attn_metadata.query_start_loc
+        q_seqlens = torch.diff(q_start_loc)
         max_query_len = common_attn_metadata.max_query_len
         kv_seqlens = common_attn_metadata.seq_lens
         max_seq_len = int(common_attn_metadata.seq_lens_cpu.max())
         block_table = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
-        return TreeAttentionMetadata(
+        bias = None
+        if num_decodes > 0:
+            # Construct the decoder bias.
+            decode_q_seqlens = q_seqlens[:num_decodes]
+            decode_kv_seqlens = kv_seqlens[:num_decodes]
+            bias = (
+                PagedBlockDiagonalCausalWithOffsetPaddedKeysMask.from_seqlens(
+                    q_seqlen=decode_q_seqlens.tolist(),
+                    kv_seqlen=decode_kv_seqlens.tolist(),
+                    page_size=self.block_size,
+                    block_tables=block_table[:num_decodes],
+                    device=block_table.device,
+                ))
+
+        return XFormersAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -221,88 +261,11 @@ class TreeAttentionMetadataBuilder(
             seq_lens=kv_seqlens,
             block_table=block_table,
             slot_mapping=slot_mapping,
-            tree_attn_bias=self.tree_attn_bias,
+            attn_bias=bias,
         )
 
-    def build_for_drafting(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        draft_index: int,
-    ) -> TreeAttentionMetadata:
-        # Cache the original tree attention bias.
-        orig_tree_attn_bias = self.tree_attn_bias
 
-        if draft_index == 0:
-            # Use prefill for drafting at the root level.
-            self.tree_attn_bias = torch.empty(0)
-        else:
-            # Slice the tree attention bias for drafting.
-            query_len = common_attn_metadata.max_query_len
-            start, end = draft_index, draft_index + query_len
-            self.tree_attn_bias = self.tree_attn_bias[start:end,
-                                                      start:end].contiguous()
-
-        # Build attention bias.
-        attn_metadata = self.build(0, common_attn_metadata, fast_build=True)
-
-        # Reset the tree attention bias to the original value.
-        self.tree_attn_bias = orig_tree_attn_bias
-        return attn_metadata
-
-
-def _get_depth_counts(sorted_tree_choices: list[tuple[int, ...]]) -> list[int]:
-    # Count the number of choices at each depth of the tree.
-    depth_counts = []
-    prev_depth = 0
-    for path in sorted_tree_choices:
-        depth = len(path)
-        if depth != prev_depth:
-            depth_counts.append(0)
-        depth_counts[depth - 1] += 1
-        prev_depth = depth
-    return depth_counts
-
-
-def _prepare_tree_attn_bias(
-    sorted_tree_choices: list[tuple[int, ...]],
-    depth_counts: list[int],
-    dtype: Optional[torch.dtype],
-    device: Optional[torch.device],
-) -> torch.Tensor:
-    # +1 comes from the additional root node.
-    tree_len = len(sorted_tree_choices) + 1
-    tree_attn_mask = torch.full((tree_len, tree_len),
-                                -torch.inf,
-                                device=device,
-                                dtype=dtype)
-
-    # Set diagonal to all zeros. Each token should
-    # attend to itself.
-    mask_val = 0
-    for i in range(tree_len):
-        tree_attn_mask[i, i] = mask_val
-
-    # Set root to all zeros. All tokens attend to it.
-    tree_attn_mask[:, 0] = mask_val
-
-    # Set all ancestors to zeros.
-    start = 0
-    for i in range(len(depth_counts)):
-        for j in range(depth_counts[i]):
-            cur_tree_choice = sorted_tree_choices[start + j]
-            # Retrieve ancestor position.
-            if len(cur_tree_choice) == 1:
-                continue
-            ancestor_idx = []
-            for c in range(len(cur_tree_choice) - 1):
-                ancestor_idx.append(
-                    sorted_tree_choices.index(cur_tree_choice[:c + 1]) + 1)
-            tree_attn_mask[j + start + 1, ancestor_idx] = mask_val
-        start += depth_counts[i]
-    return tree_attn_mask
-
-
-class TreeAttentionImpl(AttentionImpl):
+class XFormersAttentionImpl(AttentionImpl):
 
     def __init__(
         self,
@@ -317,6 +280,11 @@ class TreeAttentionImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
     ) -> None:
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing is not supported in V0.")
+        if alibi_slopes is not None:
+            raise NotImplementedError(
+                "XFormers does not support alibi slopes yet.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -327,22 +295,22 @@ class TreeAttentionImpl(AttentionImpl):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
-        if logits_soft_cap is None:
-            # Setting logits_soft_cap to 0 means no soft cap.
-            logits_soft_cap = 0
-        self.logits_soft_cap = logits_soft_cap
         if sliding_window is None:
             self.sliding_window = (-1, -1)
         else:
             self.sliding_window = (sliding_window - 1, 0)
+        if logits_soft_cap is None:
+            # Setting logits_soft_cap to 0 means no soft cap.
+            logits_soft_cap = 0
+        self.logits_soft_cap = logits_soft_cap
 
-        TreeAttentionBackend.validate_head_size(head_size)
+        XFormersAttentionBackend.validate_head_size(head_size)
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      "TreeAttentionImpl.")
+                                      "XFormersAttentionImpl.")
 
     def forward(
         self,
@@ -351,11 +319,11 @@ class TreeAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: TreeAttentionMetadata,
+        attn_metadata: XFormersAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Forward pass with TreeAttention.
+        """Forward pass with XFormers.
 
         Args:
             query: shape = [num_tokens, num_heads, head_size]
@@ -371,7 +339,7 @@ class TreeAttentionImpl(AttentionImpl):
         if output_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
-                " for TreeAttentionImpl")
+                " for XFormersAttentionImpl")
 
         if attn_metadata is None:
             # Profiling run.
@@ -400,9 +368,9 @@ class TreeAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
-        descale_shape = (attn_metadata.query_start_loc.shape[0] - 1,
-                         key.shape[1])
         if prefill_meta := attn_metadata.prefill_metadata:
+            descale_shape = (prefill_meta.query_start_loc.shape[0] - 1,
+                             key.shape[1])
             unified_attention(
                 q=query[num_decode_tokens:num_actual_tokens],
                 k=key_cache,
@@ -424,24 +392,39 @@ class TreeAttentionImpl(AttentionImpl):
             )
 
         if decode_meta := attn_metadata.decode_metadata:
-            unified_attention(
-                q=query[:num_decode_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_decode_tokens],
-                cu_seqlens_q=decode_meta.query_start_loc,
-                max_seqlen_q=decode_meta.max_query_len,
-                seqused_k=decode_meta.seq_lens,
-                max_seqlen_k=decode_meta.max_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-                qq_bias=decode_meta.tree_attn_bias,
-                window_size=self.sliding_window,
-                block_table=decode_meta.block_table,
-                softcap=self.logits_soft_cap,
-                q_descale=None,  # Not supported
-                k_descale=layer._k_scale.expand(descale_shape),
-                v_descale=layer._v_scale.expand(descale_shape),
-            )
+            # Query for decode. KV is not needed because it is already cached.
+            decode_query = query[:num_decode_tokens]
+            # Reshape query to [1, B_T, G, H, D].
+            q = decode_query.view(1, -1, self.num_kv_heads,
+                                  self.num_queries_per_kv, self.head_size)
+            # Reshape the k and v caches to [1, Bkv_T, G, H, D]
+            cache_k = key_cache.view(1, -1, self.num_kv_heads, 1,
+                                     self.head_size).expand(
+                                         1,
+                                         -1,
+                                         self.num_kv_heads,
+                                         self.num_queries_per_kv,
+                                         self.head_size,
+                                     )
+            cache_v = value_cache.view(1, -1, self.num_kv_heads, 1,
+                                       self.head_size).expand(
+                                           1,
+                                           -1,
+                                           self.num_kv_heads,
+                                           self.num_queries_per_kv,
+                                           self.head_size,
+                                       )
+
+            attn_bias = decode_meta.attn_bias
+            output[:
+                   num_decode_tokens] = xops.memory_efficient_attention_forward(
+                       q,
+                       cache_k,
+                       cache_v,
+                       attn_bias=attn_bias,
+                       p=0.0,
+                       scale=self.scale,
+                   ).view(decode_query.shape)
+
+        # Reshape the output tensor.
         return output
