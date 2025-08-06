@@ -45,11 +45,12 @@ llm.wake_up(tags=["weights"])
 # Optionally, wake up KV cache after weights are updated
 llm.wake_up(tags=["kv_cache"])
 ```
+
 ---
 
 ### Online inference
 
-To Enable sleep mode in a vLLM server you need to initialize it with the flag `VLLM_SERVER_DEV_MODE=1` and pass `--enable-sleep-mode` to the vLLM server 
+To Enable sleep mode in a vLLM server you need to initialize it with the flag `VLLM_SERVER_DEV_MODE=1` and pass `--enable-sleep-mode` to the vLLM server
 
 ```bash
 VLLM_SERVER_DEV_MODE=1 python -m vllm.entrypoints.openai.api_server \
@@ -75,4 +76,3 @@ These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`
 - **Server in development mode** When using the flag `VLLM_SERVER_DEV_MODE=1` you enable development endpoints, This should not be used in production.
 
 - **Platform support**: Supported on CUDA platform.
-
