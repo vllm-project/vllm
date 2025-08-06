@@ -22,7 +22,12 @@ check_hf_token() {
 
 check_num_gpus() {
     # can you check if the number of GPUs are >=2 via nvidia-smi?
-    num_gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+    if [ ! -d "/opt/rocm" ]; then
+	num_gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+    else
+	num_gpus=$(lspci | grep Instinct | wc -l)
+    fi
+
     if [ "$num_gpus" -lt 2 ]; then
         echo "You need at least 2 GPUs to run disaggregated prefill."
         exit 1
