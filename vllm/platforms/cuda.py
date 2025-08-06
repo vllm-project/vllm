@@ -566,7 +566,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
         query if the set of gpus are fully connected by nvlink (1 hop)
         """
 
-        if os.getenv("VLLM_SKIP_NVLINK_CHECK", "0") == "1":
+        if envs.VLLM_SKIP_NVLINK_CHECK:
             logger.info("Skipping NVLink check.")
             return True
 
