@@ -7,8 +7,8 @@ from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import QuantizationArgs
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
-        QuantizationConfig)
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+        CompressedTensorsConfig)
 
 __all__ = ["is_activation_quantization_format", "get_linear_quantization"]
 
@@ -24,9 +24,9 @@ def is_activation_quantization_format(format: str) -> bool:
 
 
 def get_linear_quantization(
-        config: "QuantizationConfig"
+    config: "CompressedTensorsConfig"
 ) -> tuple[QuantizationArgs, QuantizationArgs]:
-    for scheme in config.quantization_config.config_groups:
+    for scheme in config.quant_config.config_groups.values():
         if scheme.targets == "Linear":
             return (scheme.input_activations, scheme.weights)
 
