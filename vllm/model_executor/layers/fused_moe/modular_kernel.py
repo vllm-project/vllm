@@ -560,7 +560,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
         num_chunks = cdiv(M, CHUNK_SIZE)
 
-        # TODO: get rid of one level here, update slice functions
+        # TODO(bnell): get rid of one level here, update slice functions
         # to nops on num_chunks==1
 
         if not self.fused_experts.supports_chunking() or num_chunks == 1:

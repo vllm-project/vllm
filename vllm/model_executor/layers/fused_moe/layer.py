@@ -49,8 +49,6 @@ if current_platform.is_cuda_alike():
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
         from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SHAPE,
                                                  DeepEPLLPrepareAndFinalize)
-    if has_flashinfer():
-        pass
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
@@ -272,8 +270,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
-        moe:
-        FusedMoEConfig,  # Remove?  every layer should have an moe config object
+        # TODO(bnell): Remove. Every layer should have an moe config object.
+        moe: FusedMoEConfig,
     ) -> FusedMoEPermuteExpertsUnpermute:
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
@@ -495,7 +493,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 expert_map=expert_map,
             )
         else:
-            return fused_experts(
+            fused_experts_fn = (fused_experts if self.fused_experts is None
+                                else self.fused_experts)
+            return fused_experts_fn(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
