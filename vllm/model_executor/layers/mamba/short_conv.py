@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
-
 import torch
 
 from vllm import envs
@@ -21,16 +19,6 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionMetadata
-
-
-@dataclass
-class ConvCacheParams:
-    conv_state: torch.Tensor = torch.Tensor()
-    state_indices_tensor: torch.Tensor = torch.Tensor()
-
-    def at_layer_idx(self, layer_idx):
-        return ConvCacheParams(self.conv_state[layer_idx],
-                               self.state_indices_tensor)
 
 
 @CustomOp.register("short_conv")
@@ -69,16 +57,16 @@ class ShortConv(CustomOp):
             prefix=f"{prefix}.out_proj",
         )
 
-        if envs.VLLM_USE_V1:
-            compilation_config = get_current_vllm_config().compilation_config
-            if prefix in compilation_config.static_forward_context:
-                raise ValueError(f"Duplicate layer name: {prefix}")
-            compilation_config.static_forward_context[prefix] = self
-            # The outer list is for v0 PP virtual engine. Though this code path
-            # only runs for v1, we have to do this to unify with the interface
-            # of Attention + v0 PP.
-            # The inner tuple is (conv_state,)
-            self.kv_cache = [(torch.tensor([]))]
+        assert envs.VLLM_USE_V1, ("ShortConv layers are only supported in V1")
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
+        # The outer list is for v0 PP virtual engine. Though this code path
+        # only runs for v1, we have to do this to unify with the interface
+        # of Attention + v0 PP.
+        # The inner tuple is (conv_state,)
+        self.kv_cache = [(torch.tensor([]))]
 
         # For compatibility with MambaSpec utils
         self.chunk_size = 1
@@ -88,7 +76,6 @@ class ShortConv(CustomOp):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        conv_cache_params: ConvCacheParams,
         conv_metadata: Mamba2Metadata,
     ):
         return
@@ -97,24 +84,18 @@ class ShortConv(CustomOp):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        conv_cache_params: ConvCacheParams,
         conv_metadata: Mamba2Metadata,
     ):
-        if not envs.VLLM_USE_V1:
-            CustomOp.forward(self, hidden_states, output, conv_cache_params,
-                             conv_metadata)
-        else:
-            torch.ops.vllm.short_conv(
-                hidden_states,
-                output,
-                self.prefix,
-            )
+        torch.ops.vllm.short_conv(
+            hidden_states,
+            output,
+            self.prefix,
+        )
 
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        conv_cache_params: ConvCacheParams,
         conv_metadata: Mamba2Metadata,
     ):
         forward_context = get_forward_context()
@@ -123,20 +104,15 @@ class ShortConv(CustomOp):
         # modes; they are computed at top-level model forward since they
         # stay the same and reused for all mamba layers in the same iteration
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
-        if envs.VLLM_USE_V1:
-            if attn_metadata is not None:
-                assert isinstance(attn_metadata, dict)
-                attn_metadata = attn_metadata[self.prefix]
-                conv_metadata = attn_metadata
-                assert isinstance(attn_metadata, Mamba2AttentionMetadata)
-                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                conv_state = self_kv_cache[0].transpose(-1, -2)
-                state_indices_tensor = attn_metadata.state_indices_tensor
-                has_initial_states_p = attn_metadata.has_initial_states
-        else:
-            conv_state = conv_cache_params.conv_state
-            state_indices_tensor = conv_cache_params.state_indices_tensor
-            has_initial_states_p = conv_metadata.has_initial_states
+        if attn_metadata is not None:
+            assert isinstance(attn_metadata, dict)
+            attn_metadata = attn_metadata[self.prefix]
+            conv_metadata = attn_metadata
+            assert isinstance(attn_metadata, Mamba2AttentionMetadata)
+            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            conv_state = self_kv_cache[0].transpose(-1, -2)
+            state_indices_tensor = attn_metadata.state_indices_tensor
+            has_initial_states_p = attn_metadata.has_initial_states
 
         BCx, _ = self.in_proj(hidden_states)
 
@@ -145,7 +121,7 @@ class ShortConv(CustomOp):
         conv_weights = self.conv.weight.view(self.conv.weight.size(0),
                                              self.conv.weight.size(2))
 
-        if envs.VLLM_USE_V1 and attn_metadata is None:
+        if attn_metadata is None:
             # V1 profile run
             Bx = (B * x).contiguous()
             hidden_states = C * Bx
@@ -159,59 +135,33 @@ class ShortConv(CustomOp):
         has_decode = num_decodes > 0
         num_actual_tokens = num_decodes + num_prefill_tokens
 
-        # NOTE: V0 put prefill before decode, v1 puts decode before prefill
+        # NOTE: V1 puts decode before prefill
         # Separate prefill and decode by splitting varlen input
         # Split along token dimension
-        if envs.VLLM_USE_V1:
-            B_d, B_p = torch.split(
-                B[:num_actual_tokens],
-                [num_decodes, num_prefill_tokens],
-                dim=0,
-            )
-            C_d, C_p = torch.split(
-                C[:num_actual_tokens],
-                [num_decodes, num_prefill_tokens],
-                dim=0,
-            )
-            x_d, x_p = torch.split(
-                x[:num_actual_tokens],
-                [num_decodes, num_prefill_tokens],
-                dim=0,
-            )
-            # Split along batch dimension
-            state_indices_tensor_d, state_indices_tensor_p = torch.split(
-                state_indices_tensor[:num_actual_tokens],
-                [num_decodes, num_prefills],
-                dim=0,
-            )
-            query_start_loc_p = (
-                attn_metadata.query_start_loc[-num_prefills - 1:] -
-                num_decodes if has_prefill else None)
-        else:
-            B_p, B_d = torch.split(
-                B,
-                [num_prefill_tokens, num_decodes],
-                dim=0,
-            )
-            C_p, C_d = torch.split(
-                C,
-                [num_prefill_tokens, num_decodes],
-                dim=0,
-            )
-            x_p, x_d = torch.split(
-                x,
-                [num_prefill_tokens, num_decodes],
-                dim=0,
-            )
-            # Split along batch dimension
-            state_indices_tensor_p, state_indices_tensor_d = torch.split(
-                state_indices_tensor,
-                [num_prefills, num_decodes],
-                dim=0,
-            )
-            query_start_loc_p = (attn_metadata.query_start_loc[:num_prefills +
-                                                               1]
-                                 if has_prefill else None)
+        B_d, B_p = torch.split(
+            B[:num_actual_tokens],
+            [num_decodes, num_prefill_tokens],
+            dim=0,
+        )
+        C_d, C_p = torch.split(
+            C[:num_actual_tokens],
+            [num_decodes, num_prefill_tokens],
+            dim=0,
+        )
+        x_d, x_p = torch.split(
+            x[:num_actual_tokens],
+            [num_decodes, num_prefill_tokens],
+            dim=0,
+        )
+        # Split along batch dimension
+        state_indices_tensor_d, state_indices_tensor_p = torch.split(
+            state_indices_tensor[:num_actual_tokens],
+            [num_decodes, num_prefills],
+            dim=0,
+        )
+        query_start_loc_p = (
+            attn_metadata.query_start_loc[-num_prefills - 1:] -
+            num_decodes if has_prefill else None)
 
         conv_output_list = []
 
@@ -244,10 +194,7 @@ class ShortConv(CustomOp):
                 activation=None,
                 conv_state_indices=state_indices_tensor_d)
             y = C_d * Bx
-            if envs.VLLM_USE_V1:
-                conv_output_list.insert(0, y)
-            else:
-                conv_output_list.append(y)
+            conv_output_list.insert(0, y)
 
         # Merge prefill and decode outputs before passing to gated MLP
         hidden_states = torch.vstack(conv_output_list)
@@ -274,7 +221,6 @@ def short_conv(
     self = forward_context.no_compile_layers[layer_name]
     self.forward_cuda(hidden_states=hidden_states,
                       output=output,
-                      conv_cache_params=None,
                       conv_metadata=None)
 
 
