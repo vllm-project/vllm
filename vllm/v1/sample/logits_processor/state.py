@@ -68,12 +68,11 @@ class BatchUpdateBuilder:
         return self._removed
 
     def removed_append(self, index: int) -> None:
-        """Register the removal of a request from
-        the persistent batch.
+        """Register the removal of a request from the persistent batch.
 
-        Must not be called after the first time
-        self.removed, self.pop_removed() or
-        self.peek_removed() are invoked.
+        Must not be called after the first time self.removed,
+        self.pop_removed() or self.peek_removed() are invoked.
+
         Args:
           index: request index
         """
@@ -104,8 +103,9 @@ class BatchUpdateBuilder:
         return any((self._removed, self.moved, self.added))
 
     def get_and_reset(self, batch_size: int) -> Optional[BatchUpdate]:
-        """Generate a logitsprocs batch update data structure
-        and reset internal batch update builder state.
+        """Generate a logitsprocs batch update data structure and reset
+        internal batch update builder state.
+        
         Args:
           batch_size: current persistent batch size
 

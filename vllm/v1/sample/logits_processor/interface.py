@@ -21,9 +21,9 @@ class MoveDirectionality(Enum):
     SWAP = auto()
 
 
-# (prompt_tok_ids, index, params, output_tok_ids) tuples for new
+# (index, params, prompt_tok_ids, output_tok_ids) tuples for new
 # requests added to the batch.
-AddedRequest = tuple[list[int], int, SamplingParams, list[int]]
+AddedRequest = tuple[int, SamplingParams, list[int], list[int]]
 
 # (index 1, index 2, directionality) tuples representing
 # one-way moves or two-way swaps of requests in batch
@@ -41,12 +41,10 @@ class BatchUpdate:
     # Metadata for requests added to, removed from, and moved
     # within the persistent batch.
     #
-    # Note: each added request is represented as
-    # (index, params, output_tok_ids)
-    # Key assumption: output_tok_ids is a reference to the
-    # request's running output tokens list; in this way
-    # the logits processors always see the latest list of
-    # generated tokens
+    # Key assumption: the `output_tok_ids` list (which is an element of each
+    # tuple in `added`) is a reference to the request's running output tokens
+    # list; via this reference, the logits processors always see the latest
+    # list of generated output tokens
     removed: Sequence[RemovedRequest]
     moved: Sequence[MovedRequest]
     added: Sequence[AddedRequest]

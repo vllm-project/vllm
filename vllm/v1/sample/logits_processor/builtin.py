@@ -51,7 +51,7 @@ class MinPLogitsProcessor(LogitsProcessor):
 
         needs_update = False
         # Process added requests.
-        for _, index, params, _ in batch_update.added:
+        for index, params, _, _ in batch_update.added:
             min_p = params.min_p
             if self.min_p_cpu[index] != min_p:
                 needs_update = True
@@ -127,7 +127,7 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
 
         needs_update: bool = False
         # Process added requests.
-        for _, index, params, _ in batch_update.added:
+        for index, params, _, _ in batch_update.added:
             if lb := params.logit_bias:
                 self.biases[index] = lb
                 needs_update = True
@@ -213,7 +213,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
         if batch_update:
             # Process added requests.
-            for _, index, params, output_tok_ids in batch_update.added:
+            for index, params, _, output_tok_ids in batch_update.added:
                 if ((min_tokens := params.min_tokens)
                         and len(output_tok_ids) < min_tokens):
                     # Replace request metadata at batch index

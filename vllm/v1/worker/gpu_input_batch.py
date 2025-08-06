@@ -262,7 +262,7 @@ class InputBatch:
         # models, to support logitsprocs
         assert request.sampling_params
         self.batch_update_builder.added.append(
-            (request.prompt_token_ids, req_index, request.sampling_params,
+            (req_index, request.sampling_params, request.prompt_token_ids,
              request.output_token_ids))
         return req_index
 
