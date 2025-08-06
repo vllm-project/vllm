@@ -95,7 +95,14 @@ def rank_worker(
             with set_current_vllm_config(vllm_config):
                 ref_out = reference_moe_impl(cfgx, weights, rank_tensors)
 
-            torch.testing.assert_close(ref_out, mk_out, atol=3e-2, rtol=3e-2)
+            if config.quant_dtype == "nvfp4":
+                atol = 2e-1
+                rtol = 2e-1
+            else:
+                atol = 3e-2
+                rtol = 3e-2
+
+            torch.testing.assert_close(ref_out, mk_out, atol=atol, rtol=rtol)
             format_result(verbose, config.describe())
         except Exception as ex:
             format_result(verbose, config.describe(), ex)

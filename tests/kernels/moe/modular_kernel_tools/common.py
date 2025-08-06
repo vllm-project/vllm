@@ -8,9 +8,13 @@ import torch
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_test_weights, per_token_cast_to_fp8
+from tests.kernels.quantization.nvfp4_utils import (FLOAT4_E2M1_MAX,
+                                                    FLOAT8_E4M3_MAX,
+                                                    dequantize_nvfp4_to_dtype)
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig
 from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEParallelConfig, FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
@@ -52,14 +56,18 @@ class Config:
 
     def describe(self) -> str:
         s = ""
-        s += "== Config: \n"
-        s += f" world_size={self.world_size} \n"
-        s += f" PF={self.prepare_finalize_type.__name__} \n"
-        s += f" FE={self.fused_experts_type.__name__} \n"
-        s += f" topk={self.topks} \n"
-        s += f" dtype={self.dtype} \n"
-        s += f" fused_moe_chunk_size={self.fused_moe_chunk_size} \n"
-        s += " Quant: \n"
+        s += "== Config:\n"
+        s += f" world_size={self.world_size}\n"
+        s += f" PF={self.prepare_finalize_type.__name__}\n"
+        s += f" FE={self.fused_experts_type.__name__}\n"
+        s += f" E={self.E}\n"
+        s += f" Ms={self.Ms}\n"
+        s += f" N={self.N}\n"
+        s += f" K={self.K}\n"
+        s += f" topk={self.topks}\n"
+        s += f" dtype={self.dtype}\n"
+        s += f" fused_moe_chunk_size={self.fused_moe_chunk_size}\n"
+        s += " Quant:\n"
         if self.quant_config is not None:
             s += f"     q_dtype={self.quant_dtype}\n"
             s += f"     q_block_shape={self.quant_block_shape}\n"
@@ -144,26 +152,17 @@ class Config:
         info = expert_info(self.fused_experts_type)
         return mk.FusedMoEActivationFormat.Standard == info.activation_format
 
-    def is_fe_16bit_supported(self):
+    def fe_supported_types(self):
         info = expert_info(self.fused_experts_type)
-        return torch.bfloat16 in info.supported_dtypes
+        return info.supported_dtypes
 
-    def is_fe_fp8_supported(self):
-        info = expert_info(self.fused_experts_type)
-        return torch.float8_e4m3fn in info.supported_dtypes
-
-    def is_fe_fp4_supported(self):
-        info = expert_info(self.fused_experts_type)
-        return "nvfp4" in info.supported_dtypes
-
-    def is_pf_fp4_supported(self):
+    def pf_supported_types(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
-        return "nvfp4" in info.supported_dtypes
+        return info.supported_dtypes
 
-    def is_fe_block_fp8_supported(self):
+    def is_block_quant_supported(self):
         info = expert_info(self.fused_experts_type)
-        return (torch.float8_e4m3fn in info.supported_dtypes
-                and info.blocked_quantization_support)
+        return info.blocked_quantization_support
 
     def is_fe_supports_chunking(self):
         info = expert_info(self.fused_experts_type)
@@ -172,6 +171,10 @@ class Config:
     def supports_expert_map(self):
         info = expert_info(self.fused_experts_type)
         return info.supports_expert_map
+
+    def supports_apply_weight_on_input(self):
+        info = prepare_finalize_info(self.prepare_finalize_type)
+        return info.supports_apply_weight_on_input
 
     def needs_deep_gemm(self):
         info = expert_info(self.fused_experts_type)
@@ -210,34 +213,28 @@ class Config:
             # invalid quant config
             return False
 
-        # check bf16 / fp16 support
-        is_16bit = (self.dtype.itemsize == 2 and self.quant_dtype is None)
-        if is_16bit and not self.is_fe_16bit_supported():
-            return False
+        # check type support
+        if self.quant_dtype is None:
+            if (self.dtype not in self.pf_supported_types()
+                    or self.dtype not in self.fe_supported_types()):
+                return False
+        else:
+            if (self.quant_dtype not in self.pf_supported_types()
+                    or self.quant_dtype not in self.fe_supported_types()):
+                return False
 
-        # Check fp8 support
-        is_fp8 = self.quant_dtype == torch.float8_e4m3fn
-        if is_fp8 and not self.is_fe_fp8_supported():
-            return False
-
-        # Check fp4 support
-        is_fp4 = self.quant_dtype == "nvfp4"
-        if is_fp4 and (not self.is_fe_fp4_supported()
-                       or not self.is_pf_fp4_supported()):
-            return False
-
-        # Check fp8 block quanization support
+        # Check block quanization support
         is_block_quatized = self.quant_block_shape is not None
-        if is_block_quatized and not is_fp8:
+        if is_block_quatized and self.quant_dtype is None:
             return False
-        if is_block_quatized and not self.is_fe_block_fp8_supported():
+        if is_block_quatized and not self.is_block_quant_supported():
             return False
 
         # deep_gemm only works with block-quantized
         if self.needs_deep_gemm() and not is_block_quatized:
             return False
 
-        # Check dependencies
+        # Check dependencies (turn into asserts?)
         if self.needs_deep_ep() and not has_deep_ep():
             return False
         if self.needs_deep_gemm() and not has_deep_gemm():
@@ -432,20 +429,76 @@ class RankTensors:
 def reference_moe_impl(config: Config, weights: WeightTensors,
                        rank_tensors: RankTensors) -> torch.Tensor:
 
-    return torch_experts(a=rank_tensors.hidden_states,
-                         w1=weights.w1,
-                         w2=weights.w2,
+    if config.quant_dtype == "nvfp4":
+        quant_blocksize = 16
+        dtype = config.dtype
+        w1_q = weights.w1
+        w1_blockscale = weights.w1_scale
+        w1_gs = weights.w1_gs
+        w2_q = weights.w2
+        w2_blockscale = weights.w2_scale
+        w2_gs = weights.w2_gs
+        a_global_scale = ((FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(
+            rank_tensors.hidden_states.flatten(), dim=-1)).to(torch.float32)
+        a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(
+            rank_tensors.hidden_states, a_global_scale)
+        _, m_k = a_fp4.shape
+        a = dequantize_nvfp4_to_dtype(a_fp4,
+                                      a_scale_interleaved,
+                                      a_global_scale,
+                                      dtype=dtype,
+                                      device=a_fp4.device,
+                                      block_size=quant_blocksize)
+        e = w1_q.shape[0]
+        n = w1_q.shape[1] // 2
+        k = w2_q.shape[1]
+
+        w1 = torch.zeros((e, 2 * n, k), device="cuda", dtype=dtype)
+        w2 = torch.zeros((e, k, n), device="cuda", dtype=dtype)
+
+        for idx in range(0, e):
+            w1[idx] = dequantize_nvfp4_to_dtype(w1_q[idx],
+                                                w1_blockscale[idx],
+                                                w1_gs[idx],
+                                                dtype=dtype,
+                                                device=w1_q.device,
+                                                block_size=quant_blocksize)
+            w2[idx] = dequantize_nvfp4_to_dtype(w2_q[idx],
+                                                w2_blockscale[idx],
+                                                w2_gs[idx],
+                                                dtype=dtype,
+                                                device=w2_q.device,
+                                                block_size=quant_blocksize)
+        w1_scale = None
+        w2_scale = None
+        quant_dtype = None
+        per_act_token_quant = False
+        block_shape = None
+    else:
+        a = rank_tensors.hidden_states
+        w1 = weights.w1
+        w1_scale = weights.w1_scale
+        w2 = weights.w2
+        w2_scale = weights.w2_scale
+        quant_dtype = config.quant_dtype
+        per_act_token_quant = config.is_per_act_token_quant
+        block_shape = config.quant_block_shape
+
+    return torch_experts(a=a,
+                         w1=w1,
+                         w2=w2,
                          topk_weight=rank_tensors.topk_weights,
                          topk_ids=rank_tensors.topk_ids,
                          global_num_experts=config.E,
                          expert_map=None,
-                         w1_scale=weights.w1_scale,
-                         w2_scale=weights.w2_scale,
+                         w1_scale=w1_scale,
+                         w2_scale=w2_scale,
                          a1_scale=rank_tensors.hidden_states_scale,
-                         quant_dtype=config.quant_dtype,
-                         per_act_token_quant=config.is_per_act_token_quant,
-                         block_shape=config.quant_block_shape,
-                         apply_router_weights_on_input=config.topk == 1)
+                         quant_dtype=quant_dtype,
+                         per_act_token_quant=per_act_token_quant,
+                         block_shape=block_shape,
+                         apply_router_weights_on_input=config.topk == 1
+                         and config.supports_apply_weight_on_input())
 
 
 def make_modular_kernel(
@@ -466,6 +519,7 @@ def make_modular_kernel(
         dp_size_=get_dp_group().world_size,
         vllm_parallel_config=vllm_config.parallel_config,
     )
+
     moe = FusedMoEConfig(
         num_experts=config.E,
         experts_per_token=config.topk,
@@ -533,8 +587,20 @@ def run_modular_kernel(
         "global_num_experts":
         config.E,
         "apply_router_weight_on_input":
-        config.topk == 1,
+        config.topk == 1 and config.supports_apply_weight_on_input(),
     }
-    out = mk.forward(**mk_kwargs)
+
+    num_tokens = rank_tensors.hidden_states.shape[0]
+    num_tokens_across_dp = torch.tensor([num_tokens] * config.world_size,
+                                        device="cuda",
+                                        dtype=torch.int)
+
+    with set_forward_context(
+            None,
+            vllm_config,
+            num_tokens=num_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+    ):
+        out = mk.forward(**mk_kwargs)
 
     return out
