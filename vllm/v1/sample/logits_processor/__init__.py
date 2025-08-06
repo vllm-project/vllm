@@ -39,9 +39,7 @@ def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
 
     import sys
 
-    if envs.VLLM_MOCK_LP_ENTRYPOINT:
-        from vllm.test_utils import entry_points
-    elif sys.version_info < (3, 10):
+    if sys.version_info < (3, 10):
         from importlib_metadata import entry_points
     else:
         from importlib.metadata import entry_points
