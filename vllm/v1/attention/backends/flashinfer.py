@@ -647,6 +647,7 @@ class FlashInferImpl(AttentionImpl):
             if sinks.dtype != torch.float32:
                 raise ValueError("Sinks must be of type float32, but got "
                                  f"{sinks.dtype}.")
+            self.sinks = sinks
 
     def forward(
         self,
