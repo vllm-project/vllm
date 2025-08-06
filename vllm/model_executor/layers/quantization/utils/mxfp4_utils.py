@@ -8,6 +8,19 @@ from vllm.utils import direct_register_custom_op
 OCP_MX_BLOCK_SIZE = 32
 
 
+def _can_support_triton_kernels(use_grouped_topk, topk_group, num_expert_group,
+                                custom_routing_function,
+                                e_score_correction_bias, scoring_func,
+                                activation, expert_load_view,
+                                logical_to_physical_map,
+                                logical_replica_count):
+    return not (use_grouped_topk or topk_group or num_expert_group
+                or custom_routing_function or e_score_correction_bias
+                or scoring_func != "softmax" or activation != "silu"
+                or expert_load_view or logical_to_physical_map
+                or logical_replica_count)
+
+
 def _swizzle_mxfp4(quant_tensor, scale, num_warps):
     """ weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel
     """
@@ -21,7 +34,7 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
         layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=1,
                                                         num_warps=num_warps))
     if current_platform.is_cuda() and \
-        torch.cuda.get_device_capability()[0] == 10:
+        current_platform.is_device_capability(100):
         constraints = {
             "is_persistent": True,
             "epilogue_subtile": 1,

@@ -13,8 +13,8 @@ tokenizers >= 0.21.1  # Required for fast incremental detokenization.
 protobuf # Required by LlamaTokenizer.
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
 aiohttp
-openai >= 1.87.0 # Ensure modern openai package (ensure ResponsePrompt exists in type.responses and max_completion_tokens field support)
-pydantic >= 2.10
+openai >= 1.98.0 # Ensure modern openai package (ensure ResponsePrompt exists in type.responses and max_completion_tokens field support)
+pydantic >= 2.11.7
 prometheus_client >= 0.18.0
 pillow  # Required for image processing
 prometheus-fastapi-instrumentator >= 7.0.0
@@ -49,3 +49,5 @@ ninja # Required for xgrammar, rocm, tpu, xpu
 pybase64 # fast base64 implementation
 cbor2 # Required for cross-language serialization of hashable objects
 setproctitle # Used to set process names for better debugging and monitoring
+mcp==1.12.3
+openai-harmony
