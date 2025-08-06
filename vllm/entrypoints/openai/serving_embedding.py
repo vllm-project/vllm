@@ -493,10 +493,14 @@ class EmbeddingMixin(OpenAIServing):
                             if hasattr(result.outputs, 'data'):
                                 # PoolingOutput case
                                 embedding_data = result.outputs.data
-                            else:
+                            elif hasattr(result.outputs, 'embedding'):
                                 # EmbeddingOutput case -
                                 # convert embedding list to tensor
                                 embedding_data = result.outputs.embedding
+                            else:
+                                return self.create_error_response(
+                                    f"Unsupported output type: "
+                                    f"{type(result.outputs).__name__}")
 
                             if not isinstance(embedding_data, torch.Tensor):
                                 embedding_data = torch.tensor(
