@@ -1337,11 +1337,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=expert_map)
 
         if self.fused_experts is None:
-            # If no modular kernel is provided, use cutlass_moe_fp4 or
-            # flashinfer low latency kernel for TP case only (no EP).
-            assert self.allow_flashinfer and \
-               self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
-
+            # If no modular kernel is provided, use cutlass_moe_fp4 for TP case
+            # only (no EP).
             from vllm.model_executor.layers.fused_moe.cutlass_moe import (
                 cutlass_moe_fp4)
             out = cutlass_moe_fp4(
@@ -1364,6 +1361,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         else:
+            assert self.allow_flashinfer and \
+               self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
             out = flashinfer_fp4_cutlass_moe_forward(
                 self.fused_experts,
                 layer,
