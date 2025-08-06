@@ -16,10 +16,11 @@ if TYPE_CHECKING:
 
 
 # Sent to scheduler process to aggregate stats.
-class KVTransferStats(msgspec.Struct,
-                      array_like=True,
-                      omit_defaults=True,
-                      tag_field="type"):
+class KVTransferStats(
+        msgspec.Struct,
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True,  # type: ignore[call-arg]
+        tag_field="type"):  # type: ignore[call-arg]
 
     def reset(self):
         raise NotImplementedError
@@ -34,7 +35,8 @@ class KVTransferStats(msgspec.Struct,
         raise NotImplementedError
 
 
-class NixlKVTransferStats(KVTransferStats, tag="NIXL"):
+class NixlKVTransferStats(KVTransferStats,
+                          tag="NIXL"):  # type: ignore[call-arg]
     """Container for transfer performance metrics"""
     # Setup buffers
     # We could use specialized data structures to avoid copying the data
@@ -114,11 +116,11 @@ class KVTransferLogging:
                     cumulative_stats = stats_list[0]
                     for stats in stats_list[1:]:
                         cumulative_stats.aggregate(stats)
-                    cumulative_stats = cumulative_stats.reduce()
-                    fields = ", ".join(f"{k}={v}"
-                                       for k, v in cumulative_stats.items())
+                    xfer_metrics = cumulative_stats.reduce()
+                    xfer_metrics_str = ", ".join(
+                        f"{k}={v}" for k, v in xfer_metrics.items())
                     log_fn("KVConnectorType: %s, KV Transfer metrics: %s",
-                           connector_type, fields)
+                           connector_type, xfer_metrics_str)
 
             # example
             # logger.info(

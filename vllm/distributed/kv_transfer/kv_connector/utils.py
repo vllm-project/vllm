@@ -153,8 +153,7 @@ class KVOutputAggregator:
 
             # Aggregate kv_transfer_stats from all workers, by connector type.
             if kv_transfer_stats := model_runner_output.kv_transfer_stats:
-                for connector_id, xfer_stats in kv_transfer_stats.items(
-                ):
+                for connector_id, xfer_stats in kv_transfer_stats.items():
                     if connector_id not in aggregated_kv_transfer_stats:
                         aggregated_kv_transfer_stats[connector_id] = xfer_stats
                     else:
