@@ -288,7 +288,6 @@ httpx==0.27.2
     #   schemathesis
 huggingface-hub==0.34.3
     # via
-    #   -r requirements/test.in
     #   accelerate
     #   datasets
     #   evaluate
