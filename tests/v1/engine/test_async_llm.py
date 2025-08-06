@@ -204,7 +204,7 @@ async def test_streaming_with_parallel_sampling(
                 #assert total_indices == N*NUM_TOKENS # fail due to coalesing
                 assert len(set(token_all.values())) == 1
                 assert list(
-                    token_all.values())[0] == NUM_TOKENS * (NUM_TOKENS + 1) / 2
+                    token_all.values())[0] == NUM_TOKENS * (NUM_TOKENS + 1) // 2
 
 
 @pytest.mark.parametrize(
