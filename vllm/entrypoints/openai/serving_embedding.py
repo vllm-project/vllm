@@ -488,7 +488,16 @@ class EmbeddingMixin(OpenAIServing):
                                     f"chunked embedding, got "
                                     f"{type(result).__name__}")
 
-                            embedding_data = result.outputs.data
+                            # Handle both PoolingOutput and
+                            # EmbeddingOutput types
+                            if hasattr(result.outputs, 'data'):
+                                # PoolingOutput case
+                                embedding_data = result.outputs.data
+                            else:
+                                # EmbeddingOutput case -
+                                # convert embedding list to tensor
+                                embedding_data = result.outputs.embedding
+
                             if not isinstance(embedding_data, torch.Tensor):
                                 embedding_data = torch.tensor(
                                     embedding_data, dtype=torch.float32)
@@ -559,9 +568,9 @@ class EmbeddingMixin(OpenAIServing):
 
                             # Create a PoolingRequestOutput
                             # for the aggregated result
-                            from vllm.outputs import EmbeddingOutput
-                            embedding_output = EmbeddingOutput(
-                                embedding=final_embedding.tolist())
+                            from vllm.outputs import PoolingOutput
+                            pooling_output_data = PoolingOutput(
+                                data=final_embedding)
 
                             # Get original prompt token IDs for this prompt
                             original_prompt = ctx.request_prompts[prompt_idx]
@@ -575,13 +584,13 @@ class EmbeddingMixin(OpenAIServing):
                                 TextTokensPrompt,
                                 original_prompt)["prompt_token_ids"]
 
-                            pooling_output = EmbeddingRequestOutput(
+                            pooling_request_output = PoolingRequestOutput(
                                 request_id=aggregator['request_id'],
                                 prompt_token_ids=original_token_ids,
-                                outputs=embedding_output,
+                                outputs=pooling_output_data,
                                 finished=True)
 
-                            final_res_batch.append(pooling_output)
+                            final_res_batch.append(pooling_request_output)
                         else:
                             return self.create_error_response(
                                 f"Failed to aggregate chunks "
