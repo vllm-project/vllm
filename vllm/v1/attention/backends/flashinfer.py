@@ -793,6 +793,8 @@ class FlashInferImpl(AttentionImpl):
                     batch_size=attn_metadata.num_prefills,
                     cum_seq_lens_q=attn_metadata.qo_indptr_gpu,
                     cum_seq_lens_kv=attn_metadata.paged_kv_indptr_gpu,
+                    window_left=window_left,
+                    sinks=self.sinks,
                     out=output[num_decode_tokens:],
                 )
 
@@ -839,6 +841,8 @@ class FlashInferImpl(AttentionImpl):
                     max_seq_len=attn_metadata.max_seq_len,
                     bmm1_scale=layer._k_scale_float * self.scale,
                     bmm2_scale=layer._v_scale_float,
+                    window_left=window_left,
+                    sinks=self.sinks,
                     out=output[:num_decode_tokens],
                 )
         return output_padded

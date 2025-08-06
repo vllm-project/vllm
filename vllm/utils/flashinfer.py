@@ -159,7 +159,7 @@ def use_trtllm_attention(
 
     # Check if the dimensions are supported by TRTLLM decode attention
     if (attn_head_size is None or num_qo_heads is None or num_kv_heads is None
-            or num_qo_heads % num_kv_heads != 0 or attn_head_size != 128):
+            or num_qo_heads % num_kv_heads != 0):
         return False
 
     env_value = envs.VLLM_USE_TRTLLM_ATTENTION
