@@ -369,9 +369,11 @@ class Worker(WorkerBase):
         if scheduler_output.total_num_scheduled_tokens not in self._token_compiled_cudagraphs and scheduler_output.total_num_scheduled_tokens != 0:
             logger.info("DIEGO: CUDAgraph in execution time for %d input tokens", scheduler_output.total_num_scheduled_tokens)
             self._token_compiled_cudagraphs.add(scheduler_output.total_num_scheduled_tokens)
+            gc.freeze()
             start_time = time.perf_counter()
             self.model_runner._dummy_run(scheduler_output.total_num_scheduled_tokens, capture_attn_cudagraph=False, skip_eplb=True)
             end_time = time.perf_counter()
+            gc.unfreeze()
             elapsed_time = end_time - start_time
             logger.info("Graph capturing finished in %.3f secs", elapsed_time)
             
