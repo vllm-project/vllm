@@ -73,14 +73,13 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
-        assert not apply_router_weight_on_input
-
-        (a1_gscale, use_dp, local_tokens) = extract_required_args(
-            extra_prepare_args, ['a1_gscale', 'use_dp', 'local_tokens'])
+        (use_dp,
+         local_tokens) = extract_required_args(extra_prepare_args,
+                                               ['use_dp', 'local_tokens'])
 
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
-            a1_gscale,
+            a1_scale,
             quant_config.quant_dtype,
             self.per_channel_quant,
             self.block_shape,
