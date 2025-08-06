@@ -73,7 +73,7 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         PyTorch-native implementation of top-k and top-p sampling.
 
@@ -81,7 +81,7 @@ class TopKTopPSampler(nn.Module):
         """
         logits = apply_top_k_top_p(logits, k, p)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        return random_sample(probs, generators)
+        return random_sample(probs, generators), probs
 
     def forward_cuda(
         self,
@@ -89,14 +89,14 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """More optimized implementation for top-k and top-p sampling."""
+        probs = logits.softmax(dim=-1, dtype=torch.float32)
         if k is None and p is None:
             # We prefer `random_sample` over `flashinfer_sample` when sorting is
             # not needed. This is because `random_sample` does not require
             # CPU-GPU synchronization while `flashinfer_sample` does.
-            probs = logits.softmax(dim=-1, dtype=torch.float32)
-            return random_sample(probs, generators)
+            return random_sample(probs, generators), probs
         if generators:
             logger.warning_once("FlashInfer 0.2.3+ does not support "
                                 "per-request generators. Falling back to "
@@ -105,7 +105,7 @@ class TopKTopPSampler(nn.Module):
         # flashinfer sampling functions expect contiguous logits.
         # In flex_attn/triton_attn fp32 inference, logits can be non-contiguous
         # because of slicing operation in logits_processor.
-        return flashinfer_sample(logits.contiguous(), k, p, generators)
+        return flashinfer_sample(logits.contiguous(), k, p, generators), probs
 
     def forward_tpu(
         self,
@@ -113,10 +113,10 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         logits = apply_top_k_top_p_tpu(logits, k, p)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        return random_sample(probs, generators)
+        return random_sample(probs, generators), probs
 
 
 def apply_top_k_top_p_tpu(
