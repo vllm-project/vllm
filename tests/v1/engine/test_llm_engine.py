@@ -187,7 +187,7 @@ def test_llmengine_streaming_with_parallel_sampling(model, output_kind,
     partial_tokens: defaultdict[
         str, defaultdict[int, list[int]]
     ] = defaultdict(lambda: defaultdict(list))
-    finished_requests: set[int] = set()
+    finished_requests: set[str] = set()
 
     for i, prompt in enumerate(prompts):
         request_id = f"req-{i}"
