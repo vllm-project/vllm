@@ -215,6 +215,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
         # Global hyperparameters shared by all attention layers
+        # TODO: discard this for trtllm-gen backend
         self.global_hyperparameters = infer_global_hyperparameters(
             get_per_layer_parameters(vllm_config, layer_names, FlashInferImpl))
 
@@ -523,14 +524,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         head_dim = self.kv_cache_spec.head_size
 
         # currently prefill trtllm attention does not support fp8 kv cache
-        # trtllm may not support sliding window
-        prefill_use_trtllm = (self.global_hyperparameters.window_left == -1
-                              and not cache_dtype.startswith("fp8")
+        prefill_use_trtllm = (not cache_dtype.startswith("fp8")
                               and use_trtllm_attention(
                                 num_prefill_tokens, max_seq_len, cache_dtype,
                                 num_qo_heads, num_kv_heads, head_dim))
-        decode_use_trtllm = (self.global_hyperparameters.window_left == -1
-                             and use_trtllm_attention(
+        decode_use_trtllm = (use_trtllm_attention(
                                 num_decode_tokens, max_seq_len, cache_dtype,
                                 num_qo_heads, num_kv_heads, head_dim))
 
