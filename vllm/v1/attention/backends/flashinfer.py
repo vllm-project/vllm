@@ -638,11 +638,15 @@ class FlashInferImpl(AttentionImpl):
 
         self.sinks: Optional[torch.Tensor] = None
         if sinks is not None:
-            assert sinks.shape[0] == num_heads, (
-                "Sinks must have the same number of heads "
-                "as the number of heads in the layer"
-            )
-            assert sinks.dtype == torch.float32, "Sinks must be of type float32"
+            if sinks.shape[0] != num_heads:
+                raise ValueError(
+                    "Sinks must have the same number of heads as the number of "
+                    f"heads in the layer. Expected {num_heads}, but got "
+                    f"{sinks.shape[0]}."
+                )
+            if sinks.dtype != torch.float32:
+                raise ValueError("Sinks must be of type float32, but got "
+                                 f"{sinks.dtype}.")
             self.sinks = sinks
 
     def forward(
