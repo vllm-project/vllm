@@ -10,11 +10,10 @@ from functools import partial
 from typing import Optional, List, Dict, Set, Sequence, Iterable
 
 import torch
-from torch.distributed import (P2POp, ProcessGroup, 
-                               batch_isend_irecv, barrier,
-                                all_gather, get_global_rank)
+from torch.distributed import (P2POp, ProcessGroup, all_gather, barrier,
+                               batch_isend_irecv, get_global_rank)
 
-from vllm.distributed.parallel_state import get_ep_group, get_node_count
+from vllm.distributed.parallel_state import get_ep_group
 
 
 def idx_local_to_global(    
@@ -242,7 +241,7 @@ def move_to_buffer(
 
 def move_from_buffer(
     expert_weights: Iterable[torch.Tensor],
-    expert_weights_buffer: Sequence[torch.Tensor],
+    expert_weights_buffer: list[torch.Tensor],
     is_unchanged: list[bool],
     is_received_locally: list[bool],
     experts_recv_loc: dict[int, int],
@@ -275,7 +274,7 @@ async def transfer_layer(old_global_expert_indices: torch.Tensor,
                          expert_weights_buffer,
                          is_profile: bool = False,
                          layer: int = 0,
-                         cuda_stream : Optional[torch.cuda.Stream] = None,
+                         cuda_stream: Optional[torch.cuda.Stream] = None,
                          rank_mapping= None) -> None:
     """
     Rearranges the expert weights in place according to the new expert indices.

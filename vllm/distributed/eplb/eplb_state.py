@@ -160,7 +160,7 @@ class EplbState:
 
     buffer_lock: threading.Lock = threading.Lock()
 
-    expert_buffer: Optional[list[torch.Tensor]] = None
+    expert_buffer:list[torch.Tensor] = []
 
     rebalanced: bool = False  
 
@@ -418,12 +418,13 @@ class EplbState:
             self.expert_rearrangement_step = 0
             self.rearrange_calculate(model, is_profile)
             
-    def rearrange_calculate(self,
-                  model: MixtureOfExperts,
-                  is_profile: bool = False,
-                  execute_shuffle: bool = True,
-                  global_expert_load: Optional[torch.Tensor] = None,
-                  rank_mapping: Optional[dict[int, int]] = None) -> None:
+    def rearrange_calculate(
+            self,
+            model: MixtureOfExperts,
+            is_profile: bool = False,
+            execute_shuffle: bool = True,
+            global_expert_load: Optional[torch.Tensor] = None,
+            rank_mapping: Optional[dict[int, int]] = None) -> None:
         """
         Rearrange the experts according to the current load.
         """
@@ -551,10 +552,10 @@ class EplbState:
 
         self.rebalanced = True
 
-    def eplb_async_loop(
-        self, model,
-        rank_mapping: Optional[dict[int, int]] = None,
-        is_profile: bool = False):
+    def eplb_async_loop(self, 
+                        model,
+                        rank_mapping: Optional[dict[int, int]] = None,
+                        is_profile: bool = False):
 
         ep_group = get_ep_group().device_group
         rank = ep_group.rank()
@@ -564,12 +565,11 @@ class EplbState:
             try:
                 loop.run_until_complete(
                     self.transfer_run_periodically(model=model,
-                    is_profile=is_profile, 
-                    rank_mapping=rank_mapping))
+                                                   is_profile=is_profile, 
+                                                   rank_mapping=rank_mapping))
             except Exception as e:
-                logger.exception("async loop error (Rank %d): %s", 
-                rank, 
-                str(e)
+                logger.exception("async loop error (Rank %d): %s", rank, 
+                                  str(e)
             )
             finally:
                 loop.close()
@@ -579,7 +579,8 @@ class EplbState:
         return thread
 
     async def transfer_run_periodically(
-            self, model, 
+            self, 
+            model, 
             is_profile: bool = False,
             rank_mapping: Optional[dict[int, int]] = None):
         experts_stream = torch.cuda.Stream()
@@ -588,13 +589,13 @@ class EplbState:
                 # get lock
                 await asyncio.to_thread(self.buffer_lock.acquire)
                 try:
-                    self.expert_buffer= [
+                    self.expert_buffer = [
                         torch.empty_like(w) for w in model.expert_weights[0]
                         ]
                     await transfer_layer(
                         old_global_expert_indices=self.physical_to_logical_map,
                         new_global_expert_indices=self.
-                            new_physical_to_logical_map,
+                        new_physical_to_logical_map,
                         expert_weights=model.expert_weights,
                         expert_weights_buffer=self.expert_buffer,
                         is_profile=is_profile,
@@ -615,7 +616,9 @@ class EplbState:
         self.post_eplb(model, is_profile)
 
 
-    def move_to_workspace(self, model: MixtureOfExperts,is_profile: bool = False):
+    def move_to_workspace(self,
+                          model: MixtureOfExperts,
+                          is_profile: bool = False):
         with self.buffer_lock:
             move_from_buffer(
                 expert_weights=model.expert_weights[self.layer],
