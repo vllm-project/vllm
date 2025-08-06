@@ -82,17 +82,18 @@ class EngineCore:
         self.available_gpu_memory_for_kv_cache = -1
 
         # Setup KV Caches and update CacheConfig after profiling.
-        num_gpu_blocks, num_cpu_blocks, kv_cache_config, \
-            xfer_handshake_metadata = self._initialize_kv_caches(
-                vllm_config)
+        num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
+            self._initialize_kv_caches(vllm_config)
 
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
 
-        # Store KV connector metadata for handshake
-        self.xfer_handshake_metadata = xfer_handshake_metadata
+        # Collect and store KV connector xfer metadata from workers
+        # (after KV cache registration)
+        self.xfer_handshake_metadata = (
+            self.model_executor.get_kv_connector_handshake_metadata())
 
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
@@ -145,8 +146,7 @@ class EngineCore:
             self.batch_queue = queue.Queue(self.batch_queue_size)
 
     def _initialize_kv_caches(
-        self, vllm_config: VllmConfig
-    ) -> tuple[int, int, KVCacheConfig, Optional[list[Optional[dict]]]]:
+            self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
 
         # Get all kv cache needed by the model
@@ -200,16 +200,10 @@ class EngineCore:
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)
 
-        # Collect KV connector xfer metadata from workers
-        # (after KV cache registration)
-        xfer_handshake_metadata = (
-            self.model_executor.get_kv_connector_handshake_metadata())
-
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
-        return (num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config,
-                xfer_handshake_metadata)
+        return (num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config)
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_executor.supported_tasks
@@ -616,7 +610,7 @@ class EngineCoreProc(EngineCore):
                 # self.xfer_handshake_metadata is list of dicts from workers
                 # Each dict already has structure {dp_rank: {tp_rank: metadata}}
                 # Merge all worker dicts into a single dict
-                content: dict[str, dict[str, dict[str, Any]]] = {}
+                content: dict[int, dict[int, dict[int, Any]]] = {}
                 for worker_dict in self.xfer_handshake_metadata:
                     if worker_dict is not None:
                         # Deep merge nested dictionaries instead of overwrite

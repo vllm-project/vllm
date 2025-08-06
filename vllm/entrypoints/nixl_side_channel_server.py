@@ -11,7 +11,6 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata)
-from vllm.entrypoints.ssl import SSLCertRefresher, SSLConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -19,15 +18,12 @@ logger = init_logger(__name__)
 
 class NixlSideChannelServer:
 
-    def __init__(self, vllm_config: VllmConfig, host: str, port: int,
-                 ssl_config: Optional[SSLConfig]):
+    def __init__(self, vllm_config: VllmConfig, host: str, port: int):
         self.vllm_config = vllm_config
         self.host = host
         self.port = port
-        self.ssl_config = ssl_config
         self.app = FastAPI(title="vLLM NIXL Side Channel Server")
         self.server: Optional[uvicorn.Server] = None
-        self.ssl_cert_refresher: Optional[SSLCertRefresher] = None
         self._setup_routes()
 
     def _setup_routes(self):
@@ -63,17 +59,7 @@ class NixlSideChannelServer:
             logger.warning("Side channel server is already running")
             return
 
-        # validate SSL configuration
-        if self.ssl_config is not None:
-            try:
-                self.ssl_config.validate()
-            except (FileNotFoundError, PermissionError) as e:
-                logger.error("SSL configuration error: %s", e)
-                raise
-
-        listen_address = self.ssl_config.format_listen_address(
-            self.host, self.port
-        ) if self.ssl_config else f"http://{self.host}:{self.port}"
+        listen_address = f"http://{self.host}:{self.port}"
         logger.info("Starting NIXL side channel server on %s", listen_address)
 
         # prepare uvicorn configuration
@@ -85,17 +71,9 @@ class NixlSideChannelServer:
             "access_log": True,
         }
 
-        # add SSL configuration
-        if self.ssl_config is not None:
-            config_kwargs.update(self.ssl_config.to_uvicorn_kwargs())
-
         config = uvicorn.Config(**config_kwargs)
         config.load()  # need to load config to get SSL context
         self.server = uvicorn.Server(config)
-
-        # setup SSL certificate refresher if enabled
-        self.ssl_cert_refresher = self.ssl_config.create_ssl_cert_refresher(
-            config) if self.ssl_config is not None else None
 
         # start the server in a background task
         if self.server is not None:
@@ -106,11 +84,6 @@ class NixlSideChannelServer:
         if self.server is not None:
             logger.info("Stopping NIXL side channel server")
             try:
-                # stop SSL certificate refresher
-                if self.ssl_cert_refresher:
-                    self.ssl_cert_refresher.stop()
-                    self.ssl_cert_refresher = None
-
                 self.server.should_exit = True
                 await asyncio.sleep(1)  # give it time to shutdown
             except Exception as e:
@@ -132,8 +105,7 @@ def should_start_nixl_side_channel_server(vllm_config: VllmConfig) -> bool:
 
 
 async def set_up_nixl_side_channel_server(
-        vllm_config: VllmConfig,
-        ssl_config: Optional[SSLConfig]) -> Optional[NixlSideChannelServer]:
+        vllm_config: VllmConfig) -> Optional[NixlSideChannelServer]:
     if not should_start_nixl_side_channel_server(vllm_config):
         return None
 
@@ -144,6 +116,6 @@ async def set_up_nixl_side_channel_server(
                 side_channel_host, side_channel_port)
 
     server = NixlSideChannelServer(vllm_config, side_channel_host,
-                                   side_channel_port, ssl_config)
+                                   side_channel_port)
     await server.start_async()
     return server

@@ -65,7 +65,6 @@ if TYPE_CHECKING:
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
-    from vllm.entrypoints.ssl import SSLConfig
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.layers.quantization.base_config import (
@@ -86,7 +85,6 @@ else:
     BaseModelLoader = Any
     LoadFormats = Any
     TensorizerConfig = Any
-    SSLConfig = Any
     ConfigType = type
     HfOverrides = Union[dict[str, Any], Callable[[type], type]]
 
@@ -4588,8 +4586,6 @@ class VllmConfig:
     """The configurations for distributed KV cache transfer."""
     kv_events_config: Optional[KVEventsConfig] = None
     """The configurations for event publishing."""
-    ssl_config: Optional["SSLConfig"] = None
-    """SSL/TLS configuration for secure connections."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
