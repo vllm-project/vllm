@@ -41,7 +41,6 @@ class TestPassManager(InductorPass):
         self.check_fn = check_fn
 
     def __call__(self, graph: fx.Graph):
-        print(f"TestPassManager: Before pass: {self}")
         self.graph_pre_pass = deepcopy(graph)
         for pass_ in self.custom_passes:
             pass_(graph)
