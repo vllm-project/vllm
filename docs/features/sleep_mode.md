@@ -28,7 +28,7 @@ llm = LLM("Qwen/Qwen3-0.6B", enable_sleep_mode=True)
 llm.sleep(level=1)
 
 # Wake up the engine (restore weights)
-llm.wake_up()# or llm.wake_up(tags=["weights"]) for fine-grained control
+llm.wake_up()
 ```
 
 ### RLHF weight updates
@@ -67,12 +67,20 @@ VLLM_SERVER_DEV_MODE=1 python -m vllm.entrypoints.openai.api_server \
 
 These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`
 
-### Notes
+## Notes
 
-- **Partial wake-up**: Use `tags=["weights"]` or `tags=["kv_cache"]` to control which resources are restored, useful for RLHF and weight updates. Note that `is_sleeping` will report `true` until all components are awake.
+### Partial wake-up
 
-- **Sleep levels**: Level 1 sleep will offload the model weights and discard the kv cache. The content of kv cache is forgotten. Level 1 sleep is good for sleeping and waking up the engine to run the same model again. The model weights are backed up in CPU memory. Please make sure there's enough CPU memory to store the model weights. Level 2 sleep will discard both the model weights and the kv cache. The content of both the model weights and kv cache is forgotten. Level 2 sleep is good for sleeping and waking up the engine to run a different model or update the model, where previous model weights are not needed.
+Use `tags=["weights"]` or `tags=["kv_cache"]` to control which resources are restored, useful for RLHF and weight updates. Note that `is_sleeping` will report `true` until all components are awake.
 
-- **Server in development mode** When using the flag `VLLM_SERVER_DEV_MODE=1` you enable development endpoints, This should not be used in production.
+### Sleep levels
 
-- **Platform support**: Supported on CUDA platform.
+Level 1 sleep will offload the model weights and discard the kv cache. The content of kv cache is forgotten. Level 1 sleep is good for sleeping and waking up the engine to run the same model again. The model weights are backed up in CPU memory. Please make sure there's enough CPU memory to store the model weights. Level 2 sleep will discard both the model weights and the kv cache. The content of both the model weights and kv cache is forgotten. Level 2 sleep is good for sleeping and waking up the engine to run a different model or update the model, where previous model weights are not needed.
+
+### Server in development mode
+
+When using the flag `VLLM_SERVER_DEV_MODE=1` you enable development endpoints, This should not be used in production.
+
+### Platform support
+
+Supported on CUDA platform.
