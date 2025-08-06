@@ -159,34 +159,46 @@ class DummyLogitsProcessor(LogitsProcessor):
             return
 
         # Process added requests.
-        for _, index, params, _ in batch_update.added:
+        for index, params, _, _ in batch_update.added:
             assert params is not None
-            if params.extra_args:
-                target_token = params.extra_args.get("target_token", None)
-            else:
-                target_token = None
-            self.req_info[index] = target_token
+            if params.extra_args and (target_token := params.extra_args.get(
+                    "target_token", None)):
+                self.req_info[index] = target_token
 
         if self.req_info:
             # Process removed requests.
             for index in batch_update.removed:
                 self.req_info.pop(index, None)
 
-            # Process moved requests, unidirectional (a->b) and swap (a<->b)
+            # Process moved requests, unidirectional move (a->b) and swap
+            # (a<->b)
             for adx, bdx, direct in batch_update.moved:
                 if direct == MoveDirectionality.SWAP:
-                    (self.req_info[adx],
-                     self.req_info[bdx]) = (self.req_info[bdx],
-                                            self.req_info[adx])
+                    # Sparse swap
+                    a_val = self.req_info.pop(adx, None)
+                    b_val = self.req_info.pop(bdx, None)
+                    if a_val is not None:
+                        self.req_info[bdx] = a_val
+                    if b_val is not None:
+                        self.req_info[adx] = b_val
                 else:
-                    self.req_info[bdx] = self.req_info[adx]
+                    # Sparse unidirectional move
+                    if adx in self.req_info:
+                        self.req_info[bdx] = self.req_info.pop(adx)
+                    else:
+                        self.req_info.pop(bdx, None)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
-        for bdx in range(logits.shape[0]):
-            if (target_token := self.req_info[bdx]) is not None:
-                mask = torch.ones_like(logits[bdx, :], dtype=torch.bool)
-                mask[target_token] = False
-                logits[bdx, mask] = float('-inf')
+        # Save target values before modification
+        rows_list = list(self.req_info.keys())
+        cols = torch.tensor([self.req_info[i] for i in rows_list],
+                            dtype=torch.long)
+        rows = torch.tensor(rows_list, dtype=torch.long)
+        values_to_keep = logits[rows, cols].clone()
+
+        # Mask all but target tokens
+        logits[rows] = float('-inf')
+        logits[rows, cols] = values_to_keep
 
         return logits
 
