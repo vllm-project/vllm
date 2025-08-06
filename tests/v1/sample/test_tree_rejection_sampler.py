@@ -156,7 +156,7 @@ def assert_rejection_sample(
 
     # Generate logits that deterministically produce the given sampled
     # tokens.
-    target_logits = torch.cat([
+    logits = torch.cat([
         create_logits_tensor(tree, num_drafts + 1, sample_map)
         for sample_map in target_sample_maps
     ])
@@ -165,11 +165,10 @@ def assert_rejection_sample(
     metadata = create_sampling_metadata(all_greedy=True)
 
     # Rejection sample.
-    output_tokens = tree_rejection_sampler(
+    output = tree_rejection_sampler(
         spec_decode_metadata,
         draft_probs=None,
-        target_logits=target_logits,
-        bonus_token_ids=None,
+        logits=logits,
         sampling_metadata=metadata,
     )
 
@@ -178,7 +177,7 @@ def assert_rejection_sample(
         to_output_token_ids(tree, num_drafts, a, b)
         for a, b in zip(expected_accepted_nodes, expected_bonus_nodes)
     ])
-    assert torch.equal(output_tokens, expected_tokens)
+    assert torch.equal(output.sampled_token_ids, expected_tokens)
 
 
 ########################### Tests ###########################

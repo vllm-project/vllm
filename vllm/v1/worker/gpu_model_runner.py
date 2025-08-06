@@ -137,7 +137,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
-
+        
         This function blocks until the copy is finished.
         """
         self._async_copy_ready_event.synchronize()
@@ -269,7 +269,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 raise ValueError("Unknown speculative decoding method: "
                                  f"{self.speculative_config.method}")
-            self.rejection_sampler = self._create_rejection_sampler()
+            if self.use_tree_spec_decode:
+                self.rejection_sampler = TreeRejectionSampler(
+                    self.speculative_config.tree_drafter_params,
+                    max_batch_size=self.max_num_reqs,
+                    main_sampler=self.sampler,
+                    device=self.device,
+                )
+            else:
+                self.rejection_sampler = RejectionSampler(
+                    main_sampler=self.sampler,
+                    device=self.device,
+                )
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -788,7 +799,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _prepare_input_ids(self, total_num_scheduled_tokens: int,
                            cu_num_tokens: np.ndarray) -> None:
         """Prepare the input IDs for the current batch.
-
+        
         Carefully handles the `prev_sampled_token_ids` which can be cached
         from the previous engine iteration, in which case those tokens on the
         GPU need to be copied into the corresponding slots into input_ids."""
@@ -1860,9 +1871,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
         else:
             assert logits is not None
-            sampler_output = self._rejection_sample(logits,
-                                                    spec_decode_metadata,
-                                                    sampling_metadata)
+            sampler_output = self.rejection_sampler(
+                spec_decode_metadata,
+                None,  # draft_probs
+                logits,
+                sampling_metadata,
+            )
             self._update_states_after_model_execute(
                 sampler_output.sampled_token_ids)
 
@@ -2899,8 +2913,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 raise e
         if self.speculative_config:
-            num_spec_tokens = self.speculative_config.num_speculative_tokens
-            draft_token_ids = [[0] * num_spec_tokens for _ in range(num_reqs)]
+            draft_token_ids = [[0] for _ in range(num_reqs)]
             dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(
                 draft_token_ids, self.device)
 
@@ -2909,29 +2922,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             #     num_tokens, logits.shape[-1], device=self.device,
             #     dtype=logits.dtype)
             draft_probs = None
-            if self.use_tree_spec_decode:
-                # The tree rejection sampler should not receive bonus tokens.
-                # It computes its own bonus tokens depending on which branch
-                # is accepted.
-                num_logits = num_tokens + num_reqs
-                bonus_token_ids = None
-            else:
-                num_logits = num_tokens
-                # NOTE(woosuk): Here, we should use int32 because the sampler
-                # uses int32 for bonus_token_ids. If the dtype mismatches,
-                # re-compilation will occur at runtime.
-                bonus_token_ids = torch.zeros(num_reqs,
-                                              device=self.device,
-                                              dtype=torch.int32)
-            target_logits = torch.randn(num_logits,
-                                        logits.shape[-1],
-                                        device=self.device,
-                                        dtype=logits.dtype)
+            logits = torch.randn(num_tokens + num_reqs,
+                                 logits.shape[-1],
+                                 device=self.device,
+                                 dtype=logits.dtype)
             self.rejection_sampler(
                 dummy_spec_decode_metadata,
                 draft_probs,
-                target_logits,
-                bonus_token_ids,
+                logits,
                 dummy_metadata,
             )
         return sampler_output
@@ -3766,55 +3764,3 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.transfer_event.record()
         self.transfer_event.synchronize()
         return pinned.tolist()
-
-    def _create_rejection_sampler(self):
-        if self.use_tree_spec_decode:
-            # Tree rejection sampling is required when using tree attention.
-            return TreeRejectionSampler(
-                self.speculative_config.tree_drafter_params,
-                max_batch_size=self.max_num_reqs,
-                main_sampler=self.sampler,
-                device=self.device,
-            )
-        return RejectionSampler()
-
-    def _rejection_sample(
-        self,
-        logits: torch.Tensor,
-        spec_decode_metadata: SpecDecodeMetadata,
-        sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput:
-        if self.use_tree_spec_decode:
-            sampler_output = SamplerOutput(
-                sampled_token_ids=torch.empty(0),
-                logprobs_tensors=None,
-            )
-            # Bonus tokens are not provided for tree rejection sampling
-            # because it generates its own.
-            bonus_token_ids = None
-            target_logits = logits
-        else:
-            # When indexing with a tensor (bonus_logits_indices), PyTorch
-            # creates a new tensor with separate storage from the original
-            # logits tensor. This means any in-place operations on bonus_logits
-            # won't affect the original logits tensor.
-            bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
-            sampler_output = self.sampler(
-                logits=bonus_logits,
-                sampling_metadata=sampling_metadata,
-            )
-            bonus_token_ids = sampler_output.sampled_token_ids
-            # Just like `bonus_logits`, `target_logits` is a new tensor with
-            # separate storage from the original `logits` tensor. Therefore,
-            # it is safe to update `target_logits` in place.
-            target_logits = logits[spec_decode_metadata.target_logits_indices]
-
-        output_token_ids = self.rejection_sampler(
-            spec_decode_metadata,
-            None,  # draft_probs
-            target_logits,
-            bonus_token_ids,
-            sampling_metadata,
-        )
-        sampler_output.sampled_token_ids = output_token_ids
-        return sampler_output

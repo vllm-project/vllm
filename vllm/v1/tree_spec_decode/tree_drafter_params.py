@@ -4,6 +4,8 @@
 import ast
 from dataclasses import dataclass
 
+from vllm.v1.tree_spec_decode.utils import MAX_TREE_DEPTH
+
 
 @dataclass
 class TreeDrafterParams:
@@ -29,6 +31,8 @@ class TreeDrafterParams:
         _assert_fixed_branching_factor_per_level(draft_nodes, spec_token_tree)
 
         tree_depth = len(draft_nodes[-1]) + 1
+        assert tree_depth <= MAX_TREE_DEPTH
+
         # Precompute per-level properties of the tree.
         num_nodes_per_level = [0] * tree_depth
         num_nodes_per_level[0] = 1

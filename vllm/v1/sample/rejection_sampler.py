@@ -8,8 +8,10 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 logger = init_logger(__name__)
@@ -44,17 +46,24 @@ class RejectionSampler(nn.Module):
         output tokens = accepted tokens + recovered tokens + bonus tokens
     """
 
+    def __init__(
+        self,
+        main_sampler: Sampler,
+        device: Optional[torch.device],
+    ):
+        super().__init__()
+        self.main_sampler = main_sampler
+        self.device = device
+
     def forward(
         self,
         metadata: SpecDecodeMetadata,
         # [num_tokens, vocab_size]
         draft_probs: Optional[torch.Tensor],
         # [num_tokens, vocab_size]
-        target_logits: torch.Tensor,
-        # [batch_size, 1]
-        bonus_token_ids: torch.Tensor,
+        logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
+    ) -> SamplerOutput:
         '''
         Args:
             metadata:
@@ -63,19 +72,7 @@ class RejectionSampler(nn.Module):
                 Probability distribution for the draft tokens. Shape is
                 [num_tokens, vocab_size]. Can be None if probabilities are
                 not provided, which is the case for ngram spec decode.
-            target_logits (torch.Tensor):
-                Target model's logits probability distribution.
-                Shape is [num_tokens, vocab_size]. Here, probabilities from
-                different requests are flattened into a single tensor because
-                this is the shape of the output logits.
-                NOTE: `target_logits` can be updated in place to save memory.
-            bonus_token_ids (torch.Tensor):
-                A tensor containing bonus tokens. Shape is [batch_size, 1].
-                Bonus tokens are added to the end of the sequence if all
-                proposed tokens are accepted. We generate the bonus tokens
-                outside of the rejection sampler with the default sampling
-                strategy. It allows for more flexibility in the sampling
-                process such as top_p, top_k sampling.
+            logits: Logits from the target model.
             sampling_metadata (vllm.v1.sample.metadata.SamplingMetadata):
                 Additional metadata needed for sampling, such as temperature,
                 top-k/top-p parameters, or other relevant information.
@@ -84,6 +81,25 @@ class RejectionSampler(nn.Module):
                 A tensor containing the final output token IDs.
         '''
         assert metadata.max_spec_len <= MAX_SPEC_LEN
+
+        bonus_logits_indices = metadata.bonus_logits_indices
+        target_logits_indices = metadata.target_logits_indices
+
+        # When indexing with a tensor (bonus_logits_indices), PyTorch
+        # creates a new tensor with separate storage from the original
+        # logits tensor. This means any in-place operations on bonus_logits
+        # won't affect the original logits tensor.
+        bonus_logits = logits[bonus_logits_indices]
+        sampler_output = self.main_sampler(
+            logits=bonus_logits,
+            sampling_metadata=sampling_metadata,
+        )
+        bonus_token_ids = sampler_output.sampled_token_ids
+        # Just like `bonus_logits`, `target_logits` is a new tensor with
+        # separate storage from the original `logits` tensor. Therefore,
+        # it is safe to update `target_logits` in place.
+        target_logits = logits[target_logits_indices]
+
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
         # `compute_probs` function.
@@ -103,7 +119,9 @@ class RejectionSampler(nn.Module):
             bonus_token_ids,
             sampling_metadata,
         )
-        return output_token_ids
+
+        sampler_output.sampled_token_ids = output_token_ids
+        return sampler_output
 
     @staticmethod
     def parse_output(
