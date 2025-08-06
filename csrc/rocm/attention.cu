@@ -55,6 +55,7 @@
 
   #define GCN_MFMA_INSTR1 __builtin_amdgcn_mfma_f32_16x16x4f32
   #define GCN_MFMA_INSTR __builtin_amdgcn_mfma_f32_4x4x4f16
+  //#define __FP8__PA__ // Enable full fp8 paged attention
 
 using floatx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
 using float16x4 =
@@ -256,7 +257,6 @@ __device__ __forceinline__ _B16x8 convert_b8x8_custom(const _B8x8 input) {
   return ret;
 }
 
-#define __FP8__PA__ // Enable full fp8 paged attention
 #ifdef __FP8__PA__
 typedef union u64_cvt {
   half f16x4[4];
