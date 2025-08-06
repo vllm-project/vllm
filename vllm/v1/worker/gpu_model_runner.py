@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import dataclasses
+import dataclasses, inspect
 import gc
 import time
 from contextlib import contextmanager
@@ -328,6 +328,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.cache_config.kv_sharing_fast_prefill:
             self.kv_sharing_fast_prefill_logits_indices = torch.zeros(
                 self.max_num_tokens, dtype=torch.int32, device=self.device)
+            
+        # DIEGO: to avoid printing all the stack of calls every single time
+        self.print_stack_calls = True
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -2516,7 +2519,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.encoder_cache.clear()
         gc.collect()
 
-    def capture_model(self, specific_token_num: Optional[int]) -> None:
+    def capture_model(self, specific_token_num: Optional[int] = None) -> None:
         if not self.use_cuda_graph:
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
@@ -2534,7 +2537,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Optimize garbage collection during CUDA graph capture.
             # Clean up, then freeze all remaining objects from being included
             # in future collections.
-            gc.collect()
+            # gc.collect()
             should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
             if should_freeze:
                 gc.freeze()
@@ -2573,8 +2576,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes 5~20 seconds.
-        logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
+        logger.info("Graph capturing finished in %.3f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
+        
+        # DIEGO: print all the stack of calls just the first time
+        # if self.print_stack_calls == True:
+        #     self.print_stack_calls = False
+        #     for frame_info in inspect.stack():
+        #         logger.info(f"DIEGO: File: {frame_info.filename}, Line: {frame_info.lineno}, Function: {frame_info.function}")
+
 
     def _initialize_single_attn_backend(
         self, kv_cache_spec: KVCacheSpec, layer_names: list[str]
