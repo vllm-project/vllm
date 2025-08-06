@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Callable, Final, Optional, Union
+from typing import Callable, Final, Optional, Union, TYPE_CHECKING
 
 import jinja2
 import partial_json_parser
@@ -637,15 +637,17 @@ class OpenAIServingChat(OpenAIServing):
                         logprobs = None
 
                     if self.use_harmony:
-                        harmony_parser = harmony_parsers[i]
-                        for token_id in output.token_ids:
-                            harmony_parser.process(token_id)
-                        # FIXME(woosuk): Support function calling
-                        is_final = harmony_parser.current_channel == "final"
-                        if not (request.include_reasoning or is_final):
-                            # Skip the reasoning content.
-                            continue
-                        delta_text = harmony_parser.last_content_delta or ""
+                        if TYPE_CHECKING:
+                            assert tool_parser is not None
+                        delta_message = tool_parser.extract_tool_calls_streaming(
+                            previous_text="",
+                            current_text="",
+                            delta_text="",
+                            previous_token_ids=[],
+                            current_token_ids=output.token_ids,
+                            delta_token_ids=output.token_ids,
+                            request=request)
+                        delta_text = delta_message.content if delta_message else ""
                     else:
                         delta_text = output.text
 
@@ -673,11 +675,7 @@ class OpenAIServingChat(OpenAIServing):
                             current_token_ids = list(output.token_ids)
 
                     if self.use_harmony:
-                        if is_final:
-                            delta_message = DeltaMessage(content=delta_text)
-                        else:
-                            delta_message = DeltaMessage(
-                                reasoning_content=delta_text)
+                        assert delta_message is not None
                     # handle streaming deltas for tools with named tool_choice
                     elif tool_choice_function_name:
                         if (self.reasoning_parser and not reasoning_end_arr[i]
@@ -1049,32 +1047,23 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs = None
 
             if self.use_harmony:
-                reasoning_content, final_content, is_tool_call = (
-                    parse_chat_output(token_ids))
-                if not request.include_reasoning:
-                    reasoning_content = None
-
-                if is_tool_call:
-                    # TODO(woosuk): Implement tool call for gpt-oss.
-                    # For now, only Responses API supports tool call for
-                    # gpt-oss.
-                    raise NotImplementedError(
-                        "Tool call in Chat Completion API is not supported "
-                        "for gpt-oss yet. Please use Responses API instead.")
-                else:
-                    # Normal message
-                    message = ChatMessage(
-                        role=role,
-                        reasoning_content=reasoning_content,
-                        content=final_content,
-                    )
+                tool_parser = self.tool_parser(
+                    tokenizer)
+                tool_call_info = tool_parser.extract_tool_calls_from_ids(
+                    token_ids)
+                message = ChatMessage(
+                    role=role,
+                    reasoning_content=None if not request.include_reasoning else tool_call_info.reasoning_content,
+                    content=tool_call_info.content,
+                    tool_calls=tool_call_info.tool_calls)
 
                 choice_data = ChatCompletionResponseChoice(
                     index=output.index,
                     message=message,
                     logprobs=logprobs,
-                    finish_reason="tool_calls" if is_tool_call else
-                    output.finish_reason if output.finish_reason else "stop",
+                    finish_reason="tool_calls"
+                    if tool_call_info.tools_called else output.finish_reason
+                    if output.finish_reason else "stop",
                     stop_reason=output.stop_reason,
                 )
                 choices.append(choice_data)
@@ -1371,7 +1360,7 @@ class OpenAIServingChat(OpenAIServing):
         messages.append(sys_msg)
 
         # Add developer message.
-        dev_msg = get_developer_message()
+        dev_msg = get_developer_message(tools=request.tools)
         messages.append(dev_msg)
 
         # Add user message.
