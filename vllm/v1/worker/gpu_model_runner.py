@@ -56,6 +56,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, cdiv, check_use_alibi,
                         get_dtype_size, is_pin_memory_available, round_up,
                         supports_dynamo)
+from vllm.v1.attention.backends.tree_attn import TreeAttentionMetadata
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
@@ -68,12 +69,13 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         MambaSpec, SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
-                             LogprobsTensors, ModelRunnerOutput)
+                             LogprobsTensors, ModelRunnerOutput, SamplerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
+from vllm.v1.sample.tree_rejection_sampler import TreeRejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -180,6 +182,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
 
+        # Tree spec decoding.
+        tree_drafter_params = (
+            self.speculative_config
+            and self.speculative_config.tree_drafter_params) or None
+        self.use_tree_spec_decode = tree_drafter_params is not None
+        self.tree_position_offsets = None
+        if self.use_tree_spec_decode:
+            token_levels = torch.tensor(tree_drafter_params.token_levels,
+                                        dtype=torch.int64,
+                                        device=self.device)
+            flattened_tree_indices = torch.arange(token_levels.shape[0],
+                                                  dtype=torch.int64,
+                                                  device=self.device)
+            # The adjustments needed to go from token positions in the
+            # flattened tree to their levels.
+            self.tree_position_offsets = (token_levels -
+                                          flattened_tree_indices).repeat(
+                                              self.max_num_reqs)
+
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
@@ -200,7 +221,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 raise ValueError("Unknown speculative decoding method: "
                                  f"{self.speculative_config.method}")
-            self.rejection_sampler = RejectionSampler()
+            self.rejection_sampler = self._create_rejection_sampler()
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -765,10 +786,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Iterate over the dictionary rather than all requests since not all
             # requests have draft tokens.
             num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            num_decode_tokens = 0
             for req_id, draft_token_ids in (
                     scheduler_output.scheduled_spec_decode_tokens.items()):
                 req_idx = self.input_batch.req_id_to_index[req_id]
-                num_draft_tokens[req_idx] = len(draft_token_ids)
+                num_draft_toks = len(draft_token_ids)
+                num_draft_tokens[req_idx] = num_draft_toks
+                if num_draft_toks > 0:
+                    num_decode_tokens += num_draft_toks + 1
+
+            if self.tree_position_offsets is not None:
+                # Offset the decode token positions. This is needed for
+                # tree spec decoding.
+                offsets = self.tree_position_offsets[:num_decode_tokens]
+                self.positions.gpu[:num_decode_tokens] += offsets
 
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens)
@@ -1625,31 +1656,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
+            remapped_token_indices = None
         else:
-            # When indexing with a tensor (bonus_logits_indices), PyTorch
-            # creates a new tensor with separate storage from the original
-            # logits tensor. This means any in-place operations on bonus_logits
-            # won't affect the original logits tensor.
             assert logits is not None
-            bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
-            sampler_output = self.sampler(
-                logits=bonus_logits,
-                sampling_metadata=sampling_metadata,
-            )
-            bonus_token_ids = sampler_output.sampled_token_ids
-
-            # Just like `bonus_logits`, `target_logits` is a new tensor with
-            # separate storage from the original `logits` tensor. Therefore,
-            # it is safe to update `target_logits` in place.
-            target_logits = logits[spec_decode_metadata.target_logits_indices]
-            output_token_ids = self.rejection_sampler(
-                spec_decode_metadata,
-                None,  # draft_probs
-                target_logits,
-                bonus_token_ids,
-                sampling_metadata,
-            )
-            sampler_output.sampled_token_ids = output_token_ids
+            sampler_output, remapped_token_indices = self._rejection_sample(
+                logits, spec_decode_metadata, sampling_metadata)
 
         num_nans_in_logits = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -1737,6 +1748,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 aux_hidden_states,
                 spec_decode_metadata,
                 spec_decode_common_attn_metadata,
+                remapped_token_indices=remapped_token_indices,
+                per_layer_attn_metadata=attn_metadata,
             )
 
         self.eplb_step()
@@ -1773,6 +1786,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         aux_hidden_states: Optional[torch.Tensor],
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         common_attn_metadata: CommonAttentionMetadata,
+        remapped_token_indices: Optional[torch.Tensor] = None,
+        per_layer_attn_metadata: Optional[dict[str, Any]] = None,
     ) -> Union[list[list[int]], torch.Tensor]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
@@ -1844,6 +1859,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata, token_indices =\
                     self.drafter.prepare_inputs(
                     common_attn_metadata, num_rejected_tokens_cpu)
+
+                if remapped_token_indices is not None:
+                    assert per_layer_attn_metadata is not None
+                    num_remapped_tokens = remapped_token_indices.shape[0]
+                    # Update the KV cache(s) to reflect the newly accepted draft
+                    # tokens.
+                    self._remap_kv_cache(
+                        per_layer_attn_metadata,
+                        remapped_token_indices,
+                        token_indices[:num_remapped_tokens],
+                    )
+                    # Remap the token indices so that the correct target token
+                    # ids, positions, and hidden states are used.
+                    token_indices[:
+                                  num_remapped_tokens] = remapped_token_indices
 
                 target_token_ids = self.input_ids.gpu[token_indices]
                 # TODO(woosuk): Support M-RoPE.
@@ -2442,7 +2472,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 raise e
         if self.speculative_config:
-            draft_token_ids = [[0] for _ in range(num_reqs)]
+            num_spec_tokens = self.speculative_config.num_speculative_tokens
+            draft_token_ids = [[0] * num_spec_tokens for _ in range(num_reqs)]
             dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(
                 draft_token_ids, self.device)
 
@@ -2451,16 +2482,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             #     num_tokens, logits.shape[-1], device=self.device,
             #     dtype=logits.dtype)
             draft_probs = None
-            target_logits = torch.randn(num_tokens,
+            if self.use_tree_spec_decode:
+                # The tree rejection sampler should not receive bonus tokens.
+                # It computes its own bonus tokens depending on which branch
+                # is accepted.
+                num_logits = num_tokens + num_reqs
+                bonus_token_ids = None
+            else:
+                num_logits = num_tokens
+                # NOTE(woosuk): Here, we should use int32 because the sampler
+                # uses int32 for bonus_token_ids. If the dtype mismatches,
+                # re-compilation will occur at runtime.
+                bonus_token_ids = torch.zeros(num_reqs,
+                                              device=self.device,
+                                              dtype=torch.int32)
+            target_logits = torch.randn(num_logits,
                                         logits.shape[-1],
                                         device=self.device,
                                         dtype=logits.dtype)
-            # NOTE(woosuk): Here, we should use int32 because the sampler uses
-            # int32 for bonus_token_ids. If the dtype mismatches, re-compilation
-            # will occur at runtime.
-            bonus_token_ids = torch.zeros(num_reqs,
-                                          device=self.device,
-                                          dtype=torch.int32)
             self.rejection_sampler(
                 dummy_spec_decode_metadata,
                 draft_probs,
@@ -3274,3 +3313,107 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.transfer_event.record()
         self.transfer_event.synchronize()
         return pinned.tolist()
+
+    def _create_rejection_sampler(self):
+        if self.use_tree_spec_decode:
+            # Tree rejection sampling is required when using tree attention.
+            return TreeRejectionSampler(
+                self.speculative_config.tree_drafter_params,
+                max_batch_size=self.max_num_reqs,
+                main_sampler=self.sampler,
+                device=self.device,
+            )
+        return RejectionSampler()
+
+    def _rejection_sample(
+        self,
+        logits: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata,
+        sampling_metadata: SamplingMetadata,
+    ) -> tuple[SamplerOutput, Optional[list[torch.Tensor]]]:
+        if self.use_tree_spec_decode:
+            # Rejection sample from the tree of drafts. Bonus tokens are not
+            # provided because it generates its own.
+            output_token_ids, remapped_token_indices = self.rejection_sampler(
+                spec_decode_metadata,
+                None,  # draft_probs
+                logits,
+                None,  # bonus_token_ids
+                sampling_metadata,
+            )
+            sampler_output = SamplerOutput(
+                sampled_token_ids=output_token_ids,
+                logprobs_tensors=None,
+            )
+        else:
+            # No token remapping is needed when rejection sampling from a
+            # chain of drafts.
+            remapped_token_indices = None
+
+            # When indexing with a tensor (bonus_logits_indices), PyTorch
+            # creates a new tensor with separate storage from the original
+            # logits tensor. This means any in-place operations on bonus_logits
+            # won't affect the original logits tensor.
+            bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
+            sampler_output = self.sampler(
+                logits=bonus_logits,
+                sampling_metadata=sampling_metadata,
+            )
+            bonus_token_ids = sampler_output.sampled_token_ids
+
+            # Just like `bonus_logits`, `target_logits` is a new tensor with
+            # separate storage from the original `logits` tensor. Therefore,
+            # it is safe to update `target_logits` in place.
+            target_logits = logits[spec_decode_metadata.target_logits_indices]
+
+            output_token_ids = self.rejection_sampler(
+                spec_decode_metadata,
+                None,  # draft_probs
+                target_logits,
+                bonus_token_ids,
+                sampling_metadata,
+            )
+            sampler_output.sampled_token_ids = output_token_ids
+        return sampler_output, remapped_token_indices
+
+    def _remap_kv_cache(
+        self,
+        layer_attn_metadatas: dict[str, Any],
+        from_token_indices: torch.Tensor,
+        to_token_indices: torch.Tensor,
+    ):
+        """
+        Copies K/Vs from from_token_indices to to_token_indices.
+
+        Args:
+            layer_attn_metadatas: Layer-to-attention-metadata mapping.
+            from_token_indices: The indices of the tokens to copy from.
+            to_token_indices: The indices of the tokens to copy to.
+        """
+
+        block_size = self.cache_config.block_size
+        # Get all attention layers.
+        layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+
+        # Get attention metadata for a layer. The current assumption is
+        # that all attention layers share the same KV cache slot mapping.
+        layer_name = next(iter(layers.keys()))
+        attn_metadata = layer_attn_metadatas[layer_name]
+        assert isinstance(attn_metadata, TreeAttentionMetadata)
+        slot_mapping = attn_metadata.slot_mapping
+
+        # Get KV cache slots.
+        from_slots = slot_mapping[from_token_indices]
+        to_slots = slot_mapping[to_token_indices]
+
+        # Convert slots to blocks and offsets.
+        from_blocks = from_slots // block_size
+        from_offsets = from_slots % block_size
+        to_blocks = to_slots // block_size
+        to_offsets = to_slots % block_size
+
+        # TODO(TheEpicDolphin): Optimize the per-layer KV cache copy.
+        for kv_cache in self.kv_caches:
+            kv_cache[:, to_blocks,
+                     to_offsets, :, :] = kv_cache[:, from_blocks,
+                                                  from_offsets, :, :]
