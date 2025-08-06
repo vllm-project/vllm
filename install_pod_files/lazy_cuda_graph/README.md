@@ -698,3 +698,403 @@ DEBUG 08-06 10:27:22 [core.py:687] EngineCore loop active.
 (APIServer pid=192421) INFO:     127.0.0.1:57716 - "POST /v1/completions HTTP/1.1" 200 OK
 (APIServer pid=192421) INFO 08-06 10:27:22 [async_llm.py:273] Added request cmpl-19484518145041b1a5aa1f0614d24b22-0.
 DEBUG 08-06 10:27:26 [core.py:681] EngineCore waiting for work.
+
+
+### MAIN WITH BETTER TIMING FOR CUDA GRAPHS DURING INIT
+root@vllm-vm:/app/vllm# VLLM_LOGGING_LEVEL=DEBUG vllm serve meta-llama/Llama-3.2-1B
+DEBUG 08-06 11:50:36 [__init__.py:30] No plugins for group vllm.platform_plugins found.
+DEBUG 08-06 11:50:36 [__init__.py:34] Checking if TPU platform is available.
+DEBUG 08-06 11:50:36 [__init__.py:52] TPU platform is not available because: No module named 'libtpu'
+DEBUG 08-06 11:50:36 [__init__.py:58] Checking if CUDA platform is available.
+DEBUG 08-06 11:50:36 [__init__.py:78] Confirmed CUDA platform is available.
+DEBUG 08-06 11:50:36 [__init__.py:106] Checking if ROCm platform is available.
+DEBUG 08-06 11:50:36 [__init__.py:120] ROCm platform is not available because: No module named 'amdsmi'
+DEBUG 08-06 11:50:36 [__init__.py:127] Checking if XPU platform is available.
+DEBUG 08-06 11:50:36 [__init__.py:146] XPU platform is not available because: No module named 'intel_extension_for_pytorch'
+DEBUG 08-06 11:50:36 [__init__.py:153] Checking if CPU platform is available.
+DEBUG 08-06 11:50:36 [__init__.py:175] Checking if Neuron platform is available.
+DEBUG 08-06 11:50:36 [__init__.py:58] Checking if CUDA platform is available.
+DEBUG 08-06 11:50:36 [__init__.py:78] Confirmed CUDA platform is available.
+INFO 08-06 11:50:36 [__init__.py:241] Automatically detected platform cuda.
+DEBUG 08-06 11:50:39 [utils.py:168] Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn'
+DEBUG 08-06 11:50:39 [__init__.py:38] Available plugins for group vllm.general_plugins:
+DEBUG 08-06 11:50:39 [__init__.py:40] - lora_filesystem_resolver -> vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver
+DEBUG 08-06 11:50:39 [__init__.py:43] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+(APIServer pid=210846) INFO 08-06 11:50:39 [api_server.py:1774] vLLM API server version 0.1.dev8168+g475c1a0
+(APIServer pid=210846) INFO 08-06 11:50:39 [utils.py:326] non-default args: {'model_tag': 'meta-llama/Llama-3.2-1B', 'model': 'meta-llama/Llama-3.2-1B'}
+(APIServer pid=210846) INFO 08-06 11:50:45 [config.py:713] Resolved architecture: LlamaForCausalLM
+(APIServer pid=210846) INFO 08-06 11:50:46 [config.py:1716] Using max model len 131072
+(APIServer pid=210846) DEBUG 08-06 11:50:46 [arg_utils.py:1657] Setting max_num_batched_tokens to 2048 for OPENAI_API_SERVER usage context.
+(APIServer pid=210846) DEBUG 08-06 11:50:46 [arg_utils.py:1666] Setting max_num_seqs to 256 for OPENAI_API_SERVER usage context.
+(APIServer pid=210846) INFO 08-06 11:50:46 [config.py:2542] Chunked prefill is enabled with max_num_batched_tokens=2048.
+DEBUG 08-06 11:50:50 [__init__.py:30] No plugins for group vllm.platform_plugins found.
+DEBUG 08-06 11:50:50 [__init__.py:34] Checking if TPU platform is available.
+DEBUG 08-06 11:50:50 [__init__.py:52] TPU platform is not available because: No module named 'libtpu'
+DEBUG 08-06 11:50:50 [__init__.py:58] Checking if CUDA platform is available.
+DEBUG 08-06 11:50:50 [__init__.py:78] Confirmed CUDA platform is available.
+DEBUG 08-06 11:50:50 [__init__.py:106] Checking if ROCm platform is available.
+DEBUG 08-06 11:50:50 [__init__.py:120] ROCm platform is not available because: No module named 'amdsmi'
+DEBUG 08-06 11:50:50 [__init__.py:127] Checking if XPU platform is available.
+DEBUG 08-06 11:50:50 [__init__.py:146] XPU platform is not available because: No module named 'intel_extension_for_pytorch'
+DEBUG 08-06 11:50:50 [__init__.py:153] Checking if CPU platform is available.
+DEBUG 08-06 11:50:50 [__init__.py:175] Checking if Neuron platform is available.
+DEBUG 08-06 11:50:50 [__init__.py:58] Checking if CUDA platform is available.
+DEBUG 08-06 11:50:50 [__init__.py:78] Confirmed CUDA platform is available.
+INFO 08-06 11:50:50 [__init__.py:241] Automatically detected platform cuda.
+INFO 08-06 11:50:53 [core.py:591] Waiting for init message from front-end.
+(APIServer pid=210846) DEBUG 08-06 11:50:53 [utils.py:822] HELLO from local core engine process 0.
+DEBUG 08-06 11:50:53 [core.py:599] Received init message: EngineHandshakeMetadata(addresses=EngineZmqAddresses(inputs=['ipc:///tmp/8e7b68a9-6ab5-47f6-a338-14141ce30bb4'], outputs=['ipc:///tmp/a3a204f9-bb22-4721-9edd-e20eaf072a13'], coordinator_input=None, coordinator_output=None, frontend_stats_publish_address=None), parallel_config={'data_parallel_master_ip': '127.0.0.1', 'data_parallel_master_port': 0, 'data_parallel_size': 1})
+DEBUG 08-06 11:50:53 [__init__.py:38] Available plugins for group vllm.general_plugins:
+DEBUG 08-06 11:50:53 [__init__.py:40] - lora_filesystem_resolver -> vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver
+DEBUG 08-06 11:50:53 [__init__.py:43] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 08-06 11:50:53 [core.py:73] Initializing a V1 LLM engine (v0.1.dev8168+g475c1a0) with config: model='meta-llama/Llama-3.2-1B', speculative_config=None, tokenizer='meta-llama/Llama-3.2-1B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config={}, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=131072, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto, device_config=cuda, decoding_config=DecodingConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_backend=''), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=0, served_model_name=meta-llama/Llama-3.2-1B, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=True, chunked_prefill_enabled=True, use_async_output_proc=True, pooler_config=None, compilation_config={"level":3,"debug_dump_path":"","cache_dir":"","backend":"","custom_ops":[],"splitting_ops":["vllm.unified_attention","vllm.unified_attention_with_output","vllm.mamba_mixer2"],"use_inductor":true,"compile_sizes":[],"inductor_compile_config":{"enable_auto_functionalized_v2":false},"inductor_passes":{},"use_cudagraph":true,"cudagraph_num_of_warmups":1,"cudagraph_capture_sizes":[512,504,496,488,480,472,464,456,448,440,432,424,416,408,400,392,384,376,368,360,352,344,336,328,320,312,304,296,288,280,272,264,256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"cudagraph_copy_inputs":false,"full_cuda_graph":false,"max_capture_size":512,"local_cache_dir":null}
+DEBUG 08-06 11:50:54 [decorators.py:139] Inferred dynamic dimensions for forward method of <class 'vllm.model_executor.models.llama.LlamaModel'>: ['input_ids', 'positions', 'intermediate_tensors', 'inputs_embeds']
+DEBUG 08-06 11:50:54 [decorators.py:139] Inferred dynamic dimensions for forward method of <class 'vllm.model_executor.models.llama_eagle3.LlamaModel'>: ['input_ids', 'positions', 'hidden_states']
+DEBUG 08-06 11:50:54 [__init__.py:3053] Methods determine_num_available_blocks,device_config,get_cache_block_size_bytes not implemented in <vllm.v1.worker.gpu_worker.Worker object at 0x7f383017c170>
+DEBUG 08-06 11:50:54 [config.py:4998] enabled custom ops: Counter()
+DEBUG 08-06 11:50:54 [config.py:5000] disabled custom ops: Counter()
+DEBUG 08-06 11:50:54 [parallel_state.py:945] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://10.129.4.27:52587 backend=nccl
+DEBUG 08-06 11:50:54 [parallel_state.py:996] Detected 1 nodes in the distributed environment
+INFO 08-06 11:50:54 [parallel_state.py:1102] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, TP rank 0, EP rank 0
+INFO 08-06 11:50:54 [topk_topp_sampler.py:49] Using FlashInfer for top-p & top-k sampling.
+DEBUG 08-06 11:50:54 [config.py:4998] enabled custom ops: Counter()
+DEBUG 08-06 11:50:54 [config.py:5000] disabled custom ops: Counter()
+INFO 08-06 11:50:54 [gpu_model_runner.py:1921] Starting to load model meta-llama/Llama-3.2-1B...
+INFO 08-06 11:50:54 [gpu_model_runner.py:1953] Loading model from scratch...
+INFO 08-06 11:50:54 [cuda.py:305] Using Flash Attention backend on V1 engine.
+DEBUG 08-06 11:50:54 [backends.py:39] Using InductorAdaptor
+DEBUG 08-06 11:50:54 [config.py:4998] enabled custom ops: Counter()
+DEBUG 08-06 11:50:54 [config.py:5000] disabled custom ops: Counter({'rms_norm': 33, 'silu_and_mul': 16, 'rotary_embedding': 1})
+DEBUG 08-06 11:50:54 [base_loader.py:47] Loading weights on cuda ...
+INFO 08-06 11:50:55 [weight_utils.py:296] Using model weights format ['*.safetensors']
+INFO 08-06 11:50:55 [weight_utils.py:349] No model.safetensors.index.json found in remote.
+Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  2.07it/s]
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  2.07it/s]
+
+INFO 08-06 11:50:55 [default_loader.py:262] Loading weights took 0.56 seconds
+INFO 08-06 11:50:56 [gpu_model_runner.py:1970] Model loading took 2.3185 GiB and 0.846115 seconds
+DEBUG 08-06 11:50:56 [decorators.py:237] Start compiling function <code object forward at 0xe4d3b60, file "/app/vllm/vllm/model_executor/models/llama.py", line 368>
+DEBUG 08-06 11:50:59 [backends.py:487] Traced files (to be considered for compilation cache):
+DEBUG 08-06 11:50:59 [backends.py:487] /app/vllm/vllm/attention/layer.py
+DEBUG 08-06 11:50:59 [backends.py:487] /app/vllm/vllm/distributed/communication_op.py
+DEBUG 08-06 11:50:59 [backends.py:487] /app/vllm/vllm/distributed/parallel_state.py
+DEBUG 08-06 11:50:59 [backends.py:487] /app/vllm/vllm/model_executor/custom_op.py
+DEBUG 08-06 11:50:59 [backends.py:487] /app/vllm/vllm/model_executor/layers/activation.py
+DEBUG 08-06 11:50:59 [backends.py:487] /app/vllm/vllm/model_executor/layers/layernorm.py
+DEBUG 08-06 11:50:59 [backends.py:487] /app/vllm/vllm/model_executor/layers/linear.py
+DEBUG 08-06 11:50:59 [backends.py:487] /app/vllm/vllm/model_executor/layers/rotary_embedding.py
+DEBUG 08-06 11:50:59 [backends.py:487] /app/vllm/vllm/model_executor/layers/utils.py
+DEBUG 08-06 11:50:59 [backends.py:487] /app/vllm/vllm/model_executor/layers/vocab_parallel_embedding.py
+DEBUG 08-06 11:50:59 [backends.py:487] /app/vllm/vllm/model_executor/models/llama.py
+DEBUG 08-06 11:50:59 [backends.py:487] /app/vllm/vllm/platforms/interface.py
+DEBUG 08-06 11:50:59 [backends.py:487] /usr/local/lib/python3.12/dist-packages/torch/_dynamo/polyfills/__init__.py
+DEBUG 08-06 11:50:59 [backends.py:487] /usr/local/lib/python3.12/dist-packages/torch/nn/modules/container.py
+DEBUG 08-06 11:50:59 [backends.py:487] /usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py
+INFO 08-06 11:51:00 [backends.py:534] Using cache directory: /root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/backbone for vLLM's torch.compile
+INFO 08-06 11:51:00 [backends.py:545] Dynamo bytecode transform time: 3.75 s
+DEBUG 08-06 11:51:00 [backends.py:125] Directly load the 0-th graph for dynamic shape from inductor via handle ('foww4arjrmo5ntlgmdcjpr7xst6lgk62vi5tjijgfsyto7r2mfpr', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/3i/c3ifc7om5773max53s4uxbx3idf2b3yt2edem25nule7wkt3ttgy.py')
+DEBUG 08-06 11:51:00 [backends.py:157] TOTAL LOADING TIME: 0.054434 s
+DEBUG 08-06 11:51:00 [backends.py:125] Directly load the 1-th graph for dynamic shape from inductor via handle ('fiuf3tlstrqbuky24wigbejkm2cnwqxxn5nouiwmwuyprblrvtoa', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ky/cky4e3zslhbt7nnarafnykqxtqf6tjofdtfo5yqj5mc7aqemgqwr.py')
+DEBUG 08-06 11:51:00 [backends.py:157] TOTAL LOADING TIME: 0.052839 s
+DEBUG 08-06 11:51:00 [backends.py:125] Directly load the 2-th graph for dynamic shape from inductor via handle ('fiuf3tlstrqbuky24wigbejkm2cnwqxxn5nouiwmwuyprblrvtoa', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ky/cky4e3zslhbt7nnarafnykqxtqf6tjofdtfo5yqj5mc7aqemgqwr.py')
+DEBUG 08-06 11:51:00 [backends.py:157] TOTAL LOADING TIME: 0.052299 s
+DEBUG 08-06 11:51:00 [backends.py:125] Directly load the 3-th graph for dynamic shape from inductor via handle ('fiuf3tlstrqbuky24wigbejkm2cnwqxxn5nouiwmwuyprblrvtoa', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ky/cky4e3zslhbt7nnarafnykqxtqf6tjofdtfo5yqj5mc7aqemgqwr.py')
+DEBUG 08-06 11:51:00 [backends.py:157] TOTAL LOADING TIME: 0.053433 s
+DEBUG 08-06 11:51:00 [backends.py:125] Directly load the 4-th graph for dynamic shape from inductor via handle ('fiuf3tlstrqbuky24wigbejkm2cnwqxxn5nouiwmwuyprblrvtoa', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ky/cky4e3zslhbt7nnarafnykqxtqf6tjofdtfo5yqj5mc7aqemgqwr.py')
+DEBUG 08-06 11:51:00 [backends.py:157] TOTAL LOADING TIME: 0.053414 s
+DEBUG 08-06 11:51:01 [backends.py:125] Directly load the 5-th graph for dynamic shape from inductor via handle ('fiuf3tlstrqbuky24wigbejkm2cnwqxxn5nouiwmwuyprblrvtoa', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ky/cky4e3zslhbt7nnarafnykqxtqf6tjofdtfo5yqj5mc7aqemgqwr.py')
+DEBUG 08-06 11:51:01 [backends.py:157] TOTAL LOADING TIME: 0.052908 s
+DEBUG 08-06 11:51:01 [backends.py:125] Directly load the 6-th graph for dynamic shape from inductor via handle ('fiuf3tlstrqbuky24wigbejkm2cnwqxxn5nouiwmwuyprblrvtoa', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ky/cky4e3zslhbt7nnarafnykqxtqf6tjofdtfo5yqj5mc7aqemgqwr.py')
+DEBUG 08-06 11:51:01 [backends.py:157] TOTAL LOADING TIME: 0.062757 s
+DEBUG 08-06 11:51:01 [backends.py:125] Directly load the 7-th graph for dynamic shape from inductor via handle ('fiuf3tlstrqbuky24wigbejkm2cnwqxxn5nouiwmwuyprblrvtoa', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ky/cky4e3zslhbt7nnarafnykqxtqf6tjofdtfo5yqj5mc7aqemgqwr.py')
+DEBUG 08-06 11:51:01 [backends.py:157] TOTAL LOADING TIME: 0.054026 s
+DEBUG 08-06 11:51:01 [backends.py:125] Directly load the 8-th graph for dynamic shape from inductor via handle ('fiuf3tlstrqbuky24wigbejkm2cnwqxxn5nouiwmwuyprblrvtoa', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ky/cky4e3zslhbt7nnarafnykqxtqf6tjofdtfo5yqj5mc7aqemgqwr.py')
+DEBUG 08-06 11:51:01 [backends.py:157] TOTAL LOADING TIME: 0.052561 s
+DEBUG 08-06 11:51:01 [backends.py:125] Directly load the 9-th graph for dynamic shape from inductor via handle ('fiuf3tlstrqbuky24wigbejkm2cnwqxxn5nouiwmwuyprblrvtoa', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ky/cky4e3zslhbt7nnarafnykqxtqf6tjofdtfo5yqj5mc7aqemgqwr.py')
+DEBUG 08-06 11:51:01 [backends.py:157] TOTAL LOADING TIME: 0.053620 s
+DEBUG 08-06 11:51:01 [backends.py:125] Directly load the 10-th graph for dynamic shape from inductor via handle ('fiuf3tlstrqbuky24wigbejkm2cnwqxxn5nouiwmwuyprblrvtoa', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ky/cky4e3zslhbt7nnarafnykqxtqf6tjofdtfo5yqj5mc7aqemgqwr.py')
+DEBUG 08-06 11:51:01 [backends.py:157] TOTAL LOADING TIME: 0.051525 s
+DEBUG 08-06 11:51:02 [backends.py:125] Directly load the 11-th graph for dynamic shape from inductor via handle ('fiuf3tlstrqbuky24wigbejkm2cnwqxxn5nouiwmwuyprblrvtoa', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ky/cky4e3zslhbt7nnarafnykqxtqf6tjofdtfo5yqj5mc7aqemgqwr.py')
+DEBUG 08-06 11:51:02 [backends.py:157] TOTAL LOADING TIME: 0.059127 s
+DEBUG 08-06 11:51:02 [backends.py:125] Directly load the 12-th graph for dynamic shape from inductor via handle ('fiuf3tlstrqbuky24wigbejkm2cnwqxxn5nouiwmwuyprblrvtoa', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ky/cky4e3zslhbt7nnarafnykqxtqf6tjofdtfo5yqj5mc7aqemgqwr.py')
+DEBUG 08-06 11:51:02 [backends.py:157] TOTAL LOADING TIME: 0.050792 s
+DEBUG 08-06 11:51:02 [backends.py:125] Directly load the 13-th graph for dynamic shape from inductor via handle ('fiuf3tlstrqbuky24wigbejkm2cnwqxxn5nouiwmwuyprblrvtoa', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ky/cky4e3zslhbt7nnarafnykqxtqf6tjofdtfo5yqj5mc7aqemgqwr.py')
+DEBUG 08-06 11:51:02 [backends.py:157] TOTAL LOADING TIME: 0.052969 s
+DEBUG 08-06 11:51:02 [backends.py:125] Directly load the 14-th graph for dynamic shape from inductor via handle ('fiuf3tlstrqbuky24wigbejkm2cnwqxxn5nouiwmwuyprblrvtoa', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ky/cky4e3zslhbt7nnarafnykqxtqf6tjofdtfo5yqj5mc7aqemgqwr.py')
+DEBUG 08-06 11:51:02 [backends.py:157] TOTAL LOADING TIME: 0.054033 s
+DEBUG 08-06 11:51:02 [backends.py:125] Directly load the 15-th graph for dynamic shape from inductor via handle ('fiuf3tlstrqbuky24wigbejkm2cnwqxxn5nouiwmwuyprblrvtoa', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ky/cky4e3zslhbt7nnarafnykqxtqf6tjofdtfo5yqj5mc7aqemgqwr.py')
+DEBUG 08-06 11:51:02 [backends.py:157] TOTAL LOADING TIME: 0.050994 s
+DEBUG 08-06 11:51:02 [backends.py:125] Directly load the 16-th graph for dynamic shape from inductor via handle ('fvbvyhtr37kusmqij6uiinukna7ifz6inpaixj2ehzbq2ipe7nms', '/root/.cache/vllm/torch_compile_cache/25d4010308/rank_0_0/inductor_cache/ts/ctsi5px5m6j4xfpnuarwb5hejxunelgdyavbmz52ohrcimfwoaig.py')
+DEBUG 08-06 11:51:02 [backends.py:157] TOTAL LOADING TIME: 0.025458 s
+INFO 08-06 11:51:02 [backends.py:165] Directly load the compiled graph(s) for dynamic shape from the cache, took 2.616 s
+(APIServer pid=210846) DEBUG 08-06 11:51:03 [utils.py:741] Waiting for 1 local, 0 remote core engine proc(s) to start.
+INFO 08-06 11:51:03 [monitor.py:34] torch.compile takes 3.75 s in total
+/usr/local/lib/python3.12/dist-packages/torch/utils/cpp_extension.py:2356: UserWarning: TORCH_CUDA_ARCH_LIST is not set, all archs for visible cards are included for compilation. 
+If this is not desired, please set os.environ['TORCH_CUDA_ARCH_LIST'].
+  warnings.warn(
+DEBUG 08-06 11:51:04 [gpu_worker.py:262] Initial free memory: 43.82 GiB; Requested memory: 0.90 (util), 39.88 GiB
+DEBUG 08-06 11:51:04 [gpu_worker.py:269] Free memory after profiling: 41.43 GiB (total), 37.49 GiB (within requested)
+DEBUG 08-06 11:51:04 [gpu_worker.py:275] Memory profiling takes 7.87 seconds. Total non KV cache memory: 2.78GiB; torch peak memory increase: 0.45GiB; non-torch forward increase memory: 0.02GiB; weights memory: 2.32GiB.
+INFO 08-06 11:51:04 [gpu_worker.py:276] Available KV cache memory: 37.10 GiB
+INFO 08-06 11:51:04 [kv_cache_utils.py:831] GPU KV cache size: 1,215,552 tokens
+INFO 08-06 11:51:04 [kv_cache_utils.py:835] Maximum concurrency for 131,072 tokens per request: 9.27x
+DEBUG 08-06 11:51:04 [config.py:4998] enabled custom ops: Counter()
+DEBUG 08-06 11:51:04 [config.py:5000] disabled custom ops: Counter({'rms_norm': 33, 'silu_and_mul': 16, 'rotary_embedding': 1})
+Capturing CUDA graph shapes:   0%|                                                                    | 0/67 [00:00<?, ?it/s]DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 512
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 512
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.027 secs for 512 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 504
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 504
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.017 secs for 504 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 496
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 496
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.015 secs for 496 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 488
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 488
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.015 secs for 488 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 480
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 480
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 480 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 472
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 472
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 472 case
+Capturing CUDA graph shapes:   9%|█████▎                                                      | 6/67 [00:00<00:01, 55.67it/s]DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 464
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 464
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.032 secs for 464 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 456
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 456
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 456 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 448
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 448
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.017 secs for 448 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 440
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 440
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.015 secs for 440 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 432
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 432
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.017 secs for 432 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 424
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 424
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 424 case
+Capturing CUDA graph shapes:  18%|██████████▌                                                | 12/67 [00:00<00:01, 54.01it/s]DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 416
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 416
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.017 secs for 416 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 408
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 408
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 408 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 400
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 400
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.017 secs for 400 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 392
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 392
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.021 secs for 392 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 384
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 384
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 384 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 376
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 376
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.018 secs for 376 case
+Capturing CUDA graph shapes:  27%|███████████████▊                                           | 18/67 [00:00<00:00, 55.29it/s]DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 368
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 368
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 368 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 360
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 360
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.018 secs for 360 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 352
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 352
+DEBUG 08-06 11:51:04 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 352 case
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 344
+DEBUG 08-06 11:51:04 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 344
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.018 secs for 344 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 336
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 336
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 336 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 328
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 328
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.019 secs for 328 case
+Capturing CUDA graph shapes:  36%|█████████████████████▏                                     | 24/67 [00:00<00:00, 56.15it/s]DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 320
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 320
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 320 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 312
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 312
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.015 secs for 312 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 304
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 304
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.017 secs for 304 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 296
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 296
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 296 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 288
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 288
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.017 secs for 288 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 280
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 280
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.015 secs for 280 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 272
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 272
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.017 secs for 272 case
+Capturing CUDA graph shapes:  46%|███████████████████████████▎                               | 31/67 [00:00<00:00, 58.39it/s]DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 264
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 264
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.014 secs for 264 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 256
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 256
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.019 secs for 256 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 248
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 248
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 248 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 240
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 240
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.018 secs for 240 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 232
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 232
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.023 secs for 232 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 224
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 224
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.025 secs for 224 case
+Capturing CUDA graph shapes:  55%|████████████████████████████████▌                          | 37/67 [00:00<00:00, 55.99it/s]DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 216
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 216
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 216 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 208
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 208
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.018 secs for 208 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 200
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 200
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.015 secs for 200 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 192
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 192
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 192 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 184
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 184
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.017 secs for 184 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 176
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 176
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 176 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 168
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 168
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.017 secs for 168 case
+Capturing CUDA graph shapes:  66%|██████████████████████████████████████▋                    | 44/67 [00:00<00:00, 57.39it/s]DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 160
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 160
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 160 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 152
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 152
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.029 secs for 152 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 144
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 144
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.022 secs for 144 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 136
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 136
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.017 secs for 136 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 128
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 128
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 128 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 120
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 120
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 120 case
+Capturing CUDA graph shapes:  75%|████████████████████████████████████████████               | 50/67 [00:00<00:00, 55.65it/s]DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 112
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 112
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.015 secs for 112 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 104
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 104
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 104 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 96
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 96
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 96 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 88
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 88
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.015 secs for 88 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 80
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 80
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.017 secs for 80 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 72
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 72
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 72 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 64
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 64
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.017 secs for 64 case
+Capturing CUDA graph shapes:  85%|██████████████████████████████████████████████████▏        | 57/67 [00:01<00:00, 57.84it/s]DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 56
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 56
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.015 secs for 56 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 48
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 48
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 48 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 40
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 40
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.015 secs for 40 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 32
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 32
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.016 secs for 32 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 24
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 24
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.015 secs for 24 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 16
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 16
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.015 secs for 16 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 8
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 8
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.015 secs for 8 case
+Capturing CUDA graph shapes:  96%|████████████████████████████████████████████████████████▎  | 64/67 [00:01<00:00, 59.87it/s]DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 4
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 4
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.014 secs for 4 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 2
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 2
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.022 secs for 2 case
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:151] Warming up 1/1 for shape 1
+DEBUG 08-06 11:51:05 [cuda_piecewise_backend.py:162] Capturing a cudagraph for shape 1
+DEBUG 08-06 11:51:05 [gpu_model_runner.py:2572] DIEGO: CUDAGraph finished in 0.022 secs for 1 case
+Capturing CUDA graph shapes: 100%|███████████████████████████████████████████████████████████| 67/67 [00:01<00:00, 57.26it/s]
+INFO 08-06 11:51:05 [gpu_model_runner.py:2580] Graph capturing finished in 1.384 secs, took 0.31 GiB
+INFO 08-06 11:51:05 [core.py:201] init engine (profile, create kv cache, warmup model) took 9.72 seconds
+(APIServer pid=210846) DEBUG 08-06 11:51:06 [utils.py:822] READY from local core engine process 0.
+DEBUG 08-06 11:51:06 [core.py:681] EngineCore waiting for work.
+(APIServer pid=210846) INFO 08-06 11:51:06 [loggers.py:142] Engine 000: vllm cache_config_info with initialization after num_gpu_blocks is: 75972
+DEBUG 08-06 11:51:06 [core.py:681] EngineCore waiting for work.
+DEBUG 08-06 11:51:06 [core.py:681] EngineCore waiting for work.
+(APIServer pid=210846) INFO 08-06 11:51:06 [api_server.py:1595] Supported_tasks: ['generate']
+(APIServer pid=210846) WARNING 08-06 11:51:06 [config.py:1616] Default sampling parameters have been overridden by the model's Hugging Face generation config recommended from the model creator. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+(APIServer pid=210846) INFO 08-06 11:51:06 [serving_responses.py:89] Using default chat sampling params from model: {'temperature': 0.6, 'top_p': 0.9}
+(APIServer pid=210846) INFO 08-06 11:51:06 [serving_chat.py:125] Using default chat sampling params from model: {'temperature': 0.6, 'top_p': 0.9}
+(APIServer pid=210846) INFO 08-06 11:51:06 [serving_completion.py:77] Using default completion sampling params from model: {'temperature': 0.6, 'top_p': 0.9}
+(APIServer pid=210846) INFO 08-06 11:51:06 [api_server.py:1847] Starting vLLM API server 0 on http://0.0.0.0:8000
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:29] Available routes are:
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /openapi.json, Methods: HEAD, GET
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /docs, Methods: HEAD, GET
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /docs/oauth2-redirect, Methods: HEAD, GET
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /redoc, Methods: HEAD, GET
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /health, Methods: GET
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /load, Methods: GET
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /ping, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /ping, Methods: GET
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /tokenize, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /detokenize, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /v1/models, Methods: GET
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /version, Methods: GET
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /v1/responses, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /v1/responses/{response_id}, Methods: GET
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /v1/responses/{response_id}/cancel, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /v1/chat/completions, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /v1/completions, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /v1/embeddings, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /pooling, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /classify, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /score, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /v1/score, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /v1/audio/transcriptions, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /v1/audio/translations, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /rerank, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /v1/rerank, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /v2/rerank, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /scale_elastic_ep, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /is_scaling_elastic_ep, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /invocations, Methods: POST
+(APIServer pid=210846) INFO 08-06 11:51:06 [launcher.py:37] Route: /metrics, Methods: GET
+(APIServer pid=210846) INFO:     Started server process [210846]
+(APIServer pid=210846) INFO:     Waiting for application startup.
+(APIServer pid=210846) INFO:     Application startup complete.
+^CDEBUG 08-06 11:51:11 [core.py:649] EngineCore exiting.
+(APIServer pid=210846) DEBUG 08-06 11:51:12 [launcher.py:77] port 8000 is used by process psutil.Process(pid=210846, name='VLLM::APIServer_0', status='running', started='11:50:31') launched with command:
+(APIServer pid=210846) DEBUG 08-06 11:51:12 [launcher.py:77] VLLM::APIServer_0                                                    
+(APIServer pid=210846) INFO 08-06 11:51:12 [launcher.py:80] Shutting down FastAPI HTTP server.
+(APIServer pid=210846) INFO:     Shutting down
+(APIServer pid=210846) INFO:     Waiting for application shutdown.
+(APIServer pid=210846) INFO:     Application shutdown complete.
