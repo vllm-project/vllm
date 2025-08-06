@@ -937,4 +937,6 @@ def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
 
 
 class DeepseekV3ForCausalLMWithAdditionalHeads(DeepseekV3ForCausalLM, WithAdditionalHeads):
-    pass
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        DeepseekV3ForCausalLM.__init__(self, vllm_config=vllm_config, prefix=prefix)
+        WithAdditionalHeads.__init__(self, vllm_config=vllm_config)
