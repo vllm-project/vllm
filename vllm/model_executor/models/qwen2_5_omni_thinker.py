@@ -722,8 +722,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 "exactly same result as the transformers implementation "
                 "in the audio tower part.")
 
-        if multimodal_config and multimodal_config.get_limit_per_prompt(
-                "audio"):
+        if multimodal_config.get_limit_per_prompt("audio"):
             self.audio_tower = Qwen2_5OmniAudioEncoder(
                 thinker_config.audio_config)
         else:
