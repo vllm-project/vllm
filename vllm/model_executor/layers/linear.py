@@ -11,10 +11,8 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import envs
 from vllm.distributed import (GroupCoordinator, divide,
-                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              get_tp_group, split_tensor_along_last_dim,
-                              tensor_model_parallel_all_gather)
+                              get_tp_group, split_tensor_along_last_dim)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -590,7 +588,7 @@ class ColumnParallelLinear(LinearBase):
         output_parallel = self.quant_method.apply(self, input_, bias)
         if self.gather_output:
             # All-gather across the partitions.
-            output = tensor_model_parallel_all_gather(output_parallel)
+            output = self.comm_group.all_gather(output_parallel)
         else:
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
