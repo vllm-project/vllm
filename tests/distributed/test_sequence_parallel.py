@@ -14,7 +14,7 @@ from typing import Literal, NamedTuple, Optional
 
 import pytest
 
-from vllm.config import TaskOption
+from vllm.config import RunnerOption
 from vllm.logger import init_logger
 
 from ..models.registry import HF_EXAMPLE_MODELS
@@ -48,7 +48,7 @@ class SPTestSettings:
     distributed_backends: list[str]
     # vllm major version: "0" for V0, "1" for V1
     vllm_major_versions: list[str]
-    task: TaskOption
+    runner: RunnerOption
     test_options: SPTestOptions
 
     def __post_init__(self):
@@ -64,7 +64,7 @@ class SPTestSettings:
         tp_base: int = 2,
         pp_base: int = 1,
         multi_node_only: bool = False,
-        task: TaskOption = "auto",
+        runner: RunnerOption = "auto",
         load_format: Optional[str] = None,
     ):
         parallel_setups = []
@@ -81,7 +81,7 @@ class SPTestSettings:
             parallel_setups=parallel_setups,
             distributed_backends=["mp", "ray"],
             vllm_major_versions=["1", "1"],
-            task=task,
+            runner=runner,
             test_options=SPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
         )
@@ -91,7 +91,7 @@ class SPTestSettings:
         *,
         tp_base: int = 2,
         pp_base: int = 1,
-        task: TaskOption = "auto",
+        runner: RunnerOption = "auto",
         multi_node_only: bool = False,
         load_format: Optional[str] = None,
     ):
@@ -109,7 +109,7 @@ class SPTestSettings:
             parallel_setups=parallel_setups,
             distributed_backends=["mp", "ray"],
             vllm_major_versions=["1", "1"],
-            task=task,
+            runner=runner,
             test_options=SPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
         )
@@ -119,7 +119,7 @@ class SPTestSettings:
         *,
         tp_base: int = 2,
         pp_base: int = 1,
-        task: TaskOption = "auto",
+        runner: RunnerOption = "auto",
         multi_node_only: bool = False,
         load_format: Optional[str] = None,
     ):
@@ -135,7 +135,7 @@ class SPTestSettings:
             parallel_setups=parallel_setups,
             distributed_backends=["mp", "ray"],
             vllm_major_versions=["1", "1"],
-            task=task,
+            runner=runner,
             test_options=SPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
         )
@@ -147,7 +147,7 @@ class SPTestSettings:
             for backend, vllm_major_version in zip(self.distributed_backends,
                                                    self.vllm_major_versions):
                 yield (model_id, parallel_setup, backend, vllm_major_version,
-                       self.task, opts)
+                       self.runner, opts)
 
 
 def _compare_sp(
@@ -155,7 +155,7 @@ def _compare_sp(
     parallel_setup: ParallelSetup,
     distributed_backend: str,
     vllm_major_version: str,
-    task: TaskOption,
+    runner: RunnerOption,
     test_options: SPTestOptions,
     num_gpus_available: int,
     *,
@@ -217,8 +217,8 @@ def _compare_sp(
         common_args.append("--enable-chunked-prefill")
     if eager_mode:
         common_args.append("--enforce-eager")
-    if task != "auto":
-        common_args.extend(["--task", task])
+    if runner != "auto":
+        common_args.extend(["--runner", runner])
     if trust_remote_code:
         common_args.append("--trust-remote-code")
     if tokenizer_mode:
@@ -298,7 +298,7 @@ SP_TEST_MODELS = [
 
 @pytest.mark.parametrize(
     ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
-     "task", "test_options"),
+     "runner", "test_options"),
     [
         params for model_id, settings in SP_TEXT_GENERATION_MODELS.items()
         for params in settings.iter_params(model_id)
@@ -311,7 +311,7 @@ def test_tp_sp_generation(
     parallel_setup: ParallelSetup,
     distributed_backend: str,
     vllm_major_version: str,
-    task: TaskOption,
+    runner: RunnerOption,
     test_options: SPTestOptions,
     num_gpus_available,
 ):
@@ -319,7 +319,7 @@ def test_tp_sp_generation(
                 parallel_setup,
                 distributed_backend,
                 vllm_major_version,
-                task,
+                runner,
                 test_options,
                 num_gpus_available,
                 method="generate",

@@ -13,7 +13,6 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                                     MultiModalInputs)
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 
@@ -167,18 +166,6 @@ class InputPreprocessor:
             decoder_input_ids = [decoder_start_token_id] + decoder_input_ids
 
         return decoder_input_ids
-
-    def _apply_prompt_adapter(
-        self,
-        prompt_token_ids: list[int],
-        prompt_adapter_request: Optional[PromptAdapterRequest],
-    ) -> list[int]:
-        if prompt_adapter_request:
-            prompt_token_ids = (
-                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens
-                + prompt_token_ids)
-
-        return prompt_token_ids
 
     def _get_tokenization_kw(
         self,
@@ -786,15 +773,10 @@ class InputPreprocessor:
     def _build_decoder_only_llm_inputs(
         self,
         prompt_inputs: DecoderOnlyInputs,
-        prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> DecoderOnlyInputs:
         if "prompt_token_ids" in prompt_inputs:
             prompt_inputs = cast(Union[TokenInputs, MultiModalInputs],
                                  prompt_inputs)  # Needed for mypy
-            prompt_inputs["prompt_token_ids"] = self._apply_prompt_adapter(
-                prompt_inputs["prompt_token_ids"],
-                prompt_adapter_request=prompt_adapter_request,
-            )
 
         return prompt_inputs
 
@@ -803,7 +785,6 @@ class InputPreprocessor:
         prompt: SingletonPrompt,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
     ) -> DecoderOnlyInputs:
         """
@@ -815,7 +796,6 @@ class InputPreprocessor:
 
         * prompt: input prompt
         * lora_request
-        * prompt_adapter_request
         * return_mm_hashes
 
         Returns:
@@ -830,17 +810,13 @@ class InputPreprocessor:
             return_mm_hashes=return_mm_hashes,
         )
 
-        return self._build_decoder_only_llm_inputs(
-            prompt_comps,
-            prompt_adapter_request=prompt_adapter_request,
-        )
+        return self._build_decoder_only_llm_inputs(prompt_comps)
 
     async def _process_decoder_only_prompt_async(
         self,
         prompt: SingletonPrompt,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
     ) -> DecoderOnlyInputs:
         """
@@ -854,17 +830,13 @@ class InputPreprocessor:
             return_mm_hashes=return_mm_hashes,
         )
 
-        return self._build_decoder_only_llm_inputs(
-            prompt_comps,
-            prompt_adapter_request=prompt_adapter_request,
-        )
+        return self._build_decoder_only_llm_inputs(prompt_comps)
 
     def preprocess(
         self,
         prompt: PromptType,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
@@ -886,7 +858,6 @@ class InputPreprocessor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
             return_mm_hashes=return_mm_hashes,
         )
 
@@ -895,7 +866,6 @@ class InputPreprocessor:
         prompt: PromptType,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
     ) -> ProcessorInputs:
         """
@@ -919,6 +889,5 @@ class InputPreprocessor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
             return_mm_hashes=return_mm_hashes,
         )

@@ -4,8 +4,11 @@ import os
 
 import openai
 
+PREFILL_HOST = os.getenv("PREFILL_HOST", "localhost")
 PREFILL_PORT = os.getenv("PREFILL_PORT", None)
+DECODE_HOST = os.getenv("DECODE_HOST", "localhost")
 DECODE_PORT = os.getenv("DECODE_PORT", None)
+PROXY_HOST = os.getenv("PROXY_HOST", "localhost")
 PROXY_PORT = os.getenv("PROXY_PORT", None)
 
 if PREFILL_PORT is None or DECODE_PORT is None or PROXY_PORT is None:
@@ -21,15 +24,15 @@ def test_edge_cases():
     # Set the OpenAI API key and base URL
     decode_client = openai.OpenAI(
         api_key="MY_KEY",
-        base_url=f"http://localhost:{DECODE_PORT}/v1",
+        base_url=f"http://{DECODE_HOST}:{DECODE_PORT}/v1",
     )
     prefill_client = openai.OpenAI(
         api_key="MY_KEY",
-        base_url=f"http://localhost:{PREFILL_PORT}/v1",
+        base_url=f"http://{PREFILL_HOST}:{PREFILL_PORT}/v1",
     )
     proxy_client = openai.OpenAI(
         api_key="MY_KEY",
-        base_url=f"http://localhost:{PROXY_PORT}/v1",
+        base_url=f"http://{PROXY_HOST}:{PROXY_PORT}/v1",
     )
 
     # Get the list of models

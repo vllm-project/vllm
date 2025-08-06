@@ -15,6 +15,7 @@ _SAMPLING_EPS = 1e-5
 class Sampler(nn.Module):
 
     def __init__(self):
+        # TODO(houseroad): Add support for logprobs_mode.
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler()
 

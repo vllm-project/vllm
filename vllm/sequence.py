@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass, field
 from functools import reduce
-from typing import Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import msgspec
 import torch
@@ -19,8 +19,11 @@ from vllm.inputs import SingletonInputs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.kv_connector_model_runner_mixin import (
+        KVConnectorOutput)
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
@@ -458,7 +461,6 @@ class Sequence:
             block size used by the block manager and cache engine.
         eos_token_id: The end-of-sequence (EOS) token id recognized by this LLM.
         lora_request: LoRA request.
-        prompt_adapter_request: Prompt Adapter request.
     """
 
     def __init__(
@@ -468,14 +470,12 @@ class Sequence:
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         self.seq_id = seq_id
         self.inputs = inputs
         self.block_size = block_size
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
-        self.prompt_adapter_request = prompt_adapter_request
 
         self.data = SequenceData.from_seqs(
             self.prompt_token_ids,
@@ -537,11 +537,6 @@ class Sequence:
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
-    @property
-    def prompt_adapter_id(self) -> int:
-        return self.prompt_adapter_request.prompt_adapter_id \
-                        if self.prompt_adapter_request else 0
-
     def get_output_text_to_return(self, buffer_length: int,
                                   delta: bool) -> str:
         """If delta is True, only new text since the last call to
@@ -601,12 +596,12 @@ class Sequence:
         designed for prefix caching mode. The final sequence hash is determined
         by applying token_ids from the sequence's blocks.
         """
-        if self.prompt_adapter_id == 0 and self.lora_int_id == 0:
+        if self.lora_int_id == 0:
             return None
 
         # NOTE: If there are additional factors influencing the block aside from
         # token_ids, include them as input parameters to the hash.
-        return hash((self.prompt_adapter_id, self.lora_int_id))
+        return hash(self.lora_int_id)
 
     def num_hashed_tokens_of_block(self, logical_idx: int):
         return logical_idx * self.block_size + self.block_size
@@ -707,7 +702,6 @@ class SequenceGroup:
         encoder_seq: Optional, the single encoder sequence. Should be None
                      unless you are working with an encoder/decoder model.
         trace_headers: OpenTelemetry trace headers.
-        prompt_adapter_request: Prompt Adapter request.
         priority: User-defined priority of the request.
         draft_size: The number of speculative tokens plus one from the target
                     model; equal to max number of tokens a step can generate
@@ -725,7 +719,6 @@ class SequenceGroup:
                  pooled_data: Optional[torch.Tensor] = None,
                  encoder_seq: Optional[Sequence] = None,
                  trace_headers: Optional[Mapping[str, str]] = None,
-                 prompt_adapter_request: Optional[PromptAdapterRequest] = None,
                  priority: int = 0,
                  draft_size: int = 1) -> None:
         self.request_id = request_id
@@ -747,7 +740,6 @@ class SequenceGroup:
         self.state = SequenceGroupState()
         self.pooling_params = pooling_params
         self.pooled_data = pooled_data
-        self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
         self.priority = priority
@@ -801,16 +793,6 @@ class SequenceGroup:
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
-
-    @property
-    def prompt_adapter_id(self) -> int:
-        return self.prompt_adapter_request.prompt_adapter_id \
-                        if self.prompt_adapter_request else 0
-
-    @property
-    def prompt_adapter_num_virtual_tokens(self) -> int:
-        return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens\
-                         if self.prompt_adapter_request else 0
 
     def init_multi_step(self, num_steps: int) -> None:
         self.state.num_steps = num_steps
@@ -1011,7 +993,6 @@ class SequenceGroupMetadata(
                            (SequenceGroup.encoder_seq). Should be None
                            unless you are working with an encoder/decoder
                            model.
-        prompt_adapter_request: Prompt Adapter request.
     """
 
     request_id: str
@@ -1030,7 +1011,6 @@ class SequenceGroupMetadata(
     multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[list[int]] = None
-    prompt_adapter_request: Optional[PromptAdapterRequest] = None
     token_chunk_size: Optional[int] = None
 
     ### Stateful fields that are lazily defined. ###
@@ -1051,16 +1031,6 @@ class SequenceGroupMetadata(
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
-
-    @property
-    def prompt_adapter_id(self) -> int:
-        return self.prompt_adapter_request.prompt_adapter_id \
-                        if self.prompt_adapter_request else 0
-
-    @property
-    def prompt_adapter_num_virtual_tokens(self) -> int:
-        return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens \
-                        if self.prompt_adapter_request else 0
 
     # Multi-Step Chunked-Prefill property
     @property
@@ -1173,6 +1143,10 @@ class PoolingSequenceGroupOutput(
     # The actual type is in SequenceGroup.pooled_data
     data: Any
 
+    def get_data_nbytes(self) -> int:
+        data: torch.Tensor = self.data
+        return data.nbytes
+
     def __repr__(self) -> str:
         return f"PoolingSequenceGroupOutput(data={self.data}"
 
@@ -1189,14 +1163,11 @@ class IntermediateTensors:
     states and residuals to be sent to the next stage. This data structure
     contains the hidden states and residuals for a request.
     
-    Each stage also needs to handle its own finished_sending and 
-    finished_recving in case of kv transfer.
+    Each stage also needs to handle its own kv_connector_output.
     """
 
     tensors: dict[str, torch.Tensor]
-    # [req_ids]
-    finished_sending: Optional[set[str]] = None
-    finished_recving: Optional[set[str]] = None
+    kv_connector_output: Optional["KVConnectorOutput"]
 
     def __init__(self, tensors):
         # manually define this function, so that
@@ -1233,6 +1204,9 @@ class PoolerOutput(
         array_like=True):  # type: ignore[call-arg]
     """The output from a pooling operation in the pooling model."""
     outputs: list[PoolingSequenceGroupOutput]
+
+    def get_data_nbytes(self) -> int:
+        return sum(o.get_data_nbytes() for o in self.outputs)
 
     def __getitem__(self, idx: int) -> PoolingSequenceGroupOutput:
         return self.outputs[idx]
@@ -1518,7 +1492,6 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             pooled_data=seq_group.pooled_data,
             encoder_seq=seq_group.encoder_seq,
             trace_headers=seq_group.trace_headers,
-            prompt_adapter_request=seq_group.prompt_adapter_request,
             priority=seq_group.priority,
         )
 
