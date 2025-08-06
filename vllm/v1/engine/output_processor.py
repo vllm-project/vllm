@@ -308,15 +308,17 @@ class OutputProcessor:
             if req_state is not None:
                 self.lora_states.abort_request(req_state)
                 request_ids_to_abort.append(request_id)
+                # Produce final abort output.
                 if req_state.queue is not None and (
                         request_output := req_state.make_request_output(
                             [], None, FinishReason.ABORT, None, None)):
                     req_state.queue.put(request_output)
-            else:
-                parent = self.parent_requests.pop(request_id, None)
-                if parent and parent.child_requests:
+            elif parent := self.parent_requests.get(request_id):
+                # Abort children prior to removing the parent.
+                if parent.child_requests:
                     self.abort_requests(parent.child_requests)
                     request_ids_to_abort.extend(parent.child_requests)
+                self.parent_requests.pop(request_id, None)
         return request_ids_to_abort
 
     def add_request(
