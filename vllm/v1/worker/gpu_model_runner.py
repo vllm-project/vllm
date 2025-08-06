@@ -55,6 +55,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         get_dtype_size, is_pin_memory_available, round_up,
                         supports_dynamo)
 from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
+from vllm.v1.attention.backends.tree_attn import TreeAttentionBackend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     make_kv_sharing_fast_prefill_attention_metadata,
@@ -71,6 +72,7 @@ from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
+from vllm.v1.sample.tree_rejection_sampler import TreeRejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -198,7 +200,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 raise ValueError("Unknown speculative decoding method: "
                                  f"{self.speculative_config.method}")
-            self.rejection_sampler = RejectionSampler()
+
+            is_using_tree_attn = False
+            tree_drafter_params = self.speculative_config.tree_drafter_params
+            self.rejection_sampler = (TreeRejectionSampler(
+                                          tree_drafter_params,
+                                          max_batch_size=self.max_num_reqs,
+                                          main_sampler=self.sampler,
+                                          device=device,
+                                      ) if is_using_tree_attn
+                                      else RejectionSampler())
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -340,6 +351,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else None)
 
         self.reorder_batch_threshold: Optional[int] = None
+        self.draft_probs = None
 
     def _init_model_kwargs(self, num_tokens: int):
         model_kwargs = dict[str, Any]()
@@ -1608,6 +1620,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+            print(f"num_scheduled_tokens: {num_scheduled_tokens}")
+            print(f"positions: {positions}")
+            kv_caches = self.model.get_layer_kv_caches()
+            for i, kv_cache in enumerate(kv_caches):
+                print(f"layer {i}, kv_cache: {kv_cache.shape}")
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
@@ -1677,12 +1694,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             target_logits = logits[spec_decode_metadata.target_logits_indices]
             output_token_ids = self.rejection_sampler(
                 spec_decode_metadata,
-                None,  # draft_probs
+                self.draft_probs,
                 target_logits,
                 bonus_token_ids,
                 sampling_metadata,
             )
             sampler_output.sampled_token_ids = output_token_ids
+            print(f"rejection sampler output_token_ids: {output_token_ids}")
 
         num_nans_in_logits = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -1730,6 +1748,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampled_token_ids,
                 self.input_batch.vocab_size,
             )
+            print(f"rejection sampler valid_sampled_token_ids: {valid_sampled_token_ids}")
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
@@ -1859,10 +1878,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 # TODO(woosuk): Refactor this.
                 num_draft_tokens = spec_decode_metadata.num_draft_tokens
+                print(f"num_draft_tokens: {num_draft_tokens}")
                 num_rejected_tokens = [
                     n + 1 - len(sampled_token_ids[i]) if n > 0 else 0
                     for i, n in enumerate(num_draft_tokens)
                 ]
+                print(f"num_rejected_tokens: {num_rejected_tokens}")
                 num_rejected_tokens_cpu = torch.tensor(num_rejected_tokens,
                                                        dtype=torch.int32)
                 common_attn_metadata, token_indices =\
@@ -1881,8 +1902,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.supports_mm_inputs:
                 mm_embeds = self._gather_mm_embeddings(scheduler_output,
                                                        shift_computed_tokens=1)
-
-            draft_token_ids = self.drafter.propose(
+            print("proposing...")
+            print(f"target_positions: {target_positions}")
+            draft_token_ids, self.draft_probs = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -2242,7 +2264,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 - CUDAGraphMode.PIECEWISE: Piecewise cudagraph.
                 - CUDAGraphMode.FULL: Full cudagraph, attention metadata is
                     needed.
-            force_attention: If True, always create attention metadata. Used to 
+            force_attention: If True, always create attention metadata. Used to
                 warm up attention backend when mode is NONE.
             uniform_decode: If True, the batch is a uniform decode batch.
             skip_eplb: If True, skip EPLB state update.
@@ -2462,15 +2484,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 raise e
         if self.speculative_config:
-            draft_token_ids = [[0] for _ in range(num_reqs)]
+            num_spec_tokens = self.speculative_config.num_speculative_tokens
+            draft_token_ids = [[0] * num_spec_tokens for _ in range(num_reqs)]
             dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(
                 draft_token_ids, self.device)
 
             num_tokens = sum(len(ids) for ids in draft_token_ids)
-            # draft_probs = torch.randn(
-            #     num_tokens, logits.shape[-1], device=self.device,
-            #     dtype=logits.dtype)
-            draft_probs = None
+            draft_probs = torch.randn(num_tokens,
+                                      1,
+                                      device=self.device,
+                                      dtype=logits.dtype)
             target_logits = torch.randn(num_tokens,
                                         logits.shape[-1],
                                         device=self.device,
