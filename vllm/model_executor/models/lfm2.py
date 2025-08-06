@@ -18,8 +18,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.short_conv import (ConvCacheParams,
-                                                         ShortConv)
+from vllm.model_executor.layers.mamba.short_conv import ShortConv
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -279,7 +278,6 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-        conv_cache_params: ConvCacheParams,
         **kwargs,
     ):
         if residual is None:
@@ -292,7 +290,6 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
         self.conv(
             hidden_states,
             output,
-            conv_cache_params=conv_cache_params,
             conv_metadata=None,
         )
         hidden_states, residual = self.ffn_norm(output, residual)
@@ -354,7 +351,6 @@ class Lfm2Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        conv_cache_params: ConvCacheParams,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -372,20 +368,15 @@ class Lfm2Model(nn.Module):
         kv_cache_index = 0
         state_cache_index = 0
         for layer in self.layers[self.start_layer:self.end_layer]:
-            layer_conv_cache_params = None
             if isinstance(layer, Lfm2AttentionDecoderLayer):
                 kv_cache_index += 1
-            if isinstance(layer, Lfm2ShortConvDecoderLayer):
-                current_state_layer = state_cache_index
-                layer_conv_cache_params = conv_cache_params.at_layer_idx(
-                    current_state_layer) if conv_cache_params else None
+            elif isinstance(layer, Lfm2ShortConvDecoderLayer):
                 state_cache_index += 1
 
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
-                conv_cache_params=layer_conv_cache_params,
             )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -534,9 +525,8 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
-        conv_cache_params = None
-        hidden_states = self.model(input_ids, positions, conv_cache_params,
-                                   intermediate_tensors, inputs_embeds)
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
