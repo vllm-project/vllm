@@ -73,3 +73,5 @@ These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`
 - **Partial wake-up**: Use `tags=["weights"]` or `tags=["kv_cache"]` to control which resources are restored, useful for RLHF and weight updates.
 
 - **Platform support**: Supported on CUDA platform.
+
+- **Server in development mode** When using the flag `VLLM_SERVER_DEV_MODE=1` you enable development endpoints, This should not be used in production.
