@@ -143,7 +143,7 @@ class Sampler(nn.Module):
             # Apply top_k and/or top_p here to avoid unnecessary computation
             # in `TopKTopPSampler` efficient implementations.
             logprobs = self.compute_logprobs(
-                apply_top_k_top_p(logits, sampling_metadata.top_k,
+                apply_top_k_top_p(logits.clone(), sampling_metadata.top_k,
                                   sampling_metadata.top_p))
         else:
             logprobs = None
