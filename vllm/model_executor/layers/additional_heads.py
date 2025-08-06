@@ -6,7 +6,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-class ClassifierConfig:
+class ClassifierHeadConfig:
     def __init__(self, name: str, location: str, num_hidden_layers: int, hidden_dim=None):
         self.name = name
         self.location = location
@@ -26,7 +26,7 @@ class ClassifierConfig:
         )
 
 
-class WithAdditionalHeads:
+class AdditionalHeadsMixin:
     """
     Extends model to add multiple binary classification heads.
     The additional_heads_config should be provided in vllm_config.additional_config["additional_heads_config"].
@@ -56,7 +56,7 @@ class WithAdditionalHeads:
         ]
         logger.info(f"Built {len(self.heads)} classification heads.")
 
-    def _find_additional_heads_config(self, *args, **kwargs) -> List[ClassifierConfig]:
+    def _find_additional_heads_config(self, *args, **kwargs) -> List[ClassifierHeadConfig]:
         """Find and validate additional_heads_config in the given args and kwargs."""
         from vllm.config import VllmConfig  # avoid circular import
 
@@ -73,7 +73,7 @@ class WithAdditionalHeads:
             raise ValueError("additional_heads_config is required in additional_config")
     
         return [
-            ClassifierConfig.from_dict(config) for config in additional_heads_config
+            ClassifierHeadConfig.from_dict(config) for config in additional_heads_config
         ]
     
     def _build_classification_head(self, num_hidden_layers: int, hidden_dim: Optional[int]) -> nn.Sequential:
@@ -108,11 +108,11 @@ class WithAdditionalHeads:
         Override of load_weights that also loads the additional heads.
         Expects load_weights to be implemented in the parent class.
         """
-        original_cls = super(WithAdditionalHeads, self)
+        original_cls = super(AdditionalHeadsMixin, self)
         if not hasattr(original_cls, 'load_weights'):
             raise RuntimeError(
                 "The parent class does not implement load_weights. "
-                "Ensure that the parent class is compatible with WithAdditionalHeads."
+                "Ensure that the parent class is compatible with AdditionalHeadsMixin."
             )
 
         loaded_params = original_cls.load_weights(weights)

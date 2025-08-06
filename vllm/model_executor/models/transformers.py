@@ -416,7 +416,7 @@ class TransformersModel(nn.Module):
         self,
         hidden_states: torch.Tensor,
         additional_heads_extra_inputs: Optional[list[dict[str, Any]]],
-    ) -> Optional[Union[torch.Tensor]]:
+    ) -> Optional[torch.Tensor]:
         if get_pp_group().is_last_rank and hasattr(self.model,
                                                    "compute_additional_head"):
             return self.model.compute_additional_head(
@@ -522,7 +522,7 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
         self,
         hidden_states: torch.Tensor,
         additional_heads_extra_inputs: Optional[list[dict[str, Any]]],
-    ) -> Optional[Union[torch.Tensor]]:
+    ) -> Optional[torch.Tensor]:
         if hasattr(self.model, "compute_additional_head"):
             return self.model.compute_additional_head(
                 hidden_states, additional_heads_extra_inputs)
