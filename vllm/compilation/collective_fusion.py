@@ -120,6 +120,22 @@ class AllGatherGEMMPattern(BasePattern):
                                 pm.fwd_only, pm_pass)
 
 
+def has_scaled_mm():
+    if current_platform.is_cuda():
+        device_capability = current_platform.get_device_capability()
+        if device_capability:
+            major, minor = device_capability.major, device_capability.minor
+            if major >= 9:
+                return True
+            if major == 8 and minor >= 9:
+                return True
+        return False
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_mi3xx
+        return on_mi3xx()
+    return False
+
+
 class ScaledMMReduceScatterPattern(BasePattern):
 
     def get_inputs(self):
@@ -165,8 +181,9 @@ class ScaledMMReduceScatterPattern(BasePattern):
 
             return gemm_rs
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass)
+        if has_scaled_mm():
+            pm.register_replacement(pattern, replacement, self.get_inputs(),
+                                    pm.fwd_only, pm_pass)
 
 
 class AllGatherScaledMMPattern(BasePattern):
@@ -222,8 +239,9 @@ class AllGatherScaledMMPattern(BasePattern):
             )
             return mm_outputs
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass)
+        if has_scaled_mm():
+            pm.register_replacement(pattern, replacement, self.get_inputs(),
+                                    pm.fwd_only, pm_pass)
 
 
 class CutlassScaledMMReduceScatterPattern(BasePattern):
