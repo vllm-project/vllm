@@ -358,12 +358,12 @@ def dummy_hf_overrides(
     hf_config: PretrainedConfig,
     model_arch: str,
     exist_overrides: Optional[dict[str, Any]] = None,
-) -> Any:
+) -> PretrainedConfig:
     """
     Dummy HF overrides function used to create dummy model
     with only minimum nums of layer.
     """
-    hf_config.update(exist_overrides)
+    hf_config.update(exist_overrides or {})
 
     text_config = hf_config.get_text_config()
 
