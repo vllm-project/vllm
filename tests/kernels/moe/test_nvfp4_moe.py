@@ -90,7 +90,7 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
         a_global_scale = ((FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) /
                           torch.amax(a.flatten(), dim=-1)).to(torch.float32)
         a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(a, a_global_scale)
-        _, m_k = a_fp4.shape
+
         a_in_dtype = dequantize_nvfp4_to_dtype(a_fp4,
                                                a_scale_interleaved,
                                                a_global_scale,
