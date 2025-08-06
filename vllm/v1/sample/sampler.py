@@ -69,9 +69,7 @@ class Sampler(nn.Module):
 
         # Sample the next token.
         sampled, final_logprobs = self.sample(logits, sampling_metadata)
-        if (num_logprobs is not None
-                and self.logprobs_mode == "final_logprobs"):
-            assert final_logprobs is not None
+        if final_logprobs is not None:
             raw_logprobs = final_logprobs
         # Convert sampled token ids to int64 (long) type to ensure compatibility
         # with subsequent operations that may use these values as indices.
@@ -121,13 +119,16 @@ class Sampler(nn.Module):
 
         assert not (sampling_metadata.all_greedy
                     and sampling_metadata.all_random)
+        return_final_logprobs = (sampling_metadata.max_num_logprobs is not None
+                                 and self.logprobs_mode == "final_logprobs")
+        final_logprobs = None
         if sampling_metadata.all_random:
             greedy_sampled = None
         else:
             greedy_sampled = self.greedy_sample(logits)
             if sampling_metadata.all_greedy:
-                logprobs = self.compute_logprobs(logits)
-                return greedy_sampled, logprobs
+                final_logprobs = self.compute_logprobs(logits)
+                return greedy_sampled, final_logprobs
 
         assert sampling_metadata.temperature is not None
 
@@ -140,15 +141,12 @@ class Sampler(nn.Module):
             logits = processor.apply(logits)
 
         # Apply top_k and/or top_p.
-        if (sampling_metadata.max_num_logprobs is not None
-                and self.logprobs_mode == "final_logprobs"):
+        if return_final_logprobs:
             # Apply top_k and/or top_p here to avoid unnecessary computation
             # in `TopKTopPSampler` efficient implementations.
-            logprobs = self.compute_logprobs(
+            final_logprobs = self.compute_logprobs(
                 apply_top_k_top_p(logits.clone(), sampling_metadata.top_k,
                                   sampling_metadata.top_p))
-        else:
-            logprobs = None
         random_sampled = self.topk_topp_sampler(
             logits,
             sampling_metadata.generators,
@@ -157,7 +155,7 @@ class Sampler(nn.Module):
         )
 
         if greedy_sampled is None:
-            return random_sampled, logprobs
+            return random_sampled, final_logprobs
 
         sampled = torch.where(
             sampling_metadata.temperature < _SAMPLING_EPS,
@@ -165,7 +163,7 @@ class Sampler(nn.Module):
             random_sampled,
             out=greedy_sampled,  # Reuse tensor
         )
-        return sampled, logprobs
+        return sampled, final_logprobs
 
     def compute_logprobs(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.log_softmax(dim=-1, dtype=torch.float32)
