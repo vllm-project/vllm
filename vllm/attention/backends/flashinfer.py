@@ -1116,7 +1116,7 @@ class FlashInferImpl(AttentionImpl):
             # inside flashinfer.
             if not use_trtllm_attention(
                     num_decode_tokens, attn_metadata.max_decode_seq_len,
-                    kv_cache_dtype, attn_metadata.num_qo_heads,
+                    kv_cache_dtype, False, attn_metadata.num_qo_heads,
                     attn_metadata.num_kv_heads, attn_metadata.head_dim):
                 decode_meta.decode_wrapper.run(
                     decode_query,

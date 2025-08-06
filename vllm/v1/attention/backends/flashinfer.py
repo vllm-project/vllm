@@ -528,11 +528,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                               and not cache_dtype.startswith("fp8")
                               and use_trtllm_attention(
                                 num_prefill_tokens, max_seq_len, cache_dtype,
-                                num_qo_heads, num_kv_heads, head_dim))
+                                True, num_qo_heads, num_kv_heads, head_dim))
         decode_use_trtllm = (self.global_hyperparameters.window_left == -1
                              and use_trtllm_attention(
                                 num_decode_tokens, max_seq_len, cache_dtype,
-                                num_qo_heads, num_kv_heads, head_dim))
+                                False, num_qo_heads, num_kv_heads, head_dim))
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,

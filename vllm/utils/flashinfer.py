@@ -148,6 +148,7 @@ def use_trtllm_attention(
     num_tokens: int,
     max_seq_len: int,
     kv_cache_dtype: str,
+    is_prefill: bool,
     num_qo_heads: Optional[int],
     num_kv_heads: Optional[int],
     attn_head_size: Optional[int],
@@ -162,24 +163,16 @@ def use_trtllm_attention(
             or num_qo_heads % num_kv_heads != 0 or attn_head_size != 128):
         return False
 
-    env_value = envs.VLLM_USE_TRTLLM_ATTENTION
-    if env_value is not None:
-        logger.info_once("VLLM_USE_TRTLLM_ATTENTION is set to %s", env_value)
-        # Environment variable is set - respect it
-        # Making the conditional check for zero because
-        # the path is automatically enabled if the batch size condition
-        # is satisfied.
-        no_use_trtllm = (env_value == "0")
-        if not no_use_trtllm:
-            logger.info_once("Using TRTLLM attention.")
-        return not no_use_trtllm
+    if is_prefill:
+        if envs.VLLM_USE_TRTLLM_CONTEXT_ATTENTION:
+            logger.info_once("Using TRTLLM context attention.")
+            return True
+        return False
     else:
-        # Environment variable not set - use auto-detection
-        use_trtllm = (num_tokens <= 256 and max_seq_len < 131072
-                      and kv_cache_dtype == "auto")
-        if use_trtllm:
-            logger.warning_once("Using TRTLLM attention (auto-detected).")
-        return use_trtllm
+        if envs.VLLM_USE_TRTLLM_DECODE_ATTENTION:
+            logger.info_once("Using TRTLLM decode attention.")
+            return True
+        return False
 
 
 __all__ = [
