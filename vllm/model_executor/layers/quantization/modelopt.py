@@ -913,16 +913,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.fused_experts: Optional[
             mk.FusedMoEModularKernel] = None  # type: ignore[assignment]
 
-    @property
-    def allow_flashinfer_cutlass(self) -> bool:
-        return self.allow_flashinfer and \
-            self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
-
     def maybe_swap_experts_impl(
         self,
         moe_parallel_config: FusedMoEParallelConfig,
     ):
-        if not self.allow_flashinfer_cutlass:
+        if not self.allow_flashinfer:
             return
         self.fused_experts = build_flashinfer_fp4_cutlass_moe_kernel(
             moe_parallel_config)
@@ -938,8 +933,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (  # noqa: E501
             select_nvfp4_gemm_impl)
 
-        return select_nvfp4_gemm_impl(self.allow_flashinfer_cutlass, moe,
-                                      logger)
+        return select_nvfp4_gemm_impl(self.allow_flashinfer, moe, logger)
 
     def uses_weight_scale_2_pattern(self) -> bool:
         """
