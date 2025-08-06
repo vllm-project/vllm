@@ -19,7 +19,7 @@ Two main reasons:
 
 Please refer to <gh-file:examples/online_serving/disaggregated_prefill.sh> for the example usage of disaggregated prefilling.
 
-Now v1 supports 5 types of connectors:
+Now supports 5 types of connectors:
 
 - **SharedStorageConnector**: refer to <gh-file:examples/offline_inference/disaggregated-prefill-v1/run.sh> for the example usage of SharedStorageConnector disaggregated prefilling.
 - **LMCacheConnectorV1**: refer to <gh-file:examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh> for the example usage of LMCacheConnectorV1 disaggregated prefilling which uses NIXL as the underlying KV transmission.
@@ -60,7 +60,7 @@ The workflow of disaggregated prefilling is as follows:
 
 The `buffer` corresponds to `insert` API in LookupBuffer, and the `drop_select` corresponds to `drop_select` API in LookupBuffer.
 
-Now in v1, every process in vLLM will have a corresponding connector. Specifically, we have:
+Now every process in vLLM will have a corresponding connector. Specifically, we have:
 
 - Scheduler connector: the connector that locates in the same process as the scheduler process. It schedules the KV cache transfer ops.
 - Worker connectors: the connectors that locate in the worker processes. They execute KV cache transfer ops.
