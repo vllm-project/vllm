@@ -566,11 +566,8 @@ class NvmlCudaPlatform(CudaPlatformBase):
         query if the set of gpus are fully connected by nvlink (1 hop)
         """
 
-        # Check if is_fully_connected should be forced via environment variable
-        if os.getenv("VLLM_FORCE_IS_FULLY_CONNECTED", "0") == "1":
-            logger.warning(
-                "Forcing is_fully_connected to True via VLLM_FORCE_IS_FULLY_CONNECTED environment variable."
-            )
+        if os.getenv("VLLM_SKIP_NVLINK_CHECK", "0") == "1":
+            logger.info("Skipping NVLink check.")
             return True
 
         handles = [
