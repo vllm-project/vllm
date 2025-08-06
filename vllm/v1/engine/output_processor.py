@@ -316,8 +316,9 @@ class OutputProcessor:
             elif parent := self.parent_requests.get(request_id):
                 # Abort children prior to removing the parent.
                 if parent.child_requests:
-                    self.abort_requests(parent.child_requests)
-                    request_ids_to_abort.extend(parent.child_requests)
+                    child_reqs = list(parent.child_requests)
+                    child_reqs = self.abort_requests(child_reqs)
+                    request_ids_to_abort.extend(child_reqs)
                 self.parent_requests.pop(request_id, None)
         return request_ids_to_abort
 
