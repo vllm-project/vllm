@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 import torch
 from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import (ActivationOrdering,
+                                             QuantizationArgs,
                                              QuantizationStrategy)
 
 import vllm.envs as envs
@@ -21,8 +22,6 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize im
     FlashInferCutlassMoEPrepareAndFinalize)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS, WNA16_SUPPORTED_TYPES_MAP)
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    get_linear_quantization)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_kernel,
@@ -70,13 +69,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
         layer_name: str,
     ) -> "CompressedTensorsMoEMethod":
-        # TODO: @dsikka: refactor this to use schemes as other kernels
-        # are supported + check if the layer is being ignored.
-        try:
-            input_quant, weight_quant = get_linear_quantization(quant_config)
-        except ValueError as e:
-            raise NotImplementedError("Could not find a `Linear` quantization "
-                                      "scheme for use in MoE method") from e
+        input_quant, weight_quant = _get_moe_quant(quant_config)
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
             # group_size=None means channelwise
@@ -396,10 +389,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
         self.quant_config = quant_config
-        self.weight_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "weights")
-        self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "input_activations")
+        self.input_quant, self.weight_quant = _get_moe_quant(quant_config)
         self.topk_indices_dtype = None
 
         per_tensor = (self.weight_quant.strategy == QuantizationStrategy.TENSOR
@@ -844,10 +834,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
         self.quant_config = quant_config
-        self.weight_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "weights")
-        self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "input_activations")
+        self.input_quant, self.weight_quant = _get_moe_quant(quant_config)
 
         per_channel = (
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL
@@ -985,13 +972,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
         self.quant_config = quant_config
-        # TODO: @dsikka: refactor this to use schemes as other kernels
-        # are supported + check if the layer is being ignored.
-        try:
-            _, config = get_linear_quantization(quant_config)
-        except ValueError as e:
-            raise NotImplementedError("Could not find a `Linear` quantization "
-                                      "scheme for use in MoE method") from e
+        _, config = _get_moe_quant(quant_config)
 
         self.num_bits = config.num_bits
         self.packed_factor = 32 // config.num_bits
@@ -1001,7 +982,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         assert config.symmetric, (
             "Only symmetric quantization is supported for MoE")
 
-        if not (self.quant_config.quant_format
+        if not (self.quant_config.quant_config.format
                 == CompressionFormat.pack_quantized.value
                 and self.num_bits in WNA16_SUPPORTED_BITS):
             raise ValueError("For Fused MoE layers, only ",
@@ -1292,13 +1273,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
         self.quant_config = quant_config
-        # TODO: @dsikka: refactor this to use schemes as other kernels
-        # are supported + check if the layer is being ignored.
-        try:
-            _, config = get_linear_quantization(quant_config)
-        except ValueError as e:
-            raise NotImplementedError("Could not find a `Linear` quantization "
-                                      "scheme for use in MoE method") from e
+        _, config = _get_moe_quant(quant_config)
 
         self.num_bits = config.num_bits
         self.packed_factor = 32 // config.num_bits
@@ -1311,7 +1286,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         assert config.symmetric, (
             "Only symmetric quantization is supported for MoE")
 
-        if not (self.quant_config.quant_format
+        if not (self.quant_config.quant_config.format
                 == CompressionFormat.pack_quantized.value
                 and self.num_bits in WNA16_SUPPORTED_BITS):
             raise ValueError("For Fused MoE layers, only ",
@@ -1509,3 +1484,25 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             w1_zp=None,
             w2_zp=None,
             block_shape=[0, self.group_size])
+
+
+def _get_moe_quant(
+    config: "CompressedTensorsConfig"
+) -> tuple[QuantizationArgs, QuantizationArgs]:
+    """
+    Returns the quantization which is used for all `Linear` layers of a model,
+    if it exists. This is a gross generalization to assist with selecting
+    MoE kernels and should be removed in the future.
+
+    :param config: Compressed Tensors config
+    :return: input and weight quantization of Linear layers if it exists,
+        otherwise raise a ValueError
+    """
+    # TODO: @dsikka: refactor this to use schemes as other kernels
+    # are supported + check if the layer is being ignored.
+    for scheme in config.quant_config.config_groups.values():
+        if scheme.targets == "Linear":
+            return (scheme.input_activations, scheme.weights)
+
+    raise ValueError(
+        "Could not find a `Linear` quantization scheme for use in MoE method")

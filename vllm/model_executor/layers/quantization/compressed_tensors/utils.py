@@ -3,20 +3,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import regex as re
 import torch
 from compressed_tensors import CompressionFormat
-from compressed_tensors.quantization import QuantizationArgs
 
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-        CompressedTensorsConfig)
-
-__all__ = [
-    "is_activation_quantization_format", "get_linear_quantization", "is_match"
-]
+__all__ = ["is_activation_quantization_format", "is_match"]
 
 
 def is_activation_quantization_format(format: str) -> bool:
@@ -27,26 +20,6 @@ def is_activation_quantization_format(format: str) -> bool:
         CompressionFormat.nvfp4_pack_quantized.value
     ]
     return format in _ACTIVATION_QUANTIZATION_FORMATS
-
-
-def get_linear_quantization(
-    config: "CompressedTensorsConfig"
-) -> tuple[QuantizationArgs, QuantizationArgs]:
-    """
-    Returns the quantization which is used for all `Linear` layers of a model,
-    if it exists. This is a gross generalization to assist with selecting
-    MoE kernels and should be removed in the future.
-
-    :param config: Compressed Tensors config
-    :return: input and weight quantization of Linear layers if it exists,
-        otherwise raise a ValueError
-    """
-    for scheme in config.quant_config.config_groups.values():
-        if scheme.targets == "Linear":
-            return (scheme.input_activations, scheme.weights)
-
-    raise ValueError(
-        "Could not find a quantization scheme applied to all linears")
 
 
 # The code below is copied from `compressed_tensors/utils/match.py`
