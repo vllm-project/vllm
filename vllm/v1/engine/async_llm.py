@@ -5,7 +5,7 @@ import logging
 import time
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
-from typing import Any, Optional, Union
+from typing import Any, cast, Optional, Union
 
 import numpy as np
 
@@ -129,9 +129,9 @@ class AsyncLLM(EngineClient):
 
         # Loggers.
         self.logger_manager: Optional[StatLoggerManager] = None
-        factories = []
+        factories: list[StatLoggerFactory] = []
         if logger.isEnabledFor(logging.INFO) and client_count <= 1:
-            factories.append(LoggingStatLogger)
+            factories.append(cast(StatLoggerFactory, LoggingStatLogger))
         factories.extend(stat_loggers or [])
         if self.log_stats:
             self.logger_manager = StatLoggerManager(
