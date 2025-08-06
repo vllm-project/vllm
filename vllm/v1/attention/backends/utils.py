@@ -656,3 +656,7 @@ def make_kv_sharing_fast_prefill_attention_metadata(
         metadata_cls=metadata_cls,
         fields=KV_SHARING_FAST_PREFILL_METADATA_FIELDS,
     )
+
+
+def is_power_of_two(n: int) -> bool:
+    return n > 0 and (n & (n - 1)) == 0

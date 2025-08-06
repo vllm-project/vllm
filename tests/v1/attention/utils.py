@@ -124,8 +124,8 @@ def get_attention_backend(backend_name: _Backend):
         "vllm.v1.attention.backends.flashinfer.FlashInferBackend",
         _Backend.FLEX_ATTENTION:
         "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",
-        _Backend.TRITON_ATTN_VLLM_V1:
-        "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
+        _Backend.TRITON_UNIFIED_ATTN_VLLM_V1:
+        "vllm.v1.attention.backends.triton_attn.TritonUnifiedAttentionBackend",
         _Backend.TREE_ATTN:
         "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",
         _Backend.XFORMERS_VLLM_V1:

@@ -1459,7 +1459,6 @@ class EngineArgs:
             "FLASH_ATTN",
             "PALLAS",
             "PALLAS_VLLM_V1",
-            "TRITON_ATTN_VLLM_V1",
             "TRITON_MLA",
             "CUTLASS_MLA",
             "FLASHMLA",
@@ -1468,6 +1467,9 @@ class EngineArgs:
             "ROCM_AITER_MLA",
             "TORCH_SDPA_VLLM_V1",
             "FLEX_ATTENTION",
+            "ROCM_AITER_FLASH_ATTENTION_V1",
+            "TRITON_UNIFIED_ATTENTION_V1",
+            "TRITON_SPLIT_PREFILL_DECODE_ATTENTION_V1",
             "TREE_ATTN",
             "XFORMERS_VLLM_V1",
         ]
