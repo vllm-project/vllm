@@ -537,7 +537,8 @@ class EmbeddingMixin(OpenAIServing):
                                 f"format: {result.request_id}")
 
                 # Finalize aggregated results
-                final_res_batch: list[PoolingRequestOutput] = []
+                final_res_batch: list[Union[PoolingRequestOutput,
+                                            EmbeddingRequestOutput]] = []
                 num_prompts = len(ctx.engine_prompts)
 
                 for prompt_idx in range(num_prompts):
@@ -574,7 +575,7 @@ class EmbeddingMixin(OpenAIServing):
                                 TextTokensPrompt,
                                 original_prompt)["prompt_token_ids"]
 
-                            pooling_output = PoolingRequestOutput(
+                            pooling_output = EmbeddingRequestOutput(
                                 request_id=aggregator['request_id'],
                                 prompt_token_ids=original_token_ids,
                                 outputs=embedding_output,
