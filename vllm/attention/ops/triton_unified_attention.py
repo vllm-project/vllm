@@ -394,14 +394,17 @@ def kernel_unified_attention_3d(
 
     block_table_offset = seq_idx * block_table_stride
 
-    if not USE_SINK or segm_idx != 0:
-        M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    if USE_SINK:
+        if segm_idx == 0:
+            M = tl.load(
+                sink_ptr + query_offset_1,
+                mask=query_mask_1,
+                other=float("-inf"),
+            ).to(dtype=tl.float32)
+        else:
+            M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     else:
-        M = tl.load(
-            sink_ptr + query_offset_1,
-            mask=query_mask_1,
-            other=float("-inf"),
-        ).to(dtype=tl.float32)
+        M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
 
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
