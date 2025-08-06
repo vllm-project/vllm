@@ -285,6 +285,7 @@ class OpenAIServingResponses(OpenAIServing):
         if created_time is None:
             created_time = int(time.time())
 
+        context: Optional[ConversationContext] = None
         try:
             async for context in result_generator:
                 pass
@@ -294,6 +295,7 @@ class OpenAIServingResponses(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
+        assert context is not None
         final_res = context.last_output
         assert final_res is not None
         assert len(final_res.outputs) == 1
