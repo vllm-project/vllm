@@ -120,10 +120,16 @@ class MultiModalRegistry:
         processor = self.create_processor(model_config, disable_cache=False)
         supported_modalities = processor.info.get_supported_mm_limits()
 
-        # Check if any supported modalities have limit != 0
-        return any(
-            model_config.multimodal_config.get_limit_per_prompt(modality) != 0
-            for modality in supported_modalities)
+        # Check if all supported modalities have limit == 0
+        if all(
+                model_config.multimodal_config.get_limit_per_prompt(modality)
+                == 0 for modality in supported_modalities):
+            logger.info_once(
+                "All limits of modalities supported by the model are set to 0, "
+                "running in text-only mode.")
+            return False
+
+        return True
 
     def get_max_tokens_per_item_by_modality(
         self,
