@@ -51,13 +51,14 @@ class DeepseekVL2ImagePixelInputs(TensorSchema):
     """
     Dimensions:
         - bn: Batch size * number of images
+        - p: Number of patches
         - c: Number of channels (3)
         - h: Height of each image
         - w: Width of each image
     """
     type: Literal["pixel_values"]
     data: Annotated[Union[torch.Tensor, list[torch.Tensor]],
-                    TensorShape("bn", 3, "h", "w")]
+                    TensorShape("bn", "p", 3, "h", "w", dynamic_dims={"p"})]
     images_spatial_crop: Annotated[torch.Tensor, TensorShape("bn", 2)]
 
 

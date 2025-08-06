@@ -11,10 +11,12 @@ import jinja2
 from fastapi import Request
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption)
+from vllm.entrypoints.context import ConversationContext, SimpleContext
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -28,7 +30,6 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -89,15 +90,26 @@ class OpenAIServingResponses(OpenAIServing):
             logger.info("Using default chat sampling params from %s: %s",
                         source, self.default_sampling_params)
 
+        # If False (default), the "store" option is (silently) ignored and the
+        # response is not stored. If True, the response is stored in memory.
+        # NOTE(woosuk): This may not be intuitive for users, as the default
+        # behavior in OpenAI's Responses API is to store the response, but
+        # vLLM's default behavior is not.
+        self.enable_store = envs.VLLM_ENABLE_RESPONSES_API_STORE
+        if self.enable_store:
+            logger.warning_once(
+                "`VLLM_ENABLE_RESPONSES_API_STORE` is enabled. This may "
+                "cause a memory leak since we never remove responses from "
+                "the store.")
         # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: This causes a memory leak since we never remove responses
-        # from the store.
+        # FIXME: If enable_store=True, this may cause a memory leak since we
+        # never remove responses from the store.
         self.response_store: dict[str, ResponsesResponse] = {}
         self.response_store_lock = asyncio.Lock()
 
         # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: This causes a memory leak since we never remove messages
-        # from the store.
+        # FIXME: If enable_store=True, this may cause a memory leak since we
+        # never remove messages from the store.
         self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
 
         self.background_tasks: dict[str, asyncio.Task] = {}
@@ -117,6 +129,26 @@ class OpenAIServingResponses(OpenAIServing):
         # success status before we actually start generating text :).
         if self.engine_client.errored:
             raise self.engine_client.dead_error
+
+        if request.store and not self.enable_store:
+            if request.background:
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message=(
+                        "This vLLM engine does not support `store=True` and "
+                        "therefore does not support the background mode. To "
+                        "enable these features, set the environment variable "
+                        "`VLLM_ENABLE_RESPONSES_API_STORE=1` when launching "
+                        "the vLLM server."),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                )
+            # Disable the store option.
+            # NOTE(woosuk): Although returning an error is possible, we opted
+            # to implicitly disable store and process the request anyway, as
+            # we assume most users do not intend to actually store the response
+            # (i.e., their request's `store=True` just because it's the default
+            # value).
+            request.store = False
 
         # Handle the previous response ID.
         prev_response_id = request.previous_response_id
@@ -155,7 +187,7 @@ class OpenAIServingResponses(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         # Schedule the request and get the result generator.
-        generators: list[AsyncGenerator[RequestOutput, None]] = []
+        generators: list[AsyncGenerator[ConversationContext, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 default_max_tokens = self.max_model_len - len(
@@ -163,21 +195,19 @@ class OpenAIServingResponses(OpenAIServing):
                 sampling_params = request.to_sampling_params(
                     default_max_tokens, self.default_sampling_params)
 
-                self._log_inputs(request.request_id,
-                                 request_prompts[i],
-                                 params=sampling_params,
-                                 lora_request=lora_request)
-
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
 
-                generator = self.engine_client.generate(
-                    engine_prompt,
-                    sampling_params,
-                    request.request_id,
+                context = SimpleContext()
+                generator = self._generate_with_builtin_tools(
+                    request_id=request.request_id,
+                    request_prompt=request_prompts[i],
+                    engine_prompt=engine_prompt,
+                    sampling_params=sampling_params,
+                    context=context,
                     lora_request=lora_request,
-                    trace_headers=trace_headers,
                     priority=request.priority,
+                    trace_headers=trace_headers,
                 )
                 generators.append(generator)
         except ValueError as e:
@@ -245,7 +275,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         sampling_params: SamplingParams,
-        result_generator: AsyncIterator[RequestOutput],
+        result_generator: AsyncIterator[ConversationContext],
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
@@ -253,17 +283,20 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> Union[ErrorResponse, ResponsesResponse]:
         if created_time is None:
             created_time = int(time.time())
-        final_res: Optional[RequestOutput] = None
 
+        context: Optional[ConversationContext] = None
         try:
-            async for res in result_generator:
-                final_res = res
+            async for context in result_generator:
+                pass
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
+        assert context is not None
+        assert isinstance(context, SimpleContext)
+        final_res = context.last_output
         assert final_res is not None
         assert len(final_res.outputs) == 1
         final_output = final_res.outputs[0]
@@ -455,4 +488,14 @@ class OpenAIServingResponses(OpenAIServing):
             err_type="invalid_request_error",
             message=f"Response with id '{response_id}' not found.",
             status_code=HTTPStatus.NOT_FOUND,
+        )
+
+    def _make_store_not_supported_error(self) -> ErrorResponse:
+        return self.create_error_response(
+            err_type="invalid_request_error",
+            message=("`store=True` (default) is not supported. Please set "
+                     "`store=False` in Responses API or set "
+                     "`VLLM_ENABLE_RESPONSES_API_STORE=1` in the env var when "
+                     "starting the vLLM server."),
+            status_code=HTTPStatus.BAD_REQUEST,
         )

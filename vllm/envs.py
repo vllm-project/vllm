@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
+    VLLM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -70,7 +71,6 @@ if TYPE_CHECKING:
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
     VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
-    VLLM_NO_DEPRECATION_WARNING: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
@@ -151,6 +151,11 @@ if TYPE_CHECKING:
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
+    VLLM_ENABLE_RESPONSES_API_STORE: bool = False
+    VLLM_USE_TRTLLM_CONTEXT_ATTENTION: bool = False
+    VLLM_USE_TRTLLM_DECODE_ATTENTION: bool = False
+    VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
+    VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
 
 
 def get_default_cache_root():
@@ -324,6 +329,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
     lambda:
     (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower() in
+     ("true", "1")),
+
+    # Use AITER triton unified attention for V1 attention
+    "VLLM_USE_AITER_UNIFIED_ATTENTION":
+    lambda:
+    (os.getenv("VLLM_USE_AITER_UNIFIED_ATTENTION", "False").lower() in
      ("true", "1")),
 
     # Force vllm to use a specific flash-attention version (2 or 3), only valid
@@ -580,10 +591,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING":
     lambda: bool(
         int(os.getenv("VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING", "1"))),
-
-    # If set, vllm will skip the deprecation warnings.
-    "VLLM_NO_DEPRECATION_WARNING":
-    lambda: bool(int(os.getenv("VLLM_NO_DEPRECATION_WARNING", "0"))),
 
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
@@ -927,6 +934,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_MOE_FP4":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))),
 
+    # If set to 1, use the FlashInfer
+    # MXFP8 (activation) x MXFP4 (weight) MoE backend.
+    "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0"))),
+
+    # If set to 1, use the FlashInfer
+    # BF16 (activation) x MXFP4 (weight) MoE backend.
+    "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0"))),
+
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
     # It can be changed with this variable if needed for some reason.
@@ -1026,9 +1043,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_CUDNN_PREFILL":
     lambda: bool(int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))),
 
+    # If set to 1, use the TRTLLM Context Attention backend in flashinfer.
+    "VLLM_USE_TRTLLM_CONTEXT_ATTENTION":
+    lambda: bool(int(os.getenv("VLLM_USE_TRTLLM_CONTEXT_ATTENTION", "0"))),
+
     # If set to 1, use the TRTLLM Decode Attention backend in flashinfer.
     "VLLM_USE_TRTLLM_DECODE_ATTENTION":
-    lambda: os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", None),
+    lambda: bool(int(os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", "0"))),
 
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
@@ -1056,6 +1077,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE":
     lambda: bool(int(os.getenv(\
             "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE", "0"))),
+
+    # Enables support for the "store" option in the OpenAI Responses API.
+    # When set to 1, vLLM's OpenAI server will retain the input and output
+    # messages for those requests in memory. By default, this is disabled (0),
+    # and the "store" option is ignored.
+    # NOTE/WARNING:
+    # 1. Messages are kept in memory only (not persisted to disk) and will be
+    #    lost when the vLLM server shuts down.
+    # 2. Enabling this option will cause a memory leak, as stored messages are
+    #    never removed from memory until the server terminates.
+    "VLLM_ENABLE_RESPONSES_API_STORE":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
