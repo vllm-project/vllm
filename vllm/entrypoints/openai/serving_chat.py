@@ -23,7 +23,7 @@ from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
 from vllm.entrypoints.harmony_utils import (
     get_developer_message, get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant, get_system_message, parse_chat_input,
-    parse_chat_output, render_for_completion)
+    render_for_completion)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb, ChatCompletionLogProbs,
@@ -478,6 +478,7 @@ class OpenAIServingChat(OpenAIServing):
                 get_streamable_parser_for_assistant()
                 for _ in range(num_choices)
             ]
+            harmony_tools_streamed = [False] * num_choices
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
@@ -647,13 +648,11 @@ class OpenAIServingChat(OpenAIServing):
 
                     if self.use_harmony:
                         harmony_parser = harmony_parsers[i]
+                        prev_recipient = harmony_parser.current_recipient
                         for token_id in output.token_ids:
                             harmony_parser.process(token_id)
-                        # FIXME(woosuk): Support function calling
-                        is_final = harmony_parser.current_channel == "final"
-                        if not (request.include_reasoning or is_final):
-                            # Skip the reasoning content.
-                            continue
+                        cur_channel = harmony_parser.current_channel
+                        cur_recipient = harmony_parser.current_recipient
                         delta_text = harmony_parser.last_content_delta or ""
                     else:
                         delta_text = output.text
@@ -666,8 +665,7 @@ class OpenAIServingChat(OpenAIServing):
                     delta_message: Optional[DeltaMessage]
 
                     # just update previous_texts and previous_token_ids
-                    if ((tool_choice_auto or self.reasoning_parser)
-                            and not self.use_harmony):
+                    if tool_choice_auto or self.reasoning_parser:
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
                         previous_text = previous_texts[i]
@@ -682,11 +680,52 @@ class OpenAIServingChat(OpenAIServing):
                             current_token_ids = as_list(output.token_ids)
 
                     if self.use_harmony:
-                        if is_final:
+                        if cur_channel == "final":
                             delta_message = DeltaMessage(content=delta_text)
+                        elif cur_channel == "analysis":
+                            if request.include_reasoning:
+                                delta_message = DeltaMessage(
+                                    reasoning_content=delta_text)
+                            else:
+                                delta_message = None
+                        elif (cur_channel == "commentary" and cur_recipient
+                              and cur_recipient.startswith("functions.")):
+                            # Count completed tool calls to determine index
+                            base_index = 0
+                            for msg in harmony_parser.messages:
+                                if (msg.channel == "commentary"
+                                        and msg.recipient
+                                        and msg.recipient.startswith(
+                                            "functions.")):
+                                    base_index += 1
+
+                            if prev_recipient != cur_recipient:
+                                tool_name = cur_recipient.split(
+                                    "functions.", 1)[1]
+                                delta_message = DeltaMessage(tool_calls=[
+                                    DeltaToolCall(
+                                        id=random_tool_call_id(),
+                                        type="function",
+                                        function=DeltaFunctionCall(
+                                            name=tool_name, arguments=""),
+                                        index=base_index,
+                                    )
+                                ])
+                            elif delta_text:
+                                delta_message = DeltaMessage(tool_calls=[
+                                    DeltaToolCall(
+                                        index=base_index,
+                                        function=DeltaFunctionCall(
+                                            arguments=delta_text),
+                                    )
+                                ])
+                            else:
+                                delta_message = None
+
+                            if delta_message is not None:
+                                harmony_tools_streamed[i] = True
                         else:
-                            delta_message = DeltaMessage(
-                                reasoning_content=delta_text)
+                            delta_message = None
                     # handle streaming deltas for tools with named tool_choice
                     elif tool_choice_function_name:
                         if (self.reasoning_parser and not reasoning_end_arr[i]
@@ -979,7 +1018,10 @@ class OpenAIServingChat(OpenAIServing):
                             delta=delta_message,
                             logprobs=logprobs,
                             finish_reason=output.finish_reason
-                            if not auto_tools_called else "tool_calls",
+                            if not (auto_tools_called or
+                                    (self.use_harmony
+                                     and harmony_tools_streamed[i])) else
+                            "tool_calls",
                             stop_reason=output.stop_reason,
                             token_ids=(as_list(output.token_ids)
                                        if request.return_token_ids else None))
@@ -1108,31 +1150,30 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs = None
 
             if self.use_harmony:
-                reasoning_content, final_content, is_tool_call = (
-                    parse_chat_output(token_ids))
-                if not request.include_reasoning:
-                    reasoning_content = None
-
-                if is_tool_call:
-                    # TODO(woosuk): Implement tool call for gpt-oss.
-                    # For now, only Responses API supports tool call for
-                    # gpt-oss.
-                    raise NotImplementedError(
-                        "Tool call in Chat Completion API is not supported "
-                        "for gpt-oss yet. Please use Responses API instead.")
-                else:
-                    # Normal message
-                    message = ChatMessage(
-                        role=role,
-                        reasoning_content=reasoning_content,
-                        content=final_content,
-                    )
+                tool_parser = self.tool_parser(tokenizer)
+                reasoning_parser = self.reasoning_parser(tokenizer)
+                # NOTE: We use token_ids for openai tool parser
+                tool_call_info = tool_parser.extract_tool_calls(
+                    "", request=request, token_ids=token_ids)
+                reasoning_content, content = None, tool_call_info.content
+                if request.include_reasoning:
+                    reasoning_content, content = reasoning_parser.extract_reasoning_content(  # noqa: E501
+                        "",
+                        request=request,
+                        token_ids=token_ids)
+                message = ChatMessage(
+                    role=role,
+                    reasoning_content=reasoning_content,
+                    content=content,
+                    tool_calls=tool_call_info.tool_calls,
+                )
 
                 choice_data = ChatCompletionResponseChoice(
                     index=output.index,
                     message=message,
                     logprobs=logprobs,
-                    finish_reason="tool_calls" if is_tool_call else
+                    finish_reason="tool_calls"
+                    if tool_call_info.tools_called else
                     output.finish_reason if output.finish_reason else "stop",
                     stop_reason=output.stop_reason,
                 )
@@ -1473,12 +1514,12 @@ class OpenAIServingChat(OpenAIServing):
         messages.append(sys_msg)
 
         # Add developer message.
-        dev_msg = get_developer_message()
+        dev_msg = get_developer_message(tools=request.tools)
         messages.append(dev_msg)
 
         # Add user message.
         for chat_msg in request.messages:
-            messages.append(parse_chat_input(chat_msg))
+            messages.extend(parse_chat_input(chat_msg))
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
