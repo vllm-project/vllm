@@ -230,8 +230,8 @@ if has_flashinfer_cutlass_fused_moe():
         nv_fp4_types,
         blocked_quantization_support=True,
         supports_chunking=True,
-        supports_expert_map=
-        True,  # Note: this is a hack to get it to run for now
+        # Note: this is a hack to get it to run for now
+        supports_expert_map=True,
     )
 else:
     FlashInferCutlassMoEPrepareAndFinalize = None
@@ -350,6 +350,12 @@ if cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe():
     ]
 
 
+def _make_gscale(num_experts: int) -> torch.Tensor:
+    return torch.ones((num_experts, ),
+                      device=torch.cuda.current_device(),
+                      dtype=torch.float32)
+
+
 def make_prepare_finalize(
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
     backend: Optional[str],
@@ -362,9 +368,8 @@ def make_prepare_finalize(
     elif prepare_finalize_type == FlashInferCutlassMoEPrepareAndFinalize:
         return FlashInferCutlassMoEPrepareAndFinalize(
             use_dp=moe.moe_parallel_config.dp_size > 1,
-            a1_gscale=torch.ones((moe.num_local_experts, ),
-                                 device="cuda",
-                                 dtype=torch.float32))
+            a1_gscale=_make_gscale(moe.num_local_experts),
+        )
     else:
         return MoEPrepareAndFinalizeNoEP()
 
@@ -453,26 +458,16 @@ def make_fused_experts(
         num_experts = moe.num_local_experts
         rank = moe.moe_parallel_config.dp_rank
         kwargs = {
-            "g1_alphas":
-            _slice(rank, num_experts, (1 / w1_gs)),
-            "g2_alphas":
-            _slice(rank, num_experts, (1 / w2_gs)),
-            "a1_gscale":
-            torch.ones((num_experts, ), device="cuda", dtype=torch.float32),
-            "a2_gscale":
-            torch.ones((num_experts, ), device="cuda", dtype=torch.float32),
-            "max_experts_per_worker":
-            num_experts,
-            "out_dtype":
-            moe.in_dtype,
-            "per_act_token_quant":
-            moe.per_act_token_quant,
-            "per_out_ch_quant":
-            moe.per_out_ch_quant,
-            "block_shape":
-            moe.block_shape,
-            "num_dispatchers":
-            num_dispatchers,
+            "g1_alphas": _slice(rank, num_experts, (1 / w1_gs)),
+            "g2_alphas": _slice(rank, num_experts, (1 / w2_gs)),
+            "a1_gscale": _make_gscale(num_experts),
+            "a2_gscale": _make_gscale(num_experts),
+            "max_experts_per_worker": num_experts,
+            "out_dtype": moe.in_dtype,
+            "per_act_token_quant": moe.per_act_token_quant,
+            "per_out_ch_quant": moe.per_out_ch_quant,
+            "block_shape": moe.block_shape,
+            "num_dispatchers": num_dispatchers,
         }
         print(f"Making CutlassExpertsFp4 {kwargs} ...")
         experts = CutlassExpertsFp4(**kwargs)
@@ -481,26 +476,16 @@ def make_fused_experts(
         num_experts = moe.num_local_experts
         rank = moe.moe_parallel_config.dp_rank
         kwargs = {
-            "g1_alphas":
-            _slice(rank, num_experts, (1 / w1_gs)),
-            "g2_alphas":
-            _slice(rank, num_experts, (1 / w2_gs)),
-            "a1_gscale":
-            torch.ones((num_experts, ), device="cuda", dtype=torch.float32),
-            "a2_gscale":
-            torch.ones((num_experts, ), device="cuda", dtype=torch.float32),
-            "out_dtype":
-            moe.in_dtype,
-            "quant_dtype":
-            "nvfp4",
-            "ep_rank":
-            moe.ep_rank,
-            "ep_size":
-            moe.ep_size,
-            "tp_rank":
-            moe.tp_rank,
-            "tp_size":
-            moe.tp_size,
+            "g1_alphas": _slice(rank, num_experts, (1 / w1_gs)),
+            "g2_alphas": _slice(rank, num_experts, (1 / w2_gs)),
+            "a1_gscale": _make_gscale(num_experts),
+            "a2_gscale": _make_gscale(num_experts),
+            "out_dtype": moe.in_dtype,
+            "quant_dtype": "nvfp4",
+            "ep_rank": moe.ep_rank,
+            "ep_size": moe.ep_size,
+            "tp_rank": moe.tp_rank,
+            "tp_size": moe.tp_size,
         }
         print(f"Making FlashInferExperts {kwargs} ...")
         experts = FlashInferExperts(**kwargs)
