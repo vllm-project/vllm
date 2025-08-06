@@ -6,14 +6,39 @@ from typing import Literal, get_args
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
-QuantizationMethods = Literal["aqlm", "awq", "deepspeedfp", "tpu_int8", "fp8",
-                              "ptpc_fp8", "fbgemm_fp8", "modelopt",
-                              "modelopt_fp4", "marlin", "bitblas", "gguf",
-                              "gptq_marlin_24", "gptq_marlin", "gptq_bitblas",
-                              "awq_marlin", "gptq", "compressed-tensors",
-                              "bitsandbytes", "qqq", "hqq", "experts_int8",
-                              "neuron_quant", "ipex", "quark", "moe_wna16",
-                              "torchao", "auto-round", "rtn", "inc", "mxfp4"]
+QuantizationMethods = Literal[
+    "aqlm",
+    "awq",
+    "deepspeedfp",
+    "tpu_int8",
+    "fp8",
+    "ptpc_fp8",
+    "fbgemm_fp8",
+    "modelopt",
+    "modelopt_fp4",
+    "marlin",
+    "bitblas",
+    "gguf",
+    "gptq_marlin_24",
+    "gptq_marlin",
+    "gptq_bitblas",
+    "awq_marlin",
+    "gptq",
+    "compressed-tensors",
+    "bitsandbytes",
+    "qqq",
+    "hqq",
+    "experts_int8",
+    "neuron_quant",
+    "ipex",
+    "quark",
+    "moe_wna16",
+    "torchao",
+    "auto-round",
+    "rtn",
+    "inc",
+    "mxfp4",
+]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 # The customized quantization methods which will be added to this dict.
