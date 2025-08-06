@@ -4,8 +4,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 import pytest
-from packaging.version import Version
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 import vllm
 from vllm.assets.image import ImageAsset
@@ -184,10 +182,6 @@ def test_qwen2vl_lora_beam_search(qwen2vl_lora_files):
 @pytest.mark.xfail(
     current_platform.is_rocm(),
     reason="Qwen2.5-VL dependency xformers incompatible with ROCm",
-)
-@pytest.mark.skipif(
-    Version(TRANSFORMERS_VERSION) < Version("4.49.0"),
-    reason="Qwen2.5-VL require transformers version no lower than 4.49.0",
 )
 def test_qwen25vl_lora(qwen25vl_lora_files):
     """Test Qwen 2.5 VL model with LoRA"""

@@ -172,6 +172,36 @@ Multi-image input can be extended to perform video captioning. We show this with
         print(generated_text)
     ```
 
+#### Custom RGBA Background Color
+
+When loading RGBA images (images with transparency), vLLM converts them to RGB format. By default, transparent pixels are replaced with white background. You can customize this background color using the `rgba_background_color` parameter in `media_io_kwargs`.
+
+??? code
+
+    ```python
+    from vllm import LLM
+    
+    # Default white background (no configuration needed)
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
+    
+    # Custom black background for dark theme
+    llm = LLM(
+        model="llava-hf/llava-1.5-7b-hf",
+        media_io_kwargs={"image": {"rgba_background_color": [0, 0, 0]}}
+    )
+    
+    # Custom brand color background (e.g., blue)
+    llm = LLM(
+        model="llava-hf/llava-1.5-7b-hf", 
+        media_io_kwargs={"image": {"rgba_background_color": [0, 0, 255]}}
+    )
+    ```
+
+!!! note
+    - The `rgba_background_color` accepts RGB values as a list `[R, G, B]` or tuple `(R, G, B)` where each value is 0-255
+    - This setting only affects RGBA images with transparency; RGB images are unchanged
+    - If not specified, the default white background `(255, 255, 255)` is used for backward compatibility
+
 ### Video Inputs
 
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
@@ -478,6 +508,20 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
 
+#### Custom RGBA Background Color
+
+To use a custom background color for RGBA images, pass the `rgba_background_color` parameter via `--media-io-kwargs`:
+
+```bash
+# Example: Black background for dark theme
+vllm serve llava-hf/llava-1.5-7b-hf \
+  --media-io-kwargs '{"image": {"rgba_background_color": [0, 0, 0]}}'
+
+# Example: Custom gray background
+vllm serve llava-hf/llava-1.5-7b-hf \
+  --media-io-kwargs '{"image": {"rgba_background_color": [128, 128, 128]}}'
+```
+
 ### Audio Inputs
 
 Audio input is supported according to [OpenAI Audio API](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in).
@@ -588,7 +632,9 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
 pass a tensor of shape to the corresponding field of the multi-modal dictionary.
+
 #### Image Embedding Inputs
+
 For image embeddings, you can pass the base64-encoded tensor to the `image_embeds` field.
 The following example demonstrates how to pass image embeddings to the OpenAI server:
 

@@ -30,6 +30,7 @@ def kernel_paged_attention_2d(
         query_ptr,  # [num_tokens, num_query_heads, head_size]
         key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
         value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
+        sink_ptr,  # [num_query_heads]
         block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
         seq_lens_ptr,  # [num_seqs]
         alibi_slopes_ptr,  # [num_query_heads]
@@ -100,7 +101,17 @@ def kernel_paged_attention_2d(
 
     block_table_offset = seq_idx * block_table_stride
 
-    M = tl.full([num_queries_per_kv_padded], float("-inf"), dtype=tl.float32)
+    if sink_ptr is None:
+        M = tl.full([num_queries_per_kv_padded],
+                    float("-inf"),
+                    dtype=tl.float32)
+    else:
+        M = tl.load(
+            sink_ptr + query_head_idx,
+            mask=head_mask,
+            other=float("-inf"),
+        ).to(dtype=tl.float32)
+
     L = tl.full([num_queries_per_kv_padded], 1.0, dtype=tl.float32)
     acc = tl.zeros([num_queries_per_kv_padded, HEAD_SIZE_PADDED],
                    dtype=tl.float32)
@@ -232,6 +243,8 @@ def chunked_prefill_paged_decode(
     sliding_window=None,
     sm_scale=None,
     output_scale=None,
+    # Optional tensor for sinks
+    sinks=None,
 ):
 
     if sm_scale is None:
@@ -263,6 +276,7 @@ def chunked_prefill_paged_decode(
             sm_scale=sm_scale,
             skip_decode=True,
             fp8_out_scale=output_scale,
+            sinks=sinks,
         )
 
     block_size = value_cache.shape[3]
@@ -291,11 +305,17 @@ def chunked_prefill_paged_decode(
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv),
                                     16)
 
-    use_custom = use_rocm_custom_paged_attention(query.dtype, head_size,
-                                                 block_size,
-                                                 num_queries_per_kv,
-                                                 max_seq_len, sliding_window,
-                                                 kv_cache_dtype, alibi_slopes)
+    use_custom = use_rocm_custom_paged_attention(
+        query.dtype,
+        head_size,
+        block_size,
+        num_queries_per_kv,
+        max_seq_len,
+        sliding_window,
+        kv_cache_dtype,
+        alibi_slopes,
+        sinks,
+    )
     if use_custom:
         _PARTITION_SIZE_ROCM = 256
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE_ROCM - 1) //
@@ -345,6 +365,7 @@ def chunked_prefill_paged_decode(
             query_ptr=query,
             key_cache_ptr=key_cache,
             value_cache_ptr=value_cache,
+            sink_ptr=sinks,
             block_tables_ptr=block_table,
             seq_lens_ptr=seq_lens,
             alibi_slopes_ptr=alibi_slopes,

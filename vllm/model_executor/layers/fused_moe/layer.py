@@ -327,7 +327,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.w13_weight.data = shuffled_w13
             layer.w2_weight.data = shuffled_w2
 
-        if current_platform.is_cpu():
+        if current_platform.is_xpu():
+            import intel_extension_for_pytorch as ipex
+            layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+                layer.w13_weight,
+                layer.w2_weight,
+                use_prepack=True,
+            )
+        elif current_platform.is_cpu():
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
                 from vllm.model_executor.layers.fused_moe import cpu_fused_moe
                 dtype = layer.w13_weight.dtype
@@ -507,6 +514,44 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             e_score_correction_bias,
             apply_router_weight_on_input,
             activation,
+        )
+
+    def forward_xpu(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
+    ):
+        if enable_eplb is not False or expert_load_view is not None or \
+                logical_to_physical_map is not None or \
+                logical_replica_count is not None:
+            raise NotImplementedError("Expert load balancing is not supported "
+                                      "for XPU.")
+        assert custom_routing_function is None
+        return layer.ipex_fusion(
+            x,
+            use_grouped_topk,
+            top_k,
+            router_logits,
+            renormalize,
+            topk_group,
+            num_expert_group,
         )
 
     def forward_tpu(
@@ -874,6 +919,18 @@ class FusedMoE(torch.nn.Module):
         elif shard_id == "w2":
             param_data[expert_id] = loaded_weight
 
+    def _load_combined_w13_weight_scale(self, shard_dim: int,
+                                        loaded_weight: torch.Tensor,
+                                        param: torch.Tensor, tp_rank: int):
+        """
+        Load w13 weight scales assuming that w1 weight scales and w3 weight
+        scales are stored in the same loaded_weight tensor.
+        """
+        shard_size = param.shape[shard_dim]
+        loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
+                                             shard_size)
+        param.copy_(loaded_weight)
+
     def _load_model_weight_or_group_weight_scale(self,
                                                  shard_dim: int,
                                                  expert_data: torch.Tensor,
@@ -1026,9 +1083,6 @@ class FusedMoE(torch.nn.Module):
             raise ValueError(f"shard_id must be ['w1','w2','w3'] but "
                              f"got {shard_id}.")
 
-        WEIGHT_SCALE_SUPPORTED = [
-            e.value for e in FusedMoeWeightScaleSupported
-        ]
         # Fetch the dim to shard the parameter/loaded weight
         # based on the shard id. This will be whatever
         # dimension intermediate_size_per_partition is used.
@@ -1118,19 +1172,43 @@ class FusedMoE(torch.nn.Module):
             uses_weight_scale_2 = self.quant_method.uses_weight_scale_2_pattern(
             )
 
-            # For per-tensor, FP4 uses "weight_scale_2", FP8 uses "weight_scale"
-            per_tensor_conditions = (
-                "weight_scale_2" in weight_name if uses_weight_scale_2 else
-                "weight_scale" in weight_name) or "input_scale" in weight_name
-
-            if per_tensor_conditions:
+            # Call _load_per_tensor_weight_scale() to load per-tensor (scalar)
+            # weights scales.
+            # Input scales are always per-tensor.
+            # Weight scales: FP4 uses "weight_scale_2" and FP8 uses
+            # "weight_scale" for per-tensor scales.
+            is_per_tensor = ("weight_scale_2" in weight_name
+                             if uses_weight_scale_2 else "weight_scale"
+                             in weight_name) or "input_scale" in weight_name
+            if is_per_tensor:
                 self._load_per_tensor_weight_scale(
                     shard_id=shard_id,
                     param=param,
                     loaded_weight=loaded_weight,
                     expert_id=expert_id,
                 )
-            elif "weight" in weight_name:
+                return True if return_success else None
+
+            # If the weight is w13_weight_scale and w13_weight_scales are
+            # combined into single loaded_weight, call
+            # _load_combined_w13_weight_scale() to load it.
+            # This is checked by comparing the hidden_out dims of the
+            # loaded_weight and the param.
+            if "w13_weight_scale" in weight_name:
+                loaded_weight_hidden_out = loaded_weight.shape[-2]
+                param_hidden_out = param.data.shape[-2] * self.tp_size
+                if loaded_weight_hidden_out == param_hidden_out:
+                    self._load_combined_w13_weight_scale(
+                        shard_dim=shard_dim,
+                        loaded_weight=loaded_weight,
+                        param=param,
+                        tp_rank=self.tp_rank,
+                    )
+                    return True if return_success else None
+
+            # For other weights, call _load_model_weight_or_group_weight_scale()
+            # to load it.
+            if "weight" in weight_name:
                 self._load_model_weight_or_group_weight_scale(
                     shard_id=shard_id,
                     shard_dim=shard_dim,
@@ -1172,6 +1250,9 @@ class FusedMoE(torch.nn.Module):
                                                    loaded_weight=loaded_weight,
                                                    expert_id=expert_id)
             else:
+                WEIGHT_SCALE_SUPPORTED = [
+                    e.value for e in FusedMoeWeightScaleSupported
+                ]
                 raise ValueError(
                     f"quant method must be one of {WEIGHT_SCALE_SUPPORTED}")
             return True if return_success else None

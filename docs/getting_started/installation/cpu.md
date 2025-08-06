@@ -164,7 +164,7 @@ Note, it is recommended to manually reserve 1 CPU for vLLM front-end process whe
 
 ### How to decide `VLLM_CPU_KVCACHE_SPACE`?
 
-  - This value is 4GB by default. Larger space can support more concurrent requests, longer context length. However, users should take care of memory capacity of each NUMA node. The memory usage of each TP rank is the sum of `weight shard size` and `VLLM_CPU_KVCACHE_SPACE`, if it exceeds the capacity of a single NUMA node, the TP worker will be killed with `exitcode 9` due to out-of-memory.
+This value is 4GB by default. Larger space can support more concurrent requests, longer context length. However, users should take care of memory capacity of each NUMA node. The memory usage of each TP rank is the sum of `weight shard size` and `VLLM_CPU_KVCACHE_SPACE`, if it exceeds the capacity of a single NUMA node, the TP worker will be killed with `exitcode 9` due to out-of-memory.
 
 ### How to do performance tuning for vLLM CPU?
 
@@ -183,13 +183,13 @@ vLLM CPU supports tensor parallel (TP) and pipeline parallel (PP) to leverage mu
 
 ### Which quantization configs does vLLM CPU support?
 
-  - vLLM CPU supports quantizations:
+- vLLM CPU supports quantizations:
     - AWQ (x86 only)
     - GPTQ (x86 only)
     - compressed-tensor INT8 W8A8 (x86, s390x)
 
 ### (x86 only) What is the purpose of `VLLM_CPU_MOE_PREPACK` and `VLLM_CPU_SGL_KERNEL`?
 
-  - Both of them requires `amx` CPU flag.
+- Both of them requires `amx` CPU flag.
     - `VLLM_CPU_MOE_PREPACK` can provides better performance for MoE models
     - `VLLM_CPU_SGL_KERNEL` can provides better performance for MoE models and small-batch scenarios.

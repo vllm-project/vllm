@@ -11,6 +11,7 @@ import jinja2
 from fastapi import Request
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
@@ -89,15 +90,26 @@ class OpenAIServingResponses(OpenAIServing):
             logger.info("Using default chat sampling params from %s: %s",
                         source, self.default_sampling_params)
 
+        # If False (default), the "store" option is (silently) ignored and the
+        # response is not stored. If True, the response is stored in memory.
+        # NOTE(woosuk): This may not be intuitive for users, as the default
+        # behavior in OpenAI's Responses API is to store the response, but
+        # vLLM's default behavior is not.
+        self.enable_store = envs.VLLM_ENABLE_RESPONSES_API_STORE
+        if self.enable_store:
+            logger.warning_once(
+                "`VLLM_ENABLE_RESPONSES_API_STORE` is enabled. This may "
+                "cause a memory leak since we never remove responses from "
+                "the store.")
         # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: This causes a memory leak since we never remove responses
-        # from the store.
+        # FIXME: If enable_store=True, this may cause a memory leak since we
+        # never remove responses from the store.
         self.response_store: dict[str, ResponsesResponse] = {}
         self.response_store_lock = asyncio.Lock()
 
         # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: This causes a memory leak since we never remove messages
-        # from the store.
+        # FIXME: If enable_store=True, this may cause a memory leak since we
+        # never remove messages from the store.
         self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
 
         self.background_tasks: dict[str, asyncio.Task] = {}
@@ -117,6 +129,26 @@ class OpenAIServingResponses(OpenAIServing):
         # success status before we actually start generating text :).
         if self.engine_client.errored:
             raise self.engine_client.dead_error
+
+        if request.store and not self.enable_store:
+            if request.background:
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message=(
+                        "This vLLM engine does not support `store=True` and "
+                        "therefore does not support the background mode. To "
+                        "enable these features, set the environment variable "
+                        "`VLLM_ENABLE_RESPONSES_API_STORE=1` when launching "
+                        "the vLLM server."),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                )
+            # Disable the store option.
+            # NOTE(woosuk): Although returning an error is possible, we opted
+            # to implicitly disable store and process the request anyway, as
+            # we assume most users do not intend to actually store the response
+            # (i.e., their request's `store=True` just because it's the default
+            # value).
+            request.store = False
 
         # Handle the previous response ID.
         prev_response_id = request.previous_response_id
@@ -455,4 +487,14 @@ class OpenAIServingResponses(OpenAIServing):
             err_type="invalid_request_error",
             message=f"Response with id '{response_id}' not found.",
             status_code=HTTPStatus.NOT_FOUND,
+        )
+
+    def _make_store_not_supported_error(self) -> ErrorResponse:
+        return self.create_error_response(
+            err_type="invalid_request_error",
+            message=("`store=True` (default) is not supported. Please set "
+                     "`store=False` in Responses API or set "
+                     "`VLLM_ENABLE_RESPONSES_API_STORE=1` in the env var when "
+                     "starting the vLLM server."),
+            status_code=HTTPStatus.BAD_REQUEST,
         )
