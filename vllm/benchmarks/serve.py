@@ -668,8 +668,7 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
                  for k in metrics if k in results},
         extra_info={
             k: results[k]
-            for k in results if (
-                k not in metrics and k not in ignored_metrics and k in results)
+            for k in results if k not in metrics and k not in ignored_metrics
         })
     if pt_records:
         # Don't use json suffix here as we don't want CI to pick it up
