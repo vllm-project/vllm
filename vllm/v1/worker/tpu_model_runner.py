@@ -191,7 +191,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-        self.is_multimodal_model = model_config.is_multimodal_model
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config)
         # TODO: Support M-RoPE (e.g, Qwen2-VL)
