@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
+    VLLM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -151,6 +152,8 @@ if TYPE_CHECKING:
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
+    VLLM_USE_TRTLLM_CONTEXT_ATTENTION: bool = False
+    VLLM_USE_TRTLLM_DECODE_ATTENTION: bool = False
 
 
 def get_default_cache_root():
@@ -324,6 +327,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
     lambda:
     (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower() in
+     ("true", "1")),
+
+    # Use AITER triton unified attention for V1 attention
+    "VLLM_USE_AITER_UNIFIED_ATTENTION":
+    lambda:
+    (os.getenv("VLLM_USE_AITER_UNIFIED_ATTENTION", "False").lower() in
      ("true", "1")),
 
     # Force vllm to use a specific flash-attention version (2 or 3), only valid
@@ -1022,9 +1031,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_CUDNN_PREFILL":
     lambda: bool(int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))),
 
-    # If set to 1, use the TRTLLM Attention backend in flashinfer.
-    "VLLM_USE_TRTLLM_ATTENTION":
-    lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
+    # If set to 1, use the TRTLLM Context Attention backend in flashinfer.
+    "VLLM_USE_TRTLLM_CONTEXT_ATTENTION":
+    lambda: bool(int(os.getenv("VLLM_USE_TRTLLM_CONTEXT_ATTENTION", "0"))),
+
+    # If set to 1, use the TRTLLM Decode Attention backend in flashinfer.
+    "VLLM_USE_TRTLLM_DECODE_ATTENTION":
+    lambda: bool(int(os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", "0"))),
 
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
