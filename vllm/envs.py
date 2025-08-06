@@ -934,11 +934,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_MOE_FP4":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))),
 
-    # If set to 1, use the FlashInfer MXFP4 x MXFP8 MoE backend.
+    # If set to 1, use the FlashInfer
+    # MXFP8 (activation) x MXFP4 (weight) MoE backend.
     "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0"))),
 
-    # If set to 1, use the FlashInfer MXFP4 x BF16 MoE backend.
+    # If set to 1, use the FlashInfer
+    # BF16 (activation) x MXFP4 (weight) MoE backend.
     "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0"))),
 
