@@ -89,6 +89,12 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
+        if self.is_rocm_aiter_enabled:
+            query, key = super().forward(positions, query, key, offsets)
+            if positions.numel() == 1:
+                key = key.clone()
+            return query, key
+
         assert key is not None
         query_rot = query[..., :self.rotary_dim]
         key_rot = key[..., :self.rotary_dim]
