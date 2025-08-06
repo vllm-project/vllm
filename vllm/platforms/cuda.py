@@ -565,6 +565,9 @@ class NvmlCudaPlatform(CudaPlatformBase):
         """
         query if the set of gpus are fully connected by nvlink (1 hop)
         """
+        if envs.VLLM_SKIP_NVLINK_CHECK:
+            logger.info("Skipping NVLink check.")
+            return True
         handles = [
             pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_ids
         ]
