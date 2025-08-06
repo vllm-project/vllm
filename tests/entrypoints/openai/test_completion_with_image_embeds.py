@@ -21,7 +21,7 @@ MAXIMUM_IMAGES = 2
 
 
 @pytest.fixture(scope="module")
-def default_server_args() -> list[str]:
+def default_image_embeds_server_args() -> list[str]:
     return [
         "--dtype",
         "bfloat16",
@@ -36,8 +36,9 @@ def default_server_args() -> list[str]:
 
 
 @pytest.fixture(scope="module")
-def server_with_image_embeds(default_server_args):
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+def server_with_image_embeds(default_image_embeds_server_args):
+    with RemoteOpenAIServer(MODEL_NAME,
+                            default_image_embeds_server_args) as remote_server:
         yield remote_server
 
 
