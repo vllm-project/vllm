@@ -412,7 +412,7 @@ class EplbState:
         self.expert_rearrangement_step += 1
 
         if self.is_async and self.ep_buffer_ready:
-            self.move_to_workspace(model, is_profile)
+            self.move_to_workspace(model, ep_group=ep_group, is_profile)
         if (self.expert_rearrangement_step
                 >= self.expert_rearrangement_step_interval):
             self.expert_rearrangement_step = 0
@@ -565,6 +565,7 @@ class EplbState:
             try:
                 loop.run_until_complete(
                     self.transfer_run_periodically(model=model,
+                                                   ep_group=ep_group
                                                    is_profile=is_profile, 
                                                    rank_mapping=rank_mapping))
             except Exception as e:
@@ -581,6 +582,7 @@ class EplbState:
     async def transfer_run_periodically(
             self, 
             model, 
+            ep_group: ProcessGroup
             is_profile: bool = False,
             rank_mapping: Optional[dict[int, int]] = None):
         experts_stream = torch.cuda.Stream()
@@ -598,6 +600,7 @@ class EplbState:
                         new_physical_to_logical_map,
                         expert_weights=model.expert_weights,
                         expert_weights_buffer=self.expert_buffer,
+                        ep_group=ep_group
                         is_profile=is_profile,
                         layer=self.layer,
                         cuda_stream=experts_stream,
@@ -618,6 +621,7 @@ class EplbState:
 
     def move_to_workspace(self,
                           model: MixtureOfExperts,
+                          ep_group: ProcessGroup,
                           is_profile: bool = False):
         with self.buffer_lock:
             move_from_buffer(
@@ -628,6 +632,7 @@ class EplbState:
                 experts_recv_loc=self.experts_recv_loc, 
                 new_indices=self.new_physical_to_logical_map[
                     self.layer].tolist(),
+                ep_group=ep_group
             )
         self.layer += 1
         self.ep_buffer_ready = False
@@ -638,7 +643,8 @@ class EplbState:
         if not is_profile:
             if self.physical_to_logical_map.shape[
                     1] != self.new_physical_to_logical_map.shape[1]:
-                self.physical_to_logical_map = self.new_physical_to_logical_map.to(
+                self.physical_to_logical_map = 
+                self.new_physical_to_logical_map.to(
                     self.physical_to_logical_map.device)
             else:
                 self.physical_to_logical_map.copy_(

@@ -105,11 +105,11 @@ def move_to_buffer(
     expert_weights: Iterable[torch.Tensor],
     expert_weights_buffer: Sequence[torch.Tensor],
     cuda_stream: Optional[torch.cuda.Stream],
+    ep_group: ProcessGroup
 ) -> tuple[list[bool], list[bool], dict[int, int]]:
     """
     Perform expert weights rearrangement of one layer.
     """
-    ep_group = get_ep_group().device_group
     ep_rank = ep_group.rank()
     local2global = partial(
         idx_local_to_global,
@@ -246,8 +246,8 @@ def move_from_buffer(
     is_received_locally: list[bool],
     experts_recv_loc: dict[int, int],
     new_indices: Sequence[int],
+    ep_group: ProcessGroup,
 ) -> None:
-    ep_group = get_ep_group().device_group
     ep_rank = ep_group.rank()
     num_local_experts = len(is_unchanged)
 
@@ -272,6 +272,7 @@ async def transfer_layer(old_global_expert_indices: torch.Tensor,
                          new_global_expert_indices: torch.Tensor,
                          expert_weights: Sequence[Iterable[torch.Tensor]],
                          expert_weights_buffer,
+                         ep_group: ProcessGroup,
                          is_profile: bool = False,
                          layer: int = 0,
                          cuda_stream: Optional[torch.cuda.Stream] = None,
@@ -294,7 +295,6 @@ async def transfer_layer(old_global_expert_indices: torch.Tensor,
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
     """
-    ep_group = get_ep_group().device_group
     ep_size = ep_group.size()
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
@@ -317,17 +317,13 @@ async def transfer_layer(old_global_expert_indices: torch.Tensor,
         1] == new_global_expert_indices.shape[1]
     num_moe_layers, num_physical_experts = old_global_expert_indices.shape
     assert len(expert_weights) == num_moe_layers
-
-    ep_group = get_ep_group().device_group
     num_local_physical_experts = next(iter(expert_weights[0])).shape[0]
     assert new_global_expert_indices.shape == (num_moe_layers,
                                                num_physical_experts)
-
     assert num_physical_experts == ep_size * num_local_physical_experts
     # A buffer to hold the expert weights in one layer during the exchange.
     # NOTE: Currently we assume the same weights across different layers
     # have the same shape.
-
     if is_profile:
         # Maximum send size is to send all local experts to all ranks,
         # So we use a dummy `all_gather` to reserve enough communication buffer
@@ -351,6 +347,7 @@ async def transfer_layer(old_global_expert_indices: torch.Tensor,
         expert_weights=expert_weights[layer],
         expert_weights_buffer=expert_weights_buffer,
         cuda_stream=cuda_stream,
+        ep_group=ep_group
     )
     # NOTE(bowen): We need this synchronize to run, but I don't know why.
     # If you figure out the reason, please let me know -- thank you!
@@ -444,6 +441,7 @@ def rearrange_expert_weights_inplace(
             expert_weights=expert_weights[layer],
             expert_weights_buffer=expert_weights_buffer,
             cuda_stream=None,
+            ep_group=ep_group
         )
 
         move_from_buffer(
@@ -453,6 +451,7 @@ def rearrange_expert_weights_inplace(
             is_received_locally=is_received_locally, 
             experts_recv_loc=experts_recv_loc, 
             new_indices=new_global_expert_indices[layer].tolist(),
+            ep_group: ProcessGroup
         )
 
 def _map_old_expert_indices_with_rank_mapping(
