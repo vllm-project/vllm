@@ -468,7 +468,7 @@ def get_config(
             pattern_repeats = config.num_hidden_layers // len(sliding_window)
             layer_types = sliding_window * pattern_repeats
             config.layer_types = [
-                "full_attention" if layer_type is None else "sliding_window"
+                "full_attention" if layer_type is None else "sliding_attention"
                 for layer_type in layer_types
             ]
             config.sliding_window = next(filter(None, sliding_window), None)
