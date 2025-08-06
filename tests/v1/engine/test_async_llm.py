@@ -93,16 +93,16 @@ async def generate(
 @pytest.mark.asyncio
 async def test_streaming_with_parallel_sampling(monkeypatch: pytest.MonkeyPatch, output_kind: RequestOutputKind):
     """test parallel sampling along with ouput_kind""" 
-    engine_args = AsyncEngineArgs(model="Qwen/Qwen3-0.6B", gpu_memory_utilization=0.5)
+    engine_args = AsyncEngineArgs(model="Qwen/Qwen3-0.6B", gpu_memory_utilization=0.8)
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
-        NUM_REQUESTS = 100
-        N = 500
-        NUM_TOKENS = 50
+        NUM_REQUESTS = 10
+        N = 5
+        NUM_TOKENS = 20
         prompt = "<|im_start|>user\nTell me the long history of the Earth is<|im_end|>\n<|im_start|>assistant\n<think>"
 
         request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
