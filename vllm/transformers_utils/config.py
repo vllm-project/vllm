@@ -35,8 +35,8 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              MllamaConfig, MLPSpeculatorConfig,
                                              Nemotron_Nano_VL_Config,
                                              NemotronConfig, NVLM_D_Config,
-                                             Ovis2_5Config, RWConfig,
-                                             SpeculatorsConfig,
+                                             Ovis2_5Config, OvisConfig,
+                                             RWConfig, SpeculatorsConfig,
                                              Step3TextConfig, Step3VLConfig,
                                              UltravoxConfig)
 # yapf: enable
@@ -86,6 +86,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "speculators": SpeculatorsConfig,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
+    "ovis": OvisConfig,
     "ovis2_5": Ovis2_5Config,
     "ultravox": UltravoxConfig,
     "step3_vl": Step3VLConfig,
