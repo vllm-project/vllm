@@ -47,7 +47,6 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
-from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -344,7 +343,9 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         mm_limits = {"image": None}
-        if self.get_model_version() == (2, 6) or self.get_model_version() == (4, 0):
+        if self.get_model_version() == (2,
+                                        6) or self.get_model_version() == (4,
+                                                                           0):
             mm_limits["video"] = None
 
         return mm_limits
@@ -625,7 +626,8 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         out_keys: set[str],
     ) -> dict[str, NestedTensors]:
         # This processor supports zipping prompt and mm_data together
-        if self.info.get_model_version() == (2, 6) or self.info.get_model_version() == (4, 0):
+        if self.info.get_model_version() == (
+                2, 6) or self.info.get_model_version() == (4, 0):
             inputs = super()._call_hf_processor(
                 prompt=prompts,  # type: ignore
                 mm_data=mm_data,
@@ -684,16 +686,15 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        placeholders = [
-            ("image", self.info.image_pattern),
-            ("video", self.info.video_pattern)
-        ]
+        placeholders = [("image", self.info.image_pattern),
+                        ("video", self.info.video_pattern)]
 
         # hard code for inconsistency of encode-decode image_pattern
         additional_placeholders = []
         tokenizer = self.info.get_tokenizer()
         for modality, pattern in placeholders:
-            sub_pattern = tokenizer.decode(tokenizer.encode(pattern, add_special_tokens=False))
+            sub_pattern = tokenizer.decode(
+                tokenizer.encode(pattern, add_special_tokens=False))
             if sub_pattern != pattern:
                 additional_placeholders.append((modality, sub_pattern))
         placeholders += additional_placeholders
@@ -1278,11 +1279,10 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["apm.", "audio", "tts"]
-        )
+        loader = AutoWeightsLoader(self,
+                                   skip_prefixes=["apm.", "audio", "tts"])
         return loader.load_weights(weights)
+
 
 class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
     packed_modules_mapping = {
@@ -1385,11 +1385,10 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["apm.", "audio", "tts"]
-        )
+        loader = AutoWeightsLoader(self,
+                                   skip_prefixes=["apm.", "audio", "tts"])
         return loader.load_weights(weights)
+
 
 _SUPPORT_VERSION = {
     (2, 0): MiniCPMV2_0,
@@ -1423,12 +1422,10 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
         # Dispatch class based on version
         instance_cls = _SUPPORT_VERSION.get(version)
         if instance_cls is None:
-            supported_versions = ", ".join([
-                f"{v[0]}.{v[1]}" for v in sorted(_SUPPORT_VERSION.keys())
-            ])
-            raise ValueError(
-                f"Currently, MiniCPMV only supports versions "
-                f"{supported_versions}. Got version: {version}")
+            supported_versions = ", ".join(
+                [f"{v[0]}.{v[1]}" for v in sorted(_SUPPORT_VERSION.keys())])
+            raise ValueError(f"Currently, MiniCPMV only supports versions "
+                             f"{supported_versions}. Got version: {version}")
 
         # quant_config references base class members,
         # so update values before init is called
