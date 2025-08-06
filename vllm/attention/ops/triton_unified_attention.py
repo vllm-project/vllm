@@ -337,6 +337,7 @@ def kernel_unified_attention_3d(
         num_seqs: tl.int32,
         BLOCK_M: tl.constexpr,  # int
         NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
+        HAS_SINK: tl.constexpr,  # bool
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -394,7 +395,7 @@ def kernel_unified_attention_3d(
 
     block_table_offset = seq_idx * block_table_stride
 
-    if sink_ptr is None or segm_idx != 0:
+    if not HAS_SINK or segm_idx != 0:
         M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     else:
         M = tl.load(
@@ -803,6 +804,7 @@ def unified_attention(
                 num_seqs=num_seqs,
                 BLOCK_M=BLOCK_M,
                 NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
+                HAS_SINK=(sinks is not None),
             )
 
         reduce_segments[(q.shape[0], num_query_heads)](
