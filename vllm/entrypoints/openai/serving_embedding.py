@@ -34,6 +34,7 @@ from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput, RequestOutput)
 from vllm.pooling_params import PoolingParams
+from vllm.transformers_utils.config import try_get_tokenizer_config
 
 logger = init_logger(__name__)
 
@@ -154,7 +155,6 @@ class EmbeddingMixin(OpenAIServing):
 
         # Get tokenizer config for pooling models (embedding models)
         if self.model_config.runner_type == "pooling":
-            from vllm.transformers_utils.config import try_get_tokenizer_config
             tokenizer_config = try_get_tokenizer_config(
                 self.model_config.tokenizer,
                 trust_remote_code=self.model_config.trust_remote_code,
