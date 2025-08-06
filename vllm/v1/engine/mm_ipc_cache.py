@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 #  - MultiModalIPCCache stores the MultiModalKwargs from P0.
 #
 # The keys of MultiModalIPCCacheLookup (in the client)
-# and the keys of MultiModalIPCCacheLookup (in the server)
+# and the keys of MultiModalIPCCache (in the server)
 # are mirrored, and this allows us to avoid the serialization of `mm_inputs`
 # (like pixel values) between client (=P0) and server (=P1) processes if the
 # `mm_hash` is found in the client cache.
