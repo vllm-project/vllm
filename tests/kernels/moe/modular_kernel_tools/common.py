@@ -60,14 +60,13 @@ class Config:
         s += f" dtype={self.dtype} \n"
         s += f" fused_moe_chunk_size={self.fused_moe_chunk_size} \n"
         s += " Quant: \n"
-        s += f" fused_moe_chunk_size={self.fused_moe_chunk_size} \n "
         if self.quant_config is not None:
-            s += f"     q_dtype={self.quant_dtype} \n"
-            s += f"     q_block_shape={self.quant_block_shape} \n"
-            s += f"     q_per_out_ch_quant={self.is_per_out_ch_quant} \n"
-            s += f"     q_per_act_token={self.is_per_act_token_quant} \n"
+            s += f"     q_dtype={self.quant_dtype}\n"
+            s += f"     q_block_shape={self.quant_block_shape}\n"
+            s += f"     q_per_out_ch_quant={self.is_per_out_ch_quant}\n"
+            s += f"     q_per_act_token={self.is_per_act_token_quant}\n"
         else:
-            s += "     quant=None \n"
+            s += "     quant=None\n"
         return s
 
     @property
@@ -153,6 +152,14 @@ class Config:
         info = expert_info(self.fused_experts_type)
         return torch.float8_e4m3fn in info.supported_dtypes
 
+    def is_fe_fp4_supported(self):
+        info = expert_info(self.fused_experts_type)
+        return "nvfp4" in info.supported_dtypes
+
+    def is_pf_fp4_supported(self):
+        info = prepare_finalize_info(self.prepare_finalize_type)
+        return "nvfp4" in info.supported_dtypes
+
     def is_fe_block_fp8_supported(self):
         info = expert_info(self.fused_experts_type)
         return (torch.float8_e4m3fn in info.supported_dtypes
@@ -213,6 +220,12 @@ class Config:
         if is_fp8 and not self.is_fe_fp8_supported():
             return False
 
+        # Check fp4 support
+        is_fp4 = self.quant_dtype == "nvfp4"
+        if is_fp4 and (not self.is_fe_fp4_supported()
+                       or not self.is_pf_fp4_supported()):
+            return False
+
         # Check fp8 block quanization support
         is_block_quatized = self.quant_block_shape is not None
         if is_block_quatized and not is_fp8:
@@ -241,6 +254,8 @@ class WeightTensors:
     w2: torch.Tensor
     w1_scale: Optional[torch.Tensor]
     w2_scale: Optional[torch.Tensor]
+    w1_gs: Optional[torch.Tensor] = None
+    w2_gs: Optional[torch.Tensor] = None
 
     def describe(self):
         s = ""
@@ -249,13 +264,20 @@ class WeightTensors:
         s += f' - {_describe_tensor(self.w2, "w2")} \n'
         s += f' - {_describe_tensor(self.w1_scale, "w1_scale")} \n'
         s += f' - {_describe_tensor(self.w2_scale, "w2_scale")} \n'
+        s += f' - {_describe_tensor(self.w1_gs, "w1_gs")} \n'
+        s += f' - {_describe_tensor(self.w2_gs, "w2_gs")} \n'
         return s
+
+    def is_quantized(self) -> bool:
+        # or w1_scale is not None?
+        return (self.w1.dtype == torch.float8_e4m3fn
+                or self.w1.dtype == torch.uint8 or self.w1.dtype == torch.int8)
 
     def to_current_device(self):
         self.w1 = self.w1.to(device=torch.cuda.current_device())
         self.w2 = self.w2.to(device=torch.cuda.current_device())
-        is_quantized = self.w1.dtype == torch.float8_e4m3fn
-        if is_quantized:
+
+        if self.is_quantized():
             assert self.w1_scale is not None
             assert self.w2_scale is not None
             self.w1_scale = self.w1_scale.to(
@@ -263,24 +285,37 @@ class WeightTensors:
             self.w2_scale = self.w2_scale.to(
                 device=torch.cuda.current_device())
 
+        if self.w1_gs is not None:
+            assert self.w2_gs is not None
+            self.w1_gs = self.w1_gs.to(device=torch.cuda.current_device())
+            self.w2_gs = self.w2_gs.to(device=torch.cuda.current_device())
+
     def slice_weights(self, rank: int,
                       num_local_experts: int) -> "WeightTensors":
         s = rank * num_local_experts
         e = s + num_local_experts
         w1 = self.w1[s:e, :, :]
         w2 = self.w2[s:e, :, :]
-        is_quantized = self.w1.dtype == torch.float8_e4m3fn
+
         w1_scale, w2_scale = (None, None)
-        if is_quantized:
+        if self.is_quantized():
             assert self.w1_scale is not None
             assert self.w2_scale is not None
             w1_scale = self.w1_scale[s:e, :, :]
             w2_scale = self.w2_scale[s:e, :, :]
-        return WeightTensors(w1, w2, w1_scale, w2_scale)
+
+        w1_gs = self.w1_gs
+        w2_gs = self.w2_gs
+        if w1_gs is not None:
+            assert w2_gs is not None
+            w1_gs = w1_gs[s:e]
+            w2_gs = w2_gs[s:e]
+
+        return WeightTensors(w1, w2, w1_scale, w2_scale, w1_gs, w2_gs)
 
     @staticmethod
     def make(config: Config) -> "WeightTensors":
-        _, w1, w1_scale, _, w2, w2_scale = make_test_weights(
+        (_, w1, w1_scale, w1_gs), (_, w2, w2_scale, w2_gs) = make_test_weights(
             e=config.E,
             n=config.N,
             k=config.K,
@@ -292,7 +327,9 @@ class WeightTensors:
         return WeightTensors(w1=w1,
                              w2=w2,
                              w1_scale=w1_scale,
-                             w2_scale=w2_scale)
+                             w2_scale=w2_scale,
+                             w1_gs=w1_gs,
+                             w2_gs=w2_gs)
 
 
 @dataclass
@@ -411,8 +448,11 @@ def reference_moe_impl(config: Config, weights: WeightTensors,
                          apply_router_weights_on_input=config.topk == 1)
 
 
-def make_modular_kernel(config: Config,
-                        vllm_config: VllmConfig) -> mk.FusedMoEModularKernel:
+def make_modular_kernel(
+    config: Config,
+    vllm_config: VllmConfig,
+    weights: WeightTensors,
+) -> mk.FusedMoEModularKernel:
 
     def next_power_of_2(x):
         import math
@@ -437,14 +477,17 @@ def make_modular_kernel(config: Config,
         max_num_tokens=next_power_of_2(config.M),
     )
 
-    print(config.prepare_finalize_type)
-
     # make modular kernel
     prepare_finalize = make_prepare_finalize(config.prepare_finalize_type,
                                              config.all2all_backend(), moe)
 
-    fused_experts = make_fused_experts(config.fused_experts_type, moe,
-                                       prepare_finalize.num_dispatchers())
+    fused_experts = make_fused_experts(
+        config.fused_experts_type,
+        moe,
+        prepare_finalize.num_dispatchers(),
+        weights.w1_gs,
+        weights.w2_gs,
+    )
 
     modular_kernel = mk.FusedMoEModularKernel(
         prepare_finalize=prepare_finalize, fused_experts=fused_experts)
@@ -465,7 +508,7 @@ def run_modular_kernel(
     # weights for rank
     rank_weights = weights.slice_weights(pgi.rank, config.num_local_experts)
 
-    mk = make_modular_kernel(config, vllm_config)
+    mk = make_modular_kernel(config, vllm_config, weights)
 
     mk_kwargs = {
         "hidden_states":

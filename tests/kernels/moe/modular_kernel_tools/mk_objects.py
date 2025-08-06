@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_fp8_supported)
+from vllm.platforms import current_platform
 from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
@@ -73,6 +74,7 @@ def register_prepare_and_finalize(
     supported_dtypes: list[Union[torch.dtype, str]],
     blocked_quantization_support: bool,
     backend: Optional[str],
+    force_multigpu: bool = False,
 ):
     global PREPARE_FINALIZE_INFO
     global MK_ALL_PREPARE_FINALIZE_TYPES
@@ -87,7 +89,7 @@ def register_prepare_and_finalize(
         backend,
     )
     MK_ALL_PREPARE_FINALIZE_TYPES.append(kind)
-    if backend is not None:
+    if backend is not None or force_multigpu:
         MK_MULTI_GPU_PREPARE_FINALIZE_TYPES.append(kind)
     else:
         MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES.append(kind)
@@ -169,7 +171,8 @@ register_experts(
     supports_expert_map=True,
 )
 
-if has_deep_ep():
+# Disable on blackwell for now
+if has_deep_ep() and not current_platform.has_device_capability(100):
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
         DeepEPHTPrepareAndFinalize)
     from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
@@ -214,6 +217,7 @@ if has_flashinfer_cutlass_fused_moe():
         nv_fp4_types,
         blocked_quantization_support=True,
         backend=None,
+        force_multigpu=True,
     )
 
     register_experts(
@@ -222,10 +226,14 @@ if has_flashinfer_cutlass_fused_moe():
         nv_fp4_types,
         blocked_quantization_support=True,
         supports_chunking=True,
-        supports_expert_map=False,
+        supports_expert_map=
+        True,  # Note: this is a hack to get it to run for now
     )
+else:
+    FlashInferCutlassMoEPrepareAndFinalize = None
 
-if has_deep_gemm():
+# Disable on blackwell for now
+if has_deep_gemm() and not current_platform.has_device_capability(100):
     register_experts(
         BatchedDeepGemmExperts,
         batched_format,
@@ -343,15 +351,16 @@ def make_prepare_finalize(
     backend: Optional[str],
     moe: FusedMoEConfig,
 ) -> mk.FusedMoEPrepareAndFinalize:
-    if backend != "naive":
+    if backend != "naive" and backend is not None:
         prepare_finalize = FusedMoEMethodBase._maybe_make_prepare_finalize(moe)
         assert prepare_finalize is not None
         return prepare_finalize
     elif prepare_finalize_type == FlashInferCutlassMoEPrepareAndFinalize:
         return FlashInferCutlassMoEPrepareAndFinalize(
             use_dp=moe.moe_parallel_config.dp_size > 1,
-            a1_gscale=0,  #TBD
-        )
+            a1_gscale=torch.ones((moe.num_local_experts, ),
+                                 device="cuda",
+                                 dtype=torch.float32))
     else:
         return MoEPrepareAndFinalizeNoEP()
 
@@ -360,6 +369,8 @@ def make_fused_experts(
     fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
     moe: FusedMoEConfig,
     num_dispatchers: int,
+    w1_gs: Optional[torch.Tensor],
+    w2_gs: Optional[torch.Tensor],
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
 
     use_fp8 = moe.quant_dtype == torch.float8_e4m3fn
@@ -428,35 +439,54 @@ def make_fused_experts(
         print(f"Making CutlassBatchedExpertsFp8 {kwargs} ...")
         experts = CutlassBatchedExpertsFp8(**kwargs)
     elif fused_experts_type == CutlassExpertsFp4:
+        assert w1_gs is not None and w2_gs is not None
         num_experts = moe.num_local_experts
         kwargs = {
-            "g1_alphas": 0,  #TBD
-            "g2_alphas": 0,  #TBD
-            "a1_gscale": 0,  #TBD
-            "a2_gscale": 0,  #TBD
-            "max_experts_per_worker": num_experts,
-            "out_dtype": moe.in_dtype,
-            "per_act_token_quant": moe.per_act_token_quant,
-            "per_out_ch_quant": moe.per_out_ch_quant,
-            "block_shape": moe.block_shape,
-            "num_dispatchers": num_dispatchers,
+            "g1_alphas": (1 / w1_gs),
+            "g2_alphas": (1 / w2_gs),
+            "a1_gscale":
+            torch.ones((num_experts, ), device="cuda", dtype=torch.float32),
+            "a2_gscale":
+            torch.ones((num_experts, ), device="cuda", dtype=torch.float32),
+            "max_experts_per_worker":
+            num_experts,
+            "out_dtype":
+            moe.in_dtype,
+            "per_act_token_quant":
+            moe.per_act_token_quant,
+            "per_out_ch_quant":
+            moe.per_out_ch_quant,
+            "block_shape":
+            moe.block_shape,
+            "num_dispatchers":
+            num_dispatchers,
         }
         print(f"Making CutlassExpertsFp4 {kwargs} ...")
         experts = CutlassExpertsFp4(**kwargs)
     elif fused_experts_type == FlashInferExperts:
-        print(f"Making FlashInferExperts {kwargs} ...")
+        assert w1_gs is not None and w2_gs is not None
+        num_experts = moe.num_local_experts
         kwargs = {
-            "g1_alphas": 0,  #TBD
-            "g2_alphas": 0,  #TBD
-            "a1_gscale": 0,  #TBD
-            "a2_gscale": 0,  #TBD
-            "out_dtype": moe.in_dtype,
-            "quant_dtype": "nvfp4",
-            "ep_rank": moe.ep_rank,
-            "ep_size": moe.ep_size,
-            "tp_rank": moe.tp_rank,
-            "tp_size": moe.tp_size,
+            "g1_alphas": (1 / w1_gs),
+            "g2_alphas": (1 / w2_gs),
+            "a1_gscale":
+            torch.ones((num_experts, ), device="cuda", dtype=torch.float32),
+            "a2_gscale":
+            torch.ones((num_experts, ), device="cuda", dtype=torch.float32),
+            "out_dtype":
+            moe.in_dtype,
+            "quant_dtype":
+            "nvfp4",
+            "ep_rank":
+            moe.ep_rank,
+            "ep_size":
+            moe.ep_size,
+            "tp_rank":
+            moe.tp_rank,
+            "tp_size":
+            moe.tp_size,
         }
+        print(f"Making FlashInferExperts {kwargs} ...")
         experts = FlashInferExperts(**kwargs)
     else:
         raise RuntimeError(f"Unknown fused experts type: {fused_experts_type}")

@@ -161,13 +161,14 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
 
-    _, w1, w1_s, _, w2, w2_s = make_test_weights(E,
-                                                 N,
-                                                 K,
-                                                 dtype,
-                                                 torch.float8_e4m3fn,
-                                                 per_act_token_quant=False,
-                                                 block_shape=block_size)
+    (_, w1, w1_s, _), (_, w2, w2_s,
+                       _) = make_test_weights(E,
+                                              N,
+                                              K,
+                                              dtype,
+                                              torch.float8_e4m3fn,
+                                              per_act_token_quant=False,
+                                              block_shape=block_size)
 
     m_fused_moe = modular_triton_fused_moe(use_fp8_w8a8=True,
                                            use_int8_w8a8=False,
@@ -248,13 +249,14 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
 
-    _, w1, w1_s, _, w2, w2_s = make_test_weights(E,
-                                                 N,
-                                                 K,
-                                                 dtype,
-                                                 torch.float8_e4m3fn,
-                                                 per_act_token_quant=False,
-                                                 block_shape=block_size)
+    (_, w1, w1_s, _), (_, w2, w2_s,
+                       _) = make_test_weights(E,
+                                              N,
+                                              K,
+                                              dtype,
+                                              torch.float8_e4m3fn,
+                                              per_act_token_quant=False,
+                                              block_shape=block_size)
 
     # Note: for now use_compile will error out if the problem size is
     # large enough to trigger chunking. I'm leaving the flag and

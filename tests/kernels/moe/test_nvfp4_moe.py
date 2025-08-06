@@ -3,6 +3,7 @@
 import pytest
 import torch
 
+from tests.kernels.moe.utils import make_test_weights
 from tests.kernels.quantization.nvfp4_utils import (FLOAT4_E2M1_MAX,
                                                     FLOAT8_E4M3_MAX,
                                                     dequantize_nvfp4_to_dtype)
@@ -43,41 +44,20 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
             VllmConfig(parallel_config=ParallelConfig(
                 pipeline_parallel_size=1))):
 
-        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
-        w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
         quant_blocksize = 16
-        round_up = lambda x, y: (x + y - 1) // y * y
-        sf_w1_2n = round_up(2 * n, 128)
-        sf_w1_k = round_up(k // quant_blocksize, 4)
-        w1_blockscale = torch.empty((e, sf_w1_2n, sf_w1_k),
-                                    device="cuda",
-                                    dtype=torch.float8_e4m3fn)
 
-        w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
-        sf_w2_k = round_up(k, 128)
-        sf_w2_n = round_up(n // quant_blocksize, 4)
-        w2_blockscale = torch.empty((e, sf_w2_k, sf_w2_n),
-                                    device="cuda",
-                                    dtype=torch.float8_e4m3fn)
+        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
 
-        w1_q = torch.empty((e, 2 * n, k // 2),
-                           device="cuda",
-                           dtype=torch.uint8)
-        w2_q = torch.empty((e, k, n // 2), device="cuda", dtype=torch.uint8)
-        w1_gs = torch.empty((e, ), device="cuda", dtype=torch.float32)
-        w2_gs = torch.empty((e, ), device="cuda", dtype=torch.float32)
-
-        for expert in range(e):
-            w1_amax = torch.abs(w1).max().to(torch.float32)
-            w2_amax = torch.abs(w2).max().to(torch.float32)
-            w1_gs[expert] = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w1_amax
-            w2_gs[expert] = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w2_amax
-
-            w1_q[expert], w1_blockscale[expert] = ops.scaled_fp4_quant(
-                w1[expert], w1_gs[expert])
-
-            w2_q[expert], w2_blockscale[expert] = ops.scaled_fp4_quant(
-                w2[expert], w2_gs[expert])
+        (_, w1_q, w1_blockscale,
+         w1_gs), (_, w2_q, w2_blockscale, w2_gs) = make_test_weights(
+             e,
+             n,
+             k,
+             in_dtype=dtype,
+             quant_dtype="nvfp4",
+             block_shape=None,  # use quant_blocksize?
+             per_act_token_quant=False,
+         )
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids, _ = fused_topk(a,
@@ -125,14 +105,14 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
             w1_d[idx] = dequantize_nvfp4_to_dtype(w1_q[idx],
                                                   w1_blockscale[idx],
                                                   w1_gs[idx],
-                                                  dtype=w1.dtype,
-                                                  device=w1.device,
+                                                  dtype=dtype,
+                                                  device=w1_q.device,
                                                   block_size=quant_blocksize)
             w2_d[idx] = dequantize_nvfp4_to_dtype(w2_q[idx],
                                                   w2_blockscale[idx],
                                                   w2_gs[idx],
-                                                  dtype=w2.dtype,
-                                                  device=w2.device,
+                                                  dtype=dtype,
+                                                  device=w2_q.device,
                                                   block_size=quant_blocksize)
 
         torch_output = torch_moe(a_in_dtype, w1_d, w2_d, score, topk)
