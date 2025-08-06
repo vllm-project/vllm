@@ -382,9 +382,11 @@ class ModelConfig:
     logprobs_mode: LogprobsMode = "raw_logprobs"
     """Indicates the content returned in the logprobs and prompt_logprobs.
     Supported mode:
-    1) raw_logprobs, 2) processed_logprobs, 3) raw_logits, 4) processed_logits.
-    Raw means the values before applying logit processors, like bad words.
-    Processed means the values after applying such processors.
+    1) raw_logprobs, 2) processed_logprobs, 3) final_logprobs, 3) raw_logits,
+    4) processed_logits. Raw means the values before applying any logit
+    processors, like bad words. Processed means the values after applying all
+    processors, except argmax invariant processors, temperature and top_k/top_p.
+    Final means after applying all logit processors.
     """
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
