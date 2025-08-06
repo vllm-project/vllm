@@ -18,7 +18,8 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          ConversationMessage,
-                                         random_tool_call_id)
+                                         get_history_tool_calls_cnt,
+                                         make_tool_call_id)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb, ChatCompletionLogProbs,
@@ -124,6 +125,11 @@ class OpenAIServingChat(OpenAIServing):
             source = "model" if source == "auto" else source
             logger.info("Using default chat sampling params from %s: %s",
                         source, self.default_sampling_params)
+
+        if self.model_config.hf_config.model_type == 'kimi_k2':
+            self.tool_call_id_type = 'kimi_k2'
+        else:
+            self.tool_call_id_type = 'random'
 
     async def create_chat_completion(
         self,
@@ -342,6 +348,7 @@ class OpenAIServingChat(OpenAIServing):
         current_text: Optional[str],
         delta_text: str,
         function_name_returned: bool,
+        tool_call_idx: Optional[int] = None
     ) -> tuple[Optional[DeltaMessage], bool]:
         if current_text is None or current_text == "":
             # if the current text is empty, we cannot parse it
@@ -387,8 +394,12 @@ class OpenAIServingChat(OpenAIServing):
                         current_tool_call = obj[-2]
 
                     function_name_returned = True
+                    tool_call_id = make_tool_call_id(
+                        id_type=self.tool_call_id_type,
+                        func_name=current_tool_call["name"],
+                        idx=tool_call_idx)
                     delta_message = DeltaMessage(tool_calls=[
-                        DeltaToolCall(id=random_tool_call_id(),
+                        DeltaToolCall(id=tool_call_id,
                                       function=DeltaFunctionCall(
                                           name=current_tool_call["name"],
                                           arguments=arguments),
@@ -449,6 +460,8 @@ class OpenAIServingChat(OpenAIServing):
 
         all_previous_token_ids: Optional[list[list[int]]]
         function_name_returned = [False] * num_choices
+        history_tool_call_cnt = get_history_tool_calls_cnt(
+            conversation) if self.tool_call_id_type == 'kimi_k2' else 0
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
@@ -613,7 +626,6 @@ class OpenAIServingChat(OpenAIServing):
                         previous_text = previous_texts[i]
                         previous_token_ids = all_previous_token_ids[i]
                         current_text = previous_text + delta_text
-
                         # avoid the None + list error.
                         if previous_token_ids:
                             current_token_ids = previous_token_ids + list(
@@ -668,7 +680,7 @@ class OpenAIServingChat(OpenAIServing):
                                     index=i)
                             else:
                                 delta_tool_call = DeltaToolCall(
-                                    id=random_tool_call_id(),
+                                    id=make_tool_call_id(),
                                     type="function",
                                     function=DeltaFunctionCall(
                                         name=tool_choice_function_name,
@@ -699,7 +711,12 @@ class OpenAIServingChat(OpenAIServing):
                                 previous_text=previous_text,
                                 current_text=content,
                                 delta_text=delta_text,
-                                function_name_returned=fn_name_returned))
+                                function_name_returned=fn_name_returned,
+                                tool_call_idx=history_tool_call_cnt))
+                        if (delta_message and delta_message.tool_calls and
+                                delta_message.tool_calls[0].id is not None):
+                            # this tool call cnt is used for kimi-k2 only
+                            history_tool_call_cnt += 1
 
                         # update the previous values for the next iteration
                         previous_texts[i] = current_text
@@ -973,6 +990,8 @@ class OpenAIServingChat(OpenAIServing):
         assert final_res is not None
 
         choices: list[ChatCompletionResponseChoice] = []
+        history_tool_call_cnt = get_history_tool_calls_cnt(
+            conversation) if self.tool_call_id_type == 'kimi_k2' else 0
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
@@ -1042,17 +1061,29 @@ class OpenAIServingChat(OpenAIServing):
                 assert content is not None
                 tool_calls = TypeAdapter(
                     list[FunctionDefinition]).validate_json(content)
+
+                tool_call_ids = []
+                for tool_call in tool_calls:
+                    tool_call_ids.append(
+                        make_tool_call_id(id_type=self.tool_call_id_type,
+                                          func_name=tool_call.name,
+                                          idx=history_tool_call_cnt))
+                    # this tool call cnt is used for kimi-k2 only
+                    history_tool_call_cnt += 1
+
                 message = ChatMessage(
                     role=role,
                     content="",
-                    reasoning_content=reasoning_content,
                     tool_calls=[
-                        tool_call_class(function=FunctionCall(
-                            name=tool_call.name,
-                            arguments=json.dumps(tool_call.parameters,
-                                                 ensure_ascii=False)))
-                        for tool_call in tool_calls
-                    ])
+                        tool_call_class(id=tool_call_ids[i],
+                                        function=FunctionCall(
+                                            name=tool_call.name,
+                                            arguments=json.dumps(
+                                                tool_call.parameters,
+                                                ensure_ascii=False)))
+                        for i, tool_call in enumerate(tool_calls)
+                    ],
+                    reasoning_content=reasoning_content)
 
             # if the request doesn't use tool choice
             # OR specifies to not use a tool
@@ -1096,7 +1127,6 @@ class OpenAIServingChat(OpenAIServing):
                     if (tool_call_info.content
                             and len(tool_call_info.content) > 0):
                         ret_content = tool_call_info.content
-
                     message = ChatMessage(role=role,
                                           reasoning_content=reasoning_content,
                                           content=ret_content)

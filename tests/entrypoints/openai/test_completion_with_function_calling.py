@@ -28,8 +28,15 @@ def server():  # noqa: F811
         "--reasoning-parser",
         "qwen3",
     ]
-
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    # hack model_type to kimi_k2
+    # it doesn't change any other output except tool_id
+    # so original tests are cool.
+    with RemoteOpenAIServer(MODEL_NAME,
+                            args,
+                            override_hf_configs={
+                                "model_type": 'kimi_k2',
+                                'kv_lora_rank': None
+                            }) as remote_server:
         yield remote_server
 
 
@@ -54,6 +61,7 @@ async def client(server):
 async def test_function_tool_use(client: openai.AsyncOpenAI, model_name: str,
                                  stream: bool, tool_choice: Union[str, dict],
                                  enable_thinking: bool):
+
     tools = [
         {
             "type": "function",
@@ -196,6 +204,9 @@ async def test_function_tool_use(client: openai.AsyncOpenAI, model_name: str,
                 reasoning_content != ""
         assert chat_completion.choices[0].message.tool_calls is not None
         assert len(chat_completion.choices[0].message.tool_calls) > 0
+        if tool_choice == 'required':
+            assert chat_completion.choices[0].message.tool_calls[
+                0].id == 'functions.get_current_weather:0'
     else:
         # Streaming test
         output_stream = await client.chat.completions.create(
@@ -214,5 +225,10 @@ async def test_function_tool_use(client: openai.AsyncOpenAI, model_name: str,
         async for chunk in output_stream:
             if chunk.choices and chunk.choices[0].delta.tool_calls:
                 output.extend(chunk.choices[0].delta.tool_calls)
-
+        if tool_choice == 'required':
+            for o in output:
+                assert o.id is None or o.id in [
+                    'functions.get_current_weather:0',
+                    'functions.get_forecast:1'
+                ]
         assert len(output) > 0
