@@ -119,6 +119,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
+# Use copy mode to avoid hardlink failures with Docker cache mounts
+ENV UV_LINK_MODE=copy
 
 # Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
 # as it was causing spam when compiling the CUTLASS kernels
@@ -181,6 +183,8 @@ COPY requirements/build.txt requirements/build.txt
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
+# Use copy mode to avoid hardlink failures with Docker cache mounts
+ENV UV_LINK_MODE=copy
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/build.txt \
@@ -272,6 +276,8 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
+# Use copy mode to avoid hardlink failures with Docker cache mounts
+ENV UV_LINK_MODE=copy
 
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
@@ -341,6 +347,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
+# Use copy mode to avoid hardlink failures with Docker cache mounts
+ENV UV_LINK_MODE=copy
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -384,7 +392,7 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
 # Keep this in sync with https://github.com/vllm-project/vllm/blob/main/requirements/cuda.txt
 # We use `--force-reinstall --no-deps` to avoid issues with the existing FlashInfer wheel.
-ARG FLASHINFER_GIT_REF="v0.2.9rc2"
+ARG FLASHINFER_GIT_REF="v0.2.9"
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
   . /etc/environment
     git clone --depth 1 --recursive --shallow-submodules \
@@ -472,6 +480,8 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
+# Use copy mode to avoid hardlink failures with Docker cache mounts
+ENV UV_LINK_MODE=copy
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
