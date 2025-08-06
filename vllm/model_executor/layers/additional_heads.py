@@ -2,6 +2,9 @@ from typing import Optional, List, Dict, Any, Iterable, Set
 import torch
 import torch.nn as nn
 from safetensors.torch import load_file as load_safetensor
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 class ClassifierConfig:
     def __init__(self, name: str, location: str, num_hidden_layers: int, hidden_dim=None):
@@ -46,10 +49,12 @@ class WithAdditionalHeads:
 
     def __init__(self, *args, **kwargs):
         self.additional_heads_config = self._find_additional_heads_config(*args, **kwargs)
+        logger.info(f"Found {len(self.additional_heads_config)} additional heads to load.")
         self.heads = [
             self._build_classification_head(config.num_hidden_layers, config.hidden_dim) 
             for config in self.additional_heads_config
         ]
+        logger.info(f"Built {len(self.heads)} classification heads.")
 
     def _find_additional_heads_config(self, *args, **kwargs) -> List[ClassifierConfig]:
         """Find and validate additional_heads_config in the given args and kwargs."""
@@ -95,7 +100,7 @@ class WithAdditionalHeads:
                     loaded_params.add(f"heads.{i}.{param_name}")
             except Exception as e:
                 raise RuntimeError(f"Failed to load state dict for head '{config.name}': {e}")
-        
+
         return loaded_params
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> Set[str]:
@@ -112,6 +117,7 @@ class WithAdditionalHeads:
 
         loaded_params = original_cls.load_weights(weights)
         head_loaded_params = self._load_classification_heads_from_files()
+        logger.info(f"Loaded {len(head_loaded_params)} additional head parameters.")
         return loaded_params.union(head_loaded_params)
 
     def compute_additional_head(
