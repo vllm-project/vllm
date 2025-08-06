@@ -737,16 +737,21 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
-        self.vision_model = Llama4VisionModel(
-            config.vision_config,
-            None,
-            prefix=maybe_prefix(prefix, "vision_model"),
-            use_data_parallel=self.use_data_parallel,
-        )
-        self.multi_modal_projector = Llama4MultiModalProjector(
-            self.config,
-            None,
-            prefix=maybe_prefix(prefix, "multi_modal_projector"))
+        max_images = multimodal_config.get_limit_per_prompt("image")
+        if max_images > 0:
+            self.vision_model = Llama4VisionModel(
+                config.vision_config,
+                None,
+                prefix=maybe_prefix(prefix, "vision_model"),
+                use_data_parallel=self.use_data_parallel,
+            )
+            self.multi_modal_projector = Llama4MultiModalProjector(
+                self.config,
+                None,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"))
+        else:
+            self.vision_model = None
+            self.multi_modal_projector = None
         self.language_model = initialize_model(
             vllm_config=vllm_config.with_hf_config(config.text_config,
                                                    ["LlamaForCausalLM"]),
@@ -783,6 +788,9 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _process_image_input(
             self, image_input: Llama4ImagePatchInputs) -> MultiModalEmbeddings:
+        if self.vision_model is None or self.multi_modal_projector is None:
+            raise RuntimeError("Image inputs are disabled.")
+
         flat_data = image_input["flat_data"]
         patches_per_image = image_input["patches_per_image"].tolist()
 
@@ -1046,6 +1054,10 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Separate and rename weights
         language_model_weights, other_weights = (
             self._separate_and_rename_weights(weights))
+        if self.vision_model is None and self.multi_modal_projector is None:
+            other_weights = [(name, weight) for name, weight in other_weights
+                             if not (name.startswith("vision_model.") or
+                                     name.startswith("multi_modal_projector."))]
 
         # Handle expert scale parameters
         regular_weights, expert_scale_weights, updated_params_from_experts = (

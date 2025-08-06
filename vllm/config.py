@@ -1645,7 +1645,12 @@ class ModelConfig:
 
     @property
     def is_multimodal_model(self) -> bool:
-        return self.multimodal_config is not None
+        if self.multimodal_config is None:
+            return False
+        limits = self.multimodal_config.limit_per_prompt.values()
+        if not limits:
+            return True
+        return any(limit > 0 for limit in limits)
 
     @property
     def is_cross_encoder(self) -> bool:
