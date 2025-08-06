@@ -2,7 +2,8 @@
 
 vLLM's Sleep Mode allows you to temporarily release most GPU memory used by a model, including model weights and KV cache, without stopping the server or unloading the Docker container. This is especially useful for RLHF, training, or cost-saving scenarios where GPU resources need to be freed between inference workloads.
 
-> **Note:** This feature is only supported on CUDA platform.
+!!! note
+    This feature is only supported on CUDA platform.
 
 ## Benefits
 
