@@ -821,7 +821,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # block_size = 16;
         assert (layer.weight_scale.dtype == torch.float8_e4m3fn), (
             "Weight Block scale must be represented as FP8-E4M3")
-        swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
 
         if self.backend == "flashinfer-trtllm":
             # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
