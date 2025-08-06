@@ -437,12 +437,14 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled.
                             break
 
-                # Handles an edge case when P/D Disaggregation is used with 
-                # Spec Decoding where an extra block gets allocated which 
+                # Handles an edge case when P/D Disaggregation 
+                # is used with Spec Decoding where an 
+                # extra block gets allocated which 
                 # creates a mismatch between the number
                 # of local and remote blocks.
-                effective_lookahead_tokens = (0 if request.num_computed_tokens == 0
-                                              else self.num_lookahead_tokens)
+                effective_lookahead_tokens = (0 
+                                             if request.num_computed_tokens == 0
+                                             else self.num_lookahead_tokens)
                 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -452,6 +454,7 @@ class Scheduler(SchedulerInterface):
                     num_lookahead_tokens=effective_lookahead_tokens,
                     delay_cache_blocks=load_kv_async,
                 )
+
 
 
                 if new_blocks is None:
