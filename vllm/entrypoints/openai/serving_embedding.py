@@ -56,6 +56,15 @@ def _get_embedding(
 
 class EmbeddingMixin(OpenAIServing):
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # Cache chunked processing support to avoid repeated attribute lookups
+        pooler_config = getattr(self.model_config, 'pooler_config', None)
+        self.supports_chunked_processing = (
+            pooler_config is not None
+            and getattr(pooler_config, 'enable_chunked_processing', False))
+
     @override
     async def _preprocess(
         self,
@@ -182,12 +191,9 @@ class EmbeddingMixin(OpenAIServing):
                           (EmbeddingChatRequest, EmbeddingCompletionRequest)):
             return False
 
-        pooler_config = getattr(self.model_config, 'pooler_config', None)
-
         # For chunked processing, we always use MEAN aggregation
         # for cross-chunk aggregation (native pooling is used within each chunk)
-        return (pooler_config is not None
-                and getattr(pooler_config, 'enable_chunked_processing', False))
+        return self.supports_chunked_processing
 
     def _chunk_token_ids(self, token_ids: list[int],
                          chunk_size: int) -> list[list[int]]:
@@ -219,10 +225,8 @@ class EmbeddingMixin(OpenAIServing):
 
         # Process all chunks for MEAN aggregation
         chunks_to_process = chunks
-        chunk_indices = list(range(len(chunks)))
 
-        for i, (chunk_idx, chunk_tokens) in enumerate(
-                zip(chunk_indices, chunks_to_process)):
+        for chunk_idx, chunk_tokens in enumerate(chunks_to_process):
             # Create a request ID for this chunk
             chunk_request_id = (f"{ctx.request_id}-prompt-{prompt_idx}-"
                                 f"chunk-{chunk_idx}")
@@ -269,9 +273,10 @@ class EmbeddingMixin(OpenAIServing):
         if isinstance(request,
                       (EmbeddingChatRequest, EmbeddingCompletionRequest)):
             # Check if chunked processing is enabled for pooling models
+            enable_chunked = self._should_use_chunked_processing(request)
+
+            # Get pooler config for max_embed_len
             pooler_config = getattr(self.model_config, 'pooler_config', None)
-            enable_chunked = (pooler_config is not None and getattr(
-                pooler_config, 'enable_chunked_processing', False))
 
             # Get max_embed_len from pooler config if set
             max_embed_len = (pooler_config.max_embed_len if pooler_config
@@ -293,14 +298,23 @@ class EmbeddingMixin(OpenAIServing):
                 max_length_value = self.max_model_len
 
             validation_error_msg = (
-                f"This model's {length_type} is {max_length_value} tokens. "
-                f"However, you requested {token_num} tokens in the input for "
-                f"embedding generation. Please reduce the length of the input."
-            )
+                "This model's {length_type} is {max_length_value} tokens. "
+                "However, you requested {token_num} tokens in the input for "
+                "embedding generation. Please reduce the length of the input.")
+
+            chunked_processing_error_msg = (
+                "This model's {length_type} is {max_length_value} tokens. "
+                "However, you requested {token_num} tokens in the input for "
+                "embedding generation. Please reduce the length of the input "
+                "or enable chunked processing.")
 
             # Check if input exceeds effective max length
             if token_num > effective_max_len:
-                raise ValueError(validation_error_msg)
+                raise ValueError(
+                    validation_error_msg.format(
+                        length_type=length_type,
+                        max_length_value=max_length_value,
+                        token_num=token_num))
 
             # Check for chunked processing
             # when exceeding max_position_embeddings
@@ -313,11 +327,10 @@ class EmbeddingMixin(OpenAIServing):
                         max_pos_embeddings)
                 else:
                     raise ValueError(
-                        f"This model's maximum position embeddings length is "
-                        f"{max_pos_embeddings} tokens. However, you requested "
-                        f"{token_num} tokens in the input for embedding "
-                        f"generation. Please reduce the length of the input or "
-                        f"enable chunked processing.")
+                        chunked_processing_error_msg.format(
+                            length_type="maximum position embeddings length",
+                            max_length_value=max_pos_embeddings,
+                            token_num=token_num))
 
             return TextTokensPrompt(prompt=input_text,
                                     prompt_token_ids=input_ids)
