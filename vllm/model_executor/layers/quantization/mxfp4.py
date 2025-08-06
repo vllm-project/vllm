@@ -16,7 +16,7 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    _swizzle_mxfp4)
+    _can_support_triton_kernels, _swizzle_mxfp4)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.utils import set_weight_attrs
@@ -450,51 +450,58 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 True,  # do finalize
             )[0]
             return trtllm_gen_output
-
-        if self.moe.use_ep:
-            topk_weights, topk_ids = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
-                indices_type=self.topk_indices_dtype,
-                enable_eplb=enable_eplb,
-                expert_map=expert_map,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
-
-            return self.fused_experts(
-                x,
-                self.w13_weight_triton_tensor,
-                self.w2_weight_triton_tensor,
-                topk_weights,
-                topk_ids,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                w1_bias=layer.w13_bias,
-                w2_bias=layer.w2_bias,
-            )
         else:
-            return triton_kernel_moe_forward(
-                hidden_states=x,
-                w1=self.w13_weight_triton_tensor,
-                w2=self.w2_weight_triton_tensor,
-                gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                w1_bias=layer.w13_bias,
-                w2_bias=layer.w2_bias,
-                w1_precision=self.w13_precision_config,
-                w2_precision=self.w2_precision_config,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-            )
+            assert _can_support_triton_kernels(
+                use_grouped_topk, topk_group, num_expert_group,
+                custom_routing_function, e_score_correction_bias, scoring_func,
+                activation, expert_load_view, logical_to_physical_map,
+                logical_replica_count), (
+                    "Triton kernels are not supported for \
+                    mxfp4 MoE with the current configuration.")
+            if self.moe.use_ep:
+                topk_weights, topk_ids = FusedMoE.select_experts(
+                    hidden_states=x,
+                    router_logits=router_logits,
+                    use_grouped_topk=use_grouped_topk,
+                    top_k=top_k,
+                    renormalize=renormalize,
+                    topk_group=topk_group,
+                    num_expert_group=num_expert_group,
+                    custom_routing_function=custom_routing_function,
+                    scoring_func=scoring_func,
+                    e_score_correction_bias=e_score_correction_bias,
+                    indices_type=self.topk_indices_dtype,
+                    enable_eplb=enable_eplb,
+                    expert_map=expert_map,
+                    expert_load_view=expert_load_view,
+                    logical_to_physical_map=logical_to_physical_map,
+                    logical_replica_count=logical_replica_count,
+                )
+
+                return self.fused_experts(
+                    x,
+                    self.w13_weight_triton_tensor,
+                    self.w2_weight_triton_tensor,
+                    topk_weights,
+                    topk_ids,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                    w1_bias=layer.w13_bias,
+                    w2_bias=layer.w2_bias,
+                )
+            else:
+                return triton_kernel_moe_forward(
+                    hidden_states=x,
+                    w1=self.w13_weight_triton_tensor,
+                    w2=self.w2_weight_triton_tensor,
+                    gating_output=router_logits,
+                    topk=top_k,
+                    renormalize=renormalize,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                    w1_bias=layer.w13_bias,
+                    w2_bias=layer.w2_bias,
+                    w1_precision=self.w13_precision_config,
+                    w2_precision=self.w2_precision_config,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                )
