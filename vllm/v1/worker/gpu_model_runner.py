@@ -147,9 +147,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
         self.is_multimodal_model = model_config.is_multimodal_model
-        self.supports_mm_inputs = (
-            self.is_multimodal_model
-            and self.mm_registry.supports_multimodal_inputs(model_config))
+        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
+            model_config)
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
