@@ -281,6 +281,27 @@ class GemmaRMSNorm(CustomOp):
         return self.forward_static(self.weight.data, self.variance_epsilon, x,
                                    residual)
 
+    def forward_hpu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        from vllm_hpu_extension.kernels import rms_norm
+        HPUFusedRMSNorm = rms_norm()
+        orig_dtype = x.dtype
+        if residual is not None:
+            if orig_dtype == torch.float16:
+                x = x + residual.float()
+            else:
+                x = x + residual
+            residual = x
+
+        x = HPUFusedRMSNorm.apply(x, 1 + self.weight.data,
+                                  self.variance_epsilon)
+        x = x.to(orig_dtype)
+
+        return x if residual is None else (x, residual)
+
     def forward_cuda(
         self,
         x: torch.Tensor,
