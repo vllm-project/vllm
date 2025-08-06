@@ -12,7 +12,8 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.logprobs import batched_count_greater_than
 from vllm.v1.sample.ops.penalties import apply_all_penalties
-from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+from vllm.v1.sample.ops.topk_topp_sampler import (TopKTopPSampler,
+                                                  apply_top_k_top_p)
 
 _SAMPLING_EPS = 1e-5
 
@@ -68,6 +69,7 @@ class Sampler(nn.Module):
         sampled, sampled_logprobs = self.sample(logits, sampling_metadata)
         if (num_logprobs is not None
                 and self.logprobs_mode == "sampled_logprobs"):
+            assert sampled_logprobs is not None
             raw_logprobs = sampled_logprobs
         # Convert sampled token ids to int64 (long) type to ensure compatibility
         # with subsequent operations that may use these values as indices.
@@ -108,7 +110,7 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Sample logits based on sampling metadata.
 
         The various logits processing functions called in this method
@@ -136,7 +138,14 @@ class Sampler(nn.Module):
             logits = processor.apply(logits)
 
         # Apply top_k and/or top_p.
-        random_sampled, logprobs = self.topk_topp_sampler(
+        if (sampling_metadata.max_num_logprobs is not None
+                and self.logprobs_mode == "sampled_logprobs"):
+            logprobs = self.compute_logprobs(
+                apply_top_k_top_p(logits, sampling_metadata.top_k,
+                                  sampling_metadata.top_p))
+        else:
+            logprobs = None
+        random_sampled = self.topk_topp_sampler(
             logits,
             sampling_metadata.generators,
             sampling_metadata.top_k,
