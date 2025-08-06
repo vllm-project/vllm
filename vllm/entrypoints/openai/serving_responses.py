@@ -16,6 +16,7 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption)
+from vllm.entrypoints.context import ConversationContext, SimpleContext
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -29,7 +30,6 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -187,7 +187,7 @@ class OpenAIServingResponses(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         # Schedule the request and get the result generator.
-        generators: list[AsyncGenerator[RequestOutput, None]] = []
+        generators: list[AsyncGenerator[ConversationContext, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 default_max_tokens = self.max_model_len - len(
@@ -195,21 +195,19 @@ class OpenAIServingResponses(OpenAIServing):
                 sampling_params = request.to_sampling_params(
                     default_max_tokens, self.default_sampling_params)
 
-                self._log_inputs(request.request_id,
-                                 request_prompts[i],
-                                 params=sampling_params,
-                                 lora_request=lora_request)
-
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
 
-                generator = self.engine_client.generate(
-                    engine_prompt,
-                    sampling_params,
-                    request.request_id,
+                context = SimpleContext()
+                generator = self._generate_with_builtin_tools(
+                    request_id=request.request_id,
+                    request_prompt=request_prompts[i],
+                    engine_prompt=engine_prompt,
+                    sampling_params=sampling_params,
+                    context=context,
                     lora_request=lora_request,
-                    trace_headers=trace_headers,
                     priority=request.priority,
+                    trace_headers=trace_headers,
                 )
                 generators.append(generator)
         except ValueError as e:
@@ -277,7 +275,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         sampling_params: SamplingParams,
-        result_generator: AsyncIterator[RequestOutput],
+        result_generator: AsyncIterator[ConversationContext],
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
@@ -285,17 +283,20 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> Union[ErrorResponse, ResponsesResponse]:
         if created_time is None:
             created_time = int(time.time())
-        final_res: Optional[RequestOutput] = None
 
+        context: Optional[ConversationContext] = None
         try:
-            async for res in result_generator:
-                final_res = res
+            async for context in result_generator:
+                pass
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
+        assert context is not None
+        assert isinstance(context, SimpleContext)
+        final_res = context.last_output
         assert final_res is not None
         assert len(final_res.outputs) == 1
         final_output = final_res.outputs[0]
