@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any, ClassVar, Optional
+from typing import ClassVar, Optional
 
 import torch
 
@@ -18,6 +18,7 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
+from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -54,11 +55,13 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = True  # Decode-only
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.PURE_DECODE_ONLY
 
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
-        super().__init__(kv_cache_spec, vllm_config, device, FlashMLAMetadata)
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device,
+                         FlashMLAMetadata)
 
         self.compilation_config = vllm_config.compilation_config
         self.num_q_heads = vllm_config.model_config.get_num_attention_heads(
@@ -119,7 +122,6 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             alibi_slopes: Optional[list[float]],
             sliding_window: Optional[int],
             kv_cache_dtype: str,
-            blocksparse_params: Optional[dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
             kv_sharing_target_layer_name: Optional[str],
@@ -127,20 +129,17 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             **mla_args) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
-                         blocksparse_params, logits_soft_cap, attn_type,
+                         logits_soft_cap, attn_type,
                          kv_sharing_target_layer_name, **mla_args)
 
         assert is_flashmla_supported(), \
             "FlashMLA is not supported on this device"
 
-        unsupported_features = [
-            alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
-        ]
+        unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
                 "FlashMLAImpl does not support one of the following: "
-                "alibi_slopes, sliding_window, blocksparse_params, "
-                "logits_soft_cap")
+                "alibi_slopes, sliding_window, logits_soft_cap")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "

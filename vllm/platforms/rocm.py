@@ -174,6 +174,18 @@ class RocmPlatform(Platform):
     ]
 
     @classmethod
+    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
+        if support_fa:
+            if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
+                    and on_gfx9()):
+                # Note: AITER FA is only supported for Qwen-VL models.
+                # TODO: Add support for other VL models in their model class.
+                return _Backend.ROCM_AITER_FA
+            if on_gfx9():
+                return _Backend.FLASH_ATTN
+        return _Backend.TORCH_SDPA
+
+    @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:
@@ -326,15 +338,10 @@ class RocmPlatform(Platform):
                     parallel_config.worker_cls = \
                         "vllm.worker.multi_step_worker.MultiStepWorker"
             elif vllm_config.speculative_config:
-                if envs.VLLM_USE_V1:
+                if not envs.VLLM_USE_V1:
                     raise NotImplementedError(
-                        "Speculative decoding is not yet supported on vLLM V1."
-                    )
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.spec_decode.spec_decode_worker.create_spec_worker"
-                    parallel_config.sd_worker_cls = \
-                        "vllm.worker.worker.Worker"
+                        "Speculative decoding is not supported on vLLM V0.")
+                parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
             else:
                 if envs.VLLM_USE_V1:
                     parallel_config.worker_cls = \
@@ -459,3 +466,7 @@ class RocmPlatform(Platform):
     @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+        return True

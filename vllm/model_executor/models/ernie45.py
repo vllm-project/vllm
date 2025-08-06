@@ -28,7 +28,7 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from .utils import PPMissingLayer
 
 
-class Ernie4_5_ForCausalLM(LlamaForCausalLM):
+class Ernie4_5ForCausalLM(LlamaForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)

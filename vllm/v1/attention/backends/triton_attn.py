@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 from dataclasses import dataclass
-from typing import Any, ClassVar, Optional
+from typing import ClassVar, Optional
 
 import torch
 
@@ -18,7 +18,8 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                              AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -57,10 +58,11 @@ class TritonAttentionMetadata:
 
 class TritonAttentionMetadataBuilder(
         AttentionMetadataBuilder[TritonAttentionMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = True
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.ALWAYS
 
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
         self.device = device
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
@@ -71,9 +73,6 @@ class TritonAttentionMetadataBuilder(
         self.num_heads_kv = model_config.get_num_kv_heads(
             vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
-
-        self.attention_chunk_size = getattr(vllm_config.scheduler_config,
-                                            'attention_chunk_size', None)
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -205,15 +204,10 @@ class TritonAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
-        use_irope: bool = False,
     ) -> None:
-        if blocksparse_params is not None:
-            raise ValueError(
-                "TritonAttention does not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -231,8 +225,6 @@ class TritonAttentionImpl(AttentionImpl):
             logits_soft_cap = 0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
-
-        self.use_irope = use_irope
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 

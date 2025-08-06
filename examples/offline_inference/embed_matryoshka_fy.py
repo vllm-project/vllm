@@ -12,7 +12,9 @@ def parse_args():
     parser = EngineArgs.add_cli_args(parser)
     # Set example specific arguments
     parser.set_defaults(
-        model="jinaai/jina-embeddings-v3", task="embed", trust_remote_code=True
+        model="jinaai/jina-embeddings-v3",
+        runner="pooling",
+        trust_remote_code=True,
     )
     return parser.parse_args()
 
@@ -29,11 +31,11 @@ def main(args: Namespace):
     ]
 
     # Create an LLM.
-    # You should pass task="embed" for embedding models
-    model = LLM(**vars(args))
+    # You should pass runner="pooling" for embedding models
+    llm = LLM(**vars(args))
 
     # Generate embedding. The output is a list of EmbeddingRequestOutputs.
-    outputs = model.embed(prompts, pooling_params=PoolingParams(dimensions=32))
+    outputs = llm.embed(prompts, pooling_params=PoolingParams(dimensions=32))
 
     # Print the outputs.
     print("\nGenerated Outputs:")

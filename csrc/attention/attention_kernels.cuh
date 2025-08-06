@@ -24,7 +24,7 @@
 
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
-#include "cuda_compat.h"
+#include "../cuda_compat.h"
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>

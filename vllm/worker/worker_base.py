@@ -49,7 +49,6 @@ class WorkerBase:
         self.scheduler_config = vllm_config.scheduler_config
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self.kv_transfer_config = vllm_config.kv_transfer_config
         self.compilation_config = vllm_config.compilation_config
@@ -397,8 +396,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
-        if execute_model_req is not None and execute_model_req.spec_step_idx:
-            kwargs["spec_step_idx"] = execute_model_req.spec_step_idx
 
         self.execute_worker(worker_input)
 
