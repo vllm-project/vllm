@@ -52,6 +52,7 @@ def kernel_unified_attention_2d(
         query_ptr,  # [num_tokens, num_query_heads, head_size]
         key_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
         value_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
+        sink_ptr,  # [num_query_heads]
         block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
         seq_lens_ptr,  # [num_seqs]
         alibi_slopes_ptr,  # [num_query_heads]
@@ -131,7 +132,15 @@ def kernel_unified_attention_2d(
 
     block_table_offset = seq_idx * block_table_stride
 
-    M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    if sink_ptr is None:
+        M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    else:
+        M = tl.load(
+            sink_ptr + query_offset_1,
+            mask=query_mask_1,
+            other=float("-inf"),
+        ).to(dtype=tl.float32)
+
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
 
@@ -292,6 +301,7 @@ def kernel_unified_attention_3d(
         query_ptr,  # [num_tokens, num_query_heads, head_size]
         key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
         value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
+        sink_ptr,  # [num_query_heads]
         block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
         seq_lens_ptr,  # [num_seqs]
         alibi_slopes_ptr,  # [num_query_heads]
@@ -383,7 +393,15 @@ def kernel_unified_attention_3d(
 
     block_table_offset = seq_idx * block_table_stride
 
-    M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    if sink_ptr is None or segm_idx != 0:
+        M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    else:
+        M = tl.load(
+            sink_ptr + query_offset_1,
+            mask=query_mask_1,
+            other=float("-inf"),
+        ).to(dtype=tl.float32)
+
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
 
@@ -627,6 +645,8 @@ def unified_attention(
     v_descale,
     alibi_slopes=None,
     qq_bias=None,
+    # Optional tensor for sinks
+    sinks=None,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
@@ -634,6 +654,10 @@ def unified_attention(
     block_size = v.shape[1]
     assert q.element_size() >= 2 or block_size >= 32, \
         "Block size must be at least 32 for fp8"
+
+    if sinks is not None:
+        assert sinks.shape[0] == q.shape[1], \
+        "Sinks must be num_query_heads size"
 
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
@@ -669,6 +693,7 @@ def unified_attention(
             query_ptr=q,
             key_cache_ptr=k,
             value_cache_ptr=v,
+            sink_ptr=sinks,
             block_tables_ptr=block_table,
             seq_lens_ptr=seqused_k,
             alibi_slopes_ptr=alibi_slopes,
@@ -741,6 +766,7 @@ def unified_attention(
                 query_ptr=q,
                 key_cache_ptr=k,
                 value_cache_ptr=v,
+                sink_ptr=sinks,
                 block_tables_ptr=block_table,
                 seq_lens_ptr=seqused_k,
                 alibi_slopes_ptr=alibi_slopes,
