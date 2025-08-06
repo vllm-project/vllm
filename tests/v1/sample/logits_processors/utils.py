@@ -4,6 +4,7 @@
 from enum import Enum, auto
 
 MODEL_NAME = "facebook/opt-125m"
+POOLING_MODEL_NAME = "BAAI/bge-base-en-v1.5"
 DUMMY_LOGITPROC_ARG = "target_token"
 TEMP_GREEDY = 0.0
 MAX_TOKENS = 20

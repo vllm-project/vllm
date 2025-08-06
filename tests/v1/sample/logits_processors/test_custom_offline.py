@@ -5,14 +5,18 @@ from typing import Union
 
 import pytest
 
+# yapf: disable
 from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
                                                      MAX_TOKENS, MODEL_NAME,
+                                                     POOLING_MODEL_NAME,
                                                      TEMP_GREEDY,
                                                      CustomLogitprocSource,
                                                      prompts)
+# yapf: enable
 from vllm import LLM, SamplingParams
 from vllm.test_utils import DUMMY_LOGITPROC_FQCN, DummyLogitsProcessor
-from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.v1.sample.logits_processor import (STR_POOLING_REJECTS_LOGITSPROCS,
+                                             LogitsProcessor)
 
 # Create a mixture of requests which do and don't utilize the dummy logitproc
 sampling_params_list = [
@@ -68,9 +72,9 @@ def _run_test(kwargs: dict, logitproc_loaded: bool):
 
 
 @pytest.mark.parametrize("logitproc_source", list(CustomLogitprocSource))
-def test_custom_logitsprocs_py(monkeypatch,
-                               logitproc_source: CustomLogitprocSource):
-    """Test Python interface for passing custom logitsprocs
+def test_custom_logitsprocs(monkeypatch,
+                            logitproc_source: CustomLogitprocSource):
+    """Test offline Python interface for passing custom logitsprocs
     
     Construct an `LLM` instance which loads a custom logitproc that has a
     well-defined behavior (mask out all tokens except one `target_token`)
@@ -87,7 +91,7 @@ def test_custom_logitsprocs_py(monkeypatch,
 
     Args:
       logitproc_source: what source (entrypoint, fully-qualified class name
-                        (FQCN), or class object) the user pulls the
+                        (FQCN), class object, or None) the user pulls the
                         logitproc from
     """
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
@@ -116,3 +120,68 @@ def test_custom_logitsprocs_py(monkeypatch,
         kwargs["logits_processors"] = [DummyLogitsProcessor]
 
     _run_test(kwargs, logitproc_loaded=True)
+
+
+@pytest.mark.parametrize("logitproc_source", [
+    CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT,
+    CustomLogitprocSource.LOGITPROC_SOURCE_FQCN,
+    CustomLogitprocSource.LOGITPROC_SOURCE_CLASS,
+])
+def test_pooling_rejects_custom_logitsprocs(
+        monkeypatch, logitproc_source: CustomLogitprocSource):
+    """Validate that vLLM engine initialization properly rejects custom
+    logitsprocs when the model is a pooling model.
+
+    Use `LLM` entrypoint.
+
+    Scenario 1:
+    * Mock a logitproc entrypoint
+    * Validate that `LLM` does not load the logitproc
+
+    Scenario 2:
+    * Pass custom logitproc to `LLM` constructor
+      * Scenario 2a: via FQCN
+      * Scenario 2b: via class object
+    * Validate that initialization fails with appropriate exception
+
+    Args:
+      logitproc_source: what source (entrypoint, fully-qualified class name
+                        (FQCN), or class object) the user pulls the
+                        logitproc from
+    """
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    random.seed(40)
+
+    if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT:
+        # Scenario: vLLM loads a pooling model and ignores a logitproc that is
+        # available at a preconfigured entrypoint
+        monkeypatch.setenv("VLLM_MOCK_LP_ENTRYPOINT", "1")
+        llm = LLM(
+            runner="pooling",
+            model=POOLING_MODEL_NAME,
+            gpu_memory_utilization=0.1,
+        )
+        # Require that no logitsprocs have been loaded
+        assert sum([
+            1 for _ in llm.llm_engine.model_executor.driver_worker.worker.
+            model_runner.input_batch.logitsprocs.all
+        ]) == 0
+        return
+
+    kwargs: dict[str, list[Union[str, type[LogitsProcessor]]]] = {}
+    if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_FQCN:
+        # Scenario: load logitproc based on fully-qualified class name (FQCN)
+        kwargs["logits_processors"] = [DUMMY_LOGITPROC_FQCN]
+    elif logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_CLASS:
+        # Scenario: load logitproc from provided class object
+        kwargs["logits_processors"] = [DummyLogitsProcessor]
+
+    with pytest.raises(ValueError, match=STR_POOLING_REJECTS_LOGITSPROCS):
+        # Require that loading a pooling model alongside the logitproc raises
+        # the appropriate exception.
+        LLM(
+            runner="pooling",
+            model=POOLING_MODEL_NAME,
+            gpu_memory_utilization=0.1,
+            **kwargs,
+        )

@@ -17,6 +17,8 @@ from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
                                                        MoveDirectionality)
 from vllm.v1.sample.logits_processor.state import (BatchUpdateBuilder,
                                                    LogitsProcessors)
+from vllm.v1.sample.logits_processor.utils import (
+    STR_POOLING_REJECTS_LOGITSPROCS)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -165,8 +167,9 @@ def build_logitsprocs(
 ) -> LogitsProcessors:
     if is_pooling_model:
         if custom_logitsprocs:
-            raise ValueError(
-                "Pooling models do not support custom logits processors.")
+            raise ValueError(STR_POOLING_REJECTS_LOGITSPROCS)
+        logger.debug("Skipping logits processor loading because pooling models"
+                     " do not supports logits processors.")
         return LogitsProcessors()
     custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
     return LogitsProcessors(
@@ -184,4 +187,5 @@ __all__ = [
     "MoveDirectionality",
     "LogitsProcessors",
     "build_logitsprocs",
+    "STR_POOLING_REJECTS_LOGITSPROCS",
 ]
