@@ -162,12 +162,6 @@ def test_eagle_correctness(
     mm_enabled: bool,
     attn_backend: str,
 ):
-    if attn_backend == "TREE_ATTN":
-        # TODO: Fix this flaky test
-        pytest.skip(
-            "TREE_ATTN is flaky in the test disable for now until it can be "
-            "reolved (see https://github.com/vllm-project/vllm/issues/22922)")
-
     # Generate test prompts inside the function instead of using fixture
     test_prompts = get_test_prompts(mm_enabled)
     '''
@@ -222,7 +216,15 @@ def test_eagle_correctness(
 
         # Heuristic: expect at least 66% of the prompts to match exactly
         # Upon failure, inspect the outputs to check for inaccuracy.
-        assert matches > int(0.66 * len(ref_outputs))
+        accuracy_threshold = 0.66
+
+        if attn_backend == "TREE_ATTN":
+            # The tree attention backend uses Triton kernels, which exhibit
+            # floating-point nondeterminism. Reducing the threshold to 50%
+            # to prevent flaky tests.
+            accuracy_threshold = 0.50
+
+        assert matches > int(accuracy_threshold * len(ref_outputs))
         del spec_llm
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()

@@ -48,6 +48,7 @@ from vllm.transformers_utils.config import (
     try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
+from vllm.tree_drafter_params import TreeDrafterParams
 from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS, LayerBlockType,
                         LazyLoader, common_broadcastable_dtype, random_uuid)
 
@@ -1980,6 +1981,9 @@ class SpeculativeConfig:
         ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
 
+    # params generated in the post-init stage for tree drafting.
+    tree_drafter_params: SkipValidation[TreeDrafterParams] = None
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2201,12 +2205,9 @@ class SpeculativeConfig:
                         (i + 1) * (0, )
                         for i in range(self.num_speculative_tokens)
                     ])
-                else:
-                    # Sort the token tree breadth-first.
-                    tree_choices = ast.literal_eval(
-                        self.speculative_token_tree)
-                    self.speculative_token_tree = str(
-                        sorted(tree_choices, key=lambda t: (len(t), t)))
+                # Construct tree drafter params from the serialized token tree.
+                self.tree_drafter_params = TreeDrafterParams.from_spec_token_tree(
+                    self.speculative_token_tree)
 
                 self.draft_tensor_parallel_size = \
                     SpeculativeConfig._verify_and_get_draft_tp(
