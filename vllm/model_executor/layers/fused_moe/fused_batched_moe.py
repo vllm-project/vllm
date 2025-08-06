@@ -14,6 +14,8 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input, normalize_batched_scales_shape,
     normalize_scales_shape)
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    OCP_MX_Scheme)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     group_broadcast)
 from vllm.triton_utils import tl, triton
@@ -621,7 +623,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
-        use_mxfp4_w4a4: bool = False,
+        ocp_mx_scheme: Optional[OCP_MX_Scheme] = None,
         block_shape: Optional[list[int]] = None,
         per_act_token_quant: bool = False,
     ):
@@ -631,14 +633,14 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 use_int8_w8a8=use_int8_w8a8,
                 use_int8_w8a16=use_int8_w8a16,
                 use_int4_w4a16=use_int4_w4a16,
-                use_mxfp4_w4a4=use_mxfp4_w4a4,
+                ocp_mx_scheme=ocp_mx_scheme,
                 per_act_token_quant=per_act_token_quant,
                 block_shape=block_shape,
             ))
         assert not use_int8_w8a8, "NYI"
         assert not use_int8_w8a16, "NYI"
         assert not use_int4_w4a16, "NYI"
-        assert not use_mxfp4_w4a4, "NYI"
+        assert ocp_mx_scheme is None, "NYI"
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -828,7 +830,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
-        use_mxfp4_w4a4: bool = False,
+        ocp_mx_scheme: Optional[OCP_MX_Scheme] = None,
         per_act_token_quant: bool = False,
         block_shape: Optional[list[int]] = None,
     ):
@@ -838,21 +840,26 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 use_int8_w8a8=use_int8_w8a8,
                 use_int8_w8a16=use_int8_w8a16,
                 use_int4_w4a16=use_int4_w4a16,
-                use_mxfp4_w4a4=use_mxfp4_w4a4,
+                ocp_mx_scheme=ocp_mx_scheme,
                 per_act_token_quant=per_act_token_quant,
                 block_shape=block_shape,
             ))
         assert not use_int8_w8a8, "NYI"
         assert not use_int8_w8a16, "NYI"
         assert not use_int4_w4a16, "NYI"
-        assert not use_mxfp4_w4a4, "NYI"
+        assert ocp_mx_scheme is None, "NYI"
         assert max_num_tokens > 0
         assert num_dispatchers > 0
         self.use_fp8_w8a8 = use_fp8_w8a8
         self.use_int8_w8a8 = use_int8_w8a8
         self.use_int4_w4a16 = use_int4_w4a16
         self.use_int8_w8a16 = use_int8_w8a16
-        self.use_mxfp4_w4a4 = use_mxfp4_w4a4
+
+        if ocp_mx_scheme is not None:
+            self.ocp_mx_scheme: Optional[str] = ocp_mx_scheme.value
+        else:
+            self.ocp_mx_scheme = ocp_mx_scheme
+
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -935,7 +942,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         config_dtype = get_config_dtype_str(use_fp8_w8a8=self.use_fp8_w8a8,
                                             use_int8_w8a16=self.use_int8_w8a16,
                                             use_int4_w4a16=self.use_int4_w4a16,
-                                            use_mxfp4_w4a4=self.use_mxfp4_w4a4,
+                                            ocp_mx_scheme=self.ocp_mx_scheme,
                                             dtype=hidden_states.dtype)
 
         config = try_get_optimal_moe_config(
