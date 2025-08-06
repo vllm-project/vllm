@@ -432,23 +432,35 @@ def reference_moe_impl(config: Config, weights: WeightTensors,
     if config.quant_dtype == "nvfp4":
         quant_blocksize = 16
         dtype = config.dtype
+
         w1_q = weights.w1
         w1_blockscale = weights.w1_scale
         w1_gs = weights.w1_gs
+
         w2_q = weights.w2
         w2_blockscale = weights.w2_scale
         w2_gs = weights.w2_gs
+
         a_global_scale = ((FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(
             rank_tensors.hidden_states.flatten(), dim=-1)).to(torch.float32)
+
+        print(f"A = {rank_tensors.hidden_states.dtype}")
+
+        assert w1_blockscale.shape[1] % 128 == 0
+        assert w1_blockscale.shape[2] % 4 == 0
+        assert w2_blockscale.shape[1] % 128 == 0
+        assert w2_blockscale.shape[2] % 4 == 0
+
         a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(
             rank_tensors.hidden_states, a_global_scale)
-        _, m_k = a_fp4.shape
+
         a = dequantize_nvfp4_to_dtype(a_fp4,
                                       a_scale_interleaved,
                                       a_global_scale,
                                       dtype=dtype,
                                       device=a_fp4.device,
                                       block_size=quant_blocksize)
+
         e = w1_q.shape[0]
         n = w1_q.shape[1] // 2
         k = w2_q.shape[1]
