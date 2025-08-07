@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig, RunnerOption
+from vllm.config import ModelConfig, ModelDType, RunnerOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
@@ -257,7 +257,7 @@ def check_logprobs_close(
 def build_model_context(
     model_id: str,
     runner: RunnerOption = "auto",
-    dtype: Union[str, torch.dtype] = "auto",
+    dtype: ModelDType = "auto",
     model_config_kwargs: Optional[dict[str, Any]] = None,
     mm_processor_kwargs: Optional[dict[str, Any]] = None,
     limit_mm_per_prompt: Optional[dict[str, int]] = None,
@@ -279,6 +279,7 @@ def build_model_context(
     model_info.check_transformers_version(on_fail="skip")
 
     model_config_kwargs = model_config_kwargs or {}
+    limit_mm_per_prompt = limit_mm_per_prompt or {}
     model_config = ModelConfig(
         model_id,
         runner=runner,
@@ -412,3 +413,14 @@ def dummy_hf_overrides(
         })
 
     return hf_config
+
+
+def check_transformers_version(model: str,
+                               min_transformers_version: Optional[str] = None,
+                               max_transformers_version: Optional[str] = None):
+    from .registry import _HfExamplesInfo
+
+    return _HfExamplesInfo(model,
+                           min_transformers_version=min_transformers_version,
+                           max_transformers_version=max_transformers_version
+                           ).check_transformers_version(on_fail="skip")
