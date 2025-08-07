@@ -1,11 +1,13 @@
 """
 Harmony utilities for GPT-OSS model support.
 """
+
 import os
 from typing import Optional
 
 try:
     from openai_harmony import load_harmony_encoding
+
     HARMONY_AVAILABLE = True
 except ImportError:
     HARMONY_AVAILABLE = False
@@ -22,10 +24,10 @@ def is_harmony_available() -> bool:
 def get_encoding(name: str = "o200k_harmony") -> Optional[object]:
     """Get the harmony encoding instance."""
     global _harmony_encoding
-    
+
     if not HARMONY_AVAILABLE:
         return None
-        
+
     if _harmony_encoding is None:
         try:
             _harmony_encoding = load_harmony_encoding(name)
@@ -34,7 +36,7 @@ def get_encoding(name: str = "o200k_harmony") -> Optional[object]:
             # in air-gapped environments
             print(f"Warning: Could not load harmony encoding: {e}")
             return None
-    
+
     return _harmony_encoding
 
 
@@ -43,7 +45,7 @@ def get_stop_tokens_for_assistant_actions():
     encoding = get_encoding()
     if encoding is None:
         return []
-    
+
     try:
         return encoding.stop_tokens_for_assistant_actions()
     except AttributeError:
@@ -56,7 +58,7 @@ def encode_reasoning_token(token_type: str = "reasoning"):
     encoding = get_encoding()
     if encoding is None:
         return []
-    
+
     try:
         # This is a placeholder - actual implementation depends on harmony API
         return encoding.encode(f"<|{token_type}|>")
@@ -69,7 +71,7 @@ def is_reasoning_token(token_id: int) -> bool:
     encoding = get_encoding()
     if encoding is None:
         return False
-    
+
     try:
         # This is a placeholder - actual implementation depends on harmony API
         decoded = encoding.decode([token_id])

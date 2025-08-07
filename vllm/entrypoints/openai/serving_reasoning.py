@@ -2,6 +2,7 @@
 Serving response utilities for reasoning responses.
 Extends the base serving responses with reasoning-specific functionality.
 """
+
 import json
 import time
 from typing import Any, Dict, List, Optional, Union
@@ -29,14 +30,14 @@ logger = init_logger(__name__)
 
 class ReasoningDelta:
     """Delta for reasoning content in streaming responses."""
-    
+
     def __init__(self, reasoning: Optional[str] = None):
         self.reasoning = reasoning
 
 
 class ReasoningUsageInfo(UsageInfo):
     """Extended usage info with reasoning token counts."""
-    
+
     def __init__(
         self,
         prompt_tokens: int = 0,
@@ -54,7 +55,7 @@ class ReasoningUsageInfo(UsageInfo):
 
 class ReasoningChatCompletionResponse(ChatCompletionResponse):
     """Chat completion response with reasoning support."""
-    
+
     def __init__(
         self,
         id: str,
@@ -80,7 +81,7 @@ class ReasoningChatCompletionResponse(ChatCompletionResponse):
 
 class ReasoningChatCompletionStreamResponse(ChatCompletionStreamResponse):
     """Streaming chat completion response with reasoning support."""
-    
+
     def __init__(
         self,
         id: str,
@@ -112,16 +113,14 @@ def create_reasoning_response(
     finish_reason: str = "stop",
 ) -> ReasoningChatCompletionResponse:
     """Create a reasoning-aware chat completion response."""
-    
+
     reasoning_content, final_content, is_tool_call = extract_reasoning_and_final(
         output_text
     )
-    
+
     # Estimate reasoning tokens (simplified)
-    reasoning_tokens = (
-        len(reasoning_content.split()) if reasoning_content else 0
-    )
-    
+    reasoning_tokens = len(reasoning_content.split()) if reasoning_content else 0
+
     # Prepare the response content
     if include_reasoning and reasoning_content:
         response_content = final_content or ""
@@ -129,7 +128,7 @@ def create_reasoning_response(
     else:
         response_content = final_content or output_text
         reasoning_text = None
-    
+
     # Create the choice
     choice = ChatCompletionResponseChoice(
         index=0,
@@ -140,7 +139,7 @@ def create_reasoning_response(
         finish_reason=finish_reason,
         logprobs=None,
     )
-    
+
     # Create usage info
     usage = ReasoningUsageInfo(
         prompt_tokens=prompt_tokens,
@@ -148,7 +147,7 @@ def create_reasoning_response(
         total_tokens=prompt_tokens + completion_tokens,
         reasoning_tokens=reasoning_tokens,
     )
-    
+
     return ReasoningChatCompletionResponse(
         id=request_id,
         choices=[choice],
@@ -168,7 +167,7 @@ def create_reasoning_stream_chunk(
     is_reasoning: bool = False,
 ) -> ReasoningChatCompletionStreamResponse:
     """Create a streaming chunk for reasoning responses."""
-    
+
     if is_reasoning:
         # For reasoning content, we might want special handling
         delta = DeltaMessage(
@@ -180,14 +179,14 @@ def create_reasoning_stream_chunk(
             role="assistant" if chunk_index == 0 else None,
             content=delta_content,
         )
-    
+
     choice = ChatCompletionResponseStreamChoice(
         index=0,
         delta=delta,
         finish_reason=finish_reason,
         logprobs=None,
     )
-    
+
     return ReasoningChatCompletionStreamResponse(
         id=request_id,
         choices=[choice],
@@ -202,32 +201,32 @@ def parse_reasoning_stream(
 ) -> tuple[str, str, bool]:
     """
     Parse streaming output for reasoning content.
-    
+
     Returns:
         tuple of (new_reasoning, new_final, is_complete)
     """
-    
+
     # Simple incremental parsing
     # In practice, this would be more sophisticated
-    
+
     if "<|reasoning|>" in output_text and "<|/reasoning|>" not in output_text:
         # Still building reasoning content
         reasoning_start = output_text.find("<|reasoning|>") + len("<|reasoning|>")
         new_reasoning = output_text[reasoning_start:].strip()
         return new_reasoning, "", False
-    
+
     elif "<|final|>" in output_text and "<|/final|>" not in output_text:
         # Building final content
         final_start = output_text.find("<|final|>") + len("<|final|>")
         new_final = output_text[final_start:].strip()
         return "", new_final, False
-    
+
     else:
         # Regular content or complete
         reasoning_content, final_content, _ = extract_reasoning_and_final(output_text)
-        
+
         # Return only the new part
-        new_content = output_text[len(previous_text):]
+        new_content = output_text[len(previous_text) :]
         return "", new_content, True
 
 
@@ -237,7 +236,7 @@ def format_error_response(
     error_code: Optional[str] = None,
 ) -> ErrorResponse:
     """Format an error response for reasoning endpoints."""
-    
+
     return ErrorResponse(
         message=error_message,
         type=error_type,
@@ -250,16 +249,14 @@ def extract_usage_from_output(
     prompt_tokens: int = 0,
 ) -> ReasoningUsageInfo:
     """Extract token usage information from output."""
-    
+
     reasoning_content, final_content, _ = extract_reasoning_and_final(output_text)
-    
+
     # Simple token counting (word-based approximation)
-    reasoning_tokens = (
-        len(reasoning_content.split()) if reasoning_content else 0
-    )
+    reasoning_tokens = len(reasoning_content.split()) if reasoning_content else 0
     final_tokens = len(final_content.split()) if final_content else 0
     completion_tokens = reasoning_tokens + final_tokens
-    
+
     return ReasoningUsageInfo(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,

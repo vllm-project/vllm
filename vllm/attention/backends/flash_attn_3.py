@@ -2,6 +2,7 @@
 Flash Attention 3 backend with sinks support for Blackwell architecture.
 Extends Flash Attention with FA3 features including attention sinks.
 """
+
 from typing import List, Optional, Tuple, Type
 
 import torch
@@ -19,14 +20,14 @@ logger = init_logger(__name__)
 
 try:
     import flash_attn
-    
+
     # Check for FA3 support
     _flash_attn_version = getattr(flash_attn, "__version__", "0.0.0")
     _flash_attn_version_tuple = tuple(
         int(x) for x in _flash_attn_version.split(".")[:3]
     )
     HAS_FLASH_ATTN_3 = _flash_attn_version_tuple >= (3, 0, 0)
-    
+
     if HAS_FLASH_ATTN_3:
         from flash_attn import flash_attn_func_v3, flash_attn_varlen_func_v3
         from flash_attn.flash_attn_interface import flash_attn_with_kvcache_v3
@@ -34,7 +35,7 @@ try:
         # Fallback to regular FA2 functions
         from flash_attn import flash_attn_func, flash_attn_varlen_func
         from flash_attn.flash_attn_interface import flash_attn_with_kvcache
-        
+
         flash_attn_func_v3 = flash_attn_func
         flash_attn_varlen_func_v3 = flash_attn_varlen_func
         flash_attn_with_kvcache_v3 = flash_attn_with_kvcache
@@ -127,7 +128,7 @@ class FlashAttention3Metadata(FlashAttentionMetadata):
             block_tables=block_tables,
             **kwargs,
         )
-        
+
         # FA3-specific attributes
         self.use_sinks = use_sinks
         self.sink_size = sink_size
@@ -150,13 +151,18 @@ class FlashAttention3MetadataBuilder(FlashAttentionMetadataBuilder):
         self.sink_size = sink_size
         self.window_size = window_size
 
-    def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, batch_size: int):
+    def build(
+        self,
+        seq_lens: List[int],
+        query_lens: List[int],
+        cuda_graph_pad_size: int,
+        batch_size: int,
+    ):
         """Build FA3 metadata."""
-        
+
         # Build base metadata first
         metadata = super().build(seq_lens, query_lens, cuda_graph_pad_size, batch_size)
-        
+
         # Convert to FA3 metadata
         fa3_metadata = FlashAttention3Metadata(
             num_prefills=metadata.num_prefills,
@@ -171,12 +177,12 @@ class FlashAttention3MetadataBuilder(FlashAttentionMetadataBuilder):
             sink_size=self.sink_size,
             window_size=self.window_size,
         )
-        
+
         # Copy other attributes
         for attr in dir(metadata):
-            if not attr.startswith('_') and not hasattr(fa3_metadata, attr):
+            if not attr.startswith("_") and not hasattr(fa3_metadata, attr):
                 setattr(fa3_metadata, attr, getattr(metadata, attr))
-        
+
         return fa3_metadata
 
 
@@ -214,7 +220,7 @@ class FlashAttention3Impl(FlashAttentionImpl):
             blocksparse_block_size=blocksparse_block_size,
             blocksparse_head_sliding_step=blocksparse_head_sliding_step,
         )
-        
+
         self.use_sinks = use_sinks and HAS_FLASH_ATTN_3
         self.sink_size = sink_size if self.use_sinks else 0
         self.use_fa3_features = use_fa3_features and HAS_FLASH_ATTN_3
@@ -232,7 +238,7 @@ class FlashAttention3Impl(FlashAttentionImpl):
         attn_type: str = "DECODER",
     ) -> torch.Tensor:
         """Forward pass with FA3 features."""
-        
+
         if not self.use_fa3_features or not HAS_FLASH_ATTN_3:
             # Fallback to regular Flash Attention
             return super().forward(
@@ -246,7 +252,7 @@ class FlashAttention3Impl(FlashAttentionImpl):
                 output=output,
                 attn_type=attn_type,
             )
-        
+
         # FA3-specific forward pass
         num_tokens, hidden_size = query.shape
         query = query.view(num_tokens, self.num_heads, self.head_size)
@@ -260,9 +266,9 @@ class FlashAttention3Impl(FlashAttentionImpl):
 
         if kv_cache.numel() > 0:
             key_cache, value_cache = kv_cache.unbind(0)
-            
+
             # Use FA3 with KV cache if available
-            if hasattr(attn_metadata, 'use_sinks') and attn_metadata.use_sinks:
+            if hasattr(attn_metadata, "use_sinks") and attn_metadata.use_sinks:
                 # FA3 with sinks
                 output = flash_attn_with_kvcache_v3(
                     q=query,
@@ -274,7 +280,9 @@ class FlashAttention3Impl(FlashAttentionImpl):
                     block_table=attn_metadata.block_tables,
                     softmax_scale=self.scale,
                     causal=True,
-                    sink_token_length=attn_metadata.sink_size if attn_metadata.use_sinks else 0,
+                    sink_token_length=(
+                        attn_metadata.sink_size if attn_metadata.use_sinks else 0
+                    ),
                     window_size=attn_metadata.window_size,
                 )
             else:
@@ -292,7 +300,11 @@ class FlashAttention3Impl(FlashAttentionImpl):
                 )
         else:
             # No KV cache, use varlen function
-            if self.use_sinks and hasattr(attn_metadata, 'use_sinks') and attn_metadata.use_sinks:
+            if (
+                self.use_sinks
+                and hasattr(attn_metadata, "use_sinks")
+                and attn_metadata.use_sinks
+            ):
                 output = flash_attn_varlen_func_v3(
                     q=query,
                     k=key,
@@ -303,7 +315,9 @@ class FlashAttention3Impl(FlashAttentionImpl):
                     max_seqlen_k=attn_metadata.max_prefill_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
-                    sink_token_length=attn_metadata.sink_size if attn_metadata.use_sinks else 0,
+                    sink_token_length=(
+                        attn_metadata.sink_size if attn_metadata.use_sinks else 0
+                    ),
                     window_size=attn_metadata.window_size,
                 )
             else:
@@ -328,17 +342,17 @@ def create_fa3_backend_with_sinks(
     window_size: Optional[int] = None,
 ) -> FlashAttention3Backend:
     """Create a Flash Attention 3 backend with sinks configuration."""
-    
+
     if not HAS_FLASH_ATTN_3:
         logger.warning(
             "Flash Attention 3 not available. "
             "Please install flash-attn >= 3.0.0 for FA3 features."
         )
         return FlashAttentionBackend()  # Fallback to FA2
-    
+
     backend = FlashAttention3Backend()
     backend.use_sinks = use_sinks
     backend.sink_size = sink_size
     backend.window_size = window_size
-    
+
     return backend

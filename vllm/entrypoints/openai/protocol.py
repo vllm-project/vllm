@@ -111,6 +111,9 @@ class UsageInfo(OpenAIBaseModel):
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
     prompt_tokens_details: Optional[PromptTokenUsageInfo] = None
+    reasoning_tokens: Optional[int] = Field(
+        default=None,
+        description="Number of tokens used for reasoning (GPT-OSS and similar models)")
 
 
 class RequestResponseMetadata(BaseModel):
@@ -412,6 +415,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.")
+    
+    # Reasoning parameters for GPT-OSS and similar models
+    include_reasoning: Optional[bool] = Field(
+        default=True,
+        description=(
+            "If true and the model supports reasoning (like GPT-OSS), "
+            "the response will include the reasoning content. If false, "
+            "only the final answer will be returned. This parameter is "
+            "ignored for models that don't support reasoning."),
+    )
 
     # --8<-- [end:chat-completion-extra-params]
 
@@ -1443,6 +1456,9 @@ class ChatCompletionResponse(OpenAIBaseModel):
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None, description="KVTransfer parameters.")
+    reasoning: Optional[str] = Field(
+        default=None,
+        description="The reasoning content for reasoning-capable models like GPT-OSS.")
 
 
 class DeltaMessage(OpenAIBaseModel):

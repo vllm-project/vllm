@@ -60,32 +60,43 @@ from pathlib import Path
 
 def main():
     """Start the vLLM server with GPT-OSS model configuration."""
-    
+
     # Check if running in appropriate environment
     try:
         import vllm
+
         print(f"Using vLLM version: {vllm.__version__}")
     except ImportError:
         print("Error: vLLM not installed. Please install vLLM first.")
         sys.exit(1)
-    
+
     # Command to start vLLM server with GPT-OSS
     cmd = [
-        sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-        "--model", "openai/gpt-oss-120b",  # or gpt-oss-20b for smaller model
-        "--host", "0.0.0.0",
-        "--port", "8000",
-        "--tensor-parallel-size", "1",  # Adjust based on your GPU setup
-        "--gpu-memory-utilization", "0.9",
-        "--max-num-batched-tokens", "1024",  # Reduce if you encounter OOM
-        "--tool-server", "demo",  # Enable demo tool server
+        sys.executable,
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        "openai/gpt-oss-120b",  # or gpt-oss-20b for smaller model
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--tensor-parallel-size",
+        "1",  # Adjust based on your GPU setup
+        "--gpu-memory-utilization",
+        "0.9",
+        "--max-num-batched-tokens",
+        "1024",  # Reduce if you encounter OOM
+        "--tool-server",
+        "demo",  # Enable demo tool server
         "--enable-auto-tool-choice",
-        "--served-model-name", "gpt-oss",
+        "--served-model-name",
+        "gpt-oss",
         # Uncomment below for better performance on H100/B200
         # "--kv-cache-dtype", "fp8",
         # "--quantization", "mxfp4",  # Enable MXFP4 quantization
     ]
-    
+
     print("Starting vLLM server with GPT-OSS model...")
     print(f"Command: {' '.join(cmd)}")
     print()
@@ -93,7 +104,7 @@ def main():
     print("API documentation: http://localhost:8000/docs")
     print()
     print("Press Ctrl+C to stop the server")
-    
+
     try:
         # Run the server
         subprocess.run(cmd, check=True)

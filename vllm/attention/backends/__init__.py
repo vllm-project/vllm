@@ -8,6 +8,6 @@ from vllm.attention.backends.flash_attn_3 import FlashAttention3Backend
 
 __all__ = [
     "AttentionBackend",
-    "FlashAttentionBackend", 
+    "FlashAttentionBackend",
     "FlashAttention3Backend",
 ]

@@ -1,4 +1,5 @@
 """MXFP4 quantization method for GPT-OSS model."""
+
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -6,10 +7,12 @@ from torch.nn import Module, Parameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
-                                               UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.linear import (
+    LinearBase,
+    LinearMethodBase,
+    UnquantizedLinearMethod,
+)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
@@ -29,8 +32,9 @@ class Mxfp4Config(QuantizationConfig):
         if weight_bits not in MXFP4_SUPPORTED_BITS:
             raise ValueError(
                 f"Currently, only {MXFP4_SUPPORTED_BITS} bits are supported "
-                f"for MXFP4 quantization, but got {weight_bits} bits.")
-        
+                f"for MXFP4 quantization, but got {weight_bits} bits."
+            )
+
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.pack_factor = 32 // self.weight_bits
@@ -81,19 +85,20 @@ class Mxfp4LinearMethod(LinearMethodBase):
         **extra_weight_attrs,
     ) -> None:
         """Create quantized weights for MXFP4."""
-        
+
         output_size_per_partition = sum(output_partition_sizes)
-        
+
         # Check if group_size is valid
         if input_size_per_partition % self.quant_config.group_size != 0:
             logger.warning(
                 f"Input size {input_size_per_partition} is not divisible by "
                 f"group size {self.quant_config.group_size}. "
-                f"Padding may be required.")
+                f"Padding may be required."
+            )
 
         # Calculate packed weight dimensions
         packed_input_size = input_size_per_partition // self.quant_config.pack_factor
-        
+
         # Create quantized weight parameter
         qweight = Parameter(
             torch.empty(
@@ -104,9 +109,11 @@ class Mxfp4LinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
-        
+
         # Create scale parameter
-        num_groups = (input_size_per_partition + self.quant_config.group_size - 1) // self.quant_config.group_size
+        num_groups = (
+            input_size_per_partition + self.quant_config.group_size - 1
+        ) // self.quant_config.group_size
         scales = Parameter(
             torch.empty(
                 output_size_per_partition,
@@ -136,20 +143,17 @@ class Mxfp4LinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Apply MXFP4 quantized linear transformation."""
-        
+
         # For now, use a fallback to unquantized method if MXFP4 kernel is not available
         # In production, this would use the actual MXFP4 kernel
         if not hasattr(ops, "mxfp4_gemm") or not current_platform.is_cuda():
             logger.warning("MXFP4 kernel not available, falling back to unquantized")
             return self._fallback_apply(layer, x, bias)
-        
+
         # Actual MXFP4 kernel call would go here
         try:
             output = ops.mxfp4_gemm(
-                x, 
-                layer.qweight,
-                layer.scales,
-                self.quant_config.group_size
+                x, layer.qweight, layer.scales, self.quant_config.group_size
             )
             if bias is not None:
                 output = output + bias
@@ -168,24 +172,25 @@ class Mxfp4LinearMethod(LinearMethodBase):
         # This is a simplified fallback - in practice, you'd need to
         # dequantize the weights first
         unquant_method = UnquantizedLinearMethod()
-        
+
         # Create a temporary weight for fallback computation
         # This is a placeholder - actual implementation would dequantize properly
-        if not hasattr(layer, '_fallback_weight'):
+        if not hasattr(layer, "_fallback_weight"):
             # Create a placeholder weight with the right dimensions
             output_size, _ = layer.qweight.shape
             input_size = layer.qweight.shape[1] * self.quant_config.pack_factor
             layer._fallback_weight = Parameter(
-                torch.randn(output_size, input_size, dtype=x.dtype, device=x.device) * 0.1,
-                requires_grad=False
+                torch.randn(output_size, input_size, dtype=x.dtype, device=x.device)
+                * 0.1,
+                requires_grad=False,
             )
-        
+
         return torch.nn.functional.linear(x, layer._fallback_weight, bias)
 
 
 class Mxfp4MoEMethod(Mxfp4LinearMethod):
     """MXFP4 method for MoE layers."""
-    
+
     def __init__(self, quant_config: Mxfp4Config):
         super().__init__(quant_config)
         self.num_experts: Optional[int] = None
@@ -204,12 +209,12 @@ class Mxfp4MoEMethod(Mxfp4LinearMethod):
         """Create weights for MoE MXFP4 quantization."""
         # Get expert configuration
         self.num_experts = extra_weight_attrs.get("num_experts", 1)
-        
+
         output_size_per_partition = sum(output_partition_sizes)
-        
+
         # Calculate dimensions for expert weights
         packed_input_size = input_size_per_partition // self.quant_config.pack_factor
-        
+
         # Create expert weights
         expert_qweight = Parameter(
             torch.empty(
@@ -221,9 +226,11 @@ class Mxfp4MoEMethod(Mxfp4LinearMethod):
             ),
             requires_grad=False,
         )
-        
+
         # Create expert scales
-        num_groups = (input_size_per_partition + self.quant_config.group_size - 1) // self.quant_config.group_size
+        num_groups = (
+            input_size_per_partition + self.quant_config.group_size - 1
+        ) // self.quant_config.group_size
         expert_scales = Parameter(
             torch.empty(
                 self.num_experts,
