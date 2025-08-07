@@ -1691,7 +1691,8 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if "encode" in supported_tasks else None
+    ) if ("encode" in supported_tasks
+          and not vllm_config.cache_config.enable_prefix_caching) else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,

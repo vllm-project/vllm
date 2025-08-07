@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# ruff: noqa: SIM117
 # Keep Decode-only SequenceClassification models support auto prefix cache
 import pytest
 import torch
 from transformers import AutoModelForSequenceClassification
+
+from tests.models.language.pooling.embed_utils import (
+    run_embedding_correctness_test)
 
 
 @pytest.mark.parametrize(
@@ -12,14 +14,15 @@ from transformers import AutoModelForSequenceClassification
     ["jason9693/Qwen2.5-1.5B-apeach"],
 )
 @pytest.mark.parametrize("dtype", ["half"])
-def test_decode_only_classify(
+def test_classify_models(
     hf_runner,
     vllm_runner,
     example_prompts,
     model: str,
     dtype: str,
-    monkeypatch,
 ) -> None:
+
+    example_prompts = example_prompts * 2
 
     with vllm_runner(model,
                      max_model_len=512,
@@ -43,10 +46,46 @@ def test_decode_only_classify(
 
 
 @pytest.mark.parametrize(
-    "model", ["intfloat/e5-small", "Alibaba-NLP/gte-Qwen2-1.5B-instruct"])
+    "model",
+    ["Qwen/Qwen3-Embedding-0.6B"],
+)
 @pytest.mark.parametrize("dtype", ["half"])
-def test_encode_only_classify(hf_runner, vllm_runner, example_prompts,
-                              model: str, dtype: str) -> None:
+def test_embed_models(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+):
+    example_prompts = [str(s).strip() for s in example_prompts] * 2
+
+    with vllm_runner(
+            model,
+            runner="pooling",
+            max_model_len=None,
+            enable_prefix_caching=True,
+    ) as vllm_model:
+        cache_config = vllm_model.llm.llm_engine.cache_config
+        assert cache_config.enable_prefix_caching
+        vllm_outputs = vllm_model.embed(example_prompts)
+
+    with hf_runner(
+            model,
+            is_sentence_transformer=True,
+    ) as hf_model:
+        run_embedding_correctness_test(hf_model, example_prompts, vllm_outputs)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "intfloat/e5-small",
+        "Alibaba-NLP/gte-Qwen2-1.5B-instruct",  # is_causal == False
+        "papluca/xlm-roberta-base-language-detection",
+    ])
+@pytest.mark.parametrize("dtype", ["half"])
+def test_non_causal_models(hf_runner, vllm_runner, example_prompts, model: str,
+                           dtype: str) -> None:
     with vllm_runner(model,
                      max_model_len=512,
                      dtype=dtype,

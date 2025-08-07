@@ -1748,22 +1748,6 @@ class ModelConfig:
         # `llm as reranker` models defaults to not using pad_token.
         return getattr(self.hf_config, "use_pad_token", True)
 
-    @property
-    def attn_type(self) -> Optional[str]:
-        if self.is_attention_free:
-            return None
-        if self.is_encoder_decoder:
-            return "encoder_decoder"
-        if self._model_info.default_pooling_type == "CLS" or not getattr(
-                self.hf_config, "is_causal", True):
-            return "encoder_only"
-        elif self._model_info.default_pooling_type == "LAST":
-            return "decoder"
-        else:
-            # default_pooling_type == "ALL" and "STEP"
-            # is not supported temporarily
-            return None
-
     def get_and_verify_max_len(self, max_model_len: int):
         # Consider max_model_len in tokenizer_config only when
         # pooling models use absolute position_embedding.
@@ -4852,12 +4836,16 @@ class VllmConfig:
 
         disable_chunked_prefill_reasons: list[str] = []
 
-        if self.model_config and self.model_config.runner_type == "pooling":
-            attn_type = self.model_config.attn_type
-            if attn_type != "decoder":
+        if self.model_config and self.model_config.pooler_config:
+            pooling_type = self.model_config.pooler_config.pooling_type
+            if pooling_type is None or pooling_type.lower() != "last":
                 disable_chunked_prefill_reasons.append(
-                    "Chunked prefill and prefix caching are only available "
-                    "with attn_type='decoder';disabling both.")
+                    "Only \"last\" pooling supports chunked "
+                    "prefill and prefix caching; disabling both.")
+            elif not getattr(self.model_config.hf_config, "is_causal", True):
+                disable_chunked_prefill_reasons.append(
+                    "Only models using causal attention supports chunked "
+                    "prefill and prefix caching; disabling both.")
 
         if disable_chunked_prefill_reasons:
             for reason in disable_chunked_prefill_reasons:
