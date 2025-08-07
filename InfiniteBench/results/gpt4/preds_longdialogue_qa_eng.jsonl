@@ -1,0 +1,200 @@
+{"id": 0, "prediction": "Nicky Santoro", "ground_truth": ["ACE", "ACE ROTHSTEIN"]}
+{"id": 1, "prediction": "Ace Rothstein", "ground_truth": ["GAGGI", "Remo", "remo Gaggi"]}
+{"id": 2, "prediction": "Moonwatcher", "ground_truth": ["JIM", "JIM GARRISON", "GARRISON"]}
+{"id": 3, "prediction": "Moonwatcher", "ground_truth": ["BILL", "BILL BROUSSARD", "BROUSSARD"]}
+{"id": 4, "prediction": "Gandhi", "ground_truth": ["FARROUHK"]}
+{"id": 5, "prediction": "Vivian", "ground_truth": ["EDWARD"]}
+{"id": 6, "prediction": "Nick", "ground_truth": ["HAMMOND"]}
+{"id": 7, "prediction": "Ash", "ground_truth": ["DAVID", "DAVID WILLS"]}
+{"id": 8, "prediction": "Dr. Frank N. Furter", "ground_truth": ["MICKEY", "Mickey Sachs"]}
+{"id": 9, "prediction": "The character is most likely Tony Montana.", "ground_truth": ["OIL MAN"]}
+{"id": 10, "prediction": "Tony Montana", "ground_truth": ["TONY", "TONY MONTANA"]}
+{"id": 11, "prediction": "Jof", "ground_truth": ["CLAUDIA"]}
+{"id": 12, "prediction": "The character most likely to be \"The_Character_To_Inference\" is Hector.", "ground_truth": ["BETSY"]}
+{"id": 13, "prediction": "Dr. Roger St. Luc", "ground_truth": ["HECTOR"]}
+{"id": 14, "prediction": "The character most likely to be \"The_Character_To_Inference\" is Sissy Hankshaw.", "ground_truth": ["CLEMENZA", "Peter Clemenza"]}
+{"id": 15, "prediction": "The Plague", "ground_truth": ["PLAGUE"]}
+{"id": 16, "prediction": "Pi Patel", "ground_truth": ["THE BRIDE"]}
+{"id": 17, "prediction": "Ronald \"Butch\" DeFeo Junior", "ground_truth": ["RAMON"]}
+{"id": 18, "prediction": "Lisa Templeton", "ground_truth": ["LISA", "LISA COHEN"]}
+{"id": 19, "prediction": "Mikael Blomkvist", "ground_truth": ["KATIE"]}
+{"id": 20, "prediction": "Mumble", "ground_truth": ["BLOMKVIST", "Mikael Blomkvist"]}
+{"id": 21, "prediction": "Annie Reed", "ground_truth": ["DOUG", "DOUG BUKOWSKI"]}
+{"id": 22, "prediction": "The Accountant", "ground_truth": ["SALIERI"]}
+{"id": 23, "prediction": "The Accountant", "ground_truth": ["JONAH KING"]}
+{"id": 24, "prediction": "Hildy Johnson", "ground_truth": ["BRUCE", "Bruce Baldwin"]}
+{"id": 25, "prediction": "Walter Burns", "ground_truth": ["ENDICOTT"]}
+{"id": 26, "prediction": "Walter Burns", "ground_truth": ["HILDY", "Hildy Johnson"]}
+{"id": 27, "prediction": "Walter Burns", "ground_truth": ["BURNS", "Walter", "Walter BURNS"]}
+{"id": 28, "prediction": "Madeleine Sprague", "ground_truth": ["MARTHA"]}
+{"id": 29, "prediction": "The_Character_To_Inference is likely Ray Ferrier.", "ground_truth": ["MASON"]}
+{"id": 30, "prediction": "Kate Walker", "ground_truth": ["DAD"]}
+{"id": 31, "prediction": "Brandon Sullivan", "ground_truth": ["DR. SANGER", "HENRY SANGER", "DR. HENRY SANGER"]}
+{"id": 32, "prediction": "John Wick", "ground_truth": ["HUNSECKER"]}
+{"id": 33, "prediction": "J.J. Hunsecker", "ground_truth": ["PRIMATE PETE", "PETE"]}
+{"id": 34, "prediction": "The character most likely to be The_Character_To_Inference is \"Steve Dallas.\"", "ground_truth": ["KELLY"]}
+{"id": 35, "prediction": "Spock", "ground_truth": ["NICKY"]}
+{"id": 36, "prediction": "Mookie", "ground_truth": ["DA MAYOR"]}
+{"id": 37, "prediction": "Russell Hammond", "ground_truth": ["DARRYL"]}
+{"id": 38, "prediction": "Rick Stevens", "ground_truth": ["ESTRELLA"]}
+{"id": 39, "prediction": "Frank Wheeler", "ground_truth": ["ANNIE", "ANNIE MACLEAN"]}
+{"id": 40, "prediction": "The character most likely to be The_Character_To_Inference is \"Vada.\"", "ground_truth": ["INEZ"]}
+{"id": 41, "prediction": "Jim Morrison", "ground_truth": ["PHIL"]}
+{"id": 42, "prediction": "Ben Du Toit", "ground_truth": ["BRUWER", "MELANIE BRUWER"]}
+{"id": 43, "prediction": "Rebecca", "ground_truth": ["CLOETE"]}
+{"id": 44, "prediction": "Rebecca", "ground_truth": ["PRIEST"]}
+{"id": 45, "prediction": "Dr. Benjamin McKenna", "ground_truth": ["HEDONIA"]}
+{"id": 46, "prediction": "Nina Sayers", "ground_truth": ["GWEN"]}
+{"id": 47, "prediction": "Lorna", "ground_truth": ["SAMANTHA"]}
+{"id": 48, "prediction": "Sergeant Warden", "ground_truth": ["WARDEN", "MILTON WARDEN"]}
+{"id": 49, "prediction": "Jordan Belfort", "ground_truth": ["PINHEAD"]}
+{"id": 50, "prediction": "Sebastian", "ground_truth": ["NICOLET", "RAY NICOLET"]}
+{"id": 51, "prediction": "Mia", "ground_truth": ["JACKIE", "JACKIE BROWN"]}
+{"id": 52, "prediction": "Reuben Tishkoff", "ground_truth": ["RUSTY"]}
+{"id": 53, "prediction": "Danny Ocean", "ground_truth": ["TESS"]}
+{"id": 54, "prediction": "Christine", "ground_truth": ["ROY"]}
+{"id": 55, "prediction": "Alexander Pearce", "ground_truth": ["QUINCE"]}
+{"id": 56, "prediction": "The character most likely to be The_Character_To_Inference is Joe Black.", "ground_truth": ["JOE", "JOE Black"]}
+{"id": 57, "prediction": "Joe Black", "ground_truth": ["ALLISON"]}
+{"id": 58, "prediction": "Ishmael Chambers", "ground_truth": ["HELEN", "HELEN CHAMBERS"]}
+{"id": 59, "prediction": "Stephen Meyers", "ground_truth": ["MILLS", "David Mills"]}
+{"id": 60, "prediction": "The most likely character to be \"The_Character_To_Inference\" is John Doe.", "ground_truth": ["TYRIAN"]}
+{"id": 61, "prediction": "Stephen Meyers", "ground_truth": ["STEPHEN", "Stephen Meyers"]}
+{"id": 62, "prediction": "Lucien Carr", "ground_truth": ["BOND", "JAMES BOND"]}
+{"id": 63, "prediction": "Mr. White", "ground_truth": ["HARMSWAY", "ELLIOT HARMSWAY"]}
+{"id": 64, "prediction": "Lucien Carr", "ground_truth": ["MR. PINK"]}
+{"id": 65, "prediction": "The character is likely \"Butch Haynes.\"", "ground_truth": ["NICOLE"]}
+{"id": 66, "prediction": "Nick", "ground_truth": ["ALISON", "Ally Jones", "Ally"]}
+{"id": 67, "prediction": "Nick", "ground_truth": ["CAROL"]}
+{"id": 68, "prediction": "Susan Alexander", "ground_truth": ["ANN", "ANN BISHOP MILLANEY"]}
+{"id": 69, "prediction": "Graham Dalton", "ground_truth": ["LELAND"]}
+{"id": 70, "prediction": "Jedediah Leland", "ground_truth": ["HARVEY", "HARVEY PEKAR"]}
+{"id": 71, "prediction": "Agent K", "ground_truth": ["BILLY"]}
+{"id": 72, "prediction": "Billy Beane", "ground_truth": ["CLAUDIA", "CLAUDIA JENSSEN,"]}
+{"id": 73, "prediction": "Yaz", "ground_truth": ["KAY"]}
+{"id": 74, "prediction": "The_Character_To_Inference is likely \"Dallas.\"", "ground_truth": ["DAVE"]}
+{"id": 75, "prediction": "Lars Thorwald", "ground_truth": ["LISA"]}
+{"id": 76, "prediction": "Ernest Tilley", "ground_truth": ["QUAIL", "Douglas Quail"]}
+{"id": 77, "prediction": "Jolie", "ground_truth": ["SAM", "SAM PICKLES"]}
+{"id": 78, "prediction": "David Kessler", "ground_truth": ["JOHNNY", "JOHNNY FOOTE"]}
+{"id": 79, "prediction": "Andrew", "ground_truth": ["CHARLOTTE", "CHARLOTTE BOUDREAU CANTELLE PHELAN"]}
+{"id": 80, "prediction": "David Kessler", "ground_truth": ["ELIZABETH", "ELIZABETH LEEFOLT"]}
+{"id": 81, "prediction": "Eduardo Saverin", "ground_truth": ["BUDDY"]}
+{"id": 82, "prediction": "Eduardo Saverin", "ground_truth": ["AUSTIN", "AUSTIN POWERS"]}
+{"id": 83, "prediction": "Eduardo Saverin", "ground_truth": ["EDUARDO", "EDUARDO SAVERIN"]}
+{"id": 84, "prediction": "Matthew", "ground_truth": ["JENNIFER", "JENNIFER HILLS"]}
+{"id": 85, "prediction": "The Penguin", "ground_truth": ["JOHNNY"]}
+{"id": 86, "prediction": "Samuel", "ground_truth": ["SAMUEL"]}
+{"id": 87, "prediction": "The character most likely referred to as \"The_Character_To_Inference\" is Darth Vader.", "ground_truth": ["MOTTI", "Admiral Motti"]}
+{"id": 88, "prediction": "Stu Shepard", "ground_truth": ["STU", "STUART SHEPARD"]}
+{"id": 89, "prediction": "The character most likely to be \"The_Character_To_Inference\" is Terri.", "ground_truth": ["MAURICE"]}
+{"id": 90, "prediction": "Based on the provided script, The_Character_To_Inference is most likely Vanessa.", "ground_truth": ["BESTLER", "HEINRICH BESTLER"]}
+{"id": 91, "prediction": "Bobby Dupea", "ground_truth": ["HELMUT", "HELMUT DORQUE"]}
+{"id": 92, "prediction": "Based on the information provided, The_Character_To_Inference is likely \"Tony Fait.\"", "ground_truth": ["FAIT", "TONY FAIT"]}
+{"id": 93, "prediction": "The character most likely to be \"The_Character_To_Inference\" is John F. Kennedy.", "ground_truth": ["ECKER", "COMMANDER BILL ECKER"]}
+{"id": 94, "prediction": "Popeye Doyle", "ground_truth": ["DAVY JONES"]}
+{"id": 95, "prediction": "The character is most likely \"Elizabeth Swann.\"", "ground_truth": ["BOBBY", "Bobby Kennedy"]}
+{"id": 96, "prediction": "Chang", "ground_truth": ["PAUL", "PAUL D. GARNER", "Paul D."]}
+{"id": 97, "prediction": "Paul D. Garner", "ground_truth": ["STAMP PAID"]}
+{"id": 98, "prediction": "Sethe", "ground_truth": ["BABY SUGGS"]}
+{"id": 99, "prediction": "Chang", "ground_truth": ["DENVER"]}
+{"id": 100, "prediction": "The character is likely Lisa Sherman.", "ground_truth": ["ZED"]}
+{"id": 101, "prediction": "Sherlock Holmes", "ground_truth": ["ISABELLA", "ISABELLA MOLINA"]}
+{"id": 102, "prediction": "Sherlock Holmes", "ground_truth": ["CARTER"]}
+{"id": 103, "prediction": "Irving Rosenfeld", "ground_truth": ["PETE MUSANE"]}
+{"id": 104, "prediction": "Joel", "ground_truth": ["DAVE"]}
+{"id": 105, "prediction": "Irving Rosenfeld", "ground_truth": ["JOEL", "JOEL REYNOLDS"]}
+{"id": 106, "prediction": "Sherman McCoy", "ground_truth": ["WEISS"]}
+{"id": 107, "prediction": "Jim", "ground_truth": ["SHERMAN", "Sherman McCoy"]}
+{"id": 108, "prediction": "Sherman McCoy", "ground_truth": ["LUIS"]}
+{"id": 109, "prediction": "Paul", "ground_truth": ["PETER", "Peter Fallow"]}
+{"id": 110, "prediction": "The character most likely to be The_Character_To_Inference is Consuela.", "ground_truth": ["MISSION CONTROL"]}
+{"id": 111, "prediction": "Hal Fields", "ground_truth": ["OLIVER", "OLIVER FIELDS"]}
+{"id": 112, "prediction": "Hiccup", "ground_truth": ["COACH"]}
+{"id": 113, "prediction": "Sam Lowry", "ground_truth": ["SAM", "SAM LOWRY"]}
+{"id": 114, "prediction": "Mitch Brenner", "ground_truth": ["LOU"]}
+{"id": 115, "prediction": "Denis", "ground_truth": ["STEVE CARELL"]}
+{"id": 116, "prediction": "Cindy", "ground_truth": ["KAREN", "KAREN RICHARDS"]}
+{"id": 117, "prediction": "Marty Pilletti", "ground_truth": ["CINDY", "CINDY PERIERA"]}
+{"id": 118, "prediction": "Dr. David Ravell", "ground_truth": ["GLADYS", "GLADYS LEEMAN"]}
+{"id": 119, "prediction": "Missy Armitage", "ground_truth": ["MR. JOHNSON"]}
+{"id": 120, "prediction": "Sun Wu Kung", "ground_truth": ["LINNEA"]}
+{"id": 121, "prediction": "Jean Michel Basquiat", "ground_truth": ["BASQUIAT", "JEAN MICHEL BASQUIAT"]}
+{"id": 122, "prediction": "The character is likely \"Bruce Wayne.\"", "ground_truth": ["SECURITY CHIEF"]}
+{"id": 123, "prediction": "The_Character_To_Inference is likely \"Bruce Wayne.\"", "ground_truth": ["CHRISTY"]}
+{"id": 124, "prediction": "Jake Sully", "ground_truth": ["WALTER", "WALTER VALE"]}
+{"id": 125, "prediction": "Dyle", "ground_truth": ["REGGIE"]}
+{"id": 126, "prediction": "Jacob Carges", "ground_truth": ["LEONARD", "LEONARD FISHER"]}
+{"id": 127, "prediction": "Shelly Kaplow", "ground_truth": ["TYLER", "Tyler Durden"]}
+{"id": 128, "prediction": "Isabel Kelly", "ground_truth": ["BIALYSTOCK"]}
+{"id": 129, "prediction": "Leo Bloom", "ground_truth": ["BLOOM", "LEO BLOOM"]}
+{"id": 130, "prediction": "The character most likely to be \"The_Character_To_Inference\" is Jackie Harrison.", "ground_truth": ["RACHEL", "RACHEL KELLY"]}
+{"id": 131, "prediction": "Paul Liebkind", "ground_truth": ["JUNO"]}
+{"id": 132, "prediction": "Riddick", "ground_truth": ["D'ARTAGNAN"]}
+{"id": 133, "prediction": "Athos", "ground_truth": ["LOUIS", "King Louis XIII", "Louis XIII"]}
+{"id": 134, "prediction": "Stella Bridger", "ground_truth": ["FRY", "CAROLYN FRY"]}
+{"id": 135, "prediction": "Athos", "ground_truth": ["FIRST CAVALIER"]}
+{"id": 136, "prediction": "Father Brendan", "ground_truth": ["TITO"]}
+{"id": 137, "prediction": "Father Brendan", "ground_truth": ["NICK"]}
+{"id": 138, "prediction": "The character most likely to be \"The_Character_To_Inference\" is Anna Scott.", "ground_truth": ["WILLIAM"]}
+{"id": 139, "prediction": "Dorothy", "ground_truth": ["KIT"]}
+{"id": 140, "prediction": "Mitch", "ground_truth": ["BETTY"]}
+{"id": 141, "prediction": "Elizabeth", "ground_truth": ["ADRIAN"]}
+{"id": 142, "prediction": "Nicky", "ground_truth": ["ANGEL"]}
+{"id": 143, "prediction": "John Merrick", "ground_truth": ["DAN RATHER"]}
+{"id": 144, "prediction": "Dmitri", "ground_truth": ["QUOYLE"]}
+{"id": 145, "prediction": "Agnis Hamm", "ground_truth": ["DMITRI"]}
+{"id": 146, "prediction": "Clarice Starling", "ground_truth": ["STARLING", "CLARICE STARLING"]}
+{"id": 147, "prediction": "Robbie Zirpollo", "ground_truth": ["BARNEY"]}
+{"id": 148, "prediction": "The character most likely to be \"The_Character_To_Inference\" is Cameron.", "ground_truth": ["EVERETT"]}
+{"id": 149, "prediction": "Summer", "ground_truth": ["BERLIN", "JOHN BERLIN", "JOHN"]}
+{"id": 150, "prediction": "Karl", "ground_truth": ["SUMMER"]}
+{"id": 151, "prediction": "Cecil B. DeMented", "ground_truth": ["MAYA"]}
+{"id": 152, "prediction": "Lenny Nero", "ground_truth": ["PANES", "LEVI PANES"]}
+{"id": 153, "prediction": "Bumpy Johnson", "ground_truth": ["RIEDENSCHNEIDER", "Freddy Riedenschneider"]}
+{"id": 154, "prediction": "Frank Lucas", "ground_truth": ["FRANK"]}
+{"id": 155, "prediction": "Miles Massey", "ground_truth": ["ALI", "Ali Van Versh"]}
+{"id": 156, "prediction": "Stephanie", "ground_truth": ["SUGE", "SUGE KNIGHT"]}
+{"id": 157, "prediction": "Burnham", "ground_truth": ["RAOUL"]}
+{"id": 158, "prediction": "Beverly Weston", "ground_truth": ["PETER", "Peter Vincent"]}
+{"id": 159, "prediction": "Ed", "ground_truth": ["JEAN"]}
+{"id": 160, "prediction": "The_Character_To_Inference is likely Wyatt Earp.", "ground_truth": ["WYATT", "Wyatt Earp"]}
+{"id": 161, "prediction": "Wyatt Earp", "ground_truth": ["MATTIE"]}
+{"id": 162, "prediction": "Gene Watson", "ground_truth": ["AUFIDIUS", "TULLUS AUFIDIUS"]}
+{"id": 163, "prediction": "Coriolanus", "ground_truth": ["JO"]}
+{"id": 164, "prediction": "Kathryn Railly", "ground_truth": ["KAFKA"]}
+{"id": 165, "prediction": "Helen Tasker", "ground_truth": ["HARRY", "HARRY TASKER"]}
+{"id": 166, "prediction": "Ted Striker", "ground_truth": ["SONNY", "SONNY CORLEONE"]}
+{"id": 167, "prediction": "Ted Striker", "ground_truth": ["DON CORLEONE"]}
+{"id": 168, "prediction": "Captain William \"Whip\" Whitaker.", "ground_truth": ["ABBY"]}
+{"id": 169, "prediction": "Vernon Trent", "ground_truth": ["FLEURY"]}
+{"id": 170, "prediction": "Henri", "ground_truth": ["TEN BEARS"]}
+{"id": 171, "prediction": "Owen Hannah", "ground_truth": ["KATE"]}
+{"id": 172, "prediction": "Ray", "ground_truth": ["TYRELL", "TYRELL MARTIN"]}
+{"id": 173, "prediction": "The character most likely to be The_Character_To_Inference is Julie James.", "ground_truth": ["BOBBY GREEN"]}
+{"id": 174, "prediction": "Joe Buck", "ground_truth": ["ROSARIO DIAZ"]}
+{"id": 175, "prediction": "Dr. Evil", "ground_truth": ["LEON", "Count Leon d'Algout"]}
+{"id": 176, "prediction": "Bela Lugosi", "ground_truth": ["ED"]}
+{"id": 177, "prediction": "Bela Lugosi", "ground_truth": ["GARRETT"]}
+{"id": 178, "prediction": "Wilson.", "ground_truth": ["CHARLIE", "CHARLIE MacCORRY"]}
+{"id": 179, "prediction": "The_Character_To_Inference is likely Dr. Lawrence Gordon.", "ground_truth": ["DYSON", "MILES DYSON"]}
+{"id": 180, "prediction": "Mark Whitacre", "ground_truth": ["VOSEN", "NOAH VOSEN"]}
+{"id": 181, "prediction": "Jason Bourne.", "ground_truth": ["MILLER"]}
+{"id": 182, "prediction": "Ernesto Martel Senior", "ground_truth": ["ETHAN", "ETHAN HUNT"]}
+{"id": 183, "prediction": "Bart Bowland", "ground_truth": ["SERENDIPITY"]}
+{"id": 184, "prediction": "Parker O'Neil", "ground_truth": ["ELAINE"]}
+{"id": 185, "prediction": "The_Character_To_Inference is most likely Vincent.", "ground_truth": ["LOOMIS", "SAMUEL J. LOOMIS"]}
+{"id": 186, "prediction": "Grant Grant", "ground_truth": ["OLIVE"]}
+{"id": 187, "prediction": "Derek Charles", "ground_truth": ["FRANK", "Frank Baker"]}
+{"id": 188, "prediction": "Diana", "ground_truth": ["TAUPIN", "RICHARD TAUPIN"]}
+{"id": 189, "prediction": "The_Character_To_Inference is most likely Claire Gregory.", "ground_truth": ["GENERAL HAIG"]}
+{"id": 190, "prediction": "Kevin Lomax", "ground_truth": ["MILTON", "JOHN MILTON"]}
+{"id": 191, "prediction": "Tom Grunick", "ground_truth": ["LEONOR"]}
+{"id": 192, "prediction": "The_Character_To_Inference is likely to be Emily.", "ground_truth": ["NEFF"]}
+{"id": 193, "prediction": "Priest", "ground_truth": ["BECK"]}
+{"id": 194, "prediction": "Romeo", "ground_truth": ["CATHERINE", "Catherine Tramell"]}
+{"id": 195, "prediction": "Harry Bliss", "ground_truth": ["JOAN"]}
+{"id": 196, "prediction": "Gale Weathers", "ground_truth": ["HANNA"]}
+{"id": 197, "prediction": "The character most likely to be The_Character_To_Inference is Sonny Crockett.", "ground_truth": ["NEIL"]}
+{"id": 198, "prediction": "The character is likely \"Sidney Prescott.\"", "ground_truth": ["BREEDAN"]}
+{"id": 199, "prediction": "Oscar", "ground_truth": ["THE GANG"]}

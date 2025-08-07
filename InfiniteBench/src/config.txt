@@ -1,0 +1,30 @@
+[API]
+anthropic_api_key = <anthropic_API_Key>
+anthropic_model = claude-3-5-sonnet-20240620
+cohere_api_key = <Cohere_API_Key>
+cohere_model = command-r-plus
+groq_api_key = <Groq_API_Key>
+groq_model = llama3-70b-8192
+openai_api_key = <OpenAI_API_Key>
+openai_model = gpt-4o
+openrouter_api_key = <OpenRouter_API_Key>
+openrouter_model = mistralai/mistral-7b-instruct:free
+deepseek_api_key = <DeepSeek_API_Key>
+deepseek_model = deepseek-chat
+mistral_model = mistral-large-latest
+mistral_api_key = <mistral_api_key>
+
+[Local-API]
+kobold_api_key =
+kobold_api_IP = http://127.0.0.1:5001/api/v1/generate
+llama_api_key = <llama.cpp api key>
+llama_api_IP = http://127.0.0.1:8080/completion
+ooba_api_key = <ooba api key>
+ooba_api_IP = http://127.0.0.1:5000/v1/chat/completions
+tabby_api_IP = http://127.0.0.1:5000/v1/chat/completions
+tabby_api_key = <tabbyapi key>
+vllm_api_IP = http://127.0.0.1:8000/v1/chat/completions
+vllm_model = <vllm model>
+ollama_api_IP = http://127.0.0.1:11434/api/generate
+ollama_api_key = <ollama api key>
+ollama_model = <ollama model>

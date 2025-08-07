@@ -1,0 +1,394 @@
+{"id": 0, "prediction": "\n\n    A\n    B\n    C\n    D\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["repack_carchive", "B"]}
+{"id": 1, "prediction": "\n\n    A. repack_carchive\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Configer._set_option", "C"]}
+{"id": 2, "prediction": "\n\n    A. -h\n    B. -O\n    C. -n\n    D. -p\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["HelpFormatter._format_args", "A"]}
+{"id": 3, "prediction": "\n\n    A. _init\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_init", "A"]}
+{"id": 4, "prediction": "\nA. print_sysinfo\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["print_color", "C"]}
+{"id": 5, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["decorating_function", "C"]}
+{"id": 6, "prediction": "\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["RootFsDeviceFinder.ask_proc_partitions", "A"]}
+{"id": 7, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Process.exe", "B"]}
+{"id": 8, "prediction": "\n\nA. DynaconfDict.__init__\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["DynaBox.get", "D"]}
+{"id": 9, "prediction": "\n\nA. _parse_conf_data\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["isnamedtupleinstance", "B"]}
+{"id": 10, "prediction": "\n\nA. list_envs\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["list_envs", "A"]}
+{"id": 11, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["parseOptions", "B"]}
+{"id": 12, "prediction": "\n-h, --help\n\nThe correct option is:\n-h, --help\n\nThe correct option is:\n-h, --help\n\nThe correct option is:\n", "ground_truth": ["outputDOT", "A"]}
+{"id": 13, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["generateTasks", "A"]}
+{"id": 14, "prediction": "\n-h, --help\n\nThe correct option is:\n-h, --help\n\nThe correct option is:\n-h, --help\n\nThe correct option is:\n", "ground_truth": ["getRandomNumberBetween", "B"]}
+{"id": 15, "prediction": "\nA. LenovoFirmwareConfig.imm_size\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["docommand", "B"]}
+{"id": 16, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Bmc.get_system_boot_options", "D"]}
+{"id": 17, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Command.get_health", "A"]}
+{"id": 18, "prediction": "\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["SDREntry.decode_sensor_reading", "C"]}
+{"id": 19, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_Tree._p_resolveConflict", "A"]}
+{"id": 20, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["import_c_extension", "A"]}
+{"id": 21, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["bucket_fromBytes", "B"]}
+{"id": 22, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["BTreeItems_seek", "C"]}
+{"id": 23, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["uniq", "A"]}
+{"id": 24, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Cell._dist", "C"]}
+{"id": 25, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["to_ragged_array", "A"]}
+{"id": 26, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["rotate", "A"]}
+{"id": 27, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["voronoi_diagram", "B"]}
+{"id": 28, "prediction": "\nA. BottomMatcher.add_fixer\n\n\nFile: fissix/pgen2/pgen.py\n# Copyright 2004-200", "ground_truth": ["BottomMatcher.add_fixer", "A"]}
+{"id": 29, "prediction": "\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["reduce_tree", "C"]}
+{"id": 30, "prediction": "\nA. _params_from_ellps_map\nB. _params_from_kwargs\nC. _Transformer.source_crs\nD. _horizontal_datum", "ground_truth": ["_params_from_ellps_map", "A"]}
+{"id": 31, "prediction": "\nA. set_ca_bundle_path\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["set_ca_bundle_path", "A"]}
+{"id": 32, "prediction": "\nA. set_ca_bundle_path\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Proj.get_factors", "C"]}
+{"id": 33, "prediction": "\nA. _lambert_cylindrical_equal_area\nB. _filter_properties\nC. _Transformer.source_crs\nD. ToWGS8", "ground_truth": ["_filter_properties", "B"]}
+{"id": 34, "prediction": "\n\nA. _normalize_range_args\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_ensure_same_unit", "D"]}
+{"id": 35, "prediction": "\n\nA. VariableDrawer._draw_array\nB. DrawerItem.append_to_svg\nC. _new_size_and_offset\nD. _format", "ground_truth": ["VariableDrawer._draw_array", "A"]}
+{"id": 36, "prediction": "\n\nA. data_group_nary\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_color_variants", "B"]}
+{"id": 37, "prediction": "\nB. get_validator_source\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["run_solver", "D"]}
+{"id": 38, "prediction": "\nB. DealMypyPlugin._handle_pre\n\n\nFile: deal/py.typed\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["generate_stub", "B"]}
+{"id": 39, "prediction": "\nB. show_perf\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["DealMypyPlugin._handle_pre", "A"]}
+{"id": 40, "prediction": "\nA\n\n\nFile: bpython/test_interpreter.py\n# The MIT License\n#\n# Copyright (c) 2008 Bob Farrell\n# Copyright", "ground_truth": ["TestFutureImports.test_interactive", "C"]}
+{"id": 41, "prediction": "\nA. True\nB. True\nC. True\nD. True\n\n\ndef _get_argspec_from_signature(\n    f: Callable,\n    namespace", "ground_truth": ["AttrCompletion.attr_matches", "A"]}
+{"id": 42, "prediction": "\nA\n\n\nclass ModuleGatherer:\n    \"\"\"Gathers modules from the current directory and its subdirectories.\"\"\"\n\n    def __init__(self, skiplist:", "ground_truth": ["FullCurtsiesRepl.mainloop", "D"]}
+{"id": 43, "prediction": "\nA\n\n\nFile: bpython/cli.py\n# The MIT License\n#\n# Copyright (c) 2008 Bob Farrell\n# Copyright (c)", "ground_truth": ["History.find_partial_match_backward", "A"]}
+{"id": 44, "prediction": "\nA\n\n\nFile: bpython/cli.py\n# The MIT License\n#\n# Copyright (c) 2008 Bob Farrell\n# Copyright (c)", "ground_truth": ["evaluate_current_expression", "B"]}
+{"id": 45, "prediction": "\nA. should_start_context_test_function\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["qualname_from_frame", "C"]}
+{"id": 46, "prediction": "\n\n    A. isolate_module\n    B. PyRunner._prepare2\n    C. numbits_any_intersection\n    D. PythonFileReporter.parser\n", "ground_truth": ["PyRunner._prepare2", "B"]}
+{"id": 47, "prediction": "\n\n    A.\n\n    B.\n\n    C.\n\n    D.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Plugins._add_plugin", "A"]}
+{"id": 48, "prediction": "\nA. \"hasher\"\nB. \"numbers\"\nC. \"parallel\"\nD. \"xml\"\n\n\"\"\"\n\nfrom __future__ import annotations\n\n", "ground_truth": ["XmlReporter.xml_file", "D"]}
+{"id": 49, "prediction": "\nA. model_analyzer\nB. generate_json_ai\nC. SkTime.fit\nD. ModeEnsemble._pick_mode_highest_score\n\n", "ground_truth": ["model_analyzer", "A"]}
+{"id": 50, "prediction": "C\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["ICP.explain", "B"]}
+{"id": 51, "prediction": "\nA. ICP.explain\nB. DatetimeEncoder.encode\nC. lookup_encoder\nD. LightGBM._to_dataset\n\n\n\n\n\n\n\n", "ground_truth": ["lookup_encoder", "C"]}
+{"id": 52, "prediction": "\nA. timeseries_analyzer\nB. get_differencers\nC. _ts_add_future_target\nD. GluonTSMixer.fit\n", "ground_truth": ["timeseries_analyzer", "A"]}
+{"id": 53, "prediction": "\nA. ModeEnsemble._pick_mode_highest_score\nB. model_analyzer\nC. MarginErrFunc.apply\nD. get_differenc", "ground_truth": ["ModeEnsemble._pick_mode_highest_score", "A"]}
+{"id": 54, "prediction": "\n\nA.\n\n\nFile: rope/__init__.py\n\"\"\"\n\n\ndef get_module(name, folder=None):\n    \"\"\"Returns a `PyObject` if", "ground_truth": ["InHierarchyFilter._get_root_classes", "D"]}
+{"id": 55, "prediction": "\n\nA.\n\n\nFile: rope/__init__.py\n\"\"\"rope, a python refactoring library\"\"\"\n\nimport inspect\nimport os\nimport sys\n\nfrom", "ground_truth": ["ChangeCollector.get_changed", "A"]}
+{"id": 56, "prediction": "\n\nA.\n\n\nFile: rope/__init__.py\n\"\"\"\nrope is a python refactoring library.\n\nIt is a library that can be used to perform", "ground_truth": ["create_fscommands", "B"]}
+{"id": 57, "prediction": "\n\nA. _object_attributes\n\n\nFile: rope/__init__.py\n\"\"\"rope, a python refactoring library\"\"\"\n\nimport inspect\nimport os\nimport", "ground_truth": ["FilteredResourceObserver._search_resource_creations", "C"]}
+{"id": 58, "prediction": "\n\nA.\n\n\nFile: rope/__init__.py\n\"\"\"\nrope is a python refactoring library.\n\nIt is a library that can be used to perform", "ground_truth": ["_RealFinder._find_primary_without_dot_start", "A"]}
+{"id": 59, "prediction": "\nA. parse_ns_headers\nB. domain_match\nC. GreenSSLSocket.__new__\nD. _str2time\n\n\ndef parse_ns_headers", "ground_truth": ["_str2time", "D"]}
+{"id": 60, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Profile.SwitchTasklet", "B"]}
+{"id": 61, "prediction": "\nA\n\n\nFile: eventlet/greenio.py\n# Copyright (c) 2009 Denis Bilenko, denis.bilenko at gmail", "ground_truth": ["GreenSSLSocket._socket_connect", "A"]}
+{"id": 62, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["backdoor", "C"]}
+{"id": 63, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Input._do_read", "B"]}
+{"id": 64, "prediction": "\n\nA. _cpu_count_user\n\n\"\"\"\n\n\ndef _get_executor_manager_thread(executor):\n    \"\"\"Returns the thread managing the executor", "ground_truth": ["_ReusablePoolExecutor.get_reusable_executor", "D"]}
+{"id": 65, "prediction": "\n\n    A. _mk_common_exceptions\n\n\ndef _chain_initializers(initializer, *args, **kwargs):\n    \"\"\"Chain initializers for a Par", "ground_truth": ["_mk_common_exceptions", "A"]}
+{"id": 66, "prediction": "\n\nA. concurrency_safe_write_rename\n\n\ndef _check_option(option, option_name):\n    \"\"\"Check if an option is set correctly.\"\"\"\n   ", "ground_truth": ["concurrency_safe_write_rename", "A"]}
+{"id": 67, "prediction": "\n\nA.\n\n\ndef _test_memory_usage(filename, expected_size):\n    \"\"\"Test that the memory usage of a file is consistent with the\n    expected size", "ground_truth": ["MemorizedFunc._cached_call", "C"]}
+{"id": 68, "prediction": "\nA. _args2cmd\nB. Table.from_data\nC. LRI._get_flattened_ll\nD. BarrelList._balance_list\n\n", "ground_truth": ["LRI._get_flattened_ll", "C"]}
+{"id": 69, "prediction": "\nA. Stats.clear_cache\nB. Stats.clear_cache\nC. Stats.clear_cache\nD. Stats.clear_cache\n\n\n\n", "ground_truth": ["SpooledStringIO._traverse_codepoints", "A"]}
+{"id": 70, "prediction": "\n\nA. _args2cmd\nB. mbox_readonlydir.flush\nC. BufferedSocket.recv\nD. BasePriorityQueue.add\n\n\n\n\n", "ground_truth": ["mbox_readonlydir.flush", "B"]}
+{"id": 71, "prediction": "\nA. generate_\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["concat_with_iterable_", "C"]}
+{"id": 72, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["group_by_until_", "A"]}
+{"id": 73, "prediction": "\nA. mbox_readonlydir.flush\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["VirtualTimeScheduler.schedule_absolute", "C"]}
+{"id": 74, "prediction": "\nA. translate_args\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Chain.convert", "D"]}
+{"id": 75, "prediction": "\nA. characters\nB. Context.register_function\nC. Parser._generate_operator_funcs\nD. _is_specialization_of\n\n\n\n\n\n", "ground_truth": ["Parser._generate_operator_funcs", "C"]}
+{"id": 76, "prediction": "\nA. to_extension_method\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["to_extension_method", "A"]}
+{"id": 77, "prediction": "\nA. TestCase.create_legacy_engine\nB. YaqlFactory.create\nC. Context.register_function\nD. _is_specialization_of\n\n", "ground_truth": ["YaqlFactory.create", "B"]}
+{"id": 78, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["get_literal_coercer", "B"]}
+{"id": 79, "prediction": "\nA. abstract_coercer\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["abstract_coercer", "A"]}
+{"id": 80, "prediction": "\n\n    A. GraphQLField.bake\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["does_fragment_condition_match", "C"]}
+{"id": 81, "prediction": "\n\nA. Signature.recover_public_keys\n\n\ndef test_ed448_add_to_infinity():\n    \"\"\"\n    Test if adding a", "ground_truth": ["Signature.recover_public_keys", "A"]}
+{"id": 82, "prediction": "\n\nA. remove_object\n\n\ndef test_lengths():\n    \"\"\"\n    Test the length of the public key and the signature.\n\n    :param data: the", "ground_truth": ["PublicKey.verify", "B"]}
+{"id": 83, "prediction": "\n\nA. Signature.recover_public_keys\n\n\ndef test_ecdsa_sig_verify():\n    \"\"\"Check if signing and verification works for arbitrary messages and", "ground_truth": ["_truncate_and_convert_digest", "C"]}
+{"id": 84, "prediction": "\n\nA. ECDH._do\n\n\ndef test_ecdh_with_truncated_digest():\n    \"\"\"\n    Test the ECDH with a trunc", "ground_truth": ["Util.OFF_test_prove_uniformity", "D"]}
+{"id": 85, "prediction": "B\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_axis_scale", "A"]}
+{"id": 86, "prediction": "B\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["FeatureExtractor.spectrogram", "B"]}
+{"id": 87, "prediction": "A\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["SpectrogramBase.set_edge_arr", "C"]}
+{"id": 88, "prediction": "\nA. WaveWriter.write\nB. WSST.wsst\nC. TimeFormatter.__call__\nD. chirp\n\n\"\"\"\n\nif __name__", "ground_truth": ["chirp", "D"]}
+{"id": 89, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Reassign.reassign", "B"]}
+{"id": 90, "prediction": "\n\nOptions:\nA. render_css\nB. _render_selector\nC. PyxlParser.feed\nD. _dict_merge\n\n\"\"\"\n\nfrom typing import", "ground_truth": ["PyxlParser.feed", "C"]}
+{"id": 91, "prediction": "\n\nOptions:\nA. transform_tokens\nB. TypeAgent.stop\nC. _getargskw\nD. pyxl_untokenize\n\n\"\"\"\n\nfrom", "ground_truth": ["pyxl_untokenize", "D"]}
+{"id": 92, "prediction": "\n\n>>> Options.append_collected\n\n\"\"\"\n\nfrom mixt.contrib.css import Options\n\n\ndef _render_selector(\n    selector: str,\n   ", "ground_truth": ["Collector.append_collected", "A"]}
+{"id": 93, "prediction": "\n\nOptions:\nA. BasePropTypes.__validate_types__\nB. render_css\nC. TypeAgent.stop\nD. _dict_merge\n\n\"\"\"\n\n", "ground_truth": ["BasePropTypes.__validate_types__", "B"]}
+{"id": 94, "prediction": "\n\nOptions:\nA. enable_global_typelogged_profiler\nB. _typestring\nC. Element._get_base_element\nD. get_", "ground_truth": ["Element._get_base_element", "C"]}
+{"id": 95, "prediction": "A\n\n\nFile: xsdata/utils/collections.py\nimport sys\nfrom typing import Any\nfrom typing import Callable\nfrom typing import Dict\nfrom typing import", "ground_truth": ["ClassAnalyzer.validate_references", "D"]}
+{"id": 96, "prediction": "B\n\n\nFile: xsdata/py.typed\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["RelativeHandlerInterface.base_attrs", "A"]}
+{"id": 97, "prediction": "A\n\n\nFile: xsdata/utils/collections.py\nimport sys\nfrom typing import Any\nfrom typing import Callable\nfrom typing import Dict\nfrom typing import", "ground_truth": ["DependenciesResolver.resolve_imports", "B"]}
+{"id": 98, "prediction": "A\n\n\nFile: xsdata/utils/collections.py\nimport sys\nfrom typing import Any\nfrom typing import Callable\nfrom typing import Dict\nfrom typing import", "ground_truth": ["CodeWriter.write", "C"]}
+{"id": 99, "prediction": "B. init_config\n\n\nFile: xsdata/py.typed\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["strongly_connected_components", "D"]}
+{"id": 100, "prediction": "\nA. Auth.tune_auth_method\n\nThe correct option is:\nA. Auth.tune_auth_method\n\nThe correct option is:\nA. Auth", "ground_truth": ["Auth.tune_auth_method", "A"]}
+{"id": 101, "prediction": "\nA. get_token_from_env\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["RawAdapter._raise_for_error", "B"]}
+{"id": 102, "prediction": "\nA. getattr_with_deprecated_properties\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["SigV4Auth.add_auth", "C"]}
+{"id": 103, "prediction": "\n\n    option: str\n\n\ndef _find_executable_and_scripts(\n    source_dir: PathType,\n    isolated: bool = True,\n    *,", "ground_truth": ["_find_executable_and_scripts", "D"]}
+{"id": 104, "prediction": "\n\n    - 'A. An2Cn.__number_to_string'\n    - 'B. Cn2An.cn2an'\n    - 'C. An", "ground_truth": ["An2Cn.__number_to_string", "A"]}
+{"id": 105, "prediction": "\nA. main\n\n\nif __name__ == '__main__':\n    unittest.main()\n\n\nFile: build/py.typed\n\n\n\n\n", "ground_truth": ["build_package_via_sdist", "B"]}
+{"id": 106, "prediction": "\nA. TwistedChannel._on_channel_closed\n\nThe correct option is:\nA. TwistedChannel._on_channel_closed\n\nThe correct option is:\nA", "ground_truth": ["AMQPConnector._on_overall_timeout", "C"]}
+{"id": 107, "prediction": "\nA. _AsyncStreamConnector.__init__\n\nThe correct option is:\nA. _AsyncStreamConnector.__init__\n\nThe correct option is:\nA. _AsyncStream", "ground_truth": ["SelectorIOServicesAdapter.set_reader", "D"]}
+{"id": 108, "prediction": "\nA. GeventConnection.create_connection\n\nThe correct option is:\nA. GeventConnection.create_connection\n\nThe correct option is:\nA. GeventConnection", "ground_truth": ["GeventConnection.create_connection", "A"]}
+{"id": 109, "prediction": "\nA. _AsyncStreamConnector.__init__\n\nThe correct option is:\nA. _AsyncStreamConnector.__init__\n\nThe correct option is:\nA. _AsyncStream", "ground_truth": ["_PollerBase._get_max_wait", "B"]}
+{"id": 110, "prediction": "\nA. GeventConnection.__init__\n\n\nFile: pika/connection.py\n\"\"\"Connection classes and methods\"\"\"\n# pylint: disable=C0302", "ground_truth": ["Channel.basic_cancel", "C"]}
+{"id": 111, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["find_module_instances", "D"]}
+{"id": 112, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Statistic.create", "A"]}
+{"id": 113, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["ClassificationExtension.summaries", "B"]}
+{"id": 114, "prediction": "\n\nA. LayoutTemplate._get_template_value\nB. _make_relative_href_url\nC. Link.get_href\nD. Asset.to_dict", "ground_truth": ["Link.get_href", "C"]}
+{"id": 115, "prediction": "\nA. patch_datasets_shared_roles\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["get_datasets", "D"]}
+{"id": 116, "prediction": "\nA. post_projects\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["post_projects", "A"]}
+{"id": 117, "prediction": "\nA. DrxMlflowModel.predict\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["poll", "B"]}
+{"id": 118, "prediction": "\n\n.. code:: python\n\n    A\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["make_formatted_string_command", "C"]}
+{"id": 119, "prediction": "\n\n.. code:: python\n\n    operation.check_can_run_shell_command(\n        host,\n        command,\n        print_output=state.print_output", "ground_truth": ["connect_all", "D"]}
+{"id": 120, "prediction": "\n\n.. code:: python\n\n    pyinfra.options.A\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Host.deploy", "A"]}
+{"id": 121, "prediction": "\n\n.. code:: python\n\n    make_formatted_string_command(\n        \"ps -l | wc -l || ps -l | wc -l\",\n", "ground_truth": ["Host.get_fact", "B"]}
+{"id": 122, "prediction": "\n\n.. code:: python\n\n    pyinfra.options.A\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["run_host_op", "C"]}
+{"id": 123, "prediction": "\n\n.. code-block:: python\n\n    A. LaxBoundedSemaphore.acquire\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Hub.fire_timers", "D"]}
+{"id": 124, "prediction": "\n\n.. code-block:: python\n\n    Transport.parse_uri(uri)\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["to_rabbitmq_queue_arguments", "A"]}
+{"id": 125, "prediction": "\n\n.. code-block:: python\n\n    A.parse_url(url)\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Channel._get", "B"]}
+{"id": 126, "prediction": "\n\n.. code-block::\n\n    A.object_hook\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Transport.establish_connection", "C"]}
+{"id": 127, "prediction": "\n\n.. code-block:: python\n\n    A\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Exchange.publish", "D"]}
+{"id": 128, "prediction": "\n\nA. BufferedStream.seek\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["BufferedStream.seek", "A"]}
+{"id": 129, "prediction": "\n\nA. HTMLUnicodeInputStream.readChunk\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["HTMLParser.mainLoop", "B"]}
+{"id": 130, "prediction": "\n\nA. HTMLParser.mainLoop\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_NetlocResultMixinBase.port", "C"]}
+{"id": 131, "prediction": "\n\nA. nofollow\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["BleachSanitizerFilter.merge_characters", "D"]}
+{"id": 132, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["test_id", "A"]}
+{"id": 133, "prediction": "\nD\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["concat_string", "B"]}
+{"id": 134, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_log_option_source", "C"]}
+{"id": 135, "prediction": "\nD\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["BanditTestSet._load_builtins", "D"]}
+{"id": 136, "prediction": "\nD\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["SafeMapper.__missing__", "A"]}
+{"id": 137, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Metrics._get_issue_counts", "B"]}
+{"id": 138, "prediction": "\nA. Note.from_shorthand\n\n\"\"\"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["ii7", "C"]}
+{"id": 139, "prediction": "\nA. Instrument.note_in_range\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["substitute", "B"]}
+{"id": 140, "prediction": "\nA. Track.add_notes\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["find_melody", "C"]}
+{"id": 141, "prediction": "\nA. Sequencer.play_Note\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["MidiFile.bytes_to_int", "D"]}
+{"id": 142, "prediction": "\n\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_Scale.ascending", "A"]}
+{"id": 143, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["acoustic_snare", "B"]}
+{"id": 144, "prediction": "\n\nA. range_check\n\n\nOptions:\nA. range_check\nB. BaseTimeBuilder.range_check_date\nC. TestBaseTimeBuilder.test_", "ground_truth": ["TestBaseTimeBuilder.test_build_datetime", "C"]}
+{"id": 145, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["TestDateResolutionFunctions.test_get_date_resolution_extended_year", "D"]}
+{"id": 146, "prediction": "\nA\n\n\nOptions:\nA. TestDurationParserFunctions.test_parse_duration_prescribed_time_outoforder\nB. UTCOffset.__re", "ground_truth": ["TestDurationParserFunctions.test_parse_duration_prescribed_time_outoforder", "A"]}
+{"id": 147, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["parse_repeating_interval", "B"]}
+{"id": 148, "prediction": "\nA\n\n\nOptions:\nA. parse_timezone\nB. parse_date\nC. TestTimeParserFunctions.test_parse_datetime_badtype\nD. get", "ground_truth": ["TestTimeParserFunctions.test_parse_datetime_badtype", "C"]}
+{"id": 149, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["dtype_np_to_torch", "A"]}
+{"id": 150, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_visit_union", "A"]}
+{"id": 151, "prediction": "\nA. sha256_digest\nB. _name_rule\nC. SymbolNode.is_ambiguous\nD. digraph\n\n\n\n\n\n\n\n", "ground_truth": ["handler", "B"]}
+{"id": 152, "prediction": "\nA. PostLex.process\nB. LexerConf.__init__\nC. PackedNode.is_empty\nD. TemplateConf.__call__\n\n\n\n\n", "ground_truth": ["_AutoCastMeta.__getitem__", "D"]}
+{"id": 153, "prediction": "\nA. ForestTransformer.transform_packed_node\nB. CnfWrapper.__eq__\nC. dedup_list\nD. AbstractBasicLexer.next_token", "ground_truth": ["SymbolNode.is_ambiguous", "C"]}
+{"id": 154, "prediction": "\nA. ForestVisitor.on_cycle\nB. _wrap_lexer\nC. ForestVisitor.visit_packed_node_out\nD. _should_expand\n\n\n", "ground_truth": ["TemplateConf.__call__", "D"]}
+{"id": 155, "prediction": "\nA.\nB.\nC.\nD.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["ForestTransformer.transform_packed_node", "A"]}
+{"id": 156, "prediction": "\nA. PythonListener.notify\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["ForestVisitor.visit_packed_node_out", "C"]}
+{"id": 157, "prediction": "\nA. safe_shutdown\nB. example_app_process\nC. Returner.getChar\nD. IntegrationTest.testJavaGC\n\n\n\n\n\n\n", "ground_truth": ["create_code_for_nearley_grammar", "B"]}
+{"id": 158, "prediction": "\nA.\nB.\nC.\nD.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["PythonListener.notify", "A"]}
+{"id": 159, "prediction": "\nA. PythonGetThreadId.__init__\nB. HelloObjects.sendObject\nC. GatewayClient.shutdown_gateway\nD. assert_python_memory\n\n", "ground_truth": ["IntegrationTest.testJavaGC", "D"]}
+{"id": 160, "prediction": "\nA. SignalTest.setUp\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["start_java_multi_client_server_app", "B"]}
+{"id": 161, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["GatewayClient.shutdown_gateway", "C"]}
+{"id": 162, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["SignalTest.setUp", "A"]}
+{"id": 163, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["IocpProactor._result", "B"]}
+{"id": 164, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["BaseSelectorEventLoop.add_writer", "A"]}
+{"id": 165, "prediction": "\n\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["SubprocessStreamProtocol.process_exited", "C"]}
+{"id": 166, "prediction": "\nA. Matrix.inverted\nB. Pattern.__init__\nC. test_size\nD. Matrix.as_tuple\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["IocpProactor.accept", "B"]}
+{"id": 167, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Pattern._from_pointer", "B"]}
+{"id": 168, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["test_size", "C"]}
+{"id": 169, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Context.rel_line_to", "A"]}
+{"id": 170, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["test_append_stderr", "C"]}
+{"id": 171, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["TestOutputWidget.test_capture_decorator_no_clear_output", "A"]}
+{"id": 172, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["test_time_validate_min_vs_max", "A"]}
+{"id": 173, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["test_widget_view", "C"]}
+{"id": 174, "prediction": "\n\n\n.. code:: python\n\n    >>> import pytablewriter as ptw\n    >>> ptw.validate_python_var_name(\"a_b\")\n    >>> p", "ground_truth": ["test_tooltip_deprecation", "C"]}
+{"id": 175, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["WriterLogger.__init__", "A"]}
+{"id": 176, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Style.__eq__", "B"]}
+{"id": 177, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_check_fails", "B"]}
+{"id": 178, "prediction": "\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["TextTableWriter__repr__", "D"]}
+{"id": 179, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_ExtensionsGenericMeta__subclasscheck__", "C"]}
+{"id": 180, "prediction": "\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["parse_host_string", "A"]}
+{"id": 181, "prediction": "\nA. hide\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["HostConnectionCache.__delitem__", "B"]}
+{"id": 182, "prediction": "\n\nA. _tostr\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_noop", "B"]}
+{"id": 183, "prediction": "\n\nA. _quantize\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["output_loop", "C"]}
+{"id": 184, "prediction": "\n\nA. Variable.group\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Variable._getdims", "D"]}
+{"id": 185, "prediction": "\n\nA. Dataset.__repr__\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_quantize", "A"]}
+{"id": 186, "prediction": "\nA. save_singleton\nB. get_fun_with_strftime2\nC. save_super\nD. Pickler.save\n\n\n\n\n\n\n", "ground_truth": ["get_chunk_cache", "C"]}
+{"id": 187, "prediction": "\nA. get_fun_with_strftime2\nB. save_socket\nC. _save_file\nD. move_to\n\n\n\n\n\n\n\n", "ground_truth": ["Dataset.__repr__", "A"]}
+{"id": 188, "prediction": "\n\nA. _function\nB. pickle\nC. outdent\nD. save_socket\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Pickler.save", "D"]}
+{"id": 189, "prediction": "\nA. function_a\nB. function_b\nC. _create_array\nD. save_singleton\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_save_file", "C"]}
+{"id": 190, "prediction": "\nA. ExternalTool.input\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_function", "A"]}
+{"id": 191, "prediction": "\nA. Babel.setup\nB. FileManifest._load_manifest\nC. has_placeholder\nD. ExternalTool.input\n\n\n\n\n\n\n\n\n", "ground_truth": ["function_a", "A"]}
+{"id": 192, "prediction": "\nA. JavaScriptPacker.escape\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Jinja2.setup", "B"]}
+{"id": 193, "prediction": "\nA. make_hashable\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["FileManifest._load_manifest", "B"]}
+{"id": 194, "prediction": "\nA. AlwaysUpdater.needs_rebuild\nB. Resolver.search_env_directory\nC. make_hashable\nD. FileManifest._save_manifest", "ground_truth": ["relpathto", "D"]}
+{"id": 195, "prediction": "\nA. ClosureStylesheetsBase.output\nB. BaseEnvironment.config\nC. FileManifest._save_manifest\nD. AssetsExtension.result_contents\n", "ground_truth": ["Jinja2Loader.load_bundles", "C"]}
+{"id": 196, "prediction": "\n\nA.\n\nB.\n\nC.\n\nD.\n\n\nFile: plumbum/version.py\nimport contextlib\nimport os\nimport platform\nimport", "ground_truth": ["FileManifest._save_manifest", "D"]}
+{"id": 197, "prediction": "\n\nA. paramiko.__bool__\nB. PlumbumLocalPopen.__enter__\nC. Application._get_prog_version\nD. Style.stdout\n\n", "ground_truth": ["BaseEnvironment.config", "B"]}
+{"id": 198, "prediction": "\n\nA. 1.8.2\nB. 1.8.2\nC. 1.8.2\nD. 1.8.2\n\n\n", "ground_truth": ["ParamikoPopen._path_read", "A"]}
+{"id": 199, "prediction": "\n\nA. Progress.display\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["PlumbumLocalPopen.__enter__", "B"]}
+{"id": 200, "prediction": "\n\nA.\n\nB.\n\nC.\n\nD.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["PopenAddons.verify", "B"]}
+{"id": 201, "prediction": "\n\nA. Progress._exclude_patterns\nB. _legacy_key\nC. in_venv\nD. Manifest._exclude_patterns\n\n\n", "ground_truth": ["LocalMachine.pgrep", "D"]}
+{"id": 202, "prediction": "\n\nA. in_venv\nB. PyPIJSONLocator.__init__\nC. DistributionPath.clear_cache\nD. ScriptMaker._make_script\n\n", "ground_truth": ["Application.root_app", "C"]}
+{"id": 203, "prediction": "\n\nA. ScriptMaker._make_script\nB. ZipFile.open\nC. AggregatingLocator.get_distribution_names\nD. VersionScheme.", "ground_truth": ["_legacy_key", "B"]}
+{"id": 204, "prediction": "\n\nA. AggregatingLocator.get_distribution_names\nB. Metadata._validate_value\nC. Progress.speed\nD. Manifest._exclude_", "ground_truth": ["DistributionPath.clear_cache", "C"]}
+{"id": 205, "prediction": "\nA. {'limit': 100, 'skip': 0}\nB. 3.6\nC. {'$each': [{'filename': 'test.png',", "ground_truth": ["VersionScheme.suggest", "D"]}
+{"id": 206, "prediction": "\nA. 'delete'\nB. 'lookup_member'\nC. 'sum'\nD. 'delete'\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Metadata._validate_value", "B"]}
+{"id": 207, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["BaseQuerySet._cursor_args", "A"]}
+{"id": 208, "prediction": "\nA\n\n\nclass GeoPointField(BaseField):\n    \"\"\"A field wrapper around MongoDB's GeoJSON Point type.\"\"\"\n\n    _geo_index =", "ground_truth": ["BaseQuerySet.sum", "C"]}
+{"id": 209, "prediction": "\n\nA. Protocol.state\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["BaseDict.__setstate__", "B"]}
+{"id": 210, "prediction": "\n\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["EmbeddedDocumentList.__match_all", "C"]}
+{"id": 211, "prediction": "\n\nA. read_line\nB. Protocol.state\nC. d\nD. ServerProtocol.process_subprotocol\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_extract_parameters", "B"]}
+{"id": 212, "prediction": "\n\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["WebSocketCommonProtocol.read_data_frame", "A"]}
+{"id": 213, "prediction": "\n\n    A\n    B\n    C\n    D\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["d", "D"]}
+{"id": 214, "prediction": "\n\nA. frozenbitarray.__hash__\nB. bits2bytes\nC. MiscTests.test_to01\nD. SearchTests.test_simple\n\n\n", "ground_truth": ["socket_create_server", "B"]}
+{"id": 215, "prediction": "\n\n    A. InternalTests.test_copy_n_example\n    B. frozenbitarray.__hash__\n    C. MiscTests.test_to01\n   ", "ground_truth": ["TestsCount_N.test_ones", "B"]}
+{"id": 216, "prediction": "\n\n    A\n    B\n    C\n    D\n\n    [A]\n    [B]\n    [C]\n    [D]\n\n\n\n\n\n", "ground_truth": ["MiscTests.test_to01", "C"]}
+{"id": 217, "prediction": "\n\n    A\n    B\n    C\n    D\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["InternalTests.test_copy_n_example", "A"]}
+{"id": 218, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["TestsIntervals.test_explicit", "D"]}
+{"id": 219, "prediction": "\nA. _OneLineResult\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["InternalTests.test_overlap_shared_random", "B"]}
+{"id": 220, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_OneLineResult", "A"]}
+{"id": 221, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["OperatingSystem._CmpHelper", "D"]}
+{"id": 222, "prediction": "\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_rst_section", "C"]}
+{"id": 223, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["fn_with_kwarg_and_defaults", "A"]}
+{"id": 224, "prediction": "\n\nA. SimpleGrid.h_scroll_right\nB. FormMultiPage.draw_form\nC. TreeData.walk_parents\nD. Widget.do_colors\n", "ground_truth": ["SimpleGrid.h_scroll_right", "A"]}
+{"id": 225, "prediction": "\n\nA. TextFieldBase.print_cursor_pre_unicode\nB. MultiLineEdit.t_input_isprint\nC. NPSAppManaged.switchForm\n", "ground_truth": ["NPSAppManaged.switchForm", "C"]}
+{"id": 226, "prediction": "\n\nA. Pager.edit\nB. MultiLine.reset_display_cache\nC. MLTree.h_collapse_all\nD. NPSTreeData.new", "ground_truth": ["NPSTreeData.newChild", "D"]}
+{"id": 227, "prediction": "\n\nA. MultiLine.reset_display_cache\nB. InputHandler.add_complex_handlers\nC. TextFieldBase.print_cursor_pre_unicode\n", "ground_truth": ["InputHandler.add_complex_handlers", "B"]}
+{"id": 228, "prediction": "\n\nA. SimpleGrid.h_scroll_right\nB. MultiLineTreeView.h_collapse_tree\nC. Widget.do_colors\nD. NPSTree", "ground_truth": ["MultiLineTreeView.h_collapse_tree", "B"]}
+{"id": 229, "prediction": "\n\nA. MultiLineTree._delMyValues\nB. MultiLine.reset_display_cache\nC. MultiLineEdit.t_input_isprint\nD. TextField", "ground_truth": ["MultiLineTree._delMyValues", "A"]}
+{"id": 230, "prediction": "\nA.\nB.\nC.\nD.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Recompiler._emit_bytecode_FunctionPtrType", "A"]}
+{"id": 231, "prediction": "\nA.\nB.\nC.\nD.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["recompile", "B"]}
+{"id": 232, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["CTypesData._get_own_repr", "D"]}
+{"id": 233, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["BaseType.__ne__", "C"]}
+{"id": 234, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Aec.encode", "A"]}
+{"id": 235, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Aec.encode", "C"]}
+{"id": 236, "prediction": "\n\nA. log_warning\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["zopfli_decode", "B"]}
+{"id": 237, "prediction": "\n\nA. AzureMaps.__init__\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["lzw_decode", "D"]}
+{"id": 238, "prediction": "\n\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Aec.decode", "C"]}
+{"id": 239, "prediction": "\n\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Location.__setstate__", "B"]}
+{"id": 240, "prediction": "\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["GoogleV3._parse_json", "A"]}
+{"id": 241, "prediction": "\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Geocodio._get_error_message", "C"]}
+{"id": 242, "prediction": "\n\nA. test_uuidstring_query\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["ClientIDMutation.__init_subclass_with_meta__", "B"]}
+{"id": 243, "prediction": "\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["test_attr_resolver", "B"]}
+{"id": 244, "prediction": "\nA.\n\n\nFile: opencensus/__init__.py\n# Copyright 2019, OpenCensus Authors\n#\n# Licensed under the Apache License, Version", "ground_truth": ["ClientIDMutation.__init_subclass_with_meta__", "A"]}
+{"id": 245, "prediction": "\nA. True\nB. False\nC. True\nD. False\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["JSONString.serialize", "B"]}
+{"id": 246, "prediction": "\n\nA. The span context is the context within the request's trace.\nB. The tag key is a key to the tag value.\nC. The shutdown option is used", "ground_truth": ["BaseGauge._remove_time_series", "D"]}
+{"id": 247, "prediction": "\nA. WeakMethod.__new__\nB. BaseGauge._remove_time_series\nC. PeriodicMetricTask.run\nD. MetricDescriptor.label_keys", "ground_truth": ["GoogleCloudFormatPropagator.from_headers", "C"]}
+{"id": 248, "prediction": "\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["TagKey.__new__", "B"]}
+{"id": 249, "prediction": "\nA. write_data_src\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["WeakMethod.__new__", "A"]}
+{"id": 250, "prediction": "\nD. OSQP.solve\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["set_opencensus_tracer", "A"]}
+{"id": 251, "prediction": "\nA. render_cmakelists\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["update_matrices_tests.test_update_P", "D"]}
+{"id": 252, "prediction": "\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["basic_tests.test_basic_QP", "C"]}
+{"id": 253, "prediction": "\nD. OSQP.solve\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["codegen_vectors_tests.test_update_u", "C"]}
+{"id": 254, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["update_matrices_tests.test_update_P_A_indP", "A"]}
+{"id": 255, "prediction": "\n\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["codegen_vectors_tests.test_update_u", "B"]}
+{"id": 256, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["OSQP.derivative_iterative_refinement", "A"]}
+{"id": 257, "prediction": "\n\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["UVProcess.__cinit__", "D"]}
+{"id": 258, "prediction": "\n\n    A.\n    B.\n    C.\n    D.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["LruCache.__getitem__", "B"]}
+{"id": 259, "prediction": "\n\n    A\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["UVProcess.__cinit__", "B"]}
+{"id": 260, "prediction": "\n\n    A\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["find_free_port", "B"]}
+{"id": 261, "prediction": "\n\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["UVProcessTransport.is_closing", "B"]}
+{"id": 262, "prediction": "\n\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["UVFSEvent.cancel", "C"]}
+{"id": 263, "prediction": "\n\nA. _might_be_rich_text\nB. ValueWidget._on_value_change\nC. EmptyWidget.value\nD. ApplicationBackend._mgui", "ground_truth": ["_might_be_rich_text", "A"]}
+{"id": 264, "prediction": "\nA. _get_pydantic_model\nB. _QTableExtended.keyPressEvent\nC. _split_annotated_type\nD. EmptyWidget.", "ground_truth": ["_QTableExtended.keyPressEvent", "B"]}
+{"id": 265, "prediction": "\nA. _might_be_rich_text\nB. _get_pydantic_model\nC. ValueWidget._on_value_change\nD. BaseApplicationBackend", "ground_truth": ["BaseApplicationBackend._mgui_get_native_app", "D"]}
+{"id": 266, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["ScalarMappable.set_clim", "B"]}
+{"id": 267, "prediction": "\nA. protect_data\n\n\nFile: keystonemiddleware/tests/unit/test_auth_token_middleware.py\n# Copyright 2012 Open", "ground_truth": ["NoMemcacheAuthToken.test_nomemcache", "B"]}
+{"id": 268, "prediction": "\nA. BaseAuthProtocol.__call__\n\n\nFile: keystonemiddleware/tests/unit/test_oauth2_mtls_token_middleware.py\n", "ground_truth": ["BaseAuthProtocol.__call__", "A"]}
+{"id": 269, "prediction": "\n\nA. protect_data\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_hash_key", "D"]}
+{"id": 270, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_TestConnectionPool._create_connection", "B"]}
+{"id": 271, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["AllModules.__getitem__", "B"]}
+{"id": 272, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["header_id_from_text", "C"]}
+{"id": 273, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Markdown._encode_amps_and_angles", "B"]}
+{"id": 274, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Markdown._find_non_whitespace", "A"]}
+{"id": 275, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["AllModules.__getitem__", "B"]}
+{"id": 276, "prediction": "\n\nB. is_sorted\n\n\"\"\"\n\n\ndef is_sorted(arr):\n    \"\"\"\n    :param arr: List[int]\n    :return:", "ground_truth": ["house_robber", "A"]}
+{"id": 277, "prediction": "\nA\n\n\"\"\"\n\n\ndef climb_stairs(arr):\n    \"\"\"\n    :type arr: List[int]\n    :rtype: int\n    \"\"\"\n   ", "ground_truth": ["find_primitive_root", "B"]}
+{"id": 278, "prediction": "\nB\n\n\"\"\"\n\n\ndef check_pangram(s):\n    \"\"\"\n    :type s: str\n    :rtype: bool\n    \"\"\"\n    if", "ground_truth": ["find_path", "B"]}
+{"id": 279, "prediction": "\n\nB. reverse_bits\n\n\"\"\"\n\n\ndef reverse_bits(n):\n    \"\"\"\n    Reverse bits of a given number.\n    \"\"\"\n    if n", "ground_truth": ["SeparateChainingHashTable.__setitem__", "D"]}
+{"id": 280, "prediction": "\nA. summarize_ranges\n\n\"\"\"\n\n\ndef summarize_ranges(arr):\n    \"\"\"\n    :type arr: List[int]\n    :r", "ground_truth": ["summarize_ranges", "A"]}
+{"id": 281, "prediction": "\n\nA. _is_empty_line\n\nThe correct option is:\n\nA. _is_empty_line\n\nThe correct option is:\n\nA. _is", "ground_truth": ["_DependencyList.__contains__", "B"]}
+{"id": 282, "prediction": "\n\nA. ObjectAliasMixin.is_public\n\nThe correct option is:\n\nA. ObjectAliasMixin.is_public\n\nThe correct option is:\n\n", "ground_truth": ["ObjectAliasMixin.is_public", "A"]}
+{"id": 283, "prediction": "\n\nA. ObjectAliasMixin.is_public\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Alias.canonical_path", "D"]}
+{"id": 284, "prediction": "\n\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Expr.__iter__", "C"]}
+{"id": 285, "prediction": "\n\nA. _Logger.__getattr__\n\nThe correct option is:\n\nA. _Logger.__getattr__\n\nThe correct option is:\n\nA. _Logger", "ground_truth": ["_DependencyList.__len__", "B"]}
+{"id": 286, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["DeserializationMethodVisitor.mapping", "A"]}
+{"id": 287, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["DeserializationMethodVisitor.object", "D"]}
+{"id": 288, "prediction": "\nA. True\nB. False\nC. True\nD. False\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_properties_schema", "D"]}
+{"id": 289, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["register", "B"]}
+{"id": 290, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["isolate_ref", "C"]}
+{"id": 291, "prediction": "\nD. TSL550.wavelength_logging_number\n\n\"\"\"\n\nimport logging\nimport time\nfrom ctypes import *\nfrom typing import Any, Dict,", "ground_truth": ["ext_query_with_srq_sync", "B"]}
+{"id": 292, "prediction": "\nA. KDC101.soft_limits_mode\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["KDC101.soft_limits_mode", "A"]}
+{"id": 293, "prediction": "\nA. Daemon.ping\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["check_error", "D"]}
+{"id": 294, "prediction": "\nA. TSL550.wavelength_logging_number\nB. MAX31X.Z_MAX\nC. SampleAutoconnectInstrument.connect\nD", "ground_truth": ["MAX31X.Z_MAX", "B"]}
+{"id": 295, "prediction": "\n\nA. interesting_default_value\n\n\nclass TestLoggingConfig(unittest.TestCase):\n    def setUp(self):\n        self.app = Application()\n", "ground_truth": ["Application.print_alias_help", "A"]}
+{"id": 296, "prediction": "\n\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["TestApplication.test_cli_allow_none", "B"]}
+{"id": 297, "prediction": "\n\nA. class_to_names\n\n\nclass _Sentinel:\n    def __repr__(self):\n        return \"<Sentinel deprecated>\"\n\n   ", "ground_truth": ["_Sentinel.__repr__", "C"]}
+{"id": 298, "prediction": "\n\nA. SingletonConfigurable._walk_mro\n\n\nclass TestLoggingConfigurable(unittest.TestCase):\n    def test_walk_mro(self):", "ground_truth": ["TraitType.from_string", "C"]}
+{"id": 299, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["bech32_verify_checksum", "B"]}
+{"id": 300, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["decode", "D"]}
+{"id": 301, "prediction": "\nA. Signature.parse\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["PrivateKey.sign", "D"]}
+{"id": 302, "prediction": "\nA. FieldElement.__rmul__\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["FieldElement.__rmul__", "A"]}
+{"id": 303, "prediction": "\nA. generate_addresses\n\n\nFile: hdwallet/hdwallet.py\n#!/usr/bin/env python3\n\n\"\"\"\nThe MIT License (MIT", "ground_truth": ["generate_addresses", "A"]}
+{"id": 304, "prediction": "\nA. sha256\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["hash160", "C"]}
+{"id": 305, "prediction": "\n\nD. test_help_output\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["ConsoleWidget._event_filter_page_keypress", "C"]}
+{"id": 306, "prediction": "\nD\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["FrontendWidget._kernel_restarted_message", "A"]}
+{"id": 307, "prediction": "\n\nA. TestCompletionWidget.tearDownClass\n\n\nOptions:\nA. TestCompletionWidget.tearDownClass\nB. QtInProcessRichJupyterWidget", "ground_truth": ["BaseFrontendMixin._stopped_channels", "C"]}
+{"id": 308, "prediction": "\nA. test_input_and_print\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["TestConsoleWidget.test_keypresses", "C"]}
+{"id": 309, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["TestJWK.test_create_pubKeys", "B"]}
+{"id": 310, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["JWK._rsa_pri_n", "B"]}
+{"id": 311, "prediction": "\n\nA. JWS.jose_header\n\nThe JWS.jose_header registry is used to validate the JOSE header\nof a JWS token.\n\nB", "ground_truth": ["JWS.jose_header", "A"]}
+{"id": 312, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_RawJWE.encrypt", "A"]}
+{"id": 313, "prediction": "\nA\n\n\n# RFC 7518 - 4.1\n# name: description\nJWKTypesRegistry = {\n    'EC': 'Ellipt", "ground_truth": ["ConformanceTeststest_jws_loopback", "C"]}
+{"id": 314, "prediction": "\nA. get_local_timezone\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Transition.__init__", "B"]}
+{"id": 315, "prediction": "\nC. set_test_now\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_get_iso_8601_week", "D"]}
+{"id": 316, "prediction": "\nA. set_test_now\n\n\nFile: pendulum/py.typed\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Period.__new__", "D"]}
+{"id": 317, "prediction": "\nA. DateTime.set\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["DateTime.timezone_name", "D"]}
+{"id": 318, "prediction": "\nA. set_test_now\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Date.age", "C"]}
+{"id": 319, "prediction": "\nA. socksocket.__recvall\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["wrapmodule", "C"]}
+{"id": 320, "prediction": "\nA. _build_ssl_context\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["where", "D"]}
+{"id": 321, "prediction": "\nD. _get_end2end_headers\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Authentication.__le__", "A"]}
+{"id": 322, "prediction": "\nA. wrapmodule\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_wsse_username_token", "B"]}
+{"id": 323, "prediction": "\nA. _parse_cache_control\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Credentials.add", "B"]}
+{"id": 324, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_updateCache", "C"]}
+{"id": 325, "prediction": "\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Request.duplicate_params", "A"]}
+{"id": 326, "prediction": "\n\nA. BannerText.reset\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["ParticleEmitter._find_colour", "C"]}
+{"id": 327, "prediction": "\nA. ControlCodeParser.parse\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Label.update", "C"]}
+{"id": 328, "prediction": "\n\nA. ignores_leakcheck\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["test_falling_off_end_switches_to_unstarted_parent_works", "C"]}
+{"id": 329, "prediction": "\n\nA. TestGreenlet.test_dealloc_switch_args_not_lost\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["TestGreenlet.test_dealloc_switch_args_not_lost", "A"]}
+{"id": 330, "prediction": "\nA. updatePSL\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["TestPSL.test_suffix_deny_public", "B"]}
+{"id": 331, "prediction": "\nA. TestPSL.setUp\nB. TestPSLSections.test_icann\nC. TestPSL.test_publicsuffix\nD. PublicSuffix", "ground_truth": ["TestPSL.test_publicsuffix", "C"]}
+{"id": 332, "prediction": "\nC. updatePSL\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["updatePSL", "C"]}
+{"id": 333, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_SparkXGBParams._set_xgb_params_default", "C"]}
+{"id": 334, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_SparkXGBParams._get_fit_params_default", "C"]}
+{"id": 335, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_SparkXGBEstimator.write", "B"]}
+{"id": 336, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_SparkXGBParams._set_predict_params_default", "B"]}
+{"id": 337, "prediction": "perf\n\n\nFile: mininet/topolib.py\n\"\"\"\nTopology Library for Mininet\n\nThis package contains a set of useful topologies for Mininet.\n\n", "ground_truth": ["LegacyRouter.config", "B"]}
+{"id": 338, "prediction": "\nA. validatePort\n\n\nFile: mininet/topolib.py\n\"\"\"\nTopology Library for Mininet\n\nThis package contains a set of topology classes which can", "ground_truth": ["CPULimitedHost.init", "B"]}
+{"id": 339, "prediction": "\nA. MiniEdit.newNode\n\n\nFile: mininet/topolib.py\n\"\"\"\nTopology Library for Mininet\n\nThis package contains a set of topology", "ground_truth": ["MiniEdit.newNode", "A"]}
+{"id": 340, "prediction": "\nA. runMultiLink\n\n\nFile: mininet/topolib.py\n\"\"\"\nTopology Library for Mininet\n\nThis package contains a set of topology classes which", "ground_truth": ["RemoteLink.moveIntf", "C"]}
+{"id": 341, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_TestRemoteManager.test_remote", "C"]}
+{"id": 342, "prediction": "\nA. NamespaceProxy.__getattr__\nB. check_enough_semaphores\nC. Pipe\nD. latin\n\n\n\n\n\n\n\n", "ground_truth": ["NamespaceProxy.__getattr__", "A"]}
+{"id": 343, "prediction": "\n\nA. _cleanup_tests\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_cleanup_tests", "A"]}
+{"id": 344, "prediction": "\n\nA. get_value\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["TestStartMethod.check_context", "D"]}
+{"id": 345, "prediction": "\nA. Pipe\nB. Manager\nC. _TestQueue.test_qsize\nD. check_enough_semaphores\n\n\n\n\n\n\n\n", "ground_truth": ["_TestQueue.test_qsize", "C"]}
+{"id": 346, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["on_conflict_clause", "C"]}
+{"id": 347, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["into_clause", "B"]}
+{"id": 348, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["create_subscription_stmt", "A"]}
+{"id": 349, "prediction": "\n\n.. code-block:: python\n\n    print(pglast.prettify(\n        pglast.parse_sql(\"select * from   int8_tbl x", "ground_truth": ["IntEnumPrinter.__call__", "D"]}
+{"id": 350, "prediction": "\n\n.. code-block:: python\n\n    print(options.get(sys.argv[1]))\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["create_event_trig_stmt", "B"]}
+{"id": 351, "prediction": "\n\n - A\n - B\n - C\n - D\n\n\"\"\"\n\nfrom ._errors import unwrap\nfrom ._types import type_name\n\n\nclass Teletex", "ground_truth": ["TeletexCodec.decode", "C"]}
+{"id": 352, "prediction": "\n\n    A. CountryReverseError.__init__\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["LanguageTypeConverter.convert", "D"]}
+{"id": 353, "prediction": "\n\nA. Script.__init__\n\n\nFile: babelfish/converters/language_converter.py\n# -*- coding: utf-8 -*-\n#\n#", "ground_truth": ["CaseInsensitiveDict.__eq__", "D"]}
+{"id": 354, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["CaseInsensitiveDict.__repr__", "A"]}
+{"id": 355, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Language.__bool__", "C"]}
+{"id": 356, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["ESP32H2BETA1ROM.read_mac", "C"]}
+{"id": 357, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["ESPLoader.get_security_info", "A"]}
+{"id": 358, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["BaseFirmwareImage.get_non_irom_segments", "A"]}
+{"id": 359, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["_main", "B"]}
+{"id": 360, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["ESP32H2BETA1ROM.get_chip_description", "A"]}
+{"id": 361, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["BaseFirmwareImage.get_irom_segment", "C"]}
+{"id": 362, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["PeripheralDelegate.did_write_value_for_characteristic", "D"]}
+{"id": 363, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["BleakGATTServiceCollection.add_service", "D"]}
+{"id": 364, "prediction": "\nA. Place.__str__\n\n\nclass Tweet(HashableID, DataMapping):\n    \"\"\"Tweets are the basic building block of all things Twitter. The Tweet", "ground_truth": ["Tweet.__repr__", "D"]}
+{"id": 365, "prediction": "\nA. Status.parse\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["List.members", "C"]}
+{"id": 366, "prediction": "\nD. params\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Scenario.__getattr__", "B"]}
+{"id": 367, "prediction": "\n\nA. Group.child\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Group.child", "A"]}
+{"id": 368, "prediction": "\nD. windows_ci_skip\n\n\nFile: nose2/plugins/loader.py\nimport logging\nimport sys\n\nfrom nose2 import events, plugins\nfrom nose2", "ground_truth": ["windows_ci_skip", "D"]}
+{"id": 369, "prediction": "\nA. LayerReporter.__init__\n\n\nFile: nose2/plugins/loader/discovery.py\n# Adapted from unittest2/plugins/loader/", "ground_truth": ["Config._cast", "C"]}
+{"id": 370, "prediction": "\nA. DiscoveryLoader.loadTestsFromNames\n\n\nFile: nose2/plugins/loader/discovery.py\n\"\"\"\nPlugin that implements discovery.\n\nThis plugin respon", "ground_truth": ["Scenario._checkForLayersPlugin", "C"]}
+{"id": 371, "prediction": "\nA. MethodTestCase\n\n\nFile: nose2/plugins/loader.py\nimport logging\nimport sys\n\nfrom nose2 import events, plugins\nfrom nose2.tests.", "ground_truth": ["upper_test_setup", "B"]}
+{"id": 372, "prediction": "\n\nA. _encode_string\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["TestDiamond.test_per_diamond_1", "C"]}
+{"id": 373, "prediction": "\n\n    >>> options.get_option('A')\n    True\n\n    >>> options.get_option('B')\n    False\n\n    >>> options.get_option('", "ground_truth": ["NameScope.get_child", "C"]}
+{"id": 374, "prediction": "\n\n    >>> options.get_option('A')\n    'view_dot_graph'\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["PhiInstr.add_incoming", "D"]}
+{"id": 375, "prediction": "\n\nA. address_of_symbol\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["ModuleRef.function", "B"]}
+{"id": 376, "prediction": "\n\n    >>> options.get_option('A')\n    True\n\n    >>> options.get_option('B')\n    False\n\n    >>> options.get_option('", "ground_truth": ["_ConstOpMixin.gep", "D"]}
+{"id": 377, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["test_maptiler", "C"]}
+{"id": 378, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["test_herev3", "C"]}
+{"id": 379, "prediction": "\nA: \"&copy; <a href=\\\"https://www.openstreetmap.org/copyright\\\">OpenStreetMap</a> contributors <a href=\\\"https://xy", "ground_truth": ["test_stadia", "B"]}
+{"id": 380, "prediction": "\nA: _load_json\nB: private_provider\nC: test_maptiler\nD: test_stadia\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["test_stadia", "D"]}
+{"id": 381, "prediction": "\nA: The attributes `name`, `url`, and `attribution` are required to initialise a `TileProvider`.\nB: The `html_attribution` attribute is", "ground_truth": ["test_requires_token", "D"]}
+{"id": 382, "prediction": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Bunch._repr_html_", "B"]}
+{"id": 383, "prediction": "\n\nA. rolling_median_dev\n\nThe rolling_median_dev function is used to compute the median of a\ndataset, and the deviation of each data point from", "ground_truth": ["Setup.setup_arguments", "B"]}
+{"id": 384, "prediction": "\n\nA. Hg.url_match\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Hg.url_match", "A"]}
+{"id": 385, "prediction": "\nA.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Setup.run_from_conf_args", "C"]}
+{"id": 386, "prediction": "\n\nA. weighted_median\nB. golden_search\nC. get_mu_dist\nD. Environment._set_commit_hash\n\n\n\n\n\n\n", "ground_truth": ["Environment._set_commit_hash", "D"]}
+{"id": 387, "prediction": "\nA\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["AbstractCallableVisitor._is_return_NotImplemented", "C"]}
+{"id": 388, "prediction": "\nA\n\n\"\"\"\n\n\ndef parse(tokens):\n    # type: (List[Token]) -> Optional[List[List[Token]]]\n    \"\"\"Split the docstring", "ground_truth": ["DocstringStyle.from_string", "A"]}
+{"id": 389, "prediction": "\nA\n\n\"\"\"\n\n\ndef _get_option(option):\n    # type: (str) -> Optional[str]\n    \"\"\"Get the option from the given option string", "ground_truth": ["Path.if_left", "D"]}
+{"id": 390, "prediction": "\nA. parse\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Continuation.extract", "B"]}
+{"id": 391, "prediction": "\n\nA. gga_x_pbe_sol_spin\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["gga_x_pbe_spin", "D"]}
+{"id": 392, "prediction": "\n\nA. lda_c_vwn\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["Occupations._fractional_fillings", "B"]}
+{"id": 393, "prediction": "\n\nA. lda_c_vwn\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": ["lda_c_vwn", "A"]}

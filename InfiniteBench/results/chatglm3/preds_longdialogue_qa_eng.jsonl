@@ -1,0 +1,200 @@
+{"id": 0, "prediction": " referring to Nicky Santoro. Nicky Santoro was a character in the", "ground_truth": ["ACE", "ACE ROTHSTEIN"]}
+{"id": 1, "prediction": " J. Edgar Hoover, who was the director of the FBI from 1", "ground_truth": ["GAGGI", "Remo", "remo Gaggi"]}
+{"id": 2, "prediction": "", "ground_truth": ["JIM", "JIM GARRISON", "GARRISON"]}
+{"id": 3, "prediction": "", "ground_truth": ["BILL", "BILL BROUSSARD", "BROUSSARD"]}
+{"id": 4, "prediction": "", "ground_truth": ["FARROUHK"]}
+{"id": 5, "prediction": "", "ground_truth": ["EDWARD"]}
+{"id": 6, "prediction": " to be REX.\n\nThat's", "ground_truth": ["HAMMOND"]}
+{"id": 7, "prediction": " a placeholder name used by the filmmakers during the development of the script. It is", "ground_truth": ["DAVID", "DAVID WILLS"]}
+{"id": 8, "prediction": " intended to be Frank N. Furter. In the original script, the character", "ground_truth": ["MICKEY", "Mickey Sachs"]}
+{"id": 9, "prediction": "", "ground_truth": ["OIL MAN"]}
+{"id": 10, "prediction": "", "ground_truth": ["TONY", "TONY MONTANA"]}
+{"id": 11, "prediction": " a reference to the \"Mask\" a poem by Dylan Thomas, where the", "ground_truth": ["CLAUDIA"]}
+{"id": 12, "prediction": " a reference to the Mask of Zorro, a fictional character in the Zorro", "ground_truth": ["BETSY"]}
+{"id": 13, "prediction": " the character's name, but it is not specified. The story is told", "ground_truth": ["HECTOR"]}
+{"id": 14, "prediction": " a placeholder for the character's true identity.\n\n[MASK", "ground_truth": ["CLEMENZA", "Peter Clemenza"]}
+{"id": 15, "prediction": " to be revealed as a reference to The Mask of Zorro.\n\n\n", "ground_truth": ["PLAGUE"]}
+{"id": 16, "prediction": " referring to Bill. As the story progresses, it becomes clear that the main", "ground_truth": ["THE BRIDE"]}
+{"id": 17, "prediction": " to be a placeholder for a character whose identity is not important to the story and", "ground_truth": ["RAMON"]}
+{"id": 18, "prediction": " to be a famous actor, politician or other public figure, and the script has", "ground_truth": ["LISA", "LISA COHEN"]}
+{"id": 19, "prediction": " $$HARRIET$$\n\n\n164. The end of", "ground_truth": ["KATIE"]}
+{"id": 20, "prediction": " the character's name, who is a character in the story. This is", "ground_truth": ["BLOMKVIST", "Mikael Blomkvist"]}
+{"id": 21, "prediction": "", "ground_truth": ["DOUG", "DOUG BUKOWSKI"]}
+{"id": 22, "prediction": " $$MASK$$.\n\nThe document likely contains sensitive information about the", "ground_truth": ["SALIERI"]}
+{"id": 23, "prediction": " a reference to the 1976 exploitation horror film \"The Mask\".", "ground_truth": ["JONAH KING"]}
+{"id": 24, "prediction": " the killer's real name, but the film does not provide it.\n", "ground_truth": ["BRUCE", "Bruce Baldwin"]}
+{"id": 25, "prediction": " a reference to the character played by Charlie Chaplin in the movie \"The Great", "ground_truth": ["ENDICOTT"]}
+{"id": 26, "prediction": " \"Bob\" as that is the name the reporter is using to imperson", "ground_truth": ["HILDY", "Hildy Johnson"]}
+{"id": 27, "prediction": " one of the following:\n\n[Please select one of the options below]:", "ground_truth": ["BURNS", "Walter", "Walter BURNS"]}
+{"id": 28, "prediction": " the name of the actual killer or someone involved in the case, and the story", "ground_truth": ["MARTHA"]}
+{"id": 29, "prediction": " a reference to the film \"Mask\" (1985) which", "ground_truth": ["MASON"]}
+{"id": 30, "prediction": " to be what? The name of the character who is the main protagonist of the", "ground_truth": ["DAD"]}
+{"id": 31, "prediction": " a placeholder, indicating that the character's name is redacted. [", "ground_truth": ["DR. SANGER", "HENRY SANGER", "DR. HENRY SANGER"]}
+{"id": 32, "prediction": "", "ground_truth": ["HUNSECKER"]}
+{"id": 33, "prediction": "", "ground_truth": ["PRIMATE PETE", "PETE"]}
+{"id": 34, "prediction": "", "ground_truth": ["KELLY"]}
+{"id": 35, "prediction": " a reference to \"Mask,\" a play by Anthony Burgess about a writer", "ground_truth": ["NICKY"]}
+{"id": 36, "prediction": " a reference to the controversy surrounding the 1991 film \"The Us", "ground_truth": ["DA MAYOR"]}
+{"id": 37, "prediction": " \"Russell Hammond\"\n\n[END]\n\n\n[", "ground_truth": ["DARRYL"]}
+{"id": 38, "prediction": " \"Rick.\" The title of the film is likely \"Custody.\"", "ground_truth": ["ESTRELLA"]}
+{"id": 39, "prediction": " the real name of the character played by Kate Winslet in the movie. In", "ground_truth": ["ANNIE", "ANNIE MACLEAN"]}
+{"id": 40, "prediction": " to be the next President of the United States. The color pink no longer has", "ground_truth": ["INEZ"]}
+{"id": 41, "prediction": " Jim Morrison. The name of the character in the script is Jim Morrison. The", "ground_truth": ["PHIL"]}
+{"id": 42, "prediction": "", "ground_truth": ["BRUWER", "MELANIE BRUWER"]}
+{"id": 43, "prediction": "", "ground_truth": ["CLOETE"]}
+{"id": 44, "prediction": "", "ground_truth": ["PRIEST"]}
+{"id": 45, "prediction": "", "ground_truth": ["HEDONIA"]}
+{"id": 46, "prediction": ": Lily. Based on the script, Lily is the character played by Sarah Paul", "ground_truth": ["GWEN"]}
+{"id": 47, "prediction": " John James Preston, the main character in the original Sex and the City story.", "ground_truth": ["SAMANTHA"]}
+{"id": 48, "prediction": " \"BEN SANDERSON.\" The dialogue suggests that the person being referred to", "ground_truth": ["WARDEN", "MILTON WARDEN"]}
+{"id": 49, "prediction": " going to be your own. (end of addendum)\n\nThe", "ground_truth": ["PINHEAD"]}
+{"id": 50, "prediction": " \"Max Cherry\", who is a bail bondsman in the film, played by", "ground_truth": ["NICOLET", "RAY NICOLET"]}
+{"id": 51, "prediction": " $$MAX CHERRY$$ who is a bail bondsman. This is because", "ground_truth": ["JACKIE", "JACKIE BROWN"]}
+{"id": 52, "prediction": " to be a pseudonym.\n\n\"Ocean's 11", "ground_truth": ["RUSTY"]}
+{"id": 53, "prediction": " a reference to the way the character is referred to in the script.\n\n", "ground_truth": ["TESS"]}
+{"id": 54, "prediction": "", "ground_truth": ["ROY"]}
+{"id": 55, "prediction": " a reference to the movie, The Mask of Zorro, where the main villain", "ground_truth": ["QUINCE"]}
+{"id": 56, "prediction": " a reference to the movie Mask, where the protagonist is named Rocky Coltrane", "ground_truth": ["JOE", "JOE Black"]}
+{"id": 57, "prediction": " the name of the character played by William Hurt in the movie. It could", "ground_truth": ["ALLISON"]}
+{"id": 58, "prediction": " a random selection, chosen to mask the real author's identity. The film", "ground_truth": ["HELEN", "HELEN CHAMBERS"]}
+{"id": 59, "prediction": " Governor Morris.\n\n\nCUT TO:\n\n\nEXT. X", "ground_truth": ["MILLS", "David Mills"]}
+{"id": 60, "prediction": " that of a famous person, a celebrity, or someone of high society. The", "ground_truth": ["TYRIAN"]}
+{"id": 61, "prediction": " Duffy.\n\nSound man speaks again.\n\n\nSOUND", "ground_truth": ["STEPHEN", "Stephen Meyers"]}
+{"id": 62, "prediction": " in reference to the character played by David Kammerer in the film, who", "ground_truth": ["BOND", "JAMES BOND"]}
+{"id": 63, "prediction": " either David Kammerer or Elliot Harmsway.\n\n[M", "ground_truth": ["HARMSWAY", "ELLIOT HARMSWAY"]}
+{"id": 64, "prediction": " a reference to the works of Shakespeare. In \"Hamlet,\" Shakespeare has", "ground_truth": ["MR. PINK"]}
+{"id": 65, "prediction": " John Doe.\n\nIt's interesting that the character is named John", "ground_truth": ["NICOLE"]}
+{"id": 66, "prediction": " a reference to the 1997 film \"Mask\", which was", "ground_truth": ["ALISON", "Ally Jones", "Ally"]}
+{"id": 67, "prediction": " \"MASK\". $$MASK$$ represents the person's anonym", "ground_truth": ["CAROL"]}
+{"id": 68, "prediction": " referring to Charles Foster Kane, the protagonist of the film. The film opens with", "ground_truth": ["ANN", "ANN BISHOP MILLANEY"]}
+{"id": 69, "prediction": " R. Crumb, one of the most famous underground cartoonists of the ", "ground_truth": ["LELAND"]}
+{"id": 70, "prediction": " \"Rosebud\" and it is a film about the life of Charles Foster", "ground_truth": ["HARVEY", "HARVEY PEKAR"]}
+{"id": 71, "prediction": " a reference to the fact that the movie is a spin-off of Men in", "ground_truth": ["BILLY"]}
+{"id": 72, "prediction": " from the team's ownership group, the Lew Wolff Group. The film", "ground_truth": ["CLAUDIA", "CLAUDIA JENSSEN,"]}
+{"id": 73, "prediction": " the player whose contract has been traded away to a contending team, solidifying", "ground_truth": ["KAY"]}
+{"id": 74, "prediction": " a reference to the character Michael Myers, a notorious serial killer in the Halloween franchise", "ground_truth": ["DAVE"]}
+{"id": 75, "prediction": " to be \"Lars Thorwald\"\n\n\nThe story revolves around", "ground_truth": ["LISA"]}
+{"id": 76, "prediction": " Chris Rock.\n\nIt's a reference to Chris Rock, who is", "ground_truth": ["QUAIL", "Douglas Quail"]}
+{"id": 77, "prediction": " to be one that has been determined as most fitting the character. The dialogue is", "ground_truth": ["SAM", "SAM PICKLES"]}
+{"id": 78, "prediction": " the character of \"Rachel\" in the story.\n\nThe story revol", "ground_truth": ["JOHNNY", "JOHNNY FOOTE"]}
+{"id": 79, "prediction": " to be a reference to the movie The Mask of Zorro, where the mask", "ground_truth": ["CHARLOTTE", "CHARLOTTE BOUDREAU CANTELLE PHELAN"]}
+{"id": 80, "prediction": " one of the characters, such as:\n\n- Aibileen\n", "ground_truth": ["ELIZABETH", "ELIZABETH LEEFOLT"]}
+{"id": 81, "prediction": " the character of Vanessa Van Patten, who portrayed the love interest of Austin", "ground_truth": ["BUDDY"]}
+{"id": 82, "prediction": " the Winklevoss twins.\n\n\nTHE END. The Social Network", "ground_truth": ["AUSTIN", "AUSTIN POWERS"]}
+{"id": 83, "prediction": " the name of the company, as Facebook Inc. would be a private company,", "ground_truth": ["EDUARDO", "EDUARDO SAVERIN"]}
+{"id": 84, "prediction": "", "ground_truth": ["JENNIFER", "JENNIFER HILLS"]}
+{"id": 85, "prediction": "", "ground_truth": ["JOHNNY"]}
+{"id": 86, "prediction": " a reference to the fact that the script was originally written under a pseudonym,", "ground_truth": ["SAMUEL"]}
+{"id": 87, "prediction": " the name of the main character, John Patterson.\n\n[The Ghost and", "ground_truth": ["MOTTI", "Admiral Motti"]}
+{"id": 88, "prediction": " a pseudonym. The voice on the other end of the phone is not a", "ground_truth": ["STU", "STUART SHEPARD"]}
+{"id": 89, "prediction": " \"Dirk Diggler\"\n\n\nPinhead's face", "ground_truth": ["MAURICE"]}
+{"id": 90, "prediction": " to be one of the following:\n\n- James\n- John\n-", "ground_truth": ["BESTLER", "HEINRICH BESTLER"]}
+{"id": 91, "prediction": " Helmut Dork. The character is a German clown who performs at a circus", "ground_truth": ["HELMUT", "HELMUT DORQUE"]}
+{"id": 92, "prediction": " a reference to the Marvel Comics character Doctor Strange, whose real name is Stephen Strange", "ground_truth": ["FAIT", "TONY FAIT"]}
+{"id": 93, "prediction": ":\n\nThe name that has been replaced with $$MASK$$ is", "ground_truth": ["ECKER", "COMMANDER BILL ECKER"]}
+{"id": 94, "prediction": ":\n\nThe character whose name has been replaced with $$MASK$$", "ground_truth": ["DAVY JONES"]}
+{"id": 95, "prediction": " a reference to the movie The Mask of Zorro (1998),", "ground_truth": ["BOBBY", "Bobby Kennedy"]}
+{"id": 96, "prediction": " to be changed to \"John Smith\" in the final version.\n\nThe", "ground_truth": ["PAUL", "PAUL D. GARNER", "Paul D."]}
+{"id": 97, "prediction": " a reference to the fact that the original owner of the screenplay, Toni", "ground_truth": ["STAMP PAID"]}
+{"id": 98, "prediction": " a reference to the characters of Sethe, the protagonist of the book and movie", "ground_truth": ["BABY SUGGS"]}
+{"id": 99, "prediction": " a reference to the fact that the character is named Julian, but the script refers", "ground_truth": ["DENVER"]}
+{"id": 100, "prediction": " to be a code name given by the writer to protect the identity of the real", "ground_truth": ["ZED"]}
+{"id": 101, "prediction": " a reference to the 1998 film \"The Mask of Zorro", "ground_truth": ["ISABELLA", "ISABELLA MOLINA"]}
+{"id": 102, "prediction": " Lord Blackwood's butler, JAMES MCMASTER. The", "ground_truth": ["CARTER"]}
+{"id": 103, "prediction": "", "ground_truth": ["PETE MUSANE"]}
+{"id": 104, "prediction": "", "ground_truth": ["DAVE"]}
+{"id": 105, "prediction": "", "ground_truth": ["JOEL", "JOEL REYNOLDS"]}
+{"id": 106, "prediction": " Freddy. The passage suggests that it is an act of revenge against the character", "ground_truth": ["WEISS"]}
+{"id": 107, "prediction": " that of the character who is speaking at the beginning of the story, as well", "ground_truth": ["SHERMAN", "Sherman McCoy"]}
+{"id": 108, "prediction": " a reference to a placeholder name used during the script's writing and development process", "ground_truth": ["LUIS"]}
+{"id": 109, "prediction": " to be $$MASK$$ since it is not specified who is being referred", "ground_truth": ["PETER", "Peter Fallow"]}
+{"id": 110, "prediction": "", "ground_truth": ["MISSION CONTROL"]}
+{"id": 111, "prediction": " \"Georgia.\" The camera glides down to the window.    A", "ground_truth": ["OLIVER", "OLIVER FIELDS"]}
+{"id": 112, "prediction": " related to the name of the actor who played the character. To protect the identity", "ground_truth": ["COACH"]}
+{"id": 113, "prediction": " to have been \"TUTTLE.\"\n\nThis scene could be the", "ground_truth": ["SAM", "SAM LOWRY"]}
+{"id": 114, "prediction": " to be John Smith.\n\nThe story is likely set in the late ", "ground_truth": ["LOU"]}
+{"id": 115, "prediction": " a famous or important person in history, and it is used as a way to", "ground_truth": ["STEVE CARELL"]}
+{"id": 116, "prediction": " the name of the person in question. Many of the marriages are soiled,", "ground_truth": ["KAREN", "KAREN RICHARDS"]}
+{"id": 117, "prediction": " \"Eddie\". The text mentions Eddie being in the Air Force during WWII", "ground_truth": ["CINDY", "CINDY PERIERA"]}
+{"id": 118, "prediction": "", "ground_truth": ["GLADYS", "GLADYS LEEMAN"]}
+{"id": 119, "prediction": " in the title.\n\n$$MASK$$ is a thriller movie about", "ground_truth": ["MR. JOHNSON"]}
+{"id": 120, "prediction": "", "ground_truth": ["LINNEA"]}
+{"id": 121, "prediction": " SAMO, a street artist who was active in the 80s.", "ground_truth": ["BASQUIAT", "JEAN MICHEL BASQUIAT"]}
+{"id": 122, "prediction": " \"SAMO\" which is short for SAMO (Stylized MON", "ground_truth": ["SECURITY CHIEF"]}
+{"id": 123, "prediction": " to be that of Jean-Michel Basquiat. The exact identity", "ground_truth": ["CHRISTY"]}
+{"id": 124, "prediction": "", "ground_truth": ["WALTER", "WALTER VALE"]}
+{"id": 125, "prediction": " one of the following:\n\n- Peter Joshua\n- Adam Canfield\n", "ground_truth": ["REGGIE"]}
+{"id": 126, "prediction": " a reference to the game show \"Deception\" where contestants try to de", "ground_truth": ["LEONARD", "LEONARD FISHER"]}
+{"id": 127, "prediction": " \"Tyler Durden\" [gMASK]sop As the", "ground_truth": ["TYLER", "Tyler Durden"]}
+{"id": 128, "prediction": "...\n\nRachel's eyes are closed.  She's smiling", "ground_truth": ["BIALYSTOCK"]}
+{"id": 129, "prediction": " Max Bialystock. The name that has been replaced with $$MAS", "ground_truth": ["BLOOM", "LEO BLOOM"]}
+{"id": 130, "prediction": " to be \"DADDY\".\n\nRACHEL: (into the", "ground_truth": ["RACHEL", "RACHEL KELLY"]}
+{"id": 131, "prediction": " in reference to a secret identity or alias. The dialogue about \"MAS", "ground_truth": ["JUNO"]}
+{"id": 132, "prediction": " one of the following: [Select One]\n\na. The Princess Br", "ground_truth": ["D'ARTAGNAN"]}
+{"id": 133, "prediction": " Riddick. The character Riddick was portrayed by Vin Diesel in", "ground_truth": ["LOUIS", "King Louis XIII", "Louis XIII"]}
+{"id": 134, "prediction": " a reference to the title character in the movie The Italian Job, played by Michael", "ground_truth": ["FRY", "CAROLYN FRY"]}
+{"id": 135, "prediction": " the character named RIDDICK. [gMASK]sop", "ground_truth": ["FIRST CAVALIER"]}
+{"id": 136, "prediction": " \"Eva\" which is a shortened form of the name \"Eva", "ground_truth": ["TITO"]}
+{"id": 137, "prediction": " the name of the person who wrote the poem \"Love Poem for No One", "ground_truth": ["NICK"]}
+{"id": 138, "prediction": " referring to the original name of the character played by Anna Scott. In the script", "ground_truth": ["WILLIAM"]}
+{"id": 139, "prediction": " a placeholder for another character's name.\n\nPlease share the original name", "ground_truth": ["KIT"]}
+{"id": 140, "prediction": " a reference to the controversial conspiracy theory about the assassination of Martin Luther King Jr.", "ground_truth": ["BETTY"]}
+{"id": 141, "prediction": " to be the victim of a \"swift and quiet coup\" by an alliance", "ground_truth": ["ADRIAN"]}
+{"id": 142, "prediction": " a reference to the mask that the main character wears throughout the film, which conce", "ground_truth": ["ANGEL"]}
+{"id": 143, "prediction": " the name of the character you want to replace. Is that correct? If that", "ground_truth": ["DAN RATHER"]}
+{"id": 144, "prediction": " \"Jack\".\n\nAt the end of the movie, the name \"Jack", "ground_truth": ["QUOYLE"]}
+{"id": 145, "prediction": " one of the following:\n\n1. Mark\n2. Mike\n3", "ground_truth": ["DMITRI"]}
+{"id": 146, "prediction": "", "ground_truth": ["STARLING", "CLARICE STARLING"]}
+{"id": 147, "prediction": "", "ground_truth": ["BARNEY"]}
+{"id": 148, "prediction": " to be one of the following:\n\n- Adrian\n- John\n-", "ground_truth": ["EVERETT"]}
+{"id": 149, "prediction": " $$MASK$$.\n\nThe story is a romantic comedy about a", "ground_truth": ["BERLIN", "JOHN BERLIN", "JOHN"]}
+{"id": 150, "prediction": " a reference to the use of a mask or disguise throughout the film. $$", "ground_truth": ["SUMMER"]}
+{"id": 151, "prediction": "", "ground_truth": ["MAYA"]}
+{"id": 152, "prediction": " a reference to the horror movie \"Mask\" (1985)", "ground_truth": ["PANES", "LEVI PANES"]}
+{"id": 153, "prediction": " Frank Lucas, the main character of the story.\n\n\nIn the story", "ground_truth": ["RIEDENSCHNEIDER", "Freddy Riedenschneider"]}
+{"id": 154, "prediction": " the most famous fictional character in the history of American crime fiction. The mysterious figure", "ground_truth": ["FRANK"]}
+{"id": 155, "prediction": " Eazy-E. Eazy-E was a member of NWA,", "ground_truth": ["ALI", "Ali Van Versh"]}
+{"id": 156, "prediction": " Eazy-E, one of the original members of NWA. The group", "ground_truth": ["SUGE", "SUGE KNIGHT"]}
+{"id": 157, "prediction": " a redacted name to protect the privacy of the real people involved in the", "ground_truth": ["RAOUL"]}
+{"id": 158, "prediction": " a character from the story \"The Tell-Tale Heart\" by Edgar Allan", "ground_truth": ["PETER", "Peter Vincent"]}
+{"id": 159, "prediction": " Edward. The character of Edward refers to a fictional vampire character in a popular series", "ground_truth": ["JEAN"]}
+{"id": 160, "prediction": "", "ground_truth": ["WYATT", "Wyatt Earp"]}
+{"id": 161, "prediction": "", "ground_truth": ["MATTIE"]}
+{"id": 162, "prediction": " a famous person or character in the story, but the actual person or character is", "ground_truth": ["AUFIDIUS", "TULLUS AUFIDIUS"]}
+{"id": 163, "prediction": " an allusion to the character Caius Martius / Coriolanus in", "ground_truth": ["JO"]}
+{"id": 164, "prediction": " to be the one assigned to the scientist in the original script.\n\nINT", "ground_truth": ["KAFKA"]}
+{"id": 165, "prediction": " an attempt to avoid copyright issues.\n\nPlease provide the original text with the", "ground_truth": ["HARRY", "HARRY TASKER"]}
+{"id": 166, "prediction": "", "ground_truth": ["SONNY", "SONNY CORLEONE"]}
+{"id": 167, "prediction": "", "ground_truth": ["DON CORLEONE"]}
+{"id": 168, "prediction": " a reference to the author of the original story. It is not specified in the", "ground_truth": ["ABBY"]}
+{"id": 169, "prediction": "", "ground_truth": ["FLEURY"]}
+{"id": 170, "prediction": "", "ground_truth": ["TEN BEARS"]}
+{"id": 171, "prediction": " a reference to the \"Mask\" song from the musical \"The Phantom", "ground_truth": ["KATE"]}
+{"id": 172, "prediction": "", "ground_truth": ["TYRELL", "TYRELL MARTIN"]}
+{"id": 173, "prediction": "", "ground_truth": ["BOBBY GREEN"]}
+{"id": 174, "prediction": "", "ground_truth": ["ROSARIO DIAZ"]}
+{"id": 175, "prediction": " that of the original character played by Michael Parks, who was replaced by Mike Myers", "ground_truth": ["LEON", "Count Leon d'Algout"]}
+{"id": 176, "prediction": " EITHER ELIZABETH HALSEY or BETTY JO DU", "ground_truth": ["ED"]}
+{"id": 177, "prediction": " Elizabeth's real name, but the character's name has been changed to", "ground_truth": ["GARRETT"]}
+{"id": 178, "prediction": " \"Ethan\". The character of Ethan Edwards is the protagonist of the film \"", "ground_truth": ["CHARLIE", "CHARLIE MacCORRY"]}
+{"id": 179, "prediction": "", "ground_truth": ["DYSON", "MILES DYSON"]}
+{"id": 180, "prediction": "", "ground_truth": ["VOSEN", "NOAH VOSEN"]}
+{"id": 181, "prediction": "", "ground_truth": ["MILLER"]}
+{"id": 182, "prediction": "", "ground_truth": ["ETHAN", "ETHAN HUNT"]}
+{"id": 183, "prediction": " the name of a placeholder to protect the identity of the original author of the script", "ground_truth": ["SERENDIPITY"]}
+{"id": 184, "prediction": " a placeholder name for a character in the script. The name is not mentioned in", "ground_truth": ["ELAINE"]}
+{"id": 185, "prediction": "", "ground_truth": ["LOOMIS", "SAMUEL J. LOOMIS"]}
+{"id": 186, "prediction": "", "ground_truth": ["OLIVE"]}
+{"id": 187, "prediction": " \"Derek Charles.\"\n\nThe story is about a man who has a", "ground_truth": ["FRANK", "Frank Baker"]}
+{"id": 188, "prediction": " Richard Taupin. This was suggested by the script.\n\nIn the", "ground_truth": ["TAUPIN", "RICHARD TAUPIN"]}
+{"id": 189, "prediction": " Carl Smith. This is because there are multiple Carl Smiths in the database,", "ground_truth": ["GENERAL HAIG"]}
+{"id": 190, "prediction": " a placeholder name used in the script to prevent copyright infringement or potential plagiar", "ground_truth": ["MILTON", "JOHN MILTON"]}
+{"id": 191, "prediction": " a placeholder for the real name of the character. Shooting Script 07", "ground_truth": ["LEONOR"]}
+{"id": 192, "prediction": " \"Pin\" and his organization is called the \"Pin.\" $$M", "ground_truth": ["NEFF"]}
+{"id": 193, "prediction": "", "ground_truth": ["BECK"]}
+{"id": 194, "prediction": " a placeholder or a censored name. If you could please provide the original name", "ground_truth": ["CATHERINE", "Catherine Tramell"]}
+{"id": 195, "prediction": " the name of the main character in the story. [gMASK]", "ground_truth": ["JOAN"]}
+{"id": 196, "prediction": "", "ground_truth": ["HANNA"]}
+{"id": 197, "prediction": "", "ground_truth": ["NEIL"]}
+{"id": 198, "prediction": "", "ground_truth": ["BREEDAN"]}
+{"id": 199, "prediction": " OSCAR GRANT. The story takes place in the 195", "ground_truth": ["THE GANG"]}

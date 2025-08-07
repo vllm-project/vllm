@@ -1,0 +1,200 @@
+{"id": 0, "prediction": " a reference to Nicky's name in the script.", "ground_truth": ["ACE", "ACE ROTHSTEIN"]}
+{"id": 1, "prediction": " to be a casino executive, possibly Sam Rothstein.", "ground_truth": ["GAGGI", "Remo", "remo Gaggi"]}
+{"id": 2, "prediction": " to be the character name of the person being portrayed, the character's actual", "ground_truth": ["JIM", "JIM GARRISON", "GARRISON"]}
+{"id": 3, "prediction": " a code name or nickname. However, there is a possibility that the name is", "ground_truth": ["BILL", "BILL BROUSSARD", "BROUSSARD"]}
+{"id": 4, "prediction": " to be Godse.", "ground_truth": ["FARROUHK"]}
+{"id": 5, "prediction": " to be Alejandro González Ibáñez, one", "ground_truth": ["EDWARD"]}
+{"id": 6, "prediction": " to be FRIEDMAN.  We now see that he is seated across", "ground_truth": ["HAMMOND"]}
+{"id": 7, "prediction": " the name of the character that has been killed or is otherwise absent from the scene", "ground_truth": ["DAVID", "DAVID WILLS"]}
+{"id": 8, "prediction": " to be Frank N. Furter.\n\nIn the following paragraphs, the", "ground_truth": ["MICKEY", "Mickey Sachs"]}
+{"id": 9, "prediction": " to be wrong, but it's a nice gesture.\n\n\"\"", "ground_truth": ["OIL MAN"]}
+{"id": 10, "prediction": " to be one of the following:\n\n\n\n", "ground_truth": ["TONY", "TONY MONTANA"]}
+{"id": 11, "prediction": " to be\n\n\n \t    \t       \t   \t   \t       ", "ground_truth": ["CLAUDIA"]}
+{"id": 12, "prediction": " to be Taylor, Leveau, or Swan. Reilly was with them", "ground_truth": ["BETSY"]}
+{"id": 13, "prediction": " to be a full name, such as \"Joe Smith\". The idea is", "ground_truth": ["HECTOR"]}
+{"id": 14, "prediction": " to be Frankie Pentangeli. This is because Michael has always been loyal", "ground_truth": ["CLEMENZA", "Peter Clemenza"]}
+{"id": 15, "prediction": " to be one of the following: \"Kate Libby\", \"Ac", "ground_truth": ["PLAGUE"]}
+{"id": 16, "prediction": " that of a person you know. Who knows - perhaps you'll figure out", "ground_truth": ["THE BRIDE"]}
+{"id": 17, "prediction": " to be a character or object that is significant to the story.\n", "ground_truth": ["RAMON"]}
+{"id": 18, "prediction": " someone the character knows or is a close friend, or a name the character uses", "ground_truth": ["LISA", "LISA COHEN"]}
+{"id": 19, "prediction": " to be Erika. 297    INT. MILLENNI", "ground_truth": ["KATIE"]}
+{"id": 20, "prediction": " to be either `Harriet', `Mildred' or `", "ground_truth": ["BLOMKVIST", "Mikael Blomkvist"]}
+{"id": 21, "prediction": " the name of the character being replaced. For example, if the character being replaced", "ground_truth": ["DOUG", "DOUG BUKOWSKI"]}
+{"id": 22, "prediction": " the name of the person who died in the battle, or the name of the", "ground_truth": ["SALIERI"]}
+{"id": 23, "prediction": " Dale Tabor who died in 1997.", "ground_truth": ["JONAH KING"]}
+{"id": 24, "prediction": " the name of a character in the movie or, if not, it is a", "ground_truth": ["BRUCE", "Bruce Baldwin"]}
+{"id": 25, "prediction": " the name of a character in a film, show or movie. The player must", "ground_truth": ["ENDICOTT"]}
+{"id": 26, "prediction": " a name of a character, such as a parent, friend, or relative of", "ground_truth": ["HILDY", "Hildy Johnson"]}
+{"id": 27, "prediction": " a character who was in the previous draft.", "ground_truth": ["BURNS", "Walter", "Walter BURNS"]}
+{"id": 28, "prediction": " to be one of the principal characters.", "ground_truth": ["MARTHA"]}
+{"id": 29, "prediction": " to be the name of a character in the film.", "ground_truth": ["MASON"]}
+{"id": 30, "prediction": " to be the name of a well-known celebrity or historical figure (or fictional", "ground_truth": ["DAD"]}
+{"id": 31, "prediction": " \"Sissy\", Brandon's sister, whose face appears at the end", "ground_truth": ["DR. SANGER", "HENRY SANGER", "DR. HENRY SANGER"]}
+{"id": 32, "prediction": " a city, town, or country.", "ground_truth": ["HUNSECKER"]}
+{"id": 33, "prediction": " to be a character name or a location name.", "ground_truth": ["PRIMATE PETE", "PETE"]}
+{"id": 34, "prediction": " that of an actor or actress. The character that is the replacement for the above", "ground_truth": ["KELLY"]}
+{"id": 35, "prediction": " \"Buckner\" or \"Buckner, Bill.\" However,", "ground_truth": ["NICKY"]}
+{"id": 36, "prediction": " to be one that is familiar to viewers, a name that could represent anyone from", "ground_truth": ["DA MAYOR"]}
+{"id": 37, "prediction": " to be another character who is not present in the scene, but whose dialogue has", "ground_truth": ["DARRYL"]}
+{"id": 38, "prediction": " to be one of the following:\n\nBarry Manilow\n\n", "ground_truth": ["ESTRELLA"]}
+{"id": 39, "prediction": " \"Frank\", who is the father of the characters in the story.", "ground_truth": ["ANNIE", "ANNIE MACLEAN"]}
+{"id": 40, "prediction": " not the actual name of the character. It's used in this case because", "ground_truth": ["INEZ"]}
+{"id": 41, "prediction": " one of the characters in the scene. This is necessary to maintain the illusion of", "ground_truth": ["PHIL"]}
+{"id": 42, "prediction": " to be the name of a person who is in a position of power or influence", "ground_truth": ["BRUWER", "MELANIE BRUWER"]}
+{"id": 43, "prediction": " to be a name which is significant to the story.", "ground_truth": ["CLOETE"]}
+{"id": 44, "prediction": " a well-known, popular, or otherwise well-known name.\n\n", "ground_truth": ["PRIEST"]}
+{"id": 45, "prediction": " to be someone famous, or a character from a famous novel.", "ground_truth": ["HEDONIA"]}
+{"id": 46, "prediction": " to be someone who is emotionally involved in the scene. This person may be the", "ground_truth": ["GWEN"]}
+{"id": 47, "prediction": " to be one of the names in the list that Carrie and Big were putting together", "ground_truth": ["SAMANTHA"]}
+{"id": 48, "prediction": " to be a character from the film.", "ground_truth": ["WARDEN", "MILTON WARDEN"]}
+{"id": 49, "prediction": " to be either \"DeAndre\" or \"Rachel\".", "ground_truth": ["PINHEAD"]}
+{"id": 50, "prediction": " the name of one of the characters in the movie. The name may be either", "ground_truth": ["NICOLET", "RAY NICOLET"]}
+{"id": 51, "prediction": " a name of the character who was replaced with that character. So, if that", "ground_truth": ["JACKIE", "JACKIE BROWN"]}
+{"id": 52, "prediction": " to be one of these:\n\n- Danny Ocean\n- Rusty Ryan", "ground_truth": ["RUSTY"]}
+{"id": 53, "prediction": " to be either \"Tess\" or \"Laura\", which is why", "ground_truth": ["TESS"]}
+{"id": 54, "prediction": " the name of a known killer or murderer. The name may also be an alias", "ground_truth": ["ROY"]}
+{"id": 55, "prediction": " to be any character name that is not present in the movie (or one that", "ground_truth": ["QUINCE"]}
+{"id": 56, "prediction": " to be either \"Joe Black\" or \"Drew\".", "ground_truth": ["JOE", "JOE Black"]}
+{"id": 57, "prediction": " to be a famous person who has died. The person's name could be", "ground_truth": ["ALLISON"]}
+{"id": 58, "prediction": " to be a character name.  It is the name of a character who will", "ground_truth": ["HELEN", "HELEN CHAMBERS"]}
+{"id": 59, "prediction": " to be:", "ground_truth": ["MILLS", "David Mills"]}
+{"id": 60, "prediction": " Will Ritter.\n\n", "ground_truth": ["TYRIAN"]}
+{"id": 61, "prediction": " to be \"Morris\", \"Pullman\", or \"Th", "ground_truth": ["STEPHEN", "Stephen Meyers"]}
+{"id": 62, "prediction": " to be Allen Ginsberg, as he is the only other person who worked", "ground_truth": ["BOND", "JAMES BOND"]}
+{"id": 63, "prediction": " to be \"Vega\" or \"Pink\" or \"Blonde\"", "ground_truth": ["HARMSWAY", "ELLIOT HARMSWAY"]}
+{"id": 64, "prediction": " Mr. Pink.", "ground_truth": ["MR. PINK"]}
+{"id": 65, "prediction": " a character that will appear in the film, but the character's name is", "ground_truth": ["NICOLE"]}
+{"id": 66, "prediction": " to be a character in the film. However, in some instances the name has", "ground_truth": ["ALISON", "Ally Jones", "Ally"]}
+{"id": 67, "prediction": " to be a person's name who has been replaced by a person's", "ground_truth": ["CAROL"]}
+{"id": 68, "prediction": " to be a random character from the scene itself.\n\n\n", "ground_truth": ["ANN", "ANN BISHOP MILLANEY"]}
+{"id": 69, "prediction": " either Mr. Charles Foster Kane or Mr. Charlie Kane.", "ground_truth": ["LELAND"]}
+{"id": 70, "prediction": " to be \"Rosebud.\" The following is the only scene that", "ground_truth": ["HARVEY", "HARVEY PEKAR"]}
+{"id": 71, "prediction": " not the same as the name that is being replaced with $$MASK$$, as", "ground_truth": ["BILLY"]}
+{"id": 72, "prediction": " to be \"Beane\".", "ground_truth": ["CLAUDIA", "CLAUDIA JENSSEN,"]}
+{"id": 73, "prediction": " to be Peter, who left the A's to become the General Manager of", "ground_truth": ["KAY"]}
+{"id": 74, "prediction": " to be somewhat familiar. This is because it is commonly known that Michael Myers has", "ground_truth": ["DAVE"]}
+{"id": 75, "prediction": " to be someone who is easy to identify.", "ground_truth": ["LISA"]}
+{"id": 76, "prediction": " to be:\nHENRIETTA\n", "ground_truth": ["QUAIL", "Douglas Quail"]}
+{"id": 77, "prediction": " to be the same as the character name that was replaced in the previous scene.", "ground_truth": ["SAM", "SAM PICKLES"]}
+{"id": 78, "prediction": " to be the character's name.", "ground_truth": ["JOHNNY", "JOHNNY FOOTE"]}
+{"id": 79, "prediction": " to be a character who is deceased and is the dead person's name.", "ground_truth": ["CHARLOTTE", "CHARLOTTE BOUDREAU CANTELLE PHELAN"]}
+{"id": 80, "prediction": " John Cassavetes.\n\nWritten by Max Landis.\n", "ground_truth": ["ELIZABETH", "ELIZABETH LEEFOLT"]}
+{"id": 81, "prediction": " to be someone famous.", "ground_truth": ["BUDDY"]}
+{"id": 82, "prediction": " to be Erica Albright. In the early days of Facebook, Erica", "ground_truth": ["AUSTIN", "AUSTIN POWERS"]}
+{"id": 83, "prediction": " to be mentioned throughout the film. The character in question is a minor character whose", "ground_truth": ["EDUARDO", "EDUARDO SAVERIN"]}
+{"id": 84, "prediction": " to be a well-known person's name or a common noun. This", "ground_truth": ["JENNIFER", "JENNIFER HILLS"]}
+{"id": 85, "prediction": " the name of a character in the story. This could be the name of an", "ground_truth": ["JOHNNY"]}
+{"id": 86, "prediction": " either Mary or Margaret.\n\n", "ground_truth": ["SAMUEL"]}
+{"id": 87, "prediction": " to have multiple occurrences in the script, so there might be other instances where the", "ground_truth": ["MOTTI", "Admiral Motti"]}
+{"id": 88, "prediction": " to be a character who you've seen in a film before (a friend", "ground_truth": ["STU", "STUART SHEPARD"]}
+{"id": 89, "prediction": " \"Candyman.\" However, the name \"Doug\" is also", "ground_truth": ["MAURICE"]}
+{"id": 90, "prediction": " “Vandevere.” In the story, “Vandevere” is", "ground_truth": ["BESTLER", "HEINRICH BESTLER"]}
+{"id": 91, "prediction": " to be \"Stanley\".\n\n", "ground_truth": ["HELMUT", "HELMUT DORQUE"]}
+{"id": 92, "prediction": " to be the name of the character (see the opening scene for an example)", "ground_truth": ["FAIT", "TONY FAIT"]}
+{"id": 93, "prediction": " the name of an actor or actress whose real name is being used as a placeholder", "ground_truth": ["ECKER", "COMMANDER BILL ECKER"]}
+{"id": 94, "prediction": " referring to the character named Jake.", "ground_truth": ["DAVY JONES"]}
+{"id": 95, "prediction": " a reference to French surnames, which generally end in \"-s\"", "ground_truth": ["BOBBY", "Bobby Kennedy"]}
+{"id": 96, "prediction": " either an actor or the name of a character.", "ground_truth": ["PAUL", "PAUL D. GARNER", "Paul D."]}
+{"id": 97, "prediction": " a character in the novel. However, the character is not identified by name until", "ground_truth": ["STAMP PAID"]}
+{"id": 98, "prediction": " a person who is known to the writer or to some of the characters.\n", "ground_truth": ["BABY SUGGS"]}
+{"id": 99, "prediction": " to be a character or place name that is used in the film to represent a", "ground_truth": ["DENVER"]}
+{"id": 100, "prediction": " the name of a character in the movie who is being killed.\n\n", "ground_truth": ["ZED"]}
+{"id": 101, "prediction": " a common name in the film.\n", "ground_truth": ["ISABELLA", "ISABELLA MOLINA"]}
+{"id": 102, "prediction": " to be a character that would have a similar surname to a character already introduced", "ground_truth": ["CARTER"]}
+{"id": 103, "prediction": " to be obvious once the scene is viewed in context.\n\n\n", "ground_truth": ["PETE MUSANE"]}
+{"id": 104, "prediction": " to be a character's name, and the word \"MASK\" serves as", "ground_truth": ["DAVE"]}
+{"id": 105, "prediction": " a character that doesn't appear in the script but is important to the story", "ground_truth": ["JOEL", "JOEL REYNOLDS"]}
+{"id": 106, "prediction": " to be a character name, character description, or one of the two dates.", "ground_truth": ["WEISS"]}
+{"id": 107, "prediction": " to be a scene title, as the scene title is usually the only area of", "ground_truth": ["SHERMAN", "Sherman McCoy"]}
+{"id": 108, "prediction": " someone who has been blacklisted. This means that he or she is regarded as", "ground_truth": ["LUIS"]}
+{"id": 109, "prediction": " to be...\n\n", "ground_truth": ["PETER", "Peter Fallow"]}
+{"id": 110, "prediction": " to be a person’s name or some other relevant identifier.", "ground_truth": ["MISSION CONTROL"]}
+{"id": 111, "prediction": " to be a character that Leonard knows or would recognize if he were to see him", "ground_truth": ["OLIVER", "OLIVER FIELDS"]}
+{"id": 112, "prediction": " a character's name. If you recognize the character, you can come up", "ground_truth": ["COACH"]}
+{"id": 113, "prediction": " to be “Gilligan Layton”, the character is likely to be", "ground_truth": ["SAM", "SAM LOWRY"]}
+{"id": 114, "prediction": " to be \"Melanie\".", "ground_truth": ["LOU"]}
+{"id": 115, "prediction": " to be Denis Thatcher.", "ground_truth": ["STEVE CARELL"]}
+{"id": 116, "prediction": " to be an actor or actress.\n\n", "ground_truth": ["KAREN", "KAREN RICHARDS"]}
+{"id": 117, "prediction": " to be familiar to most viewers. It is the name of a critically acclaimed play", "ground_truth": ["CINDY", "CINDY PERIERA"]}
+{"id": 118, "prediction": " to be \"MARY\".", "ground_truth": ["GLADYS", "GLADYS LEEMAN"]}
+{"id": 119, "prediction": " \"Dick Van Dyke\".\n\n", "ground_truth": ["MR. JOHNSON"]}
+{"id": 120, "prediction": " one of the characters in the story.", "ground_truth": ["LINNEA"]}
+{"id": 121, "prediction": " to be an actor's name from the film.\n\nThe end of", "ground_truth": ["BASQUIAT", "JEAN MICHEL BASQUIAT"]}
+{"id": 122, "prediction": " to be someone who is frequently mentioned in the text.", "ground_truth": ["SECURITY CHIEF"]}
+{"id": 123, "prediction": " to be either Bruce Wayne or Harvey Dent.", "ground_truth": ["CHRISTY"]}
+{"id": 124, "prediction": " \"Eckachai\", a common name in Thailand.", "ground_truth": ["WALTER", "WALTER VALE"]}
+{"id": 125, "prediction": " to be a name of a person mentioned in the film, though not necessarily a", "ground_truth": ["REGGIE"]}
+{"id": 126, "prediction": " to be one of the characters, such as LEONARD or DEREK", "ground_truth": ["LEONARD", "LEONARD FISHER"]}
+{"id": 127, "prediction": " a reference to a member of the Project Mayhem chapter in the film.", "ground_truth": ["TYLER", "Tyler Durden"]}
+{"id": 128, "prediction": " to be <NAME>.", "ground_truth": ["BIALYSTOCK"]}
+{"id": 129, "prediction": " to be \"VINCENT\". This is a fairly common name in the", "ground_truth": ["BLOOM", "LEO BLOOM"]}
+{"id": 130, "prediction": " someone in the audience.\n\n\nRACHEL: She wrote.", "ground_truth": ["RACHEL", "RACHEL KELLY"]}
+{"id": 131, "prediction": " \"The\" or \"A\" and possibly \"I\" or \"M\"", "ground_truth": ["JUNO"]}
+{"id": 132, "prediction": " that of a character you've seen in the film, and it is not", "ground_truth": ["D'ARTAGNAN"]}
+{"id": 133, "prediction": " to be Michael Pointer, who was uncredited as a member of the cast", "ground_truth": ["LOUIS", "King Louis XIII", "Louis XIII"]}
+{"id": 134, "prediction": " to be any of the following characters:   $$MASK$$ = 0 -", "ground_truth": ["FRY", "CAROLYN FRY"]}
+{"id": 135, "prediction": " to be \"Buckingham\"\n\n", "ground_truth": ["FIRST CAVALIER"]}
+{"id": 136, "prediction": " to be of a famous comedian or actor.", "ground_truth": ["TITO"]}
+{"id": 137, "prediction": " to be Mark O'Brien.\n\n", "ground_truth": ["NICK"]}
+{"id": 138, "prediction": " to be ALICIA, but it is not certain.\n\n", "ground_truth": ["WILLIAM"]}
+{"id": 139, "prediction": " your character name.", "ground_truth": ["KIT"]}
+{"id": 140, "prediction": " to be a character name - or perhaps one that describes a mood or aspect of", "ground_truth": ["BETTY"]}
+{"id": 141, "prediction": " to be \"Diana\".", "ground_truth": ["ADRIAN"]}
+{"id": 142, "prediction": " to be \"Diana\". The reason for this is that \"Diana", "ground_truth": ["ANGEL"]}
+{"id": 143, "prediction": " to be known to most people.\n\n", "ground_truth": ["DAN RATHER"]}
+{"id": 144, "prediction": " to be someone the audience knows, like a character from a movie or book.", "ground_truth": ["QUOYLE"]}
+{"id": 145, "prediction": " to be someone who has had some level of success in some activity or field,", "ground_truth": ["DMITRI"]}
+{"id": 146, "prediction": " \"Horowitz\", but there is no way of knowing for sure.", "ground_truth": ["STARLING", "CLARICE STARLING"]}
+{"id": 147, "prediction": " to be “Sylvia”, since it is the name of the person", "ground_truth": ["BARNEY"]}
+{"id": 148, "prediction": " one of the following: Burt, Lucky, Sam, Raymond, Chuck,", "ground_truth": ["EVERETT"]}
+{"id": 149, "prediction": " \"Autumn\".\n\n\nTOM: Autumn it is. (", "ground_truth": ["BERLIN", "JOHN BERLIN", "JOHN"]}
+{"id": 150, "prediction": " your name, but you're not going to find it out, because the", "ground_truth": ["SUMMER"]}
+{"id": 151, "prediction": " to be a character's name, or the name of a place, object", "ground_truth": ["MAYA"]}
+{"id": 152, "prediction": " to be a fictional name, but it is one that has been chosen with the", "ground_truth": ["PANES", "LEVI PANES"]}
+{"id": 153, "prediction": " to be either \"Tosca\" or \"Tosca\" or \"", "ground_truth": ["RIEDENSCHNEIDER", "Freddy Riedenschneider"]}
+{"id": 154, "prediction": " to be Frank Lucas.\n\n\nRICHIE: You're welcome", "ground_truth": ["FRANK"]}
+{"id": 155, "prediction": " to be \"Nicky\" or \"Nicky Cage.\"", "ground_truth": ["ALI", "Ali Van Versh"]}
+{"id": 156, "prediction": " the name of a prominent person of color in the movie. This person has a", "ground_truth": ["SUGE", "SUGE KNIGHT"]}
+{"id": 157, "prediction": " to be a character name of some sort.\n\n", "ground_truth": ["RAOUL"]}
+{"id": 158, "prediction": " \"Julie\".", "ground_truth": ["PETER", "Peter Vincent"]}
+{"id": 159, "prediction": " to be Ed. This is a reference to the fact that Ed's nickname", "ground_truth": ["JEAN"]}
+{"id": 160, "prediction": " Joe Frazier. \n\n\nCUT TO:\n\n\n", "ground_truth": ["WYATT", "Wyatt Earp"]}
+{"id": 161, "prediction": " to be \"John Michael Kane\".", "ground_truth": ["MATTIE"]}
+{"id": 162, "prediction": " one of the following:\n\n", "ground_truth": ["AUFIDIUS", "TULLUS AUFIDIUS"]}
+{"id": 163, "prediction": " to be someone famous or influential, but it is not Coriolanus.", "ground_truth": ["JO"]}
+{"id": 164, "prediction": " to be Dr. Daniel Morain, a professor in the University of Illinois.", "ground_truth": ["KAFKA"]}
+{"id": 165, "prediction": " to be a common word.\n\n\n", "ground_truth": ["HARRY", "HARRY TASKER"]}
+{"id": 166, "prediction": " \"DORA\". She is a blonde, who was apparently kidnapped from", "ground_truth": ["SONNY", "SONNY CORLEONE"]}
+{"id": 167, "prediction": " to be a character that has not been in the film yet but whose role is", "ground_truth": ["DON CORLEONE"]}
+{"id": 168, "prediction": " KIP or someone else...\n\n\nWHIP: What do", "ground_truth": ["ABBY"]}
+{"id": 169, "prediction": " the name of the character you are in control of.\n\nThe following is", "ground_truth": ["FLEURY"]}
+{"id": 170, "prediction": " to be the name of a character in the story.", "ground_truth": ["TEN BEARS"]}
+{"id": 171, "prediction": " a random occurrence.\n\n", "ground_truth": ["KATE"]}
+{"id": 172, "prediction": " to be a character's name or some other word that is frequently used in", "ground_truth": ["TYRELL", "TYRELL MARTIN"]}
+{"id": 173, "prediction": " to be a character from the film or the actor who played that character.", "ground_truth": ["BOBBY GREEN"]}
+{"id": 174, "prediction": " to be an actor's name or an actress's name, or something", "ground_truth": ["ROSARIO DIAZ"]}
+{"id": 175, "prediction": " to be a character from the story who is either dead or, if the story", "ground_truth": ["LEON", "Count Leon d'Algout"]}
+{"id": 176, "prediction": " the name of a character, place, or object.\n\n", "ground_truth": ["ED"]}
+{"id": 177, "prediction": " \"Garrett\" or \"Chase.\"", "ground_truth": ["GARRETT"]}
+{"id": 178, "prediction": " not a character name but a title or subject line, such as \"Guns", "ground_truth": ["CHARLIE", "CHARLIE MacCORRY"]}
+{"id": 179, "prediction": " \"FOREVER\". \n\n\nCUT TO: A close", "ground_truth": ["DYSON", "MILES DYSON"]}
+{"id": 180, "prediction": " to be either:", "ground_truth": ["VOSEN", "NOAH VOSEN"]}
+{"id": 181, "prediction": " a reference to Bourne's false name David Webb.\n\n", "ground_truth": ["MILLER"]}
+{"id": 182, "prediction": " to be Judit.\n\n\n60. Judit doesn't", "ground_truth": ["ETHAN", "ETHAN HUNT"]}
+{"id": 183, "prediction": " to be one of the following: Superman, Clark Kent, Clark Gable,", "ground_truth": ["SERENDIPITY"]}
+{"id": 184, "prediction": " to be the name of the character who was portrayed by the actor whose role is", "ground_truth": ["ELAINE"]}
+{"id": 185, "prediction": " to be the name of a character in the movie, but could also be the", "ground_truth": ["LOOMIS", "SAMUEL J. LOOMIS"]}
+{"id": 186, "prediction": " not a given name, but rather a nickname, nicknames have been given out", "ground_truth": ["OLIVE"]}
+{"id": 187, "prediction": " to be a random occurrence of a character name.", "ground_truth": ["FRANK", "Frank Baker"]}
+{"id": 188, "prediction": " used to prevent spoilers from seeing the name. The name is also used to avoid", "ground_truth": ["TAUPIN", "RICHARD TAUPIN"]}
+{"id": 189, "prediction": " an allusion to Ares' nickname among the Greeks, \"Menos\"", "ground_truth": ["GENERAL HAIG"]}
+{"id": 190, "prediction": " a character name, or the name of a place or object.\n\n", "ground_truth": ["MILTON", "JOHN MILTON"]}
+{"id": 191, "prediction": " to be the name of a character or place mentioned in the dialogue.", "ground_truth": ["LEONOR"]}
+{"id": 192, "prediction": " the name of a character or place. However, it is also possible that it", "ground_truth": ["NEFF"]}
+{"id": 193, "prediction": " a character's name, but it might not be. The word is \"", "ground_truth": ["BECK"]}
+{"id": 194, "prediction": " to be either TYBALT, PETRICHIO or ABRA.", "ground_truth": ["CATHERINE", "Catherine Tramell"]}
+{"id": 195, "prediction": " to be her name and/or her job title.\n\n", "ground_truth": ["JOAN"]}
+{"id": 196, "prediction": " a character that has been killed. In this case, it is Hallie.", "ground_truth": ["HANNA"]}
+{"id": 197, "prediction": " \"Michael Cerrato\", the name of a well-known gangster", "ground_truth": ["NEIL"]}
+{"id": 198, "prediction": " \"Lois\".", "ground_truth": ["BREEDAN"]}
+{"id": 199, "prediction": " to be the name of a character who appears in the film.", "ground_truth": ["THE GANG"]}

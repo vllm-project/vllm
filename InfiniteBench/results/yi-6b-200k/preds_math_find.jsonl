@@ -1,0 +1,350 @@
+{"id": 0, "prediction": "31", "ground_truth": [88]}
+{"id": 1, "prediction": "94.", "ground_truth": [94]}
+{"id": 2, "prediction": "1499680.", "ground_truth": [84]}
+{"id": 3, "prediction": "74.", "ground_truth": [91]}
+{"id": 4, "prediction": "79.", "ground_truth": [81]}
+{"id": 5, "prediction": "94.\n\n[80, 64, 18", "ground_truth": [94]}
+{"id": 6, "prediction": "96", "ground_truth": [99]}
+{"id": 7, "prediction": "61.", "ground_truth": [81]}
+{"id": 8, "prediction": "99.\n", "ground_truth": [95]}
+{"id": 9, "prediction": "90.", "ground_truth": [93]}
+{"id": 10, "prediction": "168.", "ground_truth": [90]}
+{"id": 11, "prediction": "134.", "ground_truth": [91]}
+{"id": 12, "prediction": "82\n\n[42, 72, 40,", "ground_truth": [82]}
+{"id": 13, "prediction": "784.", "ground_truth": [88]}
+{"id": 14, "prediction": "86\n\n\n\n\n\n\n\n\n\n", "ground_truth": [86]}
+{"id": 15, "prediction": "65.", "ground_truth": [83]}
+{"id": 16, "prediction": "96.", "ground_truth": [96]}
+{"id": 17, "prediction": "92.\n\n\n\n", "ground_truth": [92]}
+{"id": 18, "prediction": "\n\nThe largest number of the list is 76.", "ground_truth": [81]}
+{"id": 19, "prediction": "624483100.", "ground_truth": [87]}
+{"id": 20, "prediction": "10188.\nThe list is sorted in decreasing order, from", "ground_truth": [91]}
+{"id": 21, "prediction": "86.", "ground_truth": [83]}
+{"id": 22, "prediction": "71.", "ground_truth": [79]}
+{"id": 23, "prediction": "262144", "ground_truth": [97]}
+{"id": 24, "prediction": "98559.\n\n\n\n\n\n\n\n\n\n", "ground_truth": [88]}
+{"id": 25, "prediction": "75047\n\n", "ground_truth": [92]}
+{"id": 26, "prediction": "10465227.\n\nSolution\n", "ground_truth": [79]}
+{"id": 27, "prediction": "89.\n\n\ndef get_largest_number(input_list", "ground_truth": [90]}
+{"id": 28, "prediction": "211.\n\n## Part 2\n\n## Find the first", "ground_truth": [94]}
+{"id": 29, "prediction": "255.", "ground_truth": [89]}
+{"id": 30, "prediction": "288.\nSolution:\nThe largest number of the list is ", "ground_truth": [88]}
+{"id": 31, "prediction": "28839.", "ground_truth": [97]}
+{"id": 32, "prediction": "90.", "ground_truth": [92]}
+{"id": 33, "prediction": "90.\n\n#include <stdio.h>\n#include", "ground_truth": [92]}
+{"id": 34, "prediction": "90.\n\nA: The largest number of the list is 9", "ground_truth": [90]}
+{"id": 35, "prediction": "75.", "ground_truth": [81]}
+{"id": 36, "prediction": "93\n\n**Problem 2:**\n\nUsing the same algorithm as", "ground_truth": [96]}
+{"id": 37, "prediction": "69.\n\nA: 69\n\nThe largest number is", "ground_truth": [80]}
+{"id": 38, "prediction": "109.", "ground_truth": [94]}
+{"id": 39, "prediction": "88.\n\nA: [88, 43, ", "ground_truth": [95]}
+{"id": 40, "prediction": "\n\n", "ground_truth": [95]}
+{"id": 41, "prediction": "72.\nThe largest number of the list is 72.", "ground_truth": [84]}
+{"id": 42, "prediction": "99.", "ground_truth": [99]}
+{"id": 43, "prediction": "63.\n\n### 2. Sum of all numbers\n\nYou", "ground_truth": [84]}
+{"id": 44, "prediction": "89.\n\nSolution:\n\ndef largest(L):\n    ", "ground_truth": [89]}
+{"id": 45, "prediction": "89.\n\n\nSolution\n\nThe largest number is 89", "ground_truth": [90]}
+{"id": 46, "prediction": "80\n", "ground_truth": [80]}
+{"id": 47, "prediction": "89.", "ground_truth": [97]}
+{"id": 48, "prediction": "662,410.", "ground_truth": [93]}
+{"id": 49, "prediction": "84.\n\nFind the maximum value of the list, then return it", "ground_truth": [98]}
+{"id": 50, "prediction": "85.\n\nNote that 85 is the largest number in the", "ground_truth": [85]}
+{"id": 51, "prediction": "48.", "ground_truth": [82]}
+{"id": 52, "prediction": "88.", "ground_truth": [93]}
+{"id": 53, "prediction": "99.", "ground_truth": [98]}
+{"id": 54, "prediction": "\n\n112", "ground_truth": [91]}
+{"id": 55, "prediction": "\n81\n\n", "ground_truth": [80]}
+{"id": 56, "prediction": "43.", "ground_truth": [78]}
+{"id": 57, "prediction": "46.", "ground_truth": [87]}
+{"id": 58, "prediction": "241.\n\n", "ground_truth": [97]}
+{"id": 59, "prediction": "29.", "ground_truth": [90]}
+{"id": 60, "prediction": "73.\n\nNice problem!\nA few observations:\n\n", "ground_truth": [94]}
+{"id": 61, "prediction": "\n\n45\n", "ground_truth": [79]}
+{"id": 62, "prediction": "96.\n\nSolution\n\nThe first largest number is 16", "ground_truth": [98]}
+{"id": 63, "prediction": "\n2\n\n\nA: How about\nfrom math import pow\nfrom", "ground_truth": [97]}
+{"id": 64, "prediction": "75.", "ground_truth": [85]}
+{"id": 65, "prediction": "39.", "ground_truth": [87]}
+{"id": 66, "prediction": "31.", "ground_truth": [85]}
+{"id": 67, "prediction": "43.", "ground_truth": [87]}
+{"id": 68, "prediction": "29.\n", "ground_truth": [81]}
+{"id": 69, "prediction": "16.\n\nExample\n\nInput: [3, 8,", "ground_truth": [98]}
+{"id": 70, "prediction": "49.", "ground_truth": [79]}
+{"id": 71, "prediction": "28", "ground_truth": [95]}
+{"id": 72, "prediction": "50.\n\n# Write your code below:\n\n# Do not", "ground_truth": [83]}
+{"id": 73, "prediction": "33.", "ground_truth": [88]}
+{"id": 74, "prediction": "83.", "ground_truth": [85]}
+{"id": 75, "prediction": "58.\n\nA: A = [65, 20", "ground_truth": [95]}
+{"id": 76, "prediction": "11, because 9 is the second largest number of the list.\n", "ground_truth": [95]}
+{"id": 77, "prediction": "39.", "ground_truth": [98]}
+{"id": 78, "prediction": "\n\n86\n\nThis is because the largest number is 10", "ground_truth": [87]}
+{"id": 79, "prediction": "33\n", "ground_truth": [89]}
+{"id": 80, "prediction": "28.", "ground_truth": [85]}
+{"id": 81, "prediction": "89", "ground_truth": [96]}
+{"id": 82, "prediction": "88\n", "ground_truth": [96]}
+{"id": 83, "prediction": "16.", "ground_truth": [78]}
+{"id": 84, "prediction": "89.", "ground_truth": [95]}
+{"id": 85, "prediction": "19", "ground_truth": [95]}
+{"id": 86, "prediction": "43\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": [83]}
+{"id": 87, "prediction": "87.", "ground_truth": [90]}
+{"id": 88, "prediction": "74.", "ground_truth": [86]}
+{"id": 89, "prediction": "41.", "ground_truth": [97]}
+{"id": 90, "prediction": "47.", "ground_truth": [96]}
+{"id": 91, "prediction": "53.\n\n#include <stdio.h>\n#include", "ground_truth": [80]}
+{"id": 92, "prediction": "83.", "ground_truth": [88]}
+{"id": 93, "prediction": "21.", "ground_truth": [91]}
+{"id": 94, "prediction": "41.", "ground_truth": [82]}
+{"id": 95, "prediction": "122.", "ground_truth": [94]}
+{"id": 96, "prediction": "\n\n67.\n", "ground_truth": [92]}
+{"id": 97, "prediction": "71.", "ground_truth": [97]}
+{"id": 98, "prediction": "25.", "ground_truth": [79]}
+{"id": 99, "prediction": "84\nThe first largest number is: 96\n", "ground_truth": [96]}
+{"id": 100, "prediction": "40.", "ground_truth": [90]}
+{"id": 101, "prediction": "71", "ground_truth": [83]}
+{"id": 102, "prediction": "79.\n\n## 2\n\nGiven a number, calculate its", "ground_truth": [89]}
+{"id": 103, "prediction": "67.\n\nTime Complexity: O(n)\n\nSpace", "ground_truth": [93]}
+{"id": 104, "prediction": "87.", "ground_truth": [85]}
+{"id": 105, "prediction": "56\n", "ground_truth": [86]}
+{"id": 106, "prediction": "39.", "ground_truth": [88]}
+{"id": 107, "prediction": "54.", "ground_truth": [77]}
+{"id": 108, "prediction": "37.", "ground_truth": [78]}
+{"id": 109, "prediction": "79.", "ground_truth": [96]}
+{"id": 110, "prediction": "78.\n\n**Solution:**\n\nfrom sorted(s, reverse", "ground_truth": [90]}
+{"id": 111, "prediction": "61.\n", "ground_truth": [81]}
+{"id": 112, "prediction": "35\n\nFor example, if the list is [1, 1", "ground_truth": [79]}
+{"id": 113, "prediction": "\n41\n\nPseudocode:\n\n#define N", "ground_truth": [77]}
+{"id": 114, "prediction": "81.", "ground_truth": [97]}
+{"id": 115, "prediction": "78.", "ground_truth": [80]}
+{"id": 116, "prediction": "73.\n\n# 3. Quick Sort\n\nThe third sorting", "ground_truth": [81]}
+{"id": 117, "prediction": "65.\n\nThe third largest number of the list is 65", "ground_truth": [90]}
+{"id": 118, "prediction": "35.", "ground_truth": [84]}
+{"id": 119, "prediction": "28.\n", "ground_truth": [87]}
+{"id": 120, "prediction": "54.\n\n\n\n\nProblem 3\n\nEuler sums", "ground_truth": [91]}
+{"id": 121, "prediction": "\n51\n", "ground_truth": [80]}
+{"id": 122, "prediction": "63.", "ground_truth": [84]}
+{"id": 123, "prediction": "52.\n\nA: This can be solved with a single for loop", "ground_truth": [83]}
+{"id": 124, "prediction": "88.", "ground_truth": [87]}
+{"id": 125, "prediction": "90.", "ground_truth": [90]}
+{"id": 126, "prediction": "78.", "ground_truth": [85]}
+{"id": 127, "prediction": "82.", "ground_truth": [91]}
+{"id": 128, "prediction": "31.", "ground_truth": [78]}
+{"id": 129, "prediction": "24.", "ground_truth": [92]}
+{"id": 130, "prediction": "73.", "ground_truth": [87]}
+{"id": 131, "prediction": "29, which means you should return 29.\n\nExample Input", "ground_truth": [78]}
+{"id": 132, "prediction": "42.", "ground_truth": [81]}
+{"id": 133, "prediction": "90\n\n\n\n\n\n\n\n", "ground_truth": [89]}
+{"id": 134, "prediction": "\n[62, 59, 62]\n", "ground_truth": [79]}
+{"id": 135, "prediction": "80.", "ground_truth": [87]}
+{"id": 136, "prediction": "18.", "ground_truth": [97]}
+{"id": 137, "prediction": "81.\n\n[81, 78, 37", "ground_truth": [89]}
+{"id": 138, "prediction": "19.", "ground_truth": [83]}
+{"id": 139, "prediction": "68", "ground_truth": [93]}
+{"id": 140, "prediction": "\n\n 48", "ground_truth": [78]}
+{"id": 141, "prediction": "48.\n\nSolution:", "ground_truth": [81]}
+{"id": 142, "prediction": "38.", "ground_truth": [79]}
+{"id": 143, "prediction": "46.\n\n", "ground_truth": [80]}
+{"id": 144, "prediction": "85", "ground_truth": [89]}
+{"id": 145, "prediction": "\n\n80.", "ground_truth": [85]}
+{"id": 146, "prediction": "39.", "ground_truth": [81]}
+{"id": 147, "prediction": "93.", "ground_truth": [91]}
+{"id": 148, "prediction": "59.", "ground_truth": [93]}
+{"id": 149, "prediction": "55.", "ground_truth": [97]}
+{"id": 150, "prediction": "36.", "ground_truth": [12]}
+{"id": 151, "prediction": "13.", "ground_truth": [11]}
+{"id": 152, "prediction": "3.\n", "ground_truth": [15]}
+{"id": 153, "prediction": "1.", "ground_truth": [9]}
+{"id": 154, "prediction": "2.\n\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": [0]}
+{"id": 155, "prediction": "12.\n", "ground_truth": [12]}
+{"id": 156, "prediction": "16", "ground_truth": [6]}
+{"id": 157, "prediction": "50.", "ground_truth": [14]}
+{"id": 158, "prediction": "1.", "ground_truth": [7]}
+{"id": 159, "prediction": "1", "ground_truth": [8]}
+{"id": 160, "prediction": "38.", "ground_truth": [13]}
+{"id": 161, "prediction": "1.", "ground_truth": [5]}
+{"id": 162, "prediction": "3", "ground_truth": [7]}
+{"id": 163, "prediction": "3\n", "ground_truth": [18]}
+{"id": 164, "prediction": "27.", "ground_truth": [9]}
+{"id": 165, "prediction": "31", "ground_truth": [0]}
+{"id": 166, "prediction": "3.", "ground_truth": [0]}
+{"id": 167, "prediction": "2.", "ground_truth": [9]}
+{"id": 168, "prediction": "1.", "ground_truth": [13]}
+{"id": 169, "prediction": "1\n", "ground_truth": [9]}
+{"id": 170, "prediction": "1.\n\n**input**\nThe smallest number of the list is:", "ground_truth": [14]}
+{"id": 171, "prediction": "39.\n\n[39, 72, 59", "ground_truth": [19]}
+{"id": 172, "prediction": "31.", "ground_truth": [2]}
+{"id": 173, "prediction": "18.", "ground_truth": [9]}
+{"id": 174, "prediction": "5.", "ground_truth": [19]}
+{"id": 175, "prediction": "1. The largest number of the list is: 99.", "ground_truth": [17]}
+{"id": 176, "prediction": "\n0", "ground_truth": [6]}
+{"id": 177, "prediction": "22.", "ground_truth": [14]}
+{"id": 178, "prediction": "13", "ground_truth": [0]}
+{"id": 179, "prediction": "20.", "ground_truth": [17]}
+{"id": 180, "prediction": "27.", "ground_truth": [8]}
+{"id": 181, "prediction": "1.", "ground_truth": [4]}
+{"id": 182, "prediction": "1.", "ground_truth": [6]}
+{"id": 183, "prediction": "2", "ground_truth": [10]}
+{"id": 184, "prediction": "1.", "ground_truth": [8]}
+{"id": 185, "prediction": "17.\n\n### 13. Count the number of elements\n", "ground_truth": [11]}
+{"id": 186, "prediction": "26.\n\n# Solution\n\nWe can use the following formula:", "ground_truth": [17]}
+{"id": 187, "prediction": "20.", "ground_truth": [1]}
+{"id": 188, "prediction": "43.", "ground_truth": [9]}
+{"id": 189, "prediction": "2.", "ground_truth": [9]}
+{"id": 190, "prediction": "86.", "ground_truth": [5]}
+{"id": 191, "prediction": "9.\n\nHere is a small explanation why this is true:\nIf", "ground_truth": [10]}
+{"id": 192, "prediction": "43.\n\n\nA: Let's create a list of the", "ground_truth": [14]}
+{"id": 193, "prediction": "3.", "ground_truth": [5]}
+{"id": 194, "prediction": "9.", "ground_truth": [19]}
+{"id": 195, "prediction": "0", "ground_truth": [0]}
+{"id": 196, "prediction": "4\n", "ground_truth": [1]}
+{"id": 197, "prediction": "2.", "ground_truth": [5]}
+{"id": 198, "prediction": "89.\n", "ground_truth": [10]}
+{"id": 199, "prediction": "\n3", "ground_truth": [0]}
+{"id": 200, "prediction": "9.", "ground_truth": [9]}
+{"id": 201, "prediction": "34.", "ground_truth": [5]}
+{"id": 202, "prediction": "30.", "ground_truth": [20]}
+{"id": 203, "prediction": "41.", "ground_truth": [15]}
+{"id": 204, "prediction": "16.", "ground_truth": [7]}
+{"id": 205, "prediction": "46.", "ground_truth": [19]}
+{"id": 206, "prediction": "64.", "ground_truth": [10]}
+{"id": 207, "prediction": "38.", "ground_truth": [10]}
+{"id": 208, "prediction": "102.", "ground_truth": [2]}
+{"id": 209, "prediction": "87.", "ground_truth": [3]}
+{"id": 210, "prediction": "37\n\nA: The smallest number of the list is 26", "ground_truth": [8]}
+{"id": 211, "prediction": "28.", "ground_truth": [20]}
+{"id": 212, "prediction": "51.\n\nA: The second smallest number in the list is ", "ground_truth": [8]}
+{"id": 213, "prediction": "31.\nYou can use any programming language or any tool for solving this", "ground_truth": [2]}
+{"id": 214, "prediction": "23\n\n\ndef find_second_smallest_element(arr", "ground_truth": [5]}
+{"id": 215, "prediction": "31.", "ground_truth": [9]}
+{"id": 216, "prediction": "41", "ground_truth": [15]}
+{"id": 217, "prediction": "41\n\nHow would you approach the task?\n", "ground_truth": [9]}
+{"id": 218, "prediction": "30.\n\n[23, 35, 40", "ground_truth": [15]}
+{"id": 219, "prediction": "44\n\n#### 34.\nIn a theater, there are", "ground_truth": [4]}
+{"id": 220, "prediction": "32.\nYou can use the following code to find the second smallest number", "ground_truth": [10]}
+{"id": 221, "prediction": "21.", "ground_truth": [20]}
+{"id": 222, "prediction": "19\n", "ground_truth": [1]}
+{"id": 223, "prediction": "29.", "ground_truth": [12]}
+{"id": 224, "prediction": "46.\n\nInput\n2020-10-0", "ground_truth": [7]}
+{"id": 225, "prediction": "43", "ground_truth": [11]}
+{"id": 226, "prediction": "24.", "ground_truth": [17]}
+{"id": 227, "prediction": "6.", "ground_truth": [9]}
+{"id": 228, "prediction": "\n", "ground_truth": [20]}
+{"id": 229, "prediction": "3.\n\nYou can find the second smallest number of the list by comparing", "ground_truth": [8]}
+{"id": 230, "prediction": "44.", "ground_truth": [3]}
+{"id": 231, "prediction": "41.", "ground_truth": [12]}
+{"id": 232, "prediction": "28", "ground_truth": [16]}
+{"id": 233, "prediction": "72.\n", "ground_truth": [15]}
+{"id": 234, "prediction": "84", "ground_truth": [8]}
+{"id": 235, "prediction": "28.", "ground_truth": [17]}
+{"id": 236, "prediction": "51.", "ground_truth": [7]}
+{"id": 237, "prediction": "21.", "ground_truth": [11]}
+{"id": 238, "prediction": "26.", "ground_truth": [9]}
+{"id": 239, "prediction": "20.", "ground_truth": [10]}
+{"id": 240, "prediction": "31.", "ground_truth": [8]}
+{"id": 241, "prediction": "52.\n\n", "ground_truth": [7]}
+{"id": 242, "prediction": "69", "ground_truth": [2]}
+{"id": 243, "prediction": "\n\n27.", "ground_truth": [15]}
+{"id": 244, "prediction": "29.\n\nThe largest number is 96.\n\n\n", "ground_truth": [13]}
+{"id": 245, "prediction": "26.", "ground_truth": [14]}
+{"id": 246, "prediction": "43", "ground_truth": [12]}
+{"id": 247, "prediction": "\n\n29", "ground_truth": [14]}
+{"id": 248, "prediction": "58\n\nB)\n\n2. 1, 2,", "ground_truth": [6]}
+{"id": 249, "prediction": "39.\n\n\n\n\n\n\n\n\n\n\n\n\n", "ground_truth": [14]}
+{"id": 250, "prediction": "34", "ground_truth": [20]}
+{"id": 251, "prediction": "26", "ground_truth": [21]}
+{"id": 252, "prediction": "29.", "ground_truth": [3]}
+{"id": 253, "prediction": "36.", "ground_truth": [11]}
+{"id": 254, "prediction": "29.", "ground_truth": [5]}
+{"id": 255, "prediction": "41.", "ground_truth": [20]}
+{"id": 256, "prediction": "7.", "ground_truth": [8]}
+{"id": 257, "prediction": "29", "ground_truth": [10]}
+{"id": 258, "prediction": "27.", "ground_truth": [8]}
+{"id": 259, "prediction": "64.", "ground_truth": [21]}
+{"id": 260, "prediction": "28.\n\nThe third smallest number of the list is 28", "ground_truth": [6]}
+{"id": 261, "prediction": "21.\n\n", "ground_truth": [6]}
+{"id": 262, "prediction": "28.\n\n", "ground_truth": [20]}
+{"id": 263, "prediction": "21.\n\n\nA: We can start by counting the number of", "ground_truth": [13]}
+{"id": 264, "prediction": "39.", "ground_truth": [2]}
+{"id": 265, "prediction": "61.", "ground_truth": [19]}
+{"id": 266, "prediction": "29.", "ground_truth": [18]}
+{"id": 267, "prediction": "34.\n\n\nfrom math import *\n\n\ndef main():", "ground_truth": [11]}
+{"id": 268, "prediction": "60\n", "ground_truth": [14]}
+{"id": 269, "prediction": "33.\n\n", "ground_truth": [18]}
+{"id": 270, "prediction": "83\n\n", "ground_truth": [16]}
+{"id": 271, "prediction": "33\n\nYou should answer with only one number, no other words.", "ground_truth": [9]}
+{"id": 272, "prediction": "28.", "ground_truth": [18]}
+{"id": 273, "prediction": "21.\n\nGiven a string and a number, return the number of", "ground_truth": [11]}
+{"id": 274, "prediction": "41.", "ground_truth": [14]}
+{"id": 275, "prediction": "59.", "ground_truth": [2]}
+{"id": 276, "prediction": "13.", "ground_truth": [2]}
+{"id": 277, "prediction": "27.", "ground_truth": [20]}
+{"id": 278, "prediction": "50.", "ground_truth": [3]}
+{"id": 279, "prediction": "21.\nThe third smallest number of the list is 21.", "ground_truth": [13]}
+{"id": 280, "prediction": "14\n\n14", "ground_truth": [21]}
+{"id": 281, "prediction": "\n18.", "ground_truth": [3]}
+{"id": 282, "prediction": "29.\n\nThe third smallest number is 29.", "ground_truth": [6]}
+{"id": 283, "prediction": "\nThe third smallest number of the list is 39.", "ground_truth": [16]}
+{"id": 284, "prediction": "47\n", "ground_truth": [16]}
+{"id": 285, "prediction": "40.", "ground_truth": [5]}
+{"id": 286, "prediction": "31\nThe third smallest number in the list is 31.", "ground_truth": [3]}
+{"id": 287, "prediction": "27.\n\n#17 - You need to find the number of", "ground_truth": [12]}
+{"id": 288, "prediction": "52.", "ground_truth": [3]}
+{"id": 289, "prediction": "20", "ground_truth": [4]}
+{"id": 290, "prediction": "41.", "ground_truth": [11]}
+{"id": 291, "prediction": "27.", "ground_truth": [21]}
+{"id": 292, "prediction": "30.", "ground_truth": [12]}
+{"id": 293, "prediction": "14.", "ground_truth": [9]}
+{"id": 294, "prediction": "20, as the first smallest number of the list is 10,", "ground_truth": [7]}
+{"id": 295, "prediction": "35.", "ground_truth": [11]}
+{"id": 296, "prediction": "23.\nSolution\n\nUsing only one pass, the code can be", "ground_truth": [9]}
+{"id": 297, "prediction": "26.\n\nHow can we find out the third smallest number of the", "ground_truth": [4]}
+{"id": 298, "prediction": "69\n\nFor example: 69.", "ground_truth": [11]}
+{"id": 299, "prediction": "44.", "ground_truth": [14]}
+{"id": 300, "prediction": "39\n", "ground_truth": [48.0]}
+{"id": 301, "prediction": "\n20\n\n\nA: Here is a solution in Python that uses", "ground_truth": [54.0]}
+{"id": 302, "prediction": "86", "ground_truth": [48.0]}
+{"id": 303, "prediction": "42.\n\nAnswers\n\nHere are some sample solutions to", "ground_truth": [47.0]}
+{"id": 304, "prediction": "17. This can be found by finding the middle number of the list.", "ground_truth": [55.0]}
+{"id": 305, "prediction": "50.", "ground_truth": [47.0]}
+{"id": 306, "prediction": "\n", "ground_truth": [56.0]}
+{"id": 307, "prediction": "6.", "ground_truth": [43.0]}
+{"id": 308, "prediction": "7.\n\nInput\nAll input data is given as a single line of", "ground_truth": [44.0]}
+{"id": 309, "prediction": "56.7841574794237", "ground_truth": [51.0]}
+{"id": 310, "prediction": "44.\n\nFor example,\n\nWhat is the median of the", "ground_truth": [51.0]}
+{"id": 311, "prediction": "47.\n\n", "ground_truth": [50.0]}
+{"id": 312, "prediction": "59.6188.\n\n", "ground_truth": [58.0]}
+{"id": 313, "prediction": "52\n\n", "ground_truth": [48.0]}
+{"id": 314, "prediction": "\n54.\n\nYou should answer with only one number, no other", "ground_truth": [42.0]}
+{"id": 315, "prediction": "69.\n\n\nimport numpy as np\n\n\ndef median(", "ground_truth": [50.0]}
+{"id": 316, "prediction": "\n\n30", "ground_truth": [52.0]}
+{"id": 317, "prediction": "18.\nThe median of the list is 18.", "ground_truth": [40.0]}
+{"id": 318, "prediction": "11.", "ground_truth": [40.0]}
+{"id": 319, "prediction": "62.5.", "ground_truth": [48.0]}
+{"id": 320, "prediction": "20.\n", "ground_truth": [42.0]}
+{"id": 321, "prediction": "50.", "ground_truth": [56.0]}
+{"id": 322, "prediction": "38.", "ground_truth": [54.0]}
+{"id": 323, "prediction": "60.", "ground_truth": [58.0]}
+{"id": 324, "prediction": "80.\n\nExplanation\nThe median of a list is the middle", "ground_truth": [51.0]}
+{"id": 325, "prediction": "75.", "ground_truth": [50.0]}
+{"id": 326, "prediction": "60\n", "ground_truth": [47.0]}
+{"id": 327, "prediction": "42.", "ground_truth": [51.0]}
+{"id": 328, "prediction": "41.\n\n\ndef get_median(array):\n    ", "ground_truth": [51.0]}
+{"id": 329, "prediction": "58.", "ground_truth": [59.0]}
+{"id": 330, "prediction": "53.\n\nYour answer should be 53.", "ground_truth": [50.0]}
+{"id": 331, "prediction": "63.\n\n#include <stdio.h>\n#include", "ground_truth": [46.0]}
+{"id": 332, "prediction": "30.4688888888888", "ground_truth": [40.0]}
+{"id": 333, "prediction": "30.\n\nThe median is 30. This can be seen", "ground_truth": [40.0]}
+{"id": 334, "prediction": "\n\n40", "ground_truth": [57.0]}
+{"id": 335, "prediction": "65\n", "ground_truth": [46.0]}
+{"id": 336, "prediction": "56\n\nProblem 2.\n\nWhat is the average of the", "ground_truth": [55.0]}
+{"id": 337, "prediction": "88.", "ground_truth": [51.0]}
+{"id": 338, "prediction": "60.\n\n*\n\n*This is a \"\"one-", "ground_truth": [43.0]}
+{"id": 339, "prediction": "68.", "ground_truth": [56.0]}
+{"id": 340, "prediction": "58.", "ground_truth": [40.0]}
+{"id": 341, "prediction": "\n\n73.5", "ground_truth": [58.0]}
+{"id": 342, "prediction": "70.", "ground_truth": [49.0]}
+{"id": 343, "prediction": "65.", "ground_truth": [48.0]}
+{"id": 344, "prediction": "61\n\n#This program is written by @SingularPanda\n", "ground_truth": [49.0]}
+{"id": 345, "prediction": "53.\n\nThe median of the list is 53.", "ground_truth": [50.0]}
+{"id": 346, "prediction": "53.6142857142857", "ground_truth": [58.0]}
+{"id": 347, "prediction": "\n\n72.8\n\n", "ground_truth": [46.0]}
+{"id": 348, "prediction": "28.\n\n**Answers:**\n\na) 2", "ground_truth": [42.0]}
+{"id": 349, "prediction": "66.", "ground_truth": [58.0]}

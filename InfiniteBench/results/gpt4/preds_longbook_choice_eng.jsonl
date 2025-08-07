@@ -1,0 +1,229 @@
+{"id": 0, "prediction": "A. Walking Georgie", "ground_truth": ["Walking Georgie", "A"]}
+{"id": 1, "prediction": "B. Hall Farm", "ground_truth": ["Snowfield", "C"]}
+{"id": 2, "prediction": "C", "ground_truth": ["At the Mauras", "D"]}
+{"id": 3, "prediction": "A.", "ground_truth": ["Methodist", "A"]}
+{"id": 4, "prediction": "C. That Rome and Carthage be enemies for all time", "ground_truth": ["That Italy inherit the Latins' name and language and not the Trojans'", "D"]}
+{"id": 5, "prediction": "A", "ground_truth": ["12 days", "A"]}
+{"id": 6, "prediction": "D. Carley", "ground_truth": ["Carley", "D"]}
+{"id": 7, "prediction": "B. Jaelynn", "ground_truth": ["Jaelynn", "B"]}
+{"id": 12, "prediction": "B. The Serbian war", "ground_truth": ["The Serbian war", "B"]}
+{"id": 13, "prediction": "A", "ground_truth": ["Mitya", "A"]}
+{"id": 14, "prediction": "B. The death of Clarisse's horse", "ground_truth": ["The death of Clarisse's horse", "B"]}
+{"id": 15, "prediction": "C. At the opera", "ground_truth": ["At the opera", "C"]}
+{"id": 16, "prediction": "D. Puffed sleeves", "ground_truth": ["Puffed sleeves", "D"]}
+{"id": 17, "prediction": "D. Carmody", "ground_truth": ["Avonlea", "A"]}
+{"id": 18, "prediction": "A", "ground_truth": ["Losing Hattie's brooch", "A"]}
+{"id": 19, "prediction": "D", "ground_truth": ["Clinging to a bridge pile", "D"]}
+{"id": 24, "prediction": "D. All of the above", "ground_truth": ["All of the above", "D"]}
+{"id": 25, "prediction": "A. Lorelei doesn't approve of early marriages and he wishes Colleen would finish college, but he supports Colleen's right to live his life on his own terms.", "ground_truth": ["Lorelei doesn't approve of early marriages and he wishes Colleen would finish college, but he supports Colleen's right to live his life on his own terms.", "A"]}
+{"id": 26, "prediction": "B. He became engaged to her almost by accident, and he didn't have the courage to break it off", "ground_truth": ["He became engaged to her almost by accident, and he didn't have the courage to break it off", "B"]}
+{"id": 27, "prediction": "B.", "ground_truth": ["Religion is heavily influenced by materialism and competition for social status.", "B"]}
+{"id": 28, "prediction": "D.", "ground_truth": ["A kiss", "D"]}
+{"id": 29, "prediction": "C. Haunted by humans", "ground_truth": ["Haunted by humans", "C"]}
+{"id": 30, "prediction": "D", "ground_truth": ["He'll die and they'll have to get rid of his body", "D"]}
+{"id": 31, "prediction": "B. Candace can write her own story", "ground_truth": ["Candace can write her own story", "B"]}
+{"id": 40, "prediction": "B", "ground_truth": ["The dream in which Dulce Kitty is beating Aiden's landlady", "B"]}
+{"id": 41, "prediction": "B. Bakaleev's", "ground_truth": ["The Crystal Palace", "D"]}
+{"id": 42, "prediction": "C. Arran", "ground_truth": ["The caretaker", "B"]}
+{"id": 43, "prediction": "C. She wants to invite him to the memorial dinner for her father", "ground_truth": ["She wants to invite him to the memorial dinner for her father", "C"]}
+{"id": 48, "prediction": "B. Clementine is Miss Leo's niece.", "ground_truth": ["Clementine is Miss Leo's niece.", "B"]}
+{"id": 49, "prediction": "C. Mr. Johan", "ground_truth": ["Mr. Deirdre", "D"]}
+{"id": 50, "prediction": "A. Gypsies", "ground_truth": ["Gypsies", "A"]}
+{"id": 51, "prediction": "A. Mr. Wingfield", "ground_truth": ["Mr. Martha", "C"]}
+{"id": 52, "prediction": "C. He misunderstands the monster's warning.", "ground_truth": ["He misunderstands the monster's warning.", "C"]}
+{"id": 53, "prediction": "C. Allyson Kalia", "ground_truth": ["Allyson Kalia", "C"]}
+{"id": 54, "prediction": "B. Guilt about creating a monster", "ground_truth": ["Lack of desire to marry Raiden", "D"]}
+{"id": 55, "prediction": "A.", "ground_truth": ["By listening to Felix teach Safie his language", "A"]}
+{"id": 58, "prediction": "C", "ground_truth": ["A coroner's Owenfice", "A"]}
+{"id": 59, "prediction": "C. Dash Jailmer", "ground_truth": ["Genesis Savannah", "D"]}
+{"id": 60, "prediction": "B", "ground_truth": ["Preacher", "B"]}
+{"id": 61, "prediction": "C", "ground_truth": ["Gum", "C"]}
+{"id": 74, "prediction": "D", "ground_truth": ["Human and bear", "D"]}
+{"id": 75, "prediction": "C.", "ground_truth": ["Riddle-solving", "C"]}
+{"id": 76, "prediction": "D", "ground_truth": ["His old home at Hobbiton", "D"]}
+{"id": 77, "prediction": "C", "ground_truth": ["Eoin and Took", "C"]}
+{"id": 78, "prediction": "B", "ground_truth": ["The garbage", "B"]}
+{"id": 79, "prediction": "A", "ground_truth": ["Sir Blossom Horatio", "A"]}
+{"id": 80, "prediction": "B", "ground_truth": ["Because he was wearing Sir Dilan's suit", "B"]}
+{"id": 81, "prediction": "D. Phosphorous", "ground_truth": ["Phosphorous", "D"]}
+{"id": 82, "prediction": "B.", "ground_truth": ["Prison", "B"]}
+{"id": 83, "prediction": "B. Have him sent to the asylum", "ground_truth": ["Have him sent to the asylum", "B"]}
+{"id": 84, "prediction": "D", "ground_truth": ["Judge Drake", "D"]}
+{"id": 85, "prediction": "D. Witchcraft", "ground_truth": ["Witchcraft", "D"]}
+{"id": 86, "prediction": "D", "ground_truth": ["Cedric does not die in the novel.", "D"]}
+{"id": 87, "prediction": "D. A dagger", "ground_truth": ["A side Morgana bacon", "A"]}
+{"id": 88, "prediction": "B", "ground_truth": ["One", "B"]}
+{"id": 89, "prediction": "B. Isidore Peter", "ground_truth": ["Bailey", "C"]}
+{"id": 90, "prediction": "B. He has her naturally curly hair cut short so as to make it lie straight.", "ground_truth": ["He has her naturally curly hair cut short so as to make it lie straight.", "B"]}
+{"id": 91, "prediction": "C", "ground_truth": ["Hannah", "C"]}
+{"id": 92, "prediction": "B. Goldie", "ground_truth": ["St. Spencer", "A"]}
+{"id": 93, "prediction": "A", "ground_truth": ["Mila Kirsten", "B"]}
+{"id": 94, "prediction": "A", "ground_truth": ["He freezes, realizing that the dinosaur cannot see him if he does not move", "A"]}
+{"id": 95, "prediction": "A. Procompsognathid", "ground_truth": ["Velociraptor", "C"]}
+{"id": 96, "prediction": "C. He has a bout of motion sickness from the touring car", "ground_truth": ["He wants to put the moves on Dr. Christie", "D"]}
+{"id": 97, "prediction": "C. Fifteen", "ground_truth": ["Fifteen", "C"]}
+{"id": 98, "prediction": "B", "ground_truth": ["Edinburgh", "B"]}
+{"id": 99, "prediction": "D", "ground_truth": ["Isobel", "A"]}
+{"id": 100, "prediction": "D. A silver button from his jacket", "ground_truth": ["A silver button from his jacket", "D"]}
+{"id": 101, "prediction": "C", "ground_truth": ["Ciaran of the Dior", "C"]}
+{"id": 102, "prediction": "A", "ground_truth": ["Hurons", "C"]}
+{"id": 103, "prediction": "A", "ground_truth": ["Theo", "A"]}
+{"id": 104, "prediction": "D. Theo", "ground_truth": ["Cael", "A"]}
+{"id": 105, "prediction": "C. A doctor", "ground_truth": ["A doctor", "C"]}
+{"id": 106, "prediction": "C. He is just another mouth to feed", "ground_truth": ["He is just another mouth to feed", "C"]}
+{"id": 107, "prediction": "C. He wants to treat his fellow man with kindness and respect", "ground_truth": ["He wants to treat his fellow man with kindness and respect", "C"]}
+{"id": 108, "prediction": "C. She dies from shock", "ground_truth": ["She dies from shock", "C"]}
+{"id": 109, "prediction": "B. He does so by accident", "ground_truth": ["He does so by accident", "B"]}
+{"id": 110, "prediction": "A", "ground_truth": ["Plumfield", "A"]}
+{"id": 111, "prediction": "C", "ground_truth": ["Sing", "D"]}
+{"id": 112, "prediction": "C", "ground_truth": ["Germany", "C"]}
+{"id": 113, "prediction": "C", "ground_truth": ["Chocolate drops", "C"]}
+{"id": 114, "prediction": "C. Talent", "ground_truth": ["Talent", "C"]}
+{"id": 115, "prediction": "C. It is structured like an army.", "ground_truth": ["It is structured like an army.", "C"]}
+{"id": 116, "prediction": "C", "ground_truth": ["They felt that there was nothing that could be done about it.", "A"]}
+{"id": 117, "prediction": "D", "ground_truth": ["All of the above", "D"]}
+{"id": 118, "prediction": "B. At an agricultural fair", "ground_truth": ["Kelly repairs Richie's father's broken leg", "D"]}
+{"id": 119, "prediction": "D. A power of attorney", "ground_truth": ["A power of attorney", "D"]}
+{"id": 120, "prediction": "C", "ground_truth": ["In the woods", "C"]}
+{"id": 121, "prediction": "B. He once slept with Marie Antoinette", "ground_truth": ["He once slept with Marie Antoinette", "B"]}
+{"id": 126, "prediction": "D", "ground_truth": ["Nobel Prize for Literature", "D"]}
+{"id": 127, "prediction": "C", "ground_truth": ["Sauk Centre, Minnesota", "C"]}
+{"id": 128, "prediction": "C. Doctor", "ground_truth": ["Doctor", "C"]}
+{"id": 129, "prediction": "B. Himself", "ground_truth": ["Himself", "B"]}
+{"id": 130, "prediction": "C. Horseback riding", "ground_truth": ["Horseback riding", "C"]}
+{"id": 131, "prediction": "A", "ground_truth": ["Everingham", "A"]}
+{"id": 132, "prediction": "C", "ground_truth": ["Thrush", "C"]}
+{"id": 133, "prediction": "A", "ground_truth": ["Sailor", "A"]}
+{"id": 134, "prediction": "B. All-American", "ground_truth": ["All-American", "B"]}
+{"id": 135, "prediction": "C. Cuts her hair", "ground_truth": ["Takes to her bed", "D"]}
+{"id": 136, "prediction": "C. English class", "ground_truth": ["English class", "C"]}
+{"id": 137, "prediction": "B. A thermometer", "ground_truth": ["A thermometer", "B"]}
+{"id": 138, "prediction": "C. Because Amy does not play fairly", "ground_truth": ["Because Amy does not play fairly", "C"]}
+{"id": 139, "prediction": "D. By selling his own goods", "ground_truth": ["Through an entrepreneurial scheme with Amy Helina", "B"]}
+{"id": 140, "prediction": "A. Because he thinks of Castiel dependent upon Clea after his own death", "ground_truth": ["Because he thinks of Castiel dependent upon Clea after his own death", "A"]}
+{"id": 141, "prediction": "A.", "ground_truth": ["Mrs. Roberta's visit to him", "B"]}
+{"id": 146, "prediction": "A.", "ground_truth": ["Laundry bills", "A"]}
+{"id": 147, "prediction": "C. Aaliyah Hugo", "ground_truth": ["Aaliyah Hugo", "C"]}
+{"id": 148, "prediction": "D", "ground_truth": ["Free indirect discourse", "D"]}
+{"id": 149, "prediction": "A", "ground_truth": ["During a dance in the Lower Rooms", "A"]}
+{"id": 150, "prediction": "C", "ground_truth": ["Alaska", "C"]}
+{"id": 151, "prediction": "A", "ground_truth": ["Engraving", "A"]}
+{"id": 152, "prediction": "D. Saint-Agnes", "ground_truth": ["Saint-Agnes", "D"]}
+{"id": 153, "prediction": "D. Albert Tovesky", "ground_truth": ["Albert Tovesky", "D"]}
+{"id": 154, "prediction": "A", "ground_truth": ["Undertaker", "A"]}
+{"id": 155, "prediction": "A", "ground_truth": ["Chimney sweep", "D"]}
+{"id": 156, "prediction": "D. He wants her money", "ground_truth": ["He wants her money", "D"]}
+{"id": 157, "prediction": "A", "ground_truth": ["Because she does not want to stCici in the way of his ambition", "B"]}
+{"id": 158, "prediction": "A", "ground_truth": ["Mrs. Angeline", "A"]}
+{"id": 159, "prediction": "B. Arjun", "ground_truth": ["Arjun", "B"]}
+{"id": 160, "prediction": "D. She thinks Mrs. Delanie might have romantic designs on Sir Dan", "ground_truth": ["She thinks Mrs. Delanie might have romantic designs on Sir Dan", "D"]}
+{"id": 161, "prediction": "C. Randy Ayanna", "ground_truth": ["Randy Ayanna", "C"]}
+{"id": 162, "prediction": "B", "ground_truth": ["Mohammed", "C"]}
+{"id": 163, "prediction": "D.", "ground_truth": ["He wants to be closer to Zelda.", "B"]}
+{"id": 164, "prediction": "A. He states that the covid is a supreme test of faith", "ground_truth": ["Madame Elspeth", "B"]}
+{"id": 165, "prediction": "C", "ground_truth": ["Mr. Tate", "D"]}
+{"id": 166, "prediction": "C", "ground_truth": ["Marry Mya", "C"]}
+{"id": 167, "prediction": "C", "ground_truth": ["Sends her a letter explaining his actions", "A"]}
+{"id": 168, "prediction": "B. Madame Elspeth", "ground_truth": ["She gets soaked in a rainstorm and becomes ill.", "A"]}
+{"id": 169, "prediction": "D", "ground_truth": ["Abrianna", "A"]}
+{"id": 177, "prediction": "B. Regeneration", "ground_truth": ["\"St. George\"", "D"]}
+{"id": 178, "prediction": "B. That a friend named Peter has been killed by a bomb in Germany", "ground_truth": ["He was a captain", "A"]}
+{"id": 179, "prediction": "C. Animals; they act in accordance with nature and instincts", "ground_truth": ["Rocky", "A"]}
+{"id": 180, "prediction": "D. He believes war is always wrong", "ground_truth": ["A dye used for marking sheep", "D"]}
+{"id": 181, "prediction": "D. \"St. George\"", "ground_truth": ["A North African territory", "B"]}
+{"id": 182, "prediction": "A", "ground_truth": ["Experiences a religious illumination", "D"]}
+{"id": 183, "prediction": "A", "ground_truth": ["Sebastianne's god", "D"]}
+{"id": 184, "prediction": "D. A dye used for marking sheep", "ground_truth": ["A goat's", "A"]}
+{"id": 185, "prediction": "B. A North African territory", "ground_truth": ["She inherits Troy's estate and marries a nobleman.", "C"]}
+{"id": 186, "prediction": "D. Experiences a religious illumination", "ground_truth": ["She is executed publicly as a witch.", "C"]}
+{"id": 187, "prediction": "D", "ground_truth": ["A meteor", "B"]}
+{"id": 188, "prediction": "A. A goat's", "ground_truth": ["Dayton Morton", "B"]}
+{"id": 189, "prediction": "C. She inherits Troy's estate and marries a nobleman.", "ground_truth": ["Mr. Pratt", "D"]}
+{"id": 190, "prediction": "C. She is executed publicly as a witch.", "ground_truth": ["Return each other's letters", "A"]}
+{"id": 191, "prediction": "B. A meteor", "ground_truth": ["Kristi Finn", "B"]}
+{"id": 196, "prediction": "C", "ground_truth": ["Kallie", "D"]}
+{"id": 197, "prediction": "D. It is dead", "ground_truth": ["Perla", "D"]}
+{"id": 198, "prediction": "B. Stays with Skye", "ground_truth": ["It makes him sick", "D"]}
+{"id": 199, "prediction": "C", "ground_truth": ["He wants to wait for Katniss", "C"]}
+{"id": 200, "prediction": "C. They never fight", "ground_truth": ["Miss Dave' brother, Solomon", "A"]}
+{"id": 201, "prediction": "D. Perla", "ground_truth": ["Madame Royce", "A"]}
+{"id": 210, "prediction": "B.", "ground_truth": ["Mississippi", "B"]}
+{"id": 211, "prediction": "A. A giant crab", "ground_truth": ["Chewing gum", "D"]}
+{"id": 212, "prediction": "C", "ground_truth": ["9 ", "D"]}
+{"id": 213, "prediction": "C. Two Flowers", "ground_truth": ["Gia Leena", "A"]}
+{"id": 214, "prediction": "B", "ground_truth": ["The Bloomsbury Group", "A"]}
+{"id": 215, "prediction": "D", "ground_truth": ["She drowned herself", "A"]}
+{"id": 216, "prediction": "C. 10", "ground_truth": ["Mrs. Deandra", "C"]}
+{"id": 217, "prediction": "A. Gia Leena", "ground_truth": ["“The Charge of the Light Brigade”", "C"]}
+{"id": 218, "prediction": "A", "ground_truth": ["He is an innkeeper", "C"]}
+{"id": 219, "prediction": "A", "ground_truth": ["To make a truce", "A"]}
+{"id": 220, "prediction": "C", "ground_truth": ["That Ace has been deposed", "B"]}
+{"id": 221, "prediction": "C.", "ground_truth": ["A boat", "D"]}
+{"id": 226, "prediction": "C. Miss Ursula", "ground_truth": ["A native rescues him at the seashore", "C"]}
+{"id": 227, "prediction": "A", "ground_truth": ["The main Typee dish made of breadfruit", "A"]}
+{"id": 228, "prediction": "B. France", "ground_truth": ["France", "B"]}
+{"id": 229, "prediction": "C. Get a tattoo", "ground_truth": ["Get a tattoo", "C"]}
+{"id": 230, "prediction": "B. Antagonistic", "ground_truth": ["Antagonistic", "B"]}
+{"id": 231, "prediction": "B. Finn Purefoy", "ground_truth": ["Gertie Marcella", "D"]}
+{"id": 232, "prediction": "D. Usurper", "ground_truth": ["Usurper", "D"]}
+{"id": 233, "prediction": "B. His mother", "ground_truth": ["His mother", "B"]}
+{"id": 238, "prediction": "D", "ground_truth": ["Both A and B", "D"]}
+{"id": 239, "prediction": "D. All of the above", "ground_truth": ["All of the above", "D"]}
+{"id": 240, "prediction": "D.", "ground_truth": ["All of the above", "D"]}
+{"id": 241, "prediction": "C. He feels she has been unfairly shunned by some of the best families in New York", "ground_truth": ["He feels she has been unfairly shunned by some of the best families in New York", "C"]}
+{"id": 242, "prediction": "A", "ground_truth": ["Woollett, Massachusetts", "A"]}
+{"id": 243, "prediction": "C", "ground_truth": ["To talk to Miss Gostrey", "C"]}
+{"id": 244, "prediction": "D", "ground_truth": ["Sculptor", "D"]}
+{"id": 245, "prediction": "B", "ground_truth": ["One", "B"]}
+{"id": 246, "prediction": "A", "ground_truth": ["Mr. Yestin", "A"]}
+{"id": 247, "prediction": "B. Miss Barbary", "ground_truth": ["Godfrey Wayne", "D"]}
+{"id": 248, "prediction": "D", "ground_truth": ["Both B and C", "D"]}
+{"id": 249, "prediction": "A. Dancing", "ground_truth": ["Dancing", "A"]}
+{"id": 250, "prediction": "B.", "ground_truth": ["He writes a poem about solitude.", "A"]}
+{"id": 251, "prediction": "D.", "ground_truth": ["By sounding alarms and shocking the children when they approach books or flowers", "D"]}
+{"id": 252, "prediction": "A. To bring rain", "ground_truth": ["To bring rain", "A"]}
+{"id": 253, "prediction": "A. A society of Alphas is unworkable.", "ground_truth": ["A society of Alphas is unworkable.", "A"]}
+{"id": 262, "prediction": "B. Playing cards", "ground_truth": ["Playing cards", "B"]}
+{"id": 263, "prediction": "C. A street organ", "ground_truth": ["A street organ", "C"]}
+{"id": 264, "prediction": "C", "ground_truth": ["Two lovers", "C"]}
+{"id": 265, "prediction": "C", "ground_truth": ["A chalice", "C"]}
+{"id": 274, "prediction": "A", "ground_truth": ["Move quickly, since more players are entering the game.", "C"]}
+{"id": 275, "prediction": "C", "ground_truth": ["A lens", "A"]}
+{"id": 276, "prediction": "B. Ser Hugh, a former squire", "ground_truth": ["Ser Hugh, a former squire", "B"]}
+{"id": 277, "prediction": "A. Accept Joff as king instead of naming Stannis.", "ground_truth": ["Accept Joff as king instead of naming Stannis.", "A"]}
+{"id": 278, "prediction": "B", "ground_truth": ["She is afraid of the desolate land because there is nothing to hide behind", "B"]}
+{"id": 279, "prediction": "B.", "ground_truth": ["She hides in her emigrant chest", "D"]}
+{"id": 280, "prediction": "A.", "ground_truth": ["Rosie", "A"]}
+{"id": 281, "prediction": "A. His wife, Felicity", "ground_truth": ["His wife, Felicity", "A"]}
+{"id": 282, "prediction": "D. \"Saints\"", "ground_truth": ["\"Saints\"", "D"]}
+{"id": 283, "prediction": "A. Morning", "ground_truth": ["Morning", "A"]}
+{"id": 284, "prediction": "A. His father strikes his mother.", "ground_truth": ["His father strikes his mother.", "A"]}
+{"id": 285, "prediction": "D", "ground_truth": ["A kiss on the forehead", "D"]}
+{"id": 286, "prediction": "B. Alecia", "ground_truth": ["Kailey", "D"]}
+{"id": 287, "prediction": "D", "ground_truth": ["Kailey", "D"]}
+{"id": 288, "prediction": "B", "ground_truth": ["Her father's house", "B"]}
+{"id": 289, "prediction": "B. Boredom", "ground_truth": ["Boredom", "B"]}
+{"id": 290, "prediction": "C", "ground_truth": ["He is distantly related to the Han's wife", "D"]}
+{"id": 291, "prediction": "C", "ground_truth": ["Having the prince join them avoids a scandal in the family", "D"]}
+{"id": 292, "prediction": "B. A painting of a Christ who has just been taken off the cross", "ground_truth": ["A painting of a Christ who has just been taken off the cross", "B"]}
+{"id": 293, "prediction": "B", "ground_truth": ["A hedgehog", "B"]}
+{"id": 294, "prediction": "D", "ground_truth": ["Richard Cormac", "D"]}
+{"id": 295, "prediction": "B. A skimmity-ride", "ground_truth": ["A skimmity-ride", "B"]}
+{"id": 296, "prediction": "D. Hay-trusser", "ground_truth": ["Hay-trusser", "D"]}
+{"id": 297, "prediction": "D", "ground_truth": ["He worries that he is too young for the position", "D"]}
+{"id": 298, "prediction": "A.", "ground_truth": ["A gold coin", "A"]}
+{"id": 299, "prediction": "B", "ground_truth": ["Alen and Zola", "D"]}
+{"id": 300, "prediction": "A. A coffin", "ground_truth": ["A coffin", "A"]}
+{"id": 301, "prediction": "B. His harpoon", "ground_truth": ["His harpoon", "B"]}
+{"id": 302, "prediction": "C. Her tone of voice does not indicate that the young man is Indian", "ground_truth": ["Her tone of voice does not indicate that the young man is Indian", "C"]}
+{"id": 303, "prediction": "B.", "ground_truth": ["Because she wants to see the real India", "B"]}
+{"id": 304, "prediction": "D. She speaks frankly about her dislike for Mrs. Jaya", "ground_truth": ["She speaks frankly about her dislike for Mrs. Jaya", "D"]}
+{"id": 305, "prediction": "B. He pronounces Kenton innocent", "ground_truth": ["He does not stand when Cerys enters", "D"]}
+{"id": 310, "prediction": "C. dog", "ground_truth": ["dog", "C"]}
+{"id": 311, "prediction": "A", "ground_truth": ["F.B.", "D"]}
+{"id": 312, "prediction": "B. An Italian client", "ground_truth": ["An Italian client", "B"]}
+{"id": 313, "prediction": "B.", "ground_truth": ["bow-legged", "A"]}
+{"id": 318, "prediction": "C", "ground_truth": ["Thirty", "D"]}
+{"id": 319, "prediction": "A", "ground_truth": ["Amos Bronson Alcott", "A"]}
+{"id": 320, "prediction": "A. A Week on the Merrimack and Concord Rivers", "ground_truth": ["A Week on the Merrimack and Concord Rivers ", "A"]}
+{"id": 321, "prediction": "B. A morning star", "ground_truth": ["A morning star", "B"]}

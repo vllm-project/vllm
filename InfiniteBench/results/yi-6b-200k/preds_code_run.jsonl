@@ -1,0 +1,400 @@
+{"id": 0, "prediction": " 109.", "ground_truth": 4}
+{"id": 1, "prediction": " 1199.", "ground_truth": 1}
+{"id": 2, "prediction": " -477.", "ground_truth": -14}
+{"id": 3, "prediction": " 4.", "ground_truth": 24}
+{"id": 4, "prediction": " 9.\nPlease compute the exact value of func_10(6", "ground_truth": 4}
+{"id": 5, "prediction": " -11.\n", "ground_truth": 6}
+{"id": 6, "prediction": " 1.", "ground_truth": 5}
+{"id": 7, "prediction": " 1.\n", "ground_truth": 1}
+{"id": 8, "prediction": " -11.", "ground_truth": -10}
+{"id": 9, "prediction": ": 13.", "ground_truth": 11}
+{"id": 10, "prediction": " 8.\n\n", "ground_truth": 7}
+{"id": 11, "prediction": " 1.", "ground_truth": -1}
+{"id": 12, "prediction": ":\nfunc_7055(2) = 11\n", "ground_truth": 4}
+{"id": 13, "prediction": " 330.", "ground_truth": 28}
+{"id": 14, "prediction": " 2. This is based on the value of func_1343", "ground_truth": -11}
+{"id": 15, "prediction": "\n\n", "ground_truth": 14}
+{"id": 16, "prediction": "\n\nfunc_8660(-5) = 152", "ground_truth": -1}
+{"id": 17, "prediction": " 1831003600.", "ground_truth": 12}
+{"id": 18, "prediction": " 2549.\n\n\n", "ground_truth": 5}
+{"id": 19, "prediction": " 186.", "ground_truth": 3}
+{"id": 20, "prediction": " 12.", "ground_truth": 10}
+{"id": 21, "prediction": " 11.299855935699", "ground_truth": 1}
+{"id": 22, "prediction": " -1.\n", "ground_truth": -2}
+{"id": 23, "prediction": " 6.0406481746522", "ground_truth": 11}
+{"id": 24, "prediction": " approximately 8.130857602118", "ground_truth": 15}
+{"id": 25, "prediction": " 10.", "ground_truth": -3}
+{"id": 26, "prediction": " 12.180554592031", "ground_truth": 4}
+{"id": 27, "prediction": " 12.\n", "ground_truth": 17}
+{"id": 28, "prediction": " -2.\n", "ground_truth": -6}
+{"id": 29, "prediction": "\n", "ground_truth": 8}
+{"id": 30, "prediction": " 11.", "ground_truth": 8}
+{"id": 31, "prediction": ":\nfunc_8741(-8) = -1\n", "ground_truth": 11}
+{"id": 32, "prediction": " 7.", "ground_truth": 12}
+{"id": 33, "prediction": " 6.", "ground_truth": 5}
+{"id": 34, "prediction": " 2219.\n", "ground_truth": -11}
+{"id": 35, "prediction": " 1.\n", "ground_truth": -2}
+{"id": 36, "prediction": " -1.", "ground_truth": 3}
+{"id": 37, "prediction": " 20.", "ground_truth": 17}
+{"id": 38, "prediction": " 80.", "ground_truth": 3}
+{"id": 39, "prediction": " 9.\nfunc_6193(5) = 9", "ground_truth": 13}
+{"id": 40, "prediction": " -121.", "ground_truth": -5}
+{"id": 41, "prediction": " 1.", "ground_truth": 18}
+{"id": 42, "prediction": " 4.", "ground_truth": -7}
+{"id": 43, "prediction": ":\n2073\n", "ground_truth": 6}
+{"id": 44, "prediction": " exactly 12.", "ground_truth": 13}
+{"id": 45, "prediction": " 1.\n", "ground_truth": 6}
+{"id": 46, "prediction": " 10.\n\n", "ground_truth": 23}
+{"id": 47, "prediction": " 2.\n\nThe function func_1832 is defined as", "ground_truth": 9}
+{"id": 48, "prediction": " 13.", "ground_truth": -4}
+{"id": 49, "prediction": " -40.", "ground_truth": 22}
+{"id": 50, "prediction": " -22.", "ground_truth": -23}
+{"id": 51, "prediction": " 0.\nPlease compute the exact value of func_6360", "ground_truth": 22}
+{"id": 52, "prediction": " -5\nfunc_5693(-5) = -5\n", "ground_truth": -2}
+{"id": 53, "prediction": " -2.\n\n", "ground_truth": 4}
+{"id": 54, "prediction": " 6.", "ground_truth": 7}
+{"id": 55, "prediction": " 0.", "ground_truth": -4}
+{"id": 56, "prediction": " approximately 2.41429806623.", "ground_truth": 7}
+{"id": 57, "prediction": " 354.", "ground_truth": -1}
+{"id": 58, "prediction": " 7085720462.", "ground_truth": 4}
+{"id": 59, "prediction": " 11.", "ground_truth": -18}
+{"id": 60, "prediction": " 4.", "ground_truth": -21}
+{"id": 61, "prediction": " 11.", "ground_truth": 32}
+{"id": 62, "prediction": " -57.", "ground_truth": -8}
+{"id": 63, "prediction": " 11.", "ground_truth": -17}
+{"id": 64, "prediction": " 8.\n\n", "ground_truth": 10}
+{"id": 65, "prediction": " 3.", "ground_truth": 10}
+{"id": 66, "prediction": " -1.", "ground_truth": 13}
+{"id": 67, "prediction": " 0. Please provide the detailed working here.", "ground_truth": 0}
+{"id": 68, "prediction": " 26.\n\n", "ground_truth": 28}
+{"id": 69, "prediction": " 100000000000000", "ground_truth": -16}
+{"id": 70, "prediction": " 267.", "ground_truth": -3}
+{"id": 71, "prediction": " -11.", "ground_truth": -10}
+{"id": 72, "prediction": " -1.6020414990931", "ground_truth": -5}
+{"id": 73, "prediction": " 1.", "ground_truth": -9}
+{"id": 74, "prediction": " 10.", "ground_truth": 5}
+{"id": 75, "prediction": " 2236.\n\nPlease compute the exact value of func_", "ground_truth": 5}
+{"id": 76, "prediction": " approximately -2.047384296683", "ground_truth": 19}
+{"id": 77, "prediction": " -3.", "ground_truth": 8}
+{"id": 78, "prediction": " -2750.\n", "ground_truth": -5}
+{"id": 79, "prediction": " -1.\n\n", "ground_truth": -6}
+{"id": 80, "prediction": " 0.", "ground_truth": 3}
+{"id": 81, "prediction": " 3.\n", "ground_truth": 16}
+{"id": 82, "prediction": " 9.", "ground_truth": -5}
+{"id": 83, "prediction": " -7623.", "ground_truth": -31}
+{"id": 84, "prediction": " 100.\nThe value of func_1427(-", "ground_truth": -8}
+{"id": 85, "prediction": " 0.", "ground_truth": -16}
+{"id": 86, "prediction": " 1.", "ground_truth": 6}
+{"id": 87, "prediction": " approximately 1.204800301798", "ground_truth": 18}
+{"id": 88, "prediction": " -2.", "ground_truth": -15}
+{"id": 89, "prediction": " 3282.", "ground_truth": 20}
+{"id": 90, "prediction": " -2.", "ground_truth": -7}
+{"id": 91, "prediction": " 1.", "ground_truth": -3}
+{"id": 92, "prediction": " 1.", "ground_truth": -4}
+{"id": 93, "prediction": " 3.\nPlease compute the exact value of func_8099", "ground_truth": -8}
+{"id": 94, "prediction": " 0.2348055713216", "ground_truth": 17}
+{"id": 95, "prediction": " -155.", "ground_truth": 8}
+{"id": 96, "prediction": " 8.", "ground_truth": -11}
+{"id": 97, "prediction": " 3206.", "ground_truth": -15}
+{"id": 98, "prediction": " 5.", "ground_truth": -14}
+{"id": 99, "prediction": " 2183.", "ground_truth": 29}
+{"id": 100, "prediction": " 1.", "ground_truth": 35}
+{"id": 101, "prediction": ": -6\nfunc_4213(-6) = -6", "ground_truth": -16}
+{"id": 102, "prediction": " 1.", "ground_truth": -21}
+{"id": 103, "prediction": ":\n<value_of_func_3226_minus_", "ground_truth": -9}
+{"id": 104, "prediction": " -2.", "ground_truth": -13}
+{"id": 105, "prediction": " 10.", "ground_truth": -15}
+{"id": 106, "prediction": " approximately 1.782846307990", "ground_truth": -5}
+{"id": 107, "prediction": " 0.2351023720243", "ground_truth": 0}
+{"id": 108, "prediction": " -1215.\n", "ground_truth": 22}
+{"id": 109, "prediction": " approximately 5.282132450000", "ground_truth": 8}
+{"id": 110, "prediction": " -631.", "ground_truth": -17}
+{"id": 111, "prediction": " -159.", "ground_truth": 0}
+{"id": 112, "prediction": " 10.", "ground_truth": -4}
+{"id": 113, "prediction": " 2.", "ground_truth": -23}
+{"id": 114, "prediction": " 10.", "ground_truth": -17}
+{"id": 115, "prediction": " 1.", "ground_truth": 16}
+{"id": 116, "prediction": " 6.", "ground_truth": -25}
+{"id": 117, "prediction": " -3.\n", "ground_truth": 11}
+{"id": 118, "prediction": " approximately 3113.", "ground_truth": 12}
+{"id": 119, "prediction": " 10.", "ground_truth": 14}
+{"id": 120, "prediction": " -1.", "ground_truth": -19}
+{"id": 121, "prediction": " 708.", "ground_truth": 3}
+{"id": 122, "prediction": " 6.25.\n\nPlease compute the exact value of func_", "ground_truth": -3}
+{"id": 123, "prediction": " 5.5450112667013", "ground_truth": 17}
+{"id": 124, "prediction": " 12.", "ground_truth": -4}
+{"id": 125, "prediction": ": -1.", "ground_truth": 0}
+{"id": 126, "prediction": " 55.", "ground_truth": -21}
+{"id": 127, "prediction": " 1.", "ground_truth": -13}
+{"id": 128, "prediction": " 90.6857071875.\n", "ground_truth": 24}
+{"id": 129, "prediction": " 8.1421356369703", "ground_truth": 19}
+{"id": 130, "prediction": " 2989.", "ground_truth": -13}
+{"id": 131, "prediction": " 8.", "ground_truth": 9}
+{"id": 132, "prediction": " 0.\n\nfunc_3878(-4) = ", "ground_truth": -13}
+{"id": 133, "prediction": " 5.", "ground_truth": 13}
+{"id": 134, "prediction": " approximately 135.\n\n", "ground_truth": 1}
+{"id": 135, "prediction": " 10.", "ground_truth": -18}
+{"id": 136, "prediction": " 1.\n\n\n\n", "ground_truth": 14}
+{"id": 137, "prediction": " 10.\n", "ground_truth": -6}
+{"id": 138, "prediction": " -11.\n\n", "ground_truth": 9}
+{"id": 139, "prediction": " 1.", "ground_truth": 8}
+{"id": 140, "prediction": " -1294.\nfunc_7397(-4)", "ground_truth": 0}
+{"id": 141, "prediction": ":\nfunc_7493(3) = 26.", "ground_truth": -11}
+{"id": 142, "prediction": " 40.", "ground_truth": 6}
+{"id": 143, "prediction": " 10.\n\n", "ground_truth": 11}
+{"id": 144, "prediction": " 209889466.\n", "ground_truth": 7}
+{"id": 145, "prediction": " 281.", "ground_truth": -5}
+{"id": 146, "prediction": " 4939.", "ground_truth": -19}
+{"id": 147, "prediction": " 815.", "ground_truth": 5}
+{"id": 148, "prediction": " -255.", "ground_truth": 14}
+{"id": 149, "prediction": " -6.7431333791239", "ground_truth": -3}
+{"id": 150, "prediction": " 1.\n\nPlease compute the exact value of func_107", "ground_truth": -8}
+{"id": 151, "prediction": " -12.", "ground_truth": 6}
+{"id": 152, "prediction": " 7.\n", "ground_truth": 9}
+{"id": 153, "prediction": " 14.\n", "ground_truth": -1}
+{"id": 154, "prediction": " approximately -4.38532.\n", "ground_truth": -11}
+{"id": 155, "prediction": " 7.", "ground_truth": -14}
+{"id": 156, "prediction": " -1.3532640872530", "ground_truth": 20}
+{"id": 157, "prediction": " 1189.\nPlease compute the exact value of func_1", "ground_truth": 12}
+{"id": 158, "prediction": " approximately 0.1961.", "ground_truth": -19}
+{"id": 159, "prediction": " 1.\n", "ground_truth": 5}
+{"id": 160, "prediction": " -1.", "ground_truth": 29}
+{"id": 161, "prediction": " 6.", "ground_truth": 25}
+{"id": 162, "prediction": " 291.", "ground_truth": 22}
+{"id": 163, "prediction": " 10.\n", "ground_truth": 11}
+{"id": 164, "prediction": " 9.\n", "ground_truth": 37}
+{"id": 165, "prediction": " approximately 0.000000000000", "ground_truth": -18}
+{"id": 166, "prediction": " 2.143013.", "ground_truth": 0}
+{"id": 167, "prediction": " -1.\n\n\nThe question states that func_2921", "ground_truth": -8}
+{"id": 168, "prediction": " 56034972.", "ground_truth": 28}
+{"id": 169, "prediction": " 4.", "ground_truth": 4}
+{"id": 170, "prediction": " 1.\nPlease compute the exact value of func_2611", "ground_truth": 58}
+{"id": 171, "prediction": " 2.\n\n\n\n\nfunc_733(10", "ground_truth": 39}
+{"id": 172, "prediction": " 6.4682184794225", "ground_truth": 9}
+{"id": 173, "prediction": " 6032.", "ground_truth": 21}
+{"id": 174, "prediction": " -1.", "ground_truth": 6}
+{"id": 175, "prediction": " 6.", "ground_truth": -4}
+{"id": 176, "prediction": " 190495734917383", "ground_truth": 49}
+{"id": 177, "prediction": " 2.\nThe code is as follows:\ndef func_77", "ground_truth": 21}
+{"id": 178, "prediction": " 1.", "ground_truth": -17}
+{"id": 179, "prediction": " 6.5.", "ground_truth": 20}
+{"id": 180, "prediction": ":\n\n5015", "ground_truth": 29}
+{"id": 181, "prediction": " 39.\n\nPlease compute the exact value of func_26", "ground_truth": 20}
+{"id": 182, "prediction": " 8.", "ground_truth": 27}
+{"id": 183, "prediction": " 1653.", "ground_truth": 14}
+{"id": 184, "prediction": " -118602137148362", "ground_truth": 12}
+{"id": 185, "prediction": " 20.", "ground_truth": 35}
+{"id": 186, "prediction": " 1.\nfunc_4588(-7) = 1", "ground_truth": 22}
+{"id": 187, "prediction": " 5.\nPlease compute the exact value of func_3388", "ground_truth": 36}
+{"id": 188, "prediction": " approximately 8.59307.", "ground_truth": 36}
+{"id": 189, "prediction": " 1.\n\nPlease compute the exact value of func_252", "ground_truth": -6}
+{"id": 190, "prediction": " 1704.\n", "ground_truth": 12}
+{"id": 191, "prediction": "\n\nfunc_5628(4) = 569", "ground_truth": 35}
+{"id": 192, "prediction": " 12.", "ground_truth": 49}
+{"id": 193, "prediction": " -1.", "ground_truth": 10}
+{"id": 194, "prediction": " 531.", "ground_truth": 8}
+{"id": 195, "prediction": " 14.", "ground_truth": 6}
+{"id": 196, "prediction": " 0.\n\nThe exact value of func_2360(-", "ground_truth": 17}
+{"id": 197, "prediction": " 4.", "ground_truth": 42}
+{"id": 198, "prediction": " 2160.\nPlease compute the exact value of func_3", "ground_truth": -1}
+{"id": 199, "prediction": " 256.", "ground_truth": 21}
+{"id": 200, "prediction": " 22.\n\n\n\n", "ground_truth": 55}
+{"id": 201, "prediction": " 726.", "ground_truth": 37}
+{"id": 202, "prediction": " 3.", "ground_truth": 63}
+{"id": 203, "prediction": " -13.", "ground_truth": 58}
+{"id": 204, "prediction": " 12.", "ground_truth": 46}
+{"id": 205, "prediction": " 2.", "ground_truth": -10}
+{"id": 206, "prediction": " 10.", "ground_truth": 42}
+{"id": 207, "prediction": ":\n\n2506\n", "ground_truth": 11}
+{"id": 208, "prediction": " 15.\n", "ground_truth": 33}
+{"id": 209, "prediction": " 4.", "ground_truth": 26}
+{"id": 210, "prediction": " -9.\n\nPlease compute the exact value of func_751", "ground_truth": 40}
+{"id": 211, "prediction": " approximately 14.00000000000", "ground_truth": 57}
+{"id": 212, "prediction": " 0.\n", "ground_truth": 48}
+{"id": 213, "prediction": " -1111.", "ground_truth": 57}
+{"id": 214, "prediction": " 4.\n", "ground_truth": 49}
+{"id": 215, "prediction": " 212403.", "ground_truth": 16}
+{"id": 216, "prediction": " -13.", "ground_truth": 15}
+{"id": 217, "prediction": " -63.\n", "ground_truth": 34}
+{"id": 218, "prediction": " 0.\n", "ground_truth": 7}
+{"id": 219, "prediction": " -7.", "ground_truth": -24}
+{"id": 220, "prediction": " 14.", "ground_truth": 24}
+{"id": 221, "prediction": " -3.\nPlease compute the exact value of func_1180", "ground_truth": 2}
+{"id": 222, "prediction": " approximately 10.26693437513", "ground_truth": 48}
+{"id": 223, "prediction": " 8.", "ground_truth": -3}
+{"id": 224, "prediction": " 0.\n", "ground_truth": -5}
+{"id": 225, "prediction": " 1.\n", "ground_truth": 36}
+{"id": 226, "prediction": "\n8 + 14 = 22.", "ground_truth": 32}
+{"id": 227, "prediction": " -1.6180339887498", "ground_truth": 43}
+{"id": 228, "prediction": " 8.", "ground_truth": 4}
+{"id": 229, "prediction": " 0.\n\n\n\n", "ground_truth": 12}
+{"id": 230, "prediction": " 547323328.\nThe code snippet above", "ground_truth": 30}
+{"id": 231, "prediction": " 3246.", "ground_truth": 51}
+{"id": 232, "prediction": " 0.0.", "ground_truth": -24}
+{"id": 233, "prediction": " -10.", "ground_truth": 35}
+{"id": 234, "prediction": " 16.", "ground_truth": 39}
+{"id": 235, "prediction": " 2.\n\n", "ground_truth": -15}
+{"id": 236, "prediction": " 64.\n\nIn order to calculate the exact value of func_", "ground_truth": 57}
+{"id": 237, "prediction": " 27.", "ground_truth": 40}
+{"id": 238, "prediction": " 122.", "ground_truth": -4}
+{"id": 239, "prediction": " -43.\n", "ground_truth": 35}
+{"id": 240, "prediction": " -1.", "ground_truth": -45}
+{"id": 241, "prediction": " 0.\n", "ground_truth": -5}
+{"id": 242, "prediction": " 4.1839187629738", "ground_truth": 25}
+{"id": 243, "prediction": " 8.\n", "ground_truth": 22}
+{"id": 244, "prediction": " 6054.", "ground_truth": 19}
+{"id": 245, "prediction": " -1.", "ground_truth": -22}
+{"id": 246, "prediction": " -1.", "ground_truth": 21}
+{"id": 247, "prediction": " -8.\n\n\n\n", "ground_truth": 25}
+{"id": 248, "prediction": " 12.", "ground_truth": -14}
+{"id": 249, "prediction": " approximately 10.", "ground_truth": 48}
+{"id": 250, "prediction": " 12.", "ground_truth": 26}
+{"id": 251, "prediction": ":\nfunc_5645(10) = 13", "ground_truth": 6}
+{"id": 252, "prediction": " 16.", "ground_truth": 58}
+{"id": 253, "prediction": " 0.", "ground_truth": 15}
+{"id": 254, "prediction": ": 414021061.", "ground_truth": 34}
+{"id": 255, "prediction": " 14.0.", "ground_truth": 49}
+{"id": 256, "prediction": " -2.", "ground_truth": -1}
+{"id": 257, "prediction": " 3.\n", "ground_truth": 29}
+{"id": 258, "prediction": " 0.000000e+00.", "ground_truth": -25}
+{"id": 259, "prediction": " 2.\nfunc_6471(9) = 2", "ground_truth": -1}
+{"id": 260, "prediction": " 30.", "ground_truth": -4}
+{"id": 261, "prediction": " 10956922075965.", "ground_truth": 11}
+{"id": 262, "prediction": ":\n\n-13\n\n", "ground_truth": 4}
+{"id": 263, "prediction": " approximately 0.2082.", "ground_truth": -4}
+{"id": 264, "prediction": " 0.\nfunc_3105(1) = 0", "ground_truth": 26}
+{"id": 265, "prediction": " 3.", "ground_truth": -21}
+{"id": 266, "prediction": " 11.\n", "ground_truth": 39}
+{"id": 267, "prediction": " approximately 4.999999999999", "ground_truth": 22}
+{"id": 268, "prediction": " 12.", "ground_truth": 13}
+{"id": 269, "prediction": " 1.", "ground_truth": 22}
+{"id": 270, "prediction": " -10.", "ground_truth": 12}
+{"id": 271, "prediction": " 4.\n", "ground_truth": 14}
+{"id": 272, "prediction": " -2430.", "ground_truth": 0}
+{"id": 273, "prediction": " 6.", "ground_truth": -19}
+{"id": 274, "prediction": " 11.\n\nWhat is the exact value of func_43", "ground_truth": 9}
+{"id": 275, "prediction": " 2.\n\nPlease compute the exact value of func_240", "ground_truth": 22}
+{"id": 276, "prediction": " 1.\nThe following Python code computes the exact value of func_1", "ground_truth": 16}
+{"id": 277, "prediction": " approximately 4.\n", "ground_truth": 6}
+{"id": 278, "prediction": ": -1.\n", "ground_truth": 33}
+{"id": 279, "prediction": " 0.\n", "ground_truth": 2}
+{"id": 280, "prediction": " 18.\nPlease compute the exact value of func_156", "ground_truth": 24}
+{"id": 281, "prediction": " -3.", "ground_truth": 38}
+{"id": 282, "prediction": " approximately 2.9807.", "ground_truth": 17}
+{"id": 283, "prediction": " 340.", "ground_truth": 21}
+{"id": 284, "prediction": " 0.\n\nfunc_6940(-5) = ", "ground_truth": 20}
+{"id": 285, "prediction": " 2.", "ground_truth": 23}
+{"id": 286, "prediction": " 267110029434905", "ground_truth": 12}
+{"id": 287, "prediction": " 6735.", "ground_truth": -8}
+{"id": 288, "prediction": " 0.", "ground_truth": 22}
+{"id": 289, "prediction": " 1.", "ground_truth": 24}
+{"id": 290, "prediction": ": 11.\n\n\nA: I'm guessing you'", "ground_truth": 39}
+{"id": 291, "prediction": " -1.\n\nPlease compute the exact value of func_655", "ground_truth": -26}
+{"id": 292, "prediction": " 1.", "ground_truth": 13}
+{"id": 293, "prediction": " 5.1181096117936", "ground_truth": 19}
+{"id": 294, "prediction": " -8.\n", "ground_truth": 20}
+{"id": 295, "prediction": " approximately 1.36041e-11.", "ground_truth": 25}
+{"id": 296, "prediction": " approximately 11.26.", "ground_truth": 1}
+{"id": 297, "prediction": " 0.\nPlease compute the exact value of func_5250", "ground_truth": 13}
+{"id": 298, "prediction": " approximately 4.738875336880", "ground_truth": -19}
+{"id": 299, "prediction": " 10.", "ground_truth": 2}
+{"id": 300, "prediction": " 0.\n\nA: The value of func_6150", "ground_truth": 15}
+{"id": 301, "prediction": " 8.", "ground_truth": -7}
+{"id": 302, "prediction": " 8.\nPlease compute the exact value of func_7205", "ground_truth": 11}
+{"id": 303, "prediction": " approximately 6.187098535732", "ground_truth": 22}
+{"id": 304, "prediction": ": 3102.\nfunc_6375(6", "ground_truth": 36}
+{"id": 305, "prediction": ": 61480540123533", "ground_truth": 21}
+{"id": 306, "prediction": " 0.8832426987510", "ground_truth": 23}
+{"id": 307, "prediction": " 1.", "ground_truth": 5}
+{"id": 308, "prediction": " -8.", "ground_truth": -10}
+{"id": 309, "prediction": " 0.", "ground_truth": -3}
+{"id": 310, "prediction": " 1.", "ground_truth": 4}
+{"id": 311, "prediction": ": 126\n", "ground_truth": 56}
+{"id": 312, "prediction": " 3.\n", "ground_truth": 23}
+{"id": 313, "prediction": " 6002.\n", "ground_truth": 24}
+{"id": 314, "prediction": " 11.\n", "ground_truth": 2}
+{"id": 315, "prediction": " -2.\n", "ground_truth": 15}
+{"id": 316, "prediction": " -1.", "ground_truth": 34}
+{"id": 317, "prediction": " -1.", "ground_truth": 5}
+{"id": 318, "prediction": ": 1", "ground_truth": -17}
+{"id": 319, "prediction": " 0.", "ground_truth": 0}
+{"id": 320, "prediction": " 0.\n\nPlease compute the exact value of func_629", "ground_truth": 92}
+{"id": 321, "prediction": " -1.", "ground_truth": 10}
+{"id": 322, "prediction": " 16.", "ground_truth": 63}
+{"id": 323, "prediction": ": 16\n\nPlease compute the exact value of func_80", "ground_truth": 34}
+{"id": 324, "prediction": " approximately 130.", "ground_truth": 54}
+{"id": 325, "prediction": " approximately 1.000000000000", "ground_truth": 17}
+{"id": 326, "prediction": " 1696.", "ground_truth": 55}
+{"id": 327, "prediction": " 69.", "ground_truth": 4}
+{"id": 328, "prediction": " 17.\n", "ground_truth": 21}
+{"id": 329, "prediction": " -28645.", "ground_truth": -45}
+{"id": 330, "prediction": ":\n\n0\nfunc_5(8) = 0", "ground_truth": 23}
+{"id": 331, "prediction": ": 0.117897559752", "ground_truth": 4}
+{"id": 332, "prediction": " 1142.", "ground_truth": 14}
+{"id": 333, "prediction": " 49.", "ground_truth": -19}
+{"id": 334, "prediction": " 10.", "ground_truth": 75}
+{"id": 335, "prediction": " approximately -2.\n", "ground_truth": 16}
+{"id": 336, "prediction": " -1.", "ground_truth": 40}
+{"id": 337, "prediction": " 24.", "ground_truth": 14}
+{"id": 338, "prediction": " -3813.", "ground_truth": 41}
+{"id": 339, "prediction": " 109365039.", "ground_truth": 18}
+{"id": 340, "prediction": " 2700.", "ground_truth": -32}
+{"id": 341, "prediction": " 202.05000000000", "ground_truth": 42}
+{"id": 342, "prediction": " -7.\n", "ground_truth": -6}
+{"id": 343, "prediction": " -10.0.\n", "ground_truth": 46}
+{"id": 344, "prediction": " 10.", "ground_truth": 16}
+{"id": 345, "prediction": " 3.\n", "ground_truth": 20}
+{"id": 346, "prediction": " -3411.", "ground_truth": 20}
+{"id": 347, "prediction": " 3320.\nPlease compute the exact value of func_5", "ground_truth": 30}
+{"id": 348, "prediction": " -1.1469590770433", "ground_truth": 38}
+{"id": 349, "prediction": " 17.\n", "ground_truth": -28}
+{"id": 350, "prediction": " 84271.", "ground_truth": 62}
+{"id": 351, "prediction": " 4.\nThe exact value of func_6693(4", "ground_truth": 7}
+{"id": 352, "prediction": " -5.", "ground_truth": 28}
+{"id": 353, "prediction": " 10.\n\n", "ground_truth": 38}
+{"id": 354, "prediction": " 2512.", "ground_truth": -12}
+{"id": 355, "prediction": " 7.", "ground_truth": 45}
+{"id": 356, "prediction": " 3.\nfunc_5483(1) = 3", "ground_truth": 50}
+{"id": 357, "prediction": " 10.\n", "ground_truth": -11}
+{"id": 358, "prediction": " 14.", "ground_truth": 40}
+{"id": 359, "prediction": " approximately -0.435929782466", "ground_truth": 89}
+{"id": 360, "prediction": " 4.1281872781897", "ground_truth": 43}
+{"id": 361, "prediction": " 19.", "ground_truth": 17}
+{"id": 362, "prediction": " -2.", "ground_truth": -1}
+{"id": 363, "prediction": " 1283.", "ground_truth": 42}
+{"id": 364, "prediction": " 10.", "ground_truth": 43}
+{"id": 365, "prediction": " 11.", "ground_truth": 29}
+{"id": 366, "prediction": " 2.\n\nPlease compute the exact value of func_152", "ground_truth": 27}
+{"id": 367, "prediction": " 4333.6843461374", "ground_truth": -17}
+{"id": 368, "prediction": " 6.1142105547109", "ground_truth": -12}
+{"id": 369, "prediction": " 4150.", "ground_truth": 18}
+{"id": 370, "prediction": " 19.", "ground_truth": 12}
+{"id": 371, "prediction": " 1104.\n", "ground_truth": 51}
+{"id": 372, "prediction": " 13.", "ground_truth": 11}
+{"id": 373, "prediction": " 44.", "ground_truth": 22}
+{"id": 374, "prediction": " -9.9999999999999", "ground_truth": -13}
+{"id": 375, "prediction": " 7.", "ground_truth": 24}
+{"id": 376, "prediction": " 0.", "ground_truth": 50}
+{"id": 377, "prediction": " 1009.\n\n\n", "ground_truth": 45}
+{"id": 378, "prediction": " 222.\n\nPlease compute the exact value of func_2", "ground_truth": 17}
+{"id": 379, "prediction": " 12245.", "ground_truth": 37}
+{"id": 380, "prediction": " 0.", "ground_truth": 32}
+{"id": 381, "prediction": " 14.", "ground_truth": -7}
+{"id": 382, "prediction": " 4192.", "ground_truth": 17}
+{"id": 383, "prediction": " 12.\nThe exact value of func_6355(-", "ground_truth": 62}
+{"id": 384, "prediction": " approximately 8.135507730085", "ground_truth": 63}
+{"id": 385, "prediction": " 320.\n\ndef func_459(x):", "ground_truth": -1}
+{"id": 386, "prediction": " 198.\n\n", "ground_truth": 22}
+{"id": 387, "prediction": " 2129.\nPlease compute the exact value of func_7", "ground_truth": -26}
+{"id": 388, "prediction": " 50.", "ground_truth": 28}
+{"id": 389, "prediction": " 676.", "ground_truth": 28}
+{"id": 390, "prediction": " 26.415348789359", "ground_truth": -53}
+{"id": 391, "prediction": " 6134.\n", "ground_truth": 12}
+{"id": 392, "prediction": " 0.\n\n\n", "ground_truth": 12}
+{"id": 393, "prediction": " 3.\n\n# For demonstration purposes, let's define a function", "ground_truth": 88}
+{"id": 394, "prediction": " -1.8808922154843", "ground_truth": -24}
+{"id": 395, "prediction": ": -21543989265668", "ground_truth": 16}
+{"id": 396, "prediction": ":\nfunc_4293(3) = 1", "ground_truth": 21}
+{"id": 397, "prediction": " 67.", "ground_truth": 53}
+{"id": 398, "prediction": " 121.\n", "ground_truth": 21}
+{"id": 399, "prediction": " 11.", "ground_truth": 49}

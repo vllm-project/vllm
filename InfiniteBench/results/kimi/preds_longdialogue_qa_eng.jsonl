@@ -1,0 +1,200 @@
+{"id": 0, "prediction": "Nicky.", "ground_truth": ["ACE", "ACE ROTHSTEIN"], "truncated": false}
+{"id": 1, "prediction": "Nicky.", "ground_truth": ["GAGGI", "Remo", "remo Gaggi"], "truncated": false}
+{"id": 2, "prediction": "HAL 9000.", "ground_truth": ["JIM", "JIM GARRISON", "GARRISON"], "truncated": true}
+{"id": 3, "prediction": "Dr. Heywood Floyd.", "ground_truth": ["BILL", "BILL BROUSSARD", "BROUSSARD"], "truncated": true}
+{"id": 4, "prediction": "Mirabehn.", "ground_truth": ["FARROUHK"], "truncated": false}
+{"id": 5, "prediction": "Vivian.", "ground_truth": ["EDWARD"], "truncated": false}
+{"id": 6, "prediction": "Harry.", "ground_truth": ["HAMMOND"], "truncated": false}
+{"id": 7, "prediction": "Steve.", "ground_truth": ["DAVID", "DAVID WILLS"], "truncated": false}
+{"id": 8, "prediction": "Brad Majors. In the provided script, the character Brad is mentioned multiple times, but his name is replaced with \"\nMASK\" only once.", "ground_truth": ["MICKEY", "Mickey Sachs"], "truncated": false}
+{"id": 9, "prediction": "Tony Montana.", "ground_truth": ["OIL MAN"], "truncated": false}
+{"id": 10, "prediction": "Gina.", "ground_truth": ["TONY", "TONY MONTANA"], "truncated": false}
+{"id": 11, "prediction": "Jim Kurring.", "ground_truth": ["CLAUDIA"], "truncated": false}
+{"id": 12, "prediction": "Hector.", "ground_truth": ["BETSY"], "truncated": false}
+{"id": 13, "prediction": "Hector.", "ground_truth": ["HECTOR"], "truncated": false}
+{"id": 14, "prediction": "Fredo.", "ground_truth": ["CLEMENZA", "Peter Clemenza"], "truncated": false}
+{"id": 15, "prediction": "Kate Libby.", "ground_truth": ["PLAGUE"], "truncated": false}
+{"id": 16, "prediction": "Pi Patel", "ground_truth": ["THE BRIDE"], "truncated": false}
+{"id": 17, "prediction": "Joan.", "ground_truth": ["RAMON"], "truncated": false}
+{"id": 18, "prediction": "Lisa.", "ground_truth": ["LISA", "LISA COHEN"], "truncated": false}
+{"id": 19, "prediction": "Harriet.", "ground_truth": ["KATIE"], "truncated": false}
+{"id": 20, "prediction": "Harry Papadopoulos.", "ground_truth": ["BLOMKVIST", "Mikael Blomkvist"], "truncated": false}
+{"id": 21, "prediction": "Walter.", "ground_truth": ["DOUG", "DOUG BUKOWSKI"], "truncated": true}
+{"id": 22, "prediction": "Glen Dowdy.", "ground_truth": ["SALIERI"], "truncated": false}
+{"id": 23, "prediction": "Glen Dowdy.", "ground_truth": ["JONAH KING"], "truncated": false}
+{"id": 24, "prediction": "Bruce Baldwin.\nIn the given script, the character Bruce Baldwin is mentioned several times, but one instance has been replaced with \"\nMASK\". The dialogue is as follows:\nINT. ANTEROOM CLOSE SHOT BURNS AND HILDY AND OPERATOR Hildy approaches the switchboard.\nOFFICE BOY: What's a seven-letter word for --?\nREPORTER: Don't ask me! If I knew any seven- letter words, I'd be something better than a reporter!\nHildy, a bit embarrassed, looks over at Bruce and sees him looking at her.\nOFFICE BOY: Hey, Skinny. Remember me?\nHildy looks up and recognizes the office boy.\nHildy: Oh, hello, Skinny. Thanks for the help with the crossword puzzle.\nSkinny blushes and smiles.\nOFFICE BOY: Anytime, Hildy.\nHildy turns to Bruce.\nHildy: What do you think, Bruce? Should I go in and talk to Burns?\nBruce: I think you should. You can handle him, Hildy.\nHildy: Thanks for the confidence, \nMASK.\nIn this dialogue, the character \"Bruce\" is replaced with \"\nMASK\" in the line \"Thanks for the confidence, \nMASK.\"", "ground_truth": ["BRUCE", "Bruce Baldwin"], "truncated": false}
+{"id": 25, "prediction": "Bruce Baldwin.", "ground_truth": ["ENDICOTT"], "truncated": false}
+{"id": 26, "prediction": "Bruce Baldwin.", "ground_truth": ["HILDY", "Hildy Johnson"], "truncated": false}
+{"id": 27, "prediction": "Hildy Johnson.", "ground_truth": ["BURNS", "Walter", "Walter BURNS"], "truncated": false}
+{"id": 28, "prediction": "Emmett Sprague. In the text, the character is mentioned in connection with the Sprague family and their involvement in the murder of Elizabeth Short. The name \"Emmett\" is replaced with \"\nMASK\" in the following sentence: \"And I don't think you cared about that. But he's her daddy. And that must have made you crazy. He was a handsome bastard, too. Somehow I don't think he was disfigured in a car wreck.\"", "ground_truth": ["MARTHA"], "truncated": false}
+{"id": 29, "prediction": "Samantha.", "ground_truth": ["MASON"], "truncated": false}
+{"id": 30, "prediction": "Kate.", "ground_truth": ["DAD"], "truncated": false}
+{"id": 31, "prediction": "Brandon.", "ground_truth": ["DR. SANGER", "HENRY SANGER", "DR. HENRY SANGER"], "truncated": false}
+{"id": 32, "prediction": "John Wick.", "ground_truth": ["HUNSECKER"], "truncated": false}
+{"id": 33, "prediction": "John Madden.", "ground_truth": ["PRIMATE PETE", "PETE"], "truncated": false}
+{"id": 34, "prediction": "Primate Elaine.", "ground_truth": ["KELLY"], "truncated": false}
+{"id": 35, "prediction": "Steven Schwimmer.", "ground_truth": ["NICKY"], "truncated": false}
+{"id": 36, "prediction": "Buggin' Out. The dialogue is from the movie \"Do the Right Thing\" and the character Buggin' Out is involved in a conflict with Sal over the lack of Black people represented on the Wall of Fame in Sal's Famous Pizzeria.", "ground_truth": ["DA MAYOR"], "truncated": false}
+{"id": 37, "prediction": "Rick.", "ground_truth": ["DARRYL"], "truncated": false}
+{"id": 38, "prediction": "Rick.", "ground_truth": ["ESTRELLA"], "truncated": false}
+{"id": 39, "prediction": "Shep.", "ground_truth": ["ANNIE", "ANNIE MACLEAN"], "truncated": false}
+{"id": 40, "prediction": "Harry.", "ground_truth": ["INEZ"], "truncated": false}
+{"id": 41, "prediction": "Jim Morrison.", "ground_truth": ["PHIL"], "truncated": false}
+{"id": 42, "prediction": "Melanie Bruwer.", "ground_truth": ["BRUWER", "MELANIE BRUWER"], "truncated": false}
+{"id": 43, "prediction": "Nicki.", "ground_truth": ["CLOETE"], "truncated": false}
+{"id": 44, "prediction": "Tom.", "ground_truth": ["PRIEST"], "truncated": false}
+{"id": 45, "prediction": "Hank.", "ground_truth": ["HEDONIA"], "truncated": false}
+{"id": 46, "prediction": "Josh.", "ground_truth": ["GWEN"], "truncated": false}
+{"id": 47, "prediction": "Samantha.", "ground_truth": ["SAMANTHA"], "truncated": false}
+{"id": 48, "prediction": "Karen.", "ground_truth": ["WARDEN", "MILTON WARDEN"], "truncated": false}
+{"id": 49, "prediction": "Amy Klein.", "ground_truth": ["PINHEAD"], "truncated": false}
+{"id": 50, "prediction": "Mia.", "ground_truth": ["NICOLET", "RAY NICOLET"], "truncated": false}
+{"id": 51, "prediction": "Mia.", "ground_truth": ["JACKIE", "JACKIE BROWN"], "truncated": false}
+{"id": 52, "prediction": "Benedict. In the line \"BENEDICT: (to his Goons) Escort Mr. Ocean to the exit. And contact the police. I would imagine Mr. Ocean is in violation of his parole.\", the character Benedict is likely the one replaced with \nMASK.", "ground_truth": ["RUSTY"], "truncated": false}
+{"id": 53, "prediction": "Tess.", "ground_truth": ["TESS"], "truncated": false}
+{"id": 54, "prediction": "Dewey.", "ground_truth": ["ROY"], "truncated": false}
+{"id": 55, "prediction": "Frank.", "ground_truth": ["QUINCE"], "truncated": false}
+{"id": 56, "prediction": "Drew.", "ground_truth": ["JOE", "JOE Black"], "truncated": false}
+{"id": 57, "prediction": "Drew.", "ground_truth": ["ALLISON"], "truncated": false}
+{"id": 58, "prediction": "Hatsue.", "ground_truth": ["HELEN", "HELEN CHAMBERS"], "truncated": false}
+{"id": 59, "prediction": "Stephen Myers.", "ground_truth": ["MILLS", "David Mills"], "truncated": false}
+{"id": 60, "prediction": "John Doe.", "ground_truth": ["TYRIAN"], "truncated": false}
+{"id": 61, "prediction": "Stephen Myers. In the script, Stephen is the character who interacts with various other characters such as Ida, Molly, Paul, and Governor Morris. He is involved in the political campaign and is eventually promoted to the position of senior campaign advisor.", "ground_truth": ["STEPHEN", "Stephen Meyers"], "truncated": false}
+{"id": 62, "prediction": "Lucien Carr.", "ground_truth": ["BOND", "JAMES BOND"], "truncated": false}
+{"id": 63, "prediction": "Mr. White.", "ground_truth": ["HARMSWAY", "ELLIOT HARMSWAY"], "truncated": false}
+{"id": 64, "prediction": "Mr. White.", "ground_truth": ["MR. PINK"], "truncated": false}
+{"id": 65, "prediction": "Butch.", "ground_truth": ["NICOLE"], "truncated": false}
+{"id": 66, "prediction": "Beth.", "ground_truth": ["ALISON", "Ally Jones", "Ally"], "truncated": false}
+{"id": 67, "prediction": "Sid.", "ground_truth": ["CAROL"], "truncated": false}
+{"id": 68, "prediction": "Charles Foster Kane.", "ground_truth": ["ANN", "ANN BISHOP MILLANEY"], "truncated": false}
+{"id": 69, "prediction": "Fred.", "ground_truth": ["LELAND"], "truncated": false}
+{"id": 70, "prediction": "Charles Foster Kane.", "ground_truth": ["HARVEY", "HARVEY PEKAR"], "truncated": false}
+{"id": 71, "prediction": "Jay.", "ground_truth": ["BILLY"], "truncated": false}
+{"id": 72, "prediction": "John Henry.", "ground_truth": ["CLAUDIA", "CLAUDIA JENSSEN,"], "truncated": false}
+{"id": 73, "prediction": "John Henry.", "ground_truth": ["KAY"], "truncated": false}
+{"id": 74, "prediction": "Beavis.", "ground_truth": ["DAVE"], "truncated": false}
+{"id": 75, "prediction": "Thorwald.", "ground_truth": ["LISA"], "truncated": false}
+{"id": 76, "prediction": "Nora.", "ground_truth": ["QUAIL", "Douglas Quail"], "truncated": false}
+{"id": 77, "prediction": "Principal Ganus.", "ground_truth": ["SAM", "SAM PICKLES"], "truncated": false}
+{"id": 78, "prediction": "Jack Goodman.", "ground_truth": ["JOHNNY", "JOHNNY FOOTE"], "truncated": false}
+{"id": 79, "prediction": "Matt.", "ground_truth": ["CHARLOTTE", "CHARLOTTE BOUDREAU CANTELLE PHELAN"], "truncated": false}
+{"id": 80, "prediction": "David.", "ground_truth": ["ELIZABETH", "ELIZABETH LEEFOLT"], "truncated": false}
+{"id": 81, "prediction": "Sean Parker.", "ground_truth": ["BUDDY"], "truncated": false}
+{"id": 82, "prediction": "Sean Parker.", "ground_truth": ["AUSTIN", "AUSTIN POWERS"], "truncated": false}
+{"id": 83, "prediction": "Sean Parker.", "ground_truth": ["EDUARDO", "EDUARDO SAVERIN"], "truncated": false}
+{"id": 84, "prediction": "Jennifer.", "ground_truth": ["JENNIFER", "JENNIFER HILLS"], "truncated": true}
+{"id": 85, "prediction": "Vicki Vale.", "ground_truth": ["JOHNNY"], "truncated": true}
+{"id": 86, "prediction": "Jim.", "ground_truth": ["SAMUEL"], "truncated": false}
+{"id": 87, "prediction": "Tom.", "ground_truth": ["MOTTI", "Admiral Motti"], "truncated": false}
+{"id": 88, "prediction": "Stu.", "ground_truth": ["STU", "STUART SHEPARD"], "truncated": false}
+{"id": 89, "prediction": "Kirsty.", "ground_truth": ["MAURICE"], "truncated": false}
+{"id": 90, "prediction": "Su.", "ground_truth": ["BESTLER", "HEINRICH BESTLER"], "truncated": false}
+{"id": 91, "prediction": "Bobby.", "ground_truth": ["HELMUT", "HELMUT DORQUE"], "truncated": false}
+{"id": 92, "prediction": "Su.", "ground_truth": ["FAIT", "TONY FAIT"], "truncated": false}
+{"id": 93, "prediction": "Dobrynin.", "ground_truth": ["ECKER", "COMMANDER BILL ECKER"], "truncated": false}
+{"id": 94, "prediction": "Alain Charnier.", "ground_truth": ["DAVY JONES"], "truncated": false}
+{"id": 95, "prediction": "Will Turner.\nIn this dialogue script, Will Turner's name is mentioned multiple times, but one instance has been replaced with \"\nMASK\". The line reads:\nWILL TURNER: I've doomed us all. It's the Flying \nMASK!\nGiven the context and the flow of the dialogue, it is likely that the character being referred to here is Will Turner.", "ground_truth": ["BOBBY", "Bobby Kennedy"], "truncated": false}
+{"id": 96, "prediction": "Julian.", "ground_truth": ["PAUL", "PAUL D. GARNER", "Paul D."], "truncated": false}
+{"id": 97, "prediction": "Stamp Paid.", "ground_truth": ["STAMP PAID"], "truncated": false}
+{"id": 98, "prediction": "Sethe.", "ground_truth": ["BABY SUGGS"], "truncated": false}
+{"id": 99, "prediction": "Julian.", "ground_truth": ["DENVER"], "truncated": false}
+{"id": 100, "prediction": "Karen Sisco.", "ground_truth": ["ZED"], "truncated": false}
+{"id": 101, "prediction": "Irene.", "ground_truth": ["ISABELLA", "ISABELLA MOLINA"], "truncated": false}
+{"id": 102, "prediction": "Watson", "ground_truth": ["CARTER"], "truncated": false}
+{"id": 103, "prediction": "Richie Dimaso.", "ground_truth": ["PETE MUSANE"], "truncated": true}
+{"id": 104, "prediction": "Dave Blase.", "ground_truth": ["DAVE"], "truncated": true}
+{"id": 105, "prediction": "Joel.\nIn the given script, the character Joel is mentioned several times, but one instance has been replaced with \"\nMASK\". The line reads:\n\"Joel: I can't believe my wife slept with that guy.\"\nReplacing \"\nMASK\" with \"Joel\", the line should be:\n\"Joel: I can't believe my wife slept with that guy.\"", "ground_truth": ["JOEL", "JOEL REYNOLDS"], "truncated": true}
+{"id": 106, "prediction": "Judge White. In this script, Judge White is the character who speaks about justice, decency, and the law. He also interacts with Sherman McCoy and helps him navigate the chaos in the courtroom.", "ground_truth": ["WEISS"], "truncated": false}
+{"id": 107, "prediction": "Jim.", "ground_truth": ["SHERMAN", "Sherman McCoy"], "truncated": false}
+{"id": 108, "prediction": "Judge White.", "ground_truth": ["LUIS"], "truncated": false}
+{"id": 109, "prediction": "Paul.", "ground_truth": ["PETER", "Peter Fallow"], "truncated": false}
+{"id": 110, "prediction": "Bret.", "ground_truth": ["MISSION CONTROL"], "truncated": false}
+{"id": 111, "prediction": "Oliver.", "ground_truth": ["OLIVER", "OLIVER FIELDS"], "truncated": false}
+{"id": 112, "prediction": "Astrid.", "ground_truth": ["COACH"], "truncated": false}
+{"id": 113, "prediction": "Jill.", "ground_truth": ["SAM", "SAM LOWRY"], "truncated": false}
+{"id": 114, "prediction": "Melanie.", "ground_truth": ["LOU"], "truncated": false}
+{"id": 115, "prediction": "Denis.", "ground_truth": ["STEVE CARELL"], "truncated": false}
+{"id": 116, "prediction": "Karen.", "ground_truth": ["KAREN", "KAREN RICHARDS"], "truncated": false}
+{"id": 117, "prediction": "Marty.", "ground_truth": ["CINDY", "CINDY PERIERA"], "truncated": false}
+{"id": 118, "prediction": "Roy Ostrey.", "ground_truth": ["GLADYS", "GLADYS LEEMAN"], "truncated": false}
+{"id": 119, "prediction": "Dean Armitage.", "ground_truth": ["MR. JOHNSON"], "truncated": false}
+{"id": 120, "prediction": "Kezure.", "ground_truth": ["LINNEA"], "truncated": false}
+{"id": 121, "prediction": "Mike.", "ground_truth": ["BASQUIAT", "JEAN MICHEL BASQUIAT"], "truncated": false}
+{"id": 122, "prediction": "Mike.", "ground_truth": ["SECURITY CHIEF"], "truncated": false}
+{"id": 123, "prediction": "Mike.", "ground_truth": ["CHRISTY"], "truncated": false}
+{"id": 124, "prediction": "Billy.", "ground_truth": ["WALTER", "WALTER VALE"], "truncated": false}
+{"id": 125, "prediction": "Adam.", "ground_truth": ["REGGIE"], "truncated": false}
+{"id": 126, "prediction": "Malee.", "ground_truth": ["LEONARD", "LEONARD FISHER"], "truncated": false}
+{"id": 127, "prediction": "Shelly.", "ground_truth": ["TYLER", "Tyler Durden"], "truncated": false}
+{"id": 128, "prediction": "Jackie.", "ground_truth": ["BIALYSTOCK"], "truncated": false}
+{"id": 129, "prediction": "Bloom.", "ground_truth": ["BLOOM", "LEO BLOOM"], "truncated": false}
+{"id": 130, "prediction": "Jackie", "ground_truth": ["RACHEL", "RACHEL KELLY"], "truncated": false}
+{"id": 131, "prediction": "Leo Bloom.", "ground_truth": ["JUNO"], "truncated": false}
+{"id": 132, "prediction": "Riddick.", "ground_truth": ["D'ARTAGNAN"], "truncated": false}
+{"id": 133, "prediction": "d'Artagnan.", "ground_truth": ["LOUIS", "King Louis XIII", "Louis XIII"], "truncated": false}
+{"id": 134, "prediction": "John Bridger.", "ground_truth": ["FRY", "CAROLYN FRY"], "truncated": false}
+{"id": 135, "prediction": "Constance.", "ground_truth": ["FIRST CAVALIER"], "truncated": false}
+{"id": 136, "prediction": "Mortimer.", "ground_truth": ["TITO"], "truncated": false}
+{"id": 137, "prediction": "Chad Palomino.", "ground_truth": ["NICK"], "truncated": false}
+{"id": 138, "prediction": "", "ground_truth": ["WILLIAM"]}
+{"id": 139, "prediction": "Rob.", "ground_truth": ["KIT"], "truncated": false}
+{"id": 140, "prediction": "Slim.", "ground_truth": ["BETTY"], "truncated": false}
+{"id": 141, "prediction": "Prince Philip.", "ground_truth": ["ADRIAN"], "truncated": false}
+{"id": 142, "prediction": "Nicky.", "ground_truth": ["ANGEL"], "truncated": false}
+{"id": 143, "prediction": "Robin Janvrin.", "ground_truth": ["DAN RATHER"], "truncated": false}
+{"id": 144, "prediction": "Dmitri.", "ground_truth": ["QUOYLE"], "truncated": false}
+{"id": 145, "prediction": "Quoyle.", "ground_truth": ["DMITRI"], "truncated": false}
+{"id": 146, "prediction": "Hannibal Lecter.", "ground_truth": ["STARLING", "CLARICE STARLING"], "truncated": true}
+{"id": 147, "prediction": "Cowboy.", "ground_truth": ["BARNEY"], "truncated": true}
+{"id": 148, "prediction": "Cameron.", "ground_truth": ["EVERETT"], "truncated": false}
+{"id": 149, "prediction": "Tom.", "ground_truth": ["BERLIN", "JOHN BERLIN", "JOHN"], "truncated": false}
+{"id": 150, "prediction": "Tom.", "ground_truth": ["SUMMER"], "truncated": false}
+{"id": 151, "prediction": "Honey Whitlock.", "ground_truth": ["MAYA"], "truncated": false}
+{"id": 152, "prediction": "Mace.", "ground_truth": ["PANES", "LEVI PANES"], "truncated": false}
+{"id": 153, "prediction": "Frank Lucas.", "ground_truth": ["RIEDENSCHNEIDER", "Freddy Riedenschneider"], "truncated": false}
+{"id": 154, "prediction": "Frank Lucas.", "ground_truth": ["FRANK"], "truncated": false}
+{"id": 155, "prediction": "Miles.", "ground_truth": ["ALI", "Ali Van Versh"], "truncated": false}
+{"id": 156, "prediction": "Miles Massey.", "ground_truth": ["SUGE", "SUGE KNIGHT"], "truncated": false}
+{"id": 157, "prediction": "Burnham. In the provided script, Burnham is the character whose name appears most frequently and seems to be involved in the main plot. The other characters mentioned, such as Raoul, Meg, and Sarah, have fewer instances of their names in the text.", "ground_truth": ["RAOUL"], "truncated": false}
+{"id": 158, "prediction": "Steve.\nIn this part of the script, Steve is having a conversation with Jean and Karen, and his name is replaced with \"\nMASK\". Here is the excerpt:\nSTEVE: (CONT'D) You know how it is when you throw a fit about going to the store with your dad... Hey, look at me. (Jean does) And you were so distraught over the start time of your Grandpa's funeral. Was this your concern? Getting back here in time to watch Phantom of the F$$ing Opera?\nJEAN: I guess.\nBARBARA: For God's sake, you can get it at any Blockbuster.\nJEAN: They're showing it with the scene in color restored.\nSTEVE: Hook you up, later.\nFrom the context, it is clear that the character \"Steve\" is the one whose name has been replaced with \"\nMASK\".", "ground_truth": ["PETER", "Peter Vincent"], "truncated": false}
+{"id": 159, "prediction": "Jerry.", "ground_truth": ["JEAN"], "truncated": false}
+{"id": 160, "prediction": "Mark Schultz.", "ground_truth": ["WYATT", "Wyatt Earp"], "truncated": false}
+{"id": 161, "prediction": "Josephine.", "ground_truth": ["MATTIE"], "truncated": false}
+{"id": 162, "prediction": "Brendan Grant.", "ground_truth": ["AUFIDIUS", "TULLUS AUFIDIUS"], "truncated": false}
+{"id": 163, "prediction": "Gene Watson.", "ground_truth": ["JO"], "truncated": false}
+{"id": 164, "prediction": "Dr. Mason.", "ground_truth": ["KAFKA"], "truncated": false}
+{"id": 165, "prediction": "Harry.", "ground_truth": ["HARRY", "HARRY TASKER"], "truncated": false}
+{"id": 166, "prediction": "Elaine.", "ground_truth": ["SONNY", "SONNY CORLEONE"], "truncated": false}
+{"id": 167, "prediction": "Elaine.", "ground_truth": ["DON CORLEONE"], "truncated": false}
+{"id": 168, "prediction": "Abby.", "ground_truth": ["ABBY"], "truncated": false}
+{"id": 169, "prediction": "Trent.", "ground_truth": ["FLEURY"], "truncated": false}
+{"id": 170, "prediction": "Sarah.", "ground_truth": ["TEN BEARS"], "truncated": false}
+{"id": 171, "prediction": "Kate.", "ground_truth": ["KATE"], "truncated": false}
+{"id": 172, "prediction": "Karla. In the script, Karla is often mentioned alongside Julie, Tyrell, and Will, and she is involved in the events and conversations with these characters.", "ground_truth": ["TYRELL", "TYRELL MARTIN"], "truncated": true}
+{"id": 173, "prediction": "Will Benson.", "ground_truth": ["BOBBY GREEN"], "truncated": true}
+{"id": 174, "prediction": "Joe.", "ground_truth": ["ROSARIO DIAZ"], "truncated": true}
+{"id": 175, "prediction": "Austin Powers.", "ground_truth": ["LEON", "Count Leon d'Algout"], "truncated": false}
+{"id": 176, "prediction": "Ed Wood.", "ground_truth": ["ED"], "truncated": false}
+{"id": 177, "prediction": "Garrett.", "ground_truth": ["GARRETT"], "truncated": false}
+{"id": 178, "prediction": "Gavin Taylor.", "ground_truth": ["CHARLIE", "CHARLIE MacCORRY"], "truncated": false}
+{"id": 179, "prediction": "Adam.", "ground_truth": ["DYSON", "MILES DYSON"], "truncated": false}
+{"id": 180, "prediction": "Mark Whitacre.", "ground_truth": ["VOSEN", "NOAH VOSEN"], "truncated": false}
+{"id": 181, "prediction": "Nicky.", "ground_truth": ["MILLER"], "truncated": false}
+{"id": 182, "prediction": "Judit.", "ground_truth": ["ETHAN", "ETHAN HUNT"], "truncated": true}
+{"id": 183, "prediction": "Bart.", "ground_truth": ["SERENDIPITY"], "truncated": false}
+{"id": 184, "prediction": "Dan.", "ground_truth": ["ELAINE"], "truncated": false}
+{"id": 185, "prediction": "Vincent.", "ground_truth": ["LOOMIS", "SAMUEL J. LOOMIS"], "truncated": false}
+{"id": 186, "prediction": "Starla.", "ground_truth": ["OLIVE"], "truncated": true}
+{"id": 187, "prediction": "Truman Capote.", "ground_truth": ["FRANK", "Frank Baker"], "truncated": false}
+{"id": 188, "prediction": "Steve Trevor.", "ground_truth": ["TAUPIN", "RICHARD TAUPIN"], "truncated": false}
+{"id": 189, "prediction": "Mike.", "ground_truth": ["GENERAL HAIG"], "truncated": false}
+{"id": 190, "prediction": "Captain Mancuso.", "ground_truth": ["MILTON", "JOHN MILTON"], "truncated": false}
+{"id": 191, "prediction": "Tony.", "ground_truth": ["LEONOR"], "truncated": false}
+{"id": 192, "prediction": "Laura.", "ground_truth": ["NEFF"], "truncated": false}
+{"id": 193, "prediction": "Black Hat.", "ground_truth": ["BECK"], "truncated": true}
+{"id": 194, "prediction": "Joan.", "ground_truth": ["CATHERINE", "Catherine Tramell"], "truncated": false}
+{"id": 195, "prediction": "Joan.", "ground_truth": ["JOAN"], "truncated": false}
+{"id": 196, "prediction": "Hallie.", "ground_truth": ["HANNA"], "truncated": false}
+{"id": 197, "prediction": "Isabella.", "ground_truth": ["NEIL"], "truncated": false}
+{"id": 198, "prediction": "Debbie Salt.", "ground_truth": ["BREEDAN"], "truncated": false}
+{"id": 199, "prediction": "Sophina.", "ground_truth": ["THE GANG"], "truncated": false}

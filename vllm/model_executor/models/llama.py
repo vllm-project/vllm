@@ -129,7 +129,7 @@ class LlamaAttention(nn.Module):
         # Sparse attention parameters
         # self.sp_threshold = sp_threshold
         self.sp_threshold = 0.625
-        self.topk = int(self.sp_threshold * self.total_num_heads)
+        self.topk = int(self.sp_threshold * self.num_heads)
         # print(f' Attention sparse activation: {self.sp_threshold}')
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
@@ -222,7 +222,7 @@ class LlamaAttention(nn.Module):
 
         if is_decode and self.sp_threshold < 1:
             batch_size = attn_output.shape[0]
-            attn_out_sparse = attn_output.view(batch_size, self.total_num_heads, self.head_dim) # shape(batch_size, num_heads, head_dim)
+            attn_out_sparse = attn_output.view(batch_size, self.num_heads, self.head_dim) # shape(batch_size, num_heads, head_dim)
             # print('attn_out_sparse.shape', attn_out_sparse.shape) if self.layer_idx == 0 else None
             
             norms = attn_out_sparse.norm(dim=-1)  # Shape: (batch_size, num_heads)
@@ -233,7 +233,8 @@ class LlamaAttention(nn.Module):
             # print('mask.shape', mask.shape) if self.layer_idx == 0 else None
 
             attn_out_sparse = attn_out_sparse * mask
-            attn_output = attn_out_sparse.view(batch_size, self.total_num_heads * self.head_dim)
+            attn_output = attn_out_sparse.view(batch_size, self.num_heads * self.head_dim)
+            # attn_output = attn_out_sparse.view(-1, self.hidden_size)
             # print('Sparse attention applied.') if self.layer_idx == 0 else None
 
 
@@ -569,7 +570,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                       prefix=maybe_prefix(prefix, "model"),
                                       layer_type=layer_type,
                                       sp_threshold=self.sp_threshold)
-
+        # print(f"Model initialized : {self.model}")
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:

@@ -1,0 +1,9 @@
+openai
+tiktoken
+rouge
+torch
+transformers
+accelerate
+evaluate
+xopen
+python-dotenv

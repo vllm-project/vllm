@@ -7,7 +7,7 @@ if __name__ == "__main__":
         tokenizer_mode="auto",
         trust_remote_code=True,
         dtype="bfloat16",
-        tensor_parallel_size=1,
+        tensor_parallel_size=2,
         enforce_eager=True,
     )
 

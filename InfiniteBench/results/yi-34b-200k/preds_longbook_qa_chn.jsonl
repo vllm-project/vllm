@@ -1,0 +1,189 @@
+{"id": 0, "prediction": "福", "ground_truth": ["田立帆, 商老太, 王剑英, 王剑杰, 福气龙, 慕容景岳, 薛鹊"]}
+{"id": 1, "prediction": "商老", "ground_truth": ["胡一刀, 马行空, 商老太, 徐峥, 程紫洁"]}
+{"id": 2, "prediction": "小说", "ground_truth": ["2", "两个", "二"]}
+{"id": 3, "prediction": "少", "ground_truth": ["袁雨琳, 万鹤声"]}
+{"id": 4, "prediction": "徐", "ground_truth": ["零", "徐峥没有亲生孩子", "无"]}
+{"id": 5, "prediction": "圆性", "ground_truth": ["邯郸府昆仑刀, 彰德府天罡剑, 保定府哪吒拳, 少林韦陀门, 八极拳, 八卦门, 鹰爪雁行门, 广西八仙剑, 湖南易家湾九龙鞭"]}
+{"id": 6, "prediction": "胡", "ground_truth": ["凤天南, 胡一统, 袁雨琳, 程紫洁"]}
+{"id": 7, "prediction": "袁", "ground_truth": ["湘妃神祠", "湘妃庙"]}
+{"id": 8, "prediction": "曹植的大哥逼她嫁给姜家的人。", "ground_truth": ["姜家残疾的二少爷", "姜家二少爷"]}
+{"id": 9, "prediction": "曹植是曹家的第二个奶奶。", "ground_truth": ["二", "2", "第二个"]}
+{"id": 10, "prediction": "曹植的女儿叫子头。", "ground_truth": ["子头"]}
+{"id": 11, "prediction": "曹植让子头穿着打扮像电影里的人物，在街上走的时候", "ground_truth": ["裹脚"]}
+{"id": 12, "prediction": "曹植家里是开麻油店的。", "ground_truth": ["开麻油店"]}
+{"id": 13, "prediction": "子头和童安格之间有着爱情。", "ground_truth": ["安格", "童安格"]}
+{"id": 14, "prediction": "最后也吸食大烟。", "ground_truth": ["是", "有"]}
+{"id": 15, "prediction": "没有。所有章节中都提到了人物的名字或外号。", "ground_truth": ["绝盗"]}
+{"id": 16, "prediction": "主要角色的外号是他们爸爸取的。", "ground_truth": ["青云楼主"]}
+{"id": 17, "prediction": "第二章“苏七块”、第五章“死鸟”、第七", "ground_truth": ["刷子李, 背头杨, 蔡二少爷, 粘土张, 大回, 杨巴, 冯五爷, 张立凯, 苏七块"]}
+{"id": 18, "prediction": "贺远帆曾经出国。", "ground_truth": ["青云楼主"]}
+{"id": 19, "prediction": "《刘英道活出殡》的主角最后死了。", "ground_truth": ["大回"]}
+{"id": 20, "prediction": "这个文章总共有16个小说。", "ground_truth": ["18", "十八"]}
+{"id": 21, "prediction": "刘英道第二次生气是因为他发现平日与他“称兄道弟”", "ground_truth": ["邻居", "乔二龙", "狗子", "卖开水的乔二龙", "卖开水的"]}
+{"id": 22, "prediction": "孙", "ground_truth": ["孙江涛", "孙兰香", "孙兰花"]}
+{"id": 23, "prediction": "孙", "ground_truth": ["售货员, 烧窑工人"]}
+{"id": 24, "prediction": "孙", "ground_truth": ["双水村, 阳沟村"]}
+{"id": 25, "prediction": "最后死亡的是苦根。", "ground_truth": ["苦根"]}
+{"id": 26, "prediction": "昱洁比晓明大五岁。", "ground_truth": ["四岁", "4岁", "4-5岁", "四、五岁"]}
+{"id": 27, "prediction": "贫困的母亲, 昱洁, 田垄, 苦根。", "ground_truth": ["贫困的母亲和田垄"]}
+{"id": 28, "prediction": "昱洁是在十二岁时变成哑巴的。", "ground_truth": ["六、七岁", "6-7岁"]}
+{"id": 29, "prediction": "小说里主要是说忠武和玉太尊这两个官吏酷行暴", "ground_truth": ["忠武和华东"]}
+{"id": 30, "prediction": "她们原都是良家女子，伟娜因家道中落沦为", "ground_truth": ["妓女"]}
+{"id": 31, "prediction": "玉", "ground_truth": ["金宜斌的三嫂玉芬", "玉芬"]}
+{"id": 32, "prediction": "金", "ground_truth": ["国务总理", "金龙翔", "国务总理金龙翔"]}
+{"id": 33, "prediction": "小", "ground_truth": ["佣人", "丫环"]}
+{"id": 34, "prediction": "金", "ground_truth": ["大哥金凤举, 二哥金鹤荪, 三哥金鹏振, 四姐金道之, 五姐金敏之, 六姐金润之", "金凤举, 金鹤荪, 金鹏振, 金道之, 金敏之, 金润之", "凤举, 鹤荪, 鹏振, 道之, 敏之, 润之"]}
+{"id": 35, "prediction": "戚", "ground_truth": ["豪门"]}
+{"id": 36, "prediction": "狄仁杰被万重山和万龙飞陷害入狱。", "ground_truth": ["万龙飞和万重山"]}
+{"id": 37, "prediction": "师妹戚芳嫁给了万家独子万重山。", "ground_truth": ["万重山"]}
+{"id": 38, "prediction": "是他爸爸救了他。", "ground_truth": ["丁丹峰"]}
+{"id": 39, "prediction": "戚长发是第二个死去的。", "ground_truth": ["万飞龙"]}
+{"id": 40, "prediction": "狄仁杰的复仇计划并未亲自动手，而是通过逼迫万龙", "ground_truth": ["否", "不是"]}
+{"id": 41, "prediction": "有两个", "ground_truth": ["2", "两个", "俩"]}
+{"id": 42, "prediction": "萧", "ground_truth": ["倩蓉, 彤馨"]}
+{"id": 43, "prediction": "第一次", "ground_truth": ["2", "第二次", "第2次"]}
+{"id": 44, "prediction": "慕", "ground_truth": ["虎头人长老, 狮头人长老, 熊头人长老"]}
+{"id": 45, "prediction": "最后是他爸爸和他爸爸在一起了。", "ground_truth": ["胡一统"]}
+{"id": 46, "prediction": "江湖人称镇国大将军。", "ground_truth": ["镇国大将军"]}
+{"id": 47, "prediction": "胡一统是胡翠山的儿子。", "ground_truth": ["父子", "胡翠山是胡一统的父亲", "胡一统是胡翠山的儿子"]}
+{"id": 48, "prediction": "胡翠山是第二个去世的。", "ground_truth": ["胡翠山"]}
+{"id": 49, "prediction": "李自成是在九宫山假死。", "ground_truth": ["九宫山"]}
+{"id": 50, "prediction": "李自成在逃脱九宫山之围后不久去世。胡", "ground_truth": ["李自成, 胡翠山, 胡夫人, 苗侨伟"]}
+{"id": 51, "prediction": "苗欣欣是苗侨伟的女儿。", "ground_truth": ["苗侨伟和南兰"]}
+{"id": 52, "prediction": "石", "ground_truth": ["第十一回", "十一", "11"]}
+{"id": 53, "prediction": "在", "ground_truth": ["飞鱼帮和铁叉会"]}
+{"id": 54, "prediction": "共有", "ground_truth": ["一个", "一", "1"]}
+{"id": 55, "prediction": "书中", "ground_truth": ["龙跷, 虎跷, 鹿卢跷"]}
+{"id": 56, "prediction": "丁", "ground_truth": ["十五", "第十五回", "15"]}
+{"id": 57, "prediction": "《", "ground_truth": ["一百四十一", "一百四十一种", "141"]}
+{"id": 58, "prediction": "在", "ground_truth": ["两个", "二", "两", "2"]}
+{"id": 59, "prediction": "从", "ground_truth": ["一百一十五日", "一百一十五", "115"]}
+{"id": 60, "prediction": "陈", "ground_truth": ["三", "第三子", "3"]}
+{"id": 61, "prediction": "担任", "ground_truth": ["于新颖", "陈晋毅"]}
+{"id": 62, "prediction": "陈", "ground_truth": ["25", "二十五"]}
+{"id": 63, "prediction": "陈", "ground_truth": ["15", "十五"]}
+{"id": 64, "prediction": "陈", "ground_truth": ["1", "一"]}
+{"id": 65, "prediction": "陈", "ground_truth": ["18", "十八"]}
+{"id": 66, "prediction": "袁", "ground_truth": ["李自成"]}
+{"id": 67, "prediction": "夏", "ground_truth": ["夏冯聪"]}
+{"id": 68, "prediction": "袁", "ground_truth": ["金蛇郎君夏超涛", "夏超涛", "金蛇郎君"]}
+{"id": 69, "prediction": "小", "ground_truth": ["何新蕾", "齐云璈"]}
+{"id": 70, "prediction": "冯", "ground_truth": ["夫妻", "情侣", "冯聪是袁国洋的妻子", "袁国洋是冯聪的老公"]}
+{"id": 71, "prediction": "袁", "ground_truth": ["梅英道人 "]}
+{"id": 72, "prediction": "排行", "ground_truth": ["温方山"]}
+{"id": 73, "prediction": "沐", "ground_truth": ["封棋, 林染, 沐晴, 张道文, 小幽"]}
+{"id": 74, "prediction": "五大", "ground_truth": ["星城, 未来城, 凛冬城, 胜利城, 旧日城"]}
+{"id": 75, "prediction": "在这", "ground_truth": ["封棋"]}
+{"id": 76, "prediction": "文中", "ground_truth": ["五", "5"]}
+{"id": 77, "prediction": "他的", "ground_truth": ["贾易"]}
+{"id": 78, "prediction": "书", "ground_truth": ["沐晴"]}
+{"id": 79, "prediction": "故事", "ground_truth": ["否"]}
+{"id": 80, "prediction": "路", "ground_truth": ["路明非", "明非"]}
+{"id": 81, "prediction": "书", "ground_truth": ["18", "十八"]}
+{"id": 82, "prediction": "剧中", "ground_truth": ["2", "两", "二"]}
+{"id": 83, "prediction": "《", "ground_truth": ["《山海经》"]}
+{"id": 84, "prediction": "陈", "ground_truth": ["陈南"]}
+{"id": 85, "prediction": "陈", "ground_truth": ["父子", "陈金河是陈南的父亲", "陈南是陈金河的儿子"]}
+{"id": 86, "prediction": "原文", "ground_truth": ["4", "四", "四个", "4个"]}
+{"id": 87, "prediction": "李", "ground_truth": ["江琴"]}
+{"id": 88, "prediction": "《", "ground_truth": ["《新年回家》"]}
+{"id": 89, "prediction": "C", "ground_truth": ["C. 导演与演员"]}
+{"id": 90, "prediction": "钱", "ground_truth": ["郑小婉, 钱宸, 田景昊"]}
+{"id": 91, "prediction": "秉", "ground_truth": ["2", "两", "二"]}
+{"id": 92, "prediction": "风", "ground_truth": ["1", "一"]}
+{"id": 93, "prediction": "青", "ground_truth": ["青龙"]}
+{"id": 94, "prediction": "风", "ground_truth": ["4", "四", "四个", "4个"]}
+{"id": 95, "prediction": "《", "ground_truth": ["《青帝长生诀》"]}
+{"id": 96, "prediction": "云", "ground_truth": ["素素"]}
+{"id": 97, "prediction": "云", "ground_truth": ["没有"]}
+{"id": 98, "prediction": "陈", "ground_truth": ["林星语, 林夜星"]}
+{"id": 99, "prediction": "《", "ground_truth": ["《无限》"]}
+{"id": 100, "prediction": "至少有", "ground_truth": ["3", "三"]}
+{"id": 101, "prediction": "根据", "ground_truth": ["5", "五"]}
+{"id": 102, "prediction": "李", "ground_truth": ["不是"]}
+{"id": 103, "prediction": "9", "ground_truth": ["70等级"]}
+{"id": 104, "prediction": "至少", "ground_truth": ["4", "四", "四个", "4个"]}
+{"id": 105, "prediction": "元", "ground_truth": ["灵宝天尊"]}
+{"id": 106, "prediction": "一共", "ground_truth": ["一", "1"]}
+{"id": 107, "prediction": "太", "ground_truth": ["太山"]}
+{"id": 108, "prediction": "总", "ground_truth": ["9", "九"]}
+{"id": 109, "prediction": "《", "ground_truth": ["《北游记》"]}
+{"id": 110, "prediction": "法", "ground_truth": ["卡希尔"]}
+{"id": 111, "prediction": "米尔", "ground_truth": ["米尔顿"]}
+{"id": 112, "prediction": "李", "ground_truth": ["0", "零", "无", "没有"]}
+{"id": 113, "prediction": "李", "ground_truth": ["门将"]}
+{"id": 114, "prediction": "《", "ground_truth": ["《经济通论》"]}
+{"id": 115, "prediction": "李", "ground_truth": ["李波罗", "波罗"]}
+{"id": 116, "prediction": "李", "ground_truth": ["李芷莹"]}
+{"id": 117, "prediction": "李", "ground_truth": ["黄灵"]}
+{"id": 118, "prediction": "小", "ground_truth": ["刘佳艳"]}
+{"id": 119, "prediction": "陈", "ground_truth": ["刘佳艳"]}
+{"id": 120, "prediction": "《", "ground_truth": ["《人民法律制度》"]}
+{"id": 121, "prediction": "刘", "ground_truth": ["秦海陆"]}
+{"id": 122, "prediction": "公司", "ground_truth": ["十万"]}
+{"id": 123, "prediction": "第二个", "ground_truth": ["花红"]}
+{"id": 124, "prediction": "长", "ground_truth": ["毛南生"]}
+{"id": 125, "prediction": "淑", "ground_truth": ["木屋", "临时驻地", "临时驻地的木屋"]}
+{"id": 126, "prediction": "“", "ground_truth": ["992", "九百九十二", "992次", "九百九十二次"]}
+{"id": 127, "prediction": "是", "ground_truth": ["陆绊"]}
+{"id": 128, "prediction": "在", "ground_truth": ["希雅和老宋"]}
+{"id": 129, "prediction": "陆", "ground_truth": ["4", "4次", "四", "四次"]}
+{"id": 130, "prediction": "有", "ground_truth": ["陈默, 琼斯, 老琼斯和兄弟会的守护者们"]}
+{"id": 131, "prediction": "是他", "ground_truth": ["陈默和吉尔"]}
+{"id": 132, "prediction": "陈", "ground_truth": ["他自称来自另一个宇宙的克拉克·肯特"]}
+{"id": 133, "prediction": "", "ground_truth": ["清夫人", "太平洋海盗王", "太平洋海盗王清夫人"]}
+{"id": 134, "prediction": "安", "ground_truth": ["宇宙号战舰, 宏伟号战舰"]}
+{"id": 135, "prediction": "《", "ground_truth": ["《情书》"]}
+{"id": 136, "prediction": "木", "ground_truth": ["喝醉"]}
+{"id": 137, "prediction": "中", "ground_truth": ["情侣"]}
+{"id": 138, "prediction": "是", "ground_truth": ["1", "一"]}
+{"id": 139, "prediction": "可能有", "ground_truth": ["3", "三", "深田勇也, 中森明菜, 岩井俊二"]}
+{"id": 140, "prediction": "中", "ground_truth": ["表达了夫妻关系和前世轮回的信息"]}
+{"id": 141, "prediction": "木", "ground_truth": ["1", "一", "1个", "一个"]}
+{"id": 142, "prediction": "《", "ground_truth": ["《如果明天》"]}
+{"id": 143, "prediction": "唐", "ground_truth": ["8000元素币", "八千元素币"]}
+{"id": 144, "prediction": "唐", "ground_truth": ["小舞"]}
+{"id": 145, "prediction": "成", "ground_truth": ["登临劫, 天地劫, 踏皇登天"]}
+{"id": 146, "prediction": "苏宁", "ground_truth": ["1次", "1", "一"]}
+{"id": 147, "prediction": "夜", "ground_truth": ["许素梅"]}
+{"id": 148, "prediction": "小说", "ground_truth": ["3个", "3", "三"]}
+{"id": 149, "prediction": "苏宁", "ground_truth": ["黛丽丝, 郝锐斌"]}
+{"id": 150, "prediction": "小说", "ground_truth": ["王吉昌, 朱俊万, 古见洪, 田云天, 隋瑜"]}
+{"id": 151, "prediction": "在", "ground_truth": ["不违反", "否"]}
+{"id": 152, "prediction": "庆", "ground_truth": ["李叔同"]}
+{"id": 153, "prediction": "庆", "ground_truth": ["监狱里的阅读区", "监狱里", "阅读区"]}
+{"id": 154, "prediction": "娱乐", "ground_truth": ["娱乐城堡"]}
+{"id": 155, "prediction": "十字", "ground_truth": ["潮汐宝石"]}
+{"id": 156, "prediction": "格林", "ground_truth": ["弗莱娅击杀了叛国者菲利普"]}
+{"id": 157, "prediction": "小说", "ground_truth": ["艾尔格林学院, 贝拉姆高级学院, 巨龙学院, 鲁丁帝都学院, 黑镰学院, 绯红学院, 黑风学院, 纳沙学院, 绯红之森学院"]}
+{"id": 158, "prediction": "巫", "ground_truth": ["火系, 植物系, 风系, 咒法系, 阴影系, 死灵系, 正能量系, 生物系, 负能量系, 电系, 附魔系, 召唤系, 预言系, 塑能系, 冰系, 黑暗系, 符文系, 雷系, 土系, 毒系"]}
+{"id": 159, "prediction": "乔", "ground_truth": ["契丹人", "契丹族"]}
+{"id": 160, "prediction": "乔", "ground_truth": ["雁门关"]}
+{"id": 161, "prediction": "虚", "ground_truth": ["少林派方丈玄慈", "方丈", "玄慈"]}
+{"id": 162, "prediction": "叶", "ground_truth": ["是, 虚狄云", "有, 虚狄云"]}
+{"id": 163, "prediction": "巫", "ground_truth": ["逍遥派"]}
+{"id": 164, "prediction": "乔", "ground_truth": ["自杀"]}
+{"id": 165, "prediction": "虚", "ground_truth": ["少林派"]}
+{"id": 166, "prediction": "乔", "ground_truth": ["珍芳, 乔超, 阿紫, 游坦之, 慕振宁"]}
+{"id": 167, "prediction": "我认为", "ground_truth": ["乔超"]}
+{"id": 168, "prediction": "小", "ground_truth": ["北宋"]}
+{"id": 169, "prediction": "他是", "ground_truth": ["小人国"]}
+{"id": 170, "prediction": "祁", "ground_truth": ["第三代", "3", "三"]}
+{"id": 171, "prediction": "祁", "ground_truth": ["祁宁震是祁宁英的二弟", "兄弟", "祁宁震是祁宁英的弟弟", "祁宁英是祁宁震的哥哥"]}
+{"id": 172, "prediction": "鑫", "ground_truth": ["第四代", "4", "四"]}
+{"id": 173, "prediction": "祁", "ground_truth": ["鑫兴与恺芯"]}
+{"id": 174, "prediction": "阿", "ground_truth": ["陈三"]}
+{"id": 175, "prediction": "素", "ground_truth": ["曼娘弟弟, 曼娘父亲, 姚老先生, 素云"]}
+{"id": 176, "prediction": "第一个", "ground_truth": ["阿瑄"]}
+{"id": 177, "prediction": "曼", "ground_truth": ["曼娘"]}
+{"id": 178, "prediction": "高", "ground_truth": ["姚老先生"]}
+{"id": 179, "prediction": "汪", "ground_truth": ["周武松, 汉武帝"]}
+{"id": 180, "prediction": "是大", "ground_truth": ["史立方"]}
+{"id": 181, "prediction": "罗", "ground_truth": ["杨坤, 叶婕姗, 罗大佑"]}
+{"id": 182, "prediction": "叶", "ground_truth": ["叶婕姗"]}
+{"id": 183, "prediction": "潘", "ground_truth": ["杀死申文心"]}
+{"id": 184, "prediction": "汪", "ground_truth": ["6", "6次", "六", "六次"]}
+{"id": 185, "prediction": "太平洋", "ground_truth": ["首都地球一号, 太平洋一号, 亚洲一号, 欧洲六号, 北美一号, 大洋洲一号"]}
+{"id": 186, "prediction": "地球", "ground_truth": ["李浓樟"]}
+{"id": 187, "prediction": "他", "ground_truth": ["叶婕姗"]}
+{"id": 188, "prediction": "最后", "ground_truth": ["救星行动"]}
