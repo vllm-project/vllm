@@ -65,7 +65,7 @@ def mxfp4_marlin_process_scales(marlin_scales):
     # fit the layout of fp8 dequantization
     marlin_scales = marlin_scales.view(-1, 4)[:, [0, 2, 1, 3]].view(
         marlin_scales.size(0), -1)
-
+    marlin_scales = marlin_scales.to(torch.float8_e8m0fnu)
     return marlin_scales
 
 
@@ -277,17 +277,12 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
         bias = getattr(layer, name).to(param_dtype)
 
         tensor_list = []
-        if "w13" in name:
-            size_n, size_k = n * 2, k
-        else:
-            size_n, size_k = k, n
-
         for i in range(e):
             tensor_list.append(marlin_permute_bias(bias[i]))
 
         bias = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
         bias = torch.nn.Parameter(bias, requires_grad=False)
-        setattr(layer, name + "_bias", bias)
+        setattr(layer, name, bias)
 
 
 def rand_marlin_weight_nvfp4_like(weight, group_size):

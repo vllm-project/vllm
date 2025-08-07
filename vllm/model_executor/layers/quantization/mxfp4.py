@@ -110,6 +110,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 intermediate_size_per_partition, 256)
             hidden_size = round_up(hidden_size, 256)
 
+        if self.use_marlin:
+            intermediate_size_per_partition_after_pad = round_up(
+                intermediate_size_per_partition, 128)
+            hidden_size = round_up(hidden_size, 256)
+
+            layer.params_dtype = params_dtype
+            layer.num_experts = num_experts
+            layer.hidden_size = hidden_size
+            layer.intermediate_size_per_partition = intermediate_size_per_partition_after_pad
+
         self.intermediate_size = intermediate_size_per_partition_after_pad
         self.hidden_size = hidden_size
         # Fused gate_up_proj (column parallel)
@@ -361,8 +371,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight,
                 layer.w13_bias,
                 layer.w2_bias,
-                layer.w13_weight_scale.view(torch.float8_e8m0fnu),
-                layer.w2_weight_scale.view(torch.float8_e8m0fnu),
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
                 router_logits,
                 topk_weights,
                 topk_ids,
