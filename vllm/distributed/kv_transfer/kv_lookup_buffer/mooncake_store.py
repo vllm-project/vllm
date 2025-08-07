@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This file contains a new class `MooncakeStore` that allows developers to
 think of KV cache transfer operations as putting new KV cache entries
@@ -70,7 +71,7 @@ class MooncakeStore(KVStoreBufferBase):
     ):
 
         try:
-            from mooncake_vllm_adaptor import MooncakeDistributedStore
+            from mooncake.store import MooncakeDistributedStore
         except ImportError as e:
             raise ImportError(
                 "Please install mooncake by following the instructions at "

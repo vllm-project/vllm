@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable, List, Optional, Set
+from typing import Callable, Optional
 
 import torch
 from compressed_tensors.quantization import ActivationOrdering
@@ -12,11 +13,15 @@ from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
     MPLinearLayerConfig, choose_mp_linear_kernel)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_repeat_scales_on_all_ranks)
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
+                                           PackedColumnParameter,
                                            PackedvLLMParameter,
                                            RowvLLMParameter)
+# yapf: enable
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -26,20 +31,23 @@ WNA16_SUPPORTED_TYPES_MAP = {
     4: scalar_types.uint4b8,
     8: scalar_types.uint8b128
 }
+WNA16_ZP_SUPPORTED_TYPES_MAP = {4: scalar_types.uint4, 8: scalar_types.uint8}
 WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
 
 
 class CompressedTensorsWNA16(CompressedTensorsScheme):
-    _kernel_backends_being_used: Set[str] = set()
+    _kernel_backends_being_used: set[str] = set()
 
     def __init__(self,
                  strategy: str,
                  num_bits: int,
                  group_size: Optional[int] = None,
+                 symmetric: Optional[bool] = True,
                  actorder: Optional[ActivationOrdering] = None):
 
         self.pack_factor = 32 // num_bits
         self.strategy = strategy
+        self.symmetric = symmetric
         self.group_size = -1 if group_size is None else group_size
         self.has_g_idx = actorder == ActivationOrdering.GROUP
 
@@ -53,7 +61,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                 f"Unsupported num_bits = {num_bits}. "
                 f"Supported num_bits = {WNA16_SUPPORTED_TYPES_MAP.keys()}")
 
-        self.quant_type = WNA16_SUPPORTED_TYPES_MAP[num_bits]
+        self.quant_type = (WNA16_ZP_SUPPORTED_TYPES_MAP[num_bits]
+                           if not self.symmetric else
+                           WNA16_SUPPORTED_TYPES_MAP[num_bits])
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -61,7 +71,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         return 80
 
     def create_weights(self, layer: torch.nn.Module, output_size: int,
-                       input_size: int, output_partition_sizes: List[int],
+                       input_size: int, output_partition_sizes: list[int],
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
@@ -75,7 +85,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             weight_type=self.quant_type,
             act_type=params_dtype,
             group_size=self.group_size,
-            zero_points=False,
+            zero_points=not self.symmetric,
             has_g_idx=self.has_g_idx
         )
 
@@ -120,13 +130,37 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                 dtype=params_dtype,
             )
         }
+
+        zeros_args = {
+            "weight_loader":
+            weight_loader,
+            "data":
+            torch.zeros(
+                output_size_per_partition // self.pack_factor,
+                scales_and_zp_size,
+                dtype=torch.int32,
+            )
+        }
+
         if not partition_scales:
             weight_scale = ChannelQuantScaleParameter(output_dim=0,
                                                       **weight_scale_args)
+
+            if not self.symmetric:
+                qzeros = PackedColumnParameter(output_dim=0,
+                                               packed_dim=0,
+                                               packed_factor=self.pack_factor,
+                                               **zeros_args)
         else:
             weight_scale = GroupQuantScaleParameter(output_dim=0,
                                                     input_dim=1,
                                                     **weight_scale_args)
+            if not self.symmetric:
+                qzeros = PackedvLLMParameter(input_dim=1,
+                                             output_dim=0,
+                                             packed_dim=0,
+                                             packed_factor=self.pack_factor,
+                                             **zeros_args)
 
         # A 2D array defining the original shape of the weights
         # before packing
@@ -137,6 +171,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.register_parameter("weight_packed", weight)
         layer.register_parameter("weight_scale", weight_scale)
         layer.register_parameter("weight_shape", weight_shape)
+
+        if not self.symmetric:
+            layer.register_parameter("weight_zero_point", qzeros)
 
         # group index (for activation reordering)
         if self.has_g_idx:
@@ -151,7 +188,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         self.kernel = kernel_type(mp_linear_kernel_config,
                                   w_q_param_name="weight_packed",
                                   w_s_param_name="weight_scale",
-                                  w_zp_param_name=None,
+                                  w_zp_param_name="weight_zero_point",
                                   w_gidx_param_name="weight_g_idx")
 
     # Checkpoints are serialized in compressed-tensors format, which is

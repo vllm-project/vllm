@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-import re
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from copy import deepcopy
-from typing import Dict, Optional, Union
+from typing import Optional, Union
 
+import regex as re
 import torch
 
 from vllm.config import QuantizationConfig
@@ -52,7 +53,7 @@ def get_dynamic_override(
     layer_name: str,
     key: Optional[str] = None,
     default_value: Union[int, bool,
-                         None] = None) -> Union[Dict, int, bool, None]:
+                         None] = None) -> Union[dict, int, bool, None]:
     for pattern, pattern_dict in config.dynamic.items():
         # Negative match: matched modules are excluded from quantized init
         if pattern.startswith("-:"):

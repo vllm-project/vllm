@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
 from collections.abc import Sequence
@@ -7,6 +8,7 @@ from typing import Union
 import partial_json_parser
 from partial_json_parser.core.options import Allow
 
+from vllm.entrypoints.chat_utils import random_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -18,7 +20,6 @@ from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -39,7 +40,7 @@ class Internlm2ToolParser(ToolParser):
             request.skip_special_tokens = False
         return request
 
-    def get_argments(self, obj):
+    def get_arguments(self, obj):
         if "parameters" in obj:
             return obj.get("parameters")
         elif "arguments" in obj:
@@ -106,7 +107,7 @@ class Internlm2ToolParser(ToolParser):
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
                                       type="function",
-                                      id=f"chatcmpl-tool-{random_uuid()}",
+                                      id=random_tool_call_id(),
                                       function=DeltaFunctionCall(
                                           name=function_name).model_dump(
                                               exclude_none=True))
@@ -118,9 +119,9 @@ class Internlm2ToolParser(ToolParser):
             # now we know we're on the same tool call and we're streaming
             # arguments
             else:
-                prev_arguments = self.get_argments(
+                prev_arguments = self.get_arguments(
                     self.prev_tool_call_arr[self.current_tool_id])
-                cur_arguments = self.get_argments(tool_call_arr)
+                cur_arguments = self.get_arguments(tool_call_arr)
 
                 # not arguments generated
                 if not cur_arguments and not prev_arguments:
@@ -133,7 +134,8 @@ class Internlm2ToolParser(ToolParser):
                     delta = None
                 # first time to get parameters
                 elif cur_arguments and not prev_arguments:
-                    cur_arguments_json = json.dumps(cur_arguments)
+                    cur_arguments_json = json.dumps(cur_arguments,
+                                                    ensure_ascii=False)
 
                     arguments_delta = cur_arguments_json[:cur_arguments_json.
                                                          index(delta_text) +
@@ -148,8 +150,10 @@ class Internlm2ToolParser(ToolParser):
                         self.current_tool_id] += arguments_delta
                 # both prev and cur parameters, send the increase parameters
                 elif cur_arguments and prev_arguments:
-                    cur_args_json = json.dumps(cur_arguments)
-                    prev_args_json = json.dumps(prev_arguments)
+                    cur_args_json = json.dumps(cur_arguments,
+                                               ensure_ascii=False)
+                    prev_args_json = json.dumps(prev_arguments,
+                                                ensure_ascii=False)
 
                     argument_diff = extract_intermediate_diff(
                         cur_args_json, prev_args_json)
@@ -166,7 +170,7 @@ class Internlm2ToolParser(ToolParser):
             # check to see if the name is defined and has been sent. if so,
             # stream the name - otherwise keep waiting
             # finish by setting old and returning None as base case
-            tool_call_arr["arguments"] = self.get_argments(tool_call_arr)
+            tool_call_arr["arguments"] = self.get_arguments(tool_call_arr)
             self.prev_tool_call_arr = [tool_call_arr]
             return delta
         except Exception:
@@ -190,7 +194,8 @@ class Internlm2ToolParser(ToolParser):
             action_dict = json.loads(action)
             name, parameters = action_dict['name'], json.dumps(
                 action_dict.get('parameters', action_dict.get('arguments',
-                                                              {})))
+                                                              {})),
+                ensure_ascii=False)
 
             if not tools or name not in [t.function.name for t in tools]:
                 ExtractedToolCallInformation(tools_called=False,

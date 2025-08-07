@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
@@ -19,9 +20,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Iterable, Set, Tuple, Type
+from collections.abc import Iterable
 
 import torch
+import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -35,9 +37,20 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
 class TeleChat2Model(LlamaModel):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        hf_config = vllm_config.model_config.hf_config
+
+        vllm_config.model_config.hf_config.attribute_map = {
+            "num_hidden_layers": "n_layer",
+            "num_attention_heads": "n_head",
+            "intermediate_size": "ffn_hidden_size",
+            "rms_norm_eps": "layer_norm_epsilon"
+        }
+        vllm_config.model_config.hf_config.hidden_act = "silu"
+
         # 1. Initialize the LlamaModel with bias
-        vllm_config.model_config.hf_config.bias = True
-        vllm_config.model_config.hf_config.mlp_bias = True
+        hf_config.bias = True
+        hf_config.mlp_bias = True
+
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         # 2. Remove the bias from the qkv_proj and gate_up_proj based on config
         # Telechat2's gate_up_proj and qkv_proj don't have bias
@@ -49,14 +62,14 @@ class TeleChat2Model(LlamaModel):
                 layer.mlp.gate_up_proj.bias = None
                 layer.mlp.gate_up_proj.skip_bias_add = True
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             ('gate_up_proj', 'gate_proj', 0),
             ('gate_up_proj', 'up_proj', 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         total_num_heads = self.config.n_head
         head_dim = self.config.hidden_size // total_num_heads
         for name, loaded_weight in weights:
@@ -124,11 +137,11 @@ class TeleChat2ForCausalLM(LlamaForCausalLM):
     def _init_model(self,
                     vllm_config: VllmConfig,
                     prefix: str = "",
-                    layer_type: Type[LlamaDecoderLayer] = LlamaDecoderLayer):
+                    layer_type: type[nn.Module] = LlamaDecoderLayer):
         return TeleChat2Model(vllm_config=vllm_config, prefix=prefix)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
 
         loader = AutoWeightsLoader(
             self,

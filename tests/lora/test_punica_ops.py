@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from threading import Lock
 
 import pytest
@@ -11,6 +12,11 @@ from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
 
 from .utils import PunicaTensors, assert_close, generate_data_for_nslices
+
+
+@pytest.fixture(autouse=True)
+def reset_device(reset_default_device):
+    pass
 
 
 # Utility shrink and expand operations used as reference implementations.

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/ssd_combined.py
@@ -6,9 +7,10 @@
 # ruff: noqa: E501
 
 import torch
-import triton
 from einops import rearrange
 from packaging import version
+
+from vllm.triton_utils import triton
 
 from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd
@@ -30,14 +32,16 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    dt_bias=None,
                                    initial_states=None,
                                    seq_idx=None,
+                                   chunk_indices=None,
+                                   chunk_offsets=None,
                                    cu_seqlens=None,
                                    dt_softplus=False,
-                                   dt_limit=(0.0, float("inf"))):
+                                   dt_limit=(0.0, float("inf")),
+                                   out=None):
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
     assert nheads % ngroups == 0
     assert B.shape == (batch, seqlen, ngroups, dstate)
-    assert x.shape == (batch, seqlen, nheads, headdim)
     assert dt.shape == (batch, seqlen, nheads)
     assert A.shape == (nheads, )
     assert C.shape == B.shape
@@ -96,7 +100,7 @@ def _mamba_chunk_scan_combined_fwd(x,
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
     # - for handling chunked prefill, this requires i) initial_states
-    #   ii) seq_idx and iii) has_cu_seqlens to be all specified.
+    #   ii) seq_idx and iii) is_cont_batched to be all specified.
     # - When a new seq_idx is detected, we will stop passing the prev_state
     #   and switch accordingly to the init_state corresponding to the new seq_idx.
     # - this will ensure that states will be updated with the rightmost flushed seq_idx
@@ -131,7 +135,7 @@ def _mamba_chunk_scan_combined_fwd(x,
     # - in each (pseudo) chunk, we detect if the previous (pseudo) chunk had
     #   a seq_idx change, in which case we take states information from
     #   init_states.
-    out, out_x = _chunk_scan_fwd(
+    out_x = _chunk_scan_fwd(
         CB,
         x,
         dt,
@@ -141,10 +145,13 @@ def _mamba_chunk_scan_combined_fwd(x,
         D=D,
         z=z,
         seq_idx=seq_idx,
+        chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
         initial_states=initial_states,
+        out=out,
     )
     if cu_seqlens is None:
-        return out, out_x, dt, dA_cumsum, states, final_states
+        return out_x, dt, dA_cumsum, states, final_states
     else:
         assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
         varlen_states = chunk_state_varlen(
@@ -156,7 +163,7 @@ def _mamba_chunk_scan_combined_fwd(x,
             states.squeeze(0),
             initial_states=initial_states,
         )
-        return out, out_x, dt, dA_cumsum, states, final_states, varlen_states
+        return out_x, dt, dA_cumsum, states, final_states, varlen_states
 
 
 def mamba_chunk_scan_combined(x,
@@ -170,9 +177,12 @@ def mamba_chunk_scan_combined(x,
                               dt_bias=None,
                               initial_states=None,
                               seq_idx=None,
+                              chunk_indices=None,
+                              chunk_offsets=None,
                               cu_seqlens=None,
                               dt_softplus=False,
                               dt_limit=(0.0, float("inf")),
+                              out=None,
                               return_final_states=False,
                               return_varlen_states=False):
     """
@@ -190,15 +200,14 @@ def mamba_chunk_scan_combined(x,
         seq_idx: (batch, seqlen)
         cu_seqlens: (num_sequences + 1) or None, only used if return_varlen_states is True
         dt_softplus: Whether to apply softplus to dt
-    Return:
-        out: (batch, seqlen, nheads, headdim)
+        out: Preallocated output tensor
     """
 
     if not return_varlen_states:
         cu_seqlens = None
     else:
         assert cu_seqlens is not None, "cu_seqlens must be provided if return_varlen_states is True"
-    out, out_x, dt_out, dA_cumsum, states, final_states, *rest = _mamba_chunk_scan_combined_fwd(
+    out_x, dt_out, dA_cumsum, states, final_states, *rest = _mamba_chunk_scan_combined_fwd(
         x,
         dt,
         A,
@@ -210,14 +219,18 @@ def mamba_chunk_scan_combined(x,
         dt_bias=dt_bias,
         initial_states=initial_states,
         seq_idx=seq_idx,
+        chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
         cu_seqlens=cu_seqlens,
         dt_softplus=dt_softplus,
-        dt_limit=dt_limit)
+        dt_limit=dt_limit,
+        out=out)
     if not return_varlen_states:
-        return out if not return_final_states else (out, final_states)
+        if not return_final_states:
+            return
+        else:
+            return final_states
     else:
         varlen_states = rest[0]
-        return (out,
-                varlen_states) if not return_final_states else (out,
-                                                                final_states,
+        return (varlen_states) if not return_final_states else (final_states,
                                                                 varlen_states)

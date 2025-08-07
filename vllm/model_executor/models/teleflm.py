@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
@@ -22,9 +23,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Type
-
 import torch
+import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -39,7 +39,7 @@ class TeleFLMModel(LlamaModel):
         *,
         vllm_config: VllmConfig,
         prefix: str = "",
-        layer_type: Type[LlamaDecoderLayer] = LlamaDecoderLayer,
+        layer_type: type[nn.Module] = LlamaDecoderLayer,
     ):
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,

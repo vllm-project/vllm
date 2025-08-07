@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://huggingface.co/h2oai/h2ovl-mississippi-2b/blob/main/modeling_h2ovl_chat.py
 # https://huggingface.co/h2oai/h2ovl-mississippi-2b/blob/main/image_process.py
@@ -19,15 +20,16 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
-from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails)
+from vllm.multimodal.processing import (MultiModalHashes, PromptReplacement,
+                                        PromptUpdate, PromptUpdateDetails)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .intern_vit import InternVisionModel
 from .internvl import (IMG_CONTEXT, IMG_END, IMG_START,
+                       BaseInternVLDummyInputsBuilder,
+                       BaseInternVLMultiModalProcessor,
                        BaseInternVLProcessingInfo, BaseInternVLProcessor,
-                       InternVLChatModel, InternVLDummyInputsBuilder,
-                       InternVLMultiModalProcessor, build_transform,
+                       InternVLChatModel, build_transform,
                        find_closest_aspect_ratio, get_internvl_target_ratios)
 
 
@@ -257,7 +259,7 @@ class H2OVLProcessor(BaseInternVLProcessor):
         repl_features = IMG_CONTEXT * feature_size
         repl_full = IMG_START + repl_features + IMG_END
 
-        return PromptUpdateDetails(full=repl_full, features=repl_features)
+        return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
 
     def resolve_min_max_num(
         self,
@@ -390,40 +392,13 @@ class H2OVLProcessor(BaseInternVLProcessor):
 
 class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
 
-    def get_hf_processor(
-        self,
-        *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        **kwargs: object,
-    ) -> H2OVLProcessor:
-        if min_dynamic_patch is not None:
-            kwargs["min_dynamic_patch"] = min_dynamic_patch
-        if max_dynamic_patch is not None:
-            kwargs["max_dynamic_patch"] = max_dynamic_patch
-        if dynamic_image_size is not None:
-            kwargs["dynamic_image_size"] = dynamic_image_size
-
+    def get_hf_processor(self, **kwargs: object) -> H2OVLProcessor:
         return self.ctx.init_processor(
             H2OVLProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
             **kwargs,
         )
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        max_tokens_one_image = self.get_max_image_tokens(use_msac=None)
-        if mm_counts.get("image", 0) <= 1:
-            max_tokens_per_image = max_tokens_one_image
-        else:
-            max_tokens_per_image = self.get_max_image_tokens(use_msac=False)
-
-        return {"image": max_tokens_per_image}
 
     def get_num_image_tokens(
         self,
@@ -442,19 +417,9 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
             use_msac=use_msac,
         )
 
-    def get_max_image_tokens(self, use_msac: Optional[bool] = None) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
 
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            processor=None,
-            use_msac=use_msac,
-        )
-
-
-class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
-                               ):
+class H2OVLMultiModalProcessor(
+        BaseInternVLMultiModalProcessor[H2OVLProcessingInfo]):
 
     def _get_prompt_updates(
         self,
@@ -511,31 +476,36 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
         prompt: Union[str, list[int]],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], MultiModalKwargs, bool]:
+        tokenization_kwargs: Mapping[str, object],
+        *,
+        return_mm_hashes: bool,
+    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
         # The processor logic is different for len(images) <= 1 vs > 1
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
         # perform caching for the most common case
         if mm_data_items.get_count("image", strict=False) > 1:
-            # This code path corresponds to the cache being disabled
-            return self._apply_hf_processor_main(
+            return self._apply_hf_processor(
                 prompt=prompt,
-                mm_items=mm_data_items,
+                mm_data_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                enable_hf_prompt_update=True,
+                tokenization_kwargs=tokenization_kwargs,
+                return_mm_hashes=return_mm_hashes,
             )
 
         return super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
+            return_mm_hashes=return_mm_hashes,
         )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
     H2OVLMultiModalProcessor,
     info=H2OVLProcessingInfo,
-    dummy_inputs=InternVLDummyInputsBuilder)
+    dummy_inputs=BaseInternVLDummyInputsBuilder)
 class H2OVLChatModel(InternVLChatModel):
 
     def _init_vision_model(

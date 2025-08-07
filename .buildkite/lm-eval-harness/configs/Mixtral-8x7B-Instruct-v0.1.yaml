@@ -1,4 +1,5 @@
-# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-hf-baseline.sh -m neuralmagic/Mixtral-8x7B-Instruct-v0.1 -b 32 -l 250 -f 5 -t 4
+# For hf script, without -t option (tensor parallel size).
+# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-hf-baseline.sh -m neuralmagic/Mixtral-8x7B-Instruct-v0.1 -b 32 -l 250 -f 5
 model_name: "mistralai/Mixtral-8x7B-Instruct-v0.1"
 tasks:
 - name: "gsm8k"

@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Test the piecewise compilation with a simple model so that we
 can exactly calculate the expected output and side effects.
 """
-
+import pytest
 import torch
 from torch import nn
 from torch.library import Library
@@ -12,6 +13,8 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CompilationConfig, CompilationLevel, VllmConfig,
                          set_current_vllm_config)
+from vllm.envs import VLLM_USE_V1
+from vllm.forward_context import set_forward_context
 from vllm.utils import direct_register_custom_op
 
 global_counter = 0
@@ -74,11 +77,14 @@ class SillyModel(nn.Module):
         return x
 
 
-def test_simple_piecewise_compile():
+@pytest.mark.parametrize("use_inductor", [True, False])
+def test_simple_piecewise_compile(use_inductor):
+    assert VLLM_USE_V1
 
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE,
         use_cudagraph=True,
+        use_inductor=use_inductor,
         splitting_ops=["silly.attention"],
         cudagraph_copy_inputs=True,
         cudagraph_capture_sizes=[1, 2],
@@ -93,9 +99,9 @@ def test_simple_piecewise_compile():
             num_piecewise_graphs_seen=5,  # 2 * num_layers + 1
             num_piecewise_capturable_graphs_seen=3,  # 1 + num_layers
             num_backend_compilations=3,  # num_piecewise_capturable_graphs_seen
-            num_cudagraph_caputured=
+            num_cudagraph_captured=
             6,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
-    ):
+    ), set_forward_context({}, vllm_config=vllm_config):
 
         model(inputs)
 

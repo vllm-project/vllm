@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
 from collections.abc import Sequence
 from typing import Optional, Union
 
+import regex as re
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -60,7 +61,7 @@ class GraniteReasoningParser(ReasoningParser):
 
         Args:
             model_output (str): Output of the model to be parsed.
-            request (ChatCompletionReqest): Request being processed.
+            request (ChatCompletionRequest): Request being processed.
 
         Returns:
             tuple[Optional[str], Optional[str]]: Tuple pair containing the

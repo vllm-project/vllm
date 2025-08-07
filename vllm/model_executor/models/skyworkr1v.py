@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://huggingface.co/Skywork/Skywork-R1V-38B/blob/main/modeling_skywork_chat.py
 # --------------------------------------------------------
@@ -6,10 +7,8 @@
 # Copyright (c) 2025 Skywork
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
-from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
-from typing import Literal, Optional, Set, Tuple, TypedDict, TypeVar, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -21,26 +20,25 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.intern_vit import (InternVisionModel,
                                                    InternVisionPatchModel)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.image import convert_image_mode
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs, NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import scatter_patch_features, select_patch_features
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -60,14 +58,6 @@ class SkyworkR1VImagePixelInputs(TypedDict):
 
     num_patches: torch.Tensor
     """Shape: `(batch_size * num_images)`"""
-
-    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
-    """
-    A boolean mask indicating which image embeddings correspond
-    to patch tokens.
-
-    Shape: `(batch_size * num_images, num_embeds)`
-    """
 
 
 class SkyworkR1VImageEmbeddingInputs(TypedDict):
@@ -89,7 +79,7 @@ SkyworkR1VImageInputs = Union[SkyworkR1VImagePixelInputs,
 def build_transform(input_size: int):
     MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
     return T.Compose([
-        T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
+        T.Lambda(lambda img: convert_image_mode(img, 'RGB')),
         T.Resize((input_size, input_size),
                  interpolation=T.InterpolationMode.BICUBIC),
         T.ToTensor(),
@@ -241,7 +231,7 @@ def image_to_pixel_values_skyworkr1v(
     return pixel_values
 
 
-class BaseSkyworkR1VProcessor(ABC):
+class SkyworkR1VProcessor:
     """
     This model doesn't define its own HF processor,
     so we implement our own one here.
@@ -288,17 +278,18 @@ class BaseSkyworkR1VProcessor(ABC):
         self.use_thumbnail: bool = config.use_thumbnail
 
     @property
-    @abstractmethod
     def image_token_id(self) -> int:
-        raise NotImplementedError
+        return self.tokenizer.get_vocab()[IMG_CONTEXT]
 
-    @abstractmethod
     def get_image_repl(
         self,
         feature_size: int,
         num_patches: Optional[int],
     ) -> PromptUpdateDetails[str]:
-        raise NotImplementedError
+        repl_features = IMG_CONTEXT * feature_size
+        repl_full = IMG_START + repl_features + IMG_END
+
+        return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
 
     def resolve_min_max_num(
         self,
@@ -419,24 +410,13 @@ class BaseSkyworkR1VProcessor(ABC):
                 torch.tensor([len(item) for item in pixel_values_lst]),
             }
 
-            tokenizer = self.tokenizer
-            image_token_id = self.image_token_id
-
-            embed_is_patch = list[torch.Tensor]()
-
             for pixel_values in pixel_values_lst:
                 num_patches = pixel_values.shape[0]
                 feature_size = num_patches * self.num_image_token
 
                 image_repl = self.get_image_repl(feature_size, num_patches)
-                feature_tokens = tokenizer.encode(image_repl.features,
-                                                  add_special_tokens=False)
 
                 text = [t.replace('<image>', image_repl.full, 1) for t in text]
-                embed_is_patch.append(
-                    torch.tensor(feature_tokens) == image_token_id)
-
-            image_inputs["embed_is_patch"] = embed_is_patch
 
         text_inputs = self.tokenizer(text)
 
@@ -446,52 +426,25 @@ class BaseSkyworkR1VProcessor(ABC):
         }
 
 
-class SkyworkR1VProcessor(BaseSkyworkR1VProcessor):
+class SkyworkR1VProcessingInfo(BaseProcessingInfo):
 
-    @property
-    def image_token_id(self) -> int:
-        return self.tokenizer.get_vocab()[IMG_CONTEXT]
-
-    def get_image_repl(
-        self,
-        feature_size: int,
-        num_patches: Optional[int],
-    ) -> PromptUpdateDetails[str]:
-        repl_features = IMG_CONTEXT * feature_size
-        repl_full = IMG_START + repl_features + IMG_END
-
-        return PromptUpdateDetails(full=repl_full, features=repl_features)
-
-
-class BaseSkyworkR1VProcessingInfo(BaseProcessingInfo):
-
-    @abstractmethod
-    def get_hf_processor(
-        self,
-        *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        **kwargs: object,
-    ) -> BaseSkyworkR1VProcessor:
-        raise NotImplementedError
+    def get_hf_processor(self, **kwargs: object) -> SkyworkR1VProcessor:
+        return self.ctx.init_processor(
+            SkyworkR1VProcessor,
+            config=self.get_hf_config(),
+            tokenizer=self.get_tokenizer(),
+            **kwargs,
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
 
     def get_num_image_tokens(
         self,
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[BaseSkyworkR1VProcessor],
+        processor: Optional[SkyworkR1VProcessor],
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor()
@@ -499,15 +452,6 @@ class BaseSkyworkR1VProcessingInfo(BaseProcessingInfo):
         return processor.get_num_image_tokens(
             image_width=image_width,
             image_height=image_height,
-        )
-
-    def get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            processor=None,
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -536,45 +480,46 @@ class BaseSkyworkR1VProcessingInfo(BaseProcessingInfo):
         return largest_feature_pinpoint
 
 
-_I = TypeVar("_I", bound=BaseSkyworkR1VProcessingInfo)
+class SkyworkR1VDummyInputsBuilder(
+        BaseDummyInputsBuilder[SkyworkR1VProcessingInfo]):
 
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
 
-class SkyworkR1VDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
+        return "<image>" * num_images
 
-    def get_dummy_processor_inputs(
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
 
-        return ProcessorInputs(
-            prompt_text="<image>" * num_images,
-            mm_data=mm_data,
-        )
 
-
-class SkyworkR1VMultiModalProcessor(BaseMultiModalProcessor[_I]):
+class SkyworkR1VMultiModalProcessor(
+        BaseMultiModalProcessor[SkyworkR1VProcessingInfo]):
 
     def _call_hf_processor(
         self,
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
@@ -599,7 +544,6 @@ class SkyworkR1VMultiModalProcessor(BaseMultiModalProcessor[_I]):
             pixel_values_flat=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_num_patches),
             image_num_patches=MultiModalFieldConfig.batched("image"),
-            embed_is_patch=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
             image_token_id=MultiModalFieldConfig.shared("image", num_images),
         )
@@ -652,36 +596,18 @@ class SkyworkR1VMultiModalProcessor(BaseMultiModalProcessor[_I]):
         ]
 
 
-class SkyworkR1VProcessingInfo(BaseSkyworkR1VProcessingInfo):
-
-    def get_hf_processor(
-        self,
-        *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        **kwargs: object,
-    ) -> SkyworkR1VProcessor:
-        if min_dynamic_patch is not None:
-            kwargs["min_dynamic_patch"] = min_dynamic_patch
-        if max_dynamic_patch is not None:
-            kwargs["max_dynamic_patch"] = max_dynamic_patch
-        if dynamic_image_size is not None:
-            kwargs["dynamic_image_size"] = dynamic_image_size
-
-        return self.ctx.init_processor(
-            SkyworkR1VProcessor,
-            config=self.get_hf_config(),
-            tokenizer=self.get_tokenizer(),
-            **kwargs,
-        )
-
-
 @MULTIMODAL_REGISTRY.register_processor(
     SkyworkR1VMultiModalProcessor,
     info=SkyworkR1VProcessingInfo,
     dummy_inputs=SkyworkR1VDummyInputsBuilder)
 class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -735,13 +661,6 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             if (not quant_config.modules_to_not_convert) and \
                 (llm_quant_config is not None):
                 quant_config.modules_to_not_convert.append("vision_model")
-
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
 
     def _init_vision_model(
         self,
@@ -835,7 +754,6 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             self, **kwargs: object) -> Optional[SkyworkR1VImageInputs]:
         pixel_values_flat = kwargs.pop("pixel_values_flat", None)
         image_num_patches = kwargs.pop("image_num_patches", None)
-        embed_is_patch = kwargs.pop("embed_is_patch", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
         if pixel_values_flat is None and image_embeds is None:
@@ -864,20 +782,14 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
                 raise ValueError("Incorrect type of image_num_patches. "
                                  f"Got type: {type(image_num_patches)}")
 
-            if not isinstance(embed_is_patch, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of embed_is_patch. "
-                                 f"Got type: {type(embed_is_patch)}")
-
             pixel_values_flat = flatten_bn(pixel_values_flat, concat=True)
             image_num_patches = flatten_bn(image_num_patches, concat=True)
-            embed_is_patch = flatten_bn(embed_is_patch)
 
             return SkyworkR1VImagePixelInputs(
                 type="pixel_values",
                 pixel_values_flat=self._validate_pixel_values(
                     pixel_values_flat),
                 num_patches=image_num_patches,
-                embed_is_patch=embed_is_patch,
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -917,21 +829,16 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         else:
             self.visual_token_mask = None
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
 
-        image_features = self._process_image_input(image_input)
-
-        if image_input["type"] != "pixel_values":
-            return image_features
-
-        return scatter_patch_features(
-            image_features,
-            image_input["embed_is_patch"],
-        )
+        return self._process_image_input(image_input)
 
     def get_input_embeddings(
         self,
@@ -939,13 +846,14 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             assert self.img_context_token_id is not None
             self._set_visual_token_mask(input_ids)
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
-                select_patch_features(multimodal_embeddings),
+                multimodal_embeddings,
                 self.img_context_token_id,
             )
         return inputs_embeds
@@ -957,7 +865,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
-    ) -> Union[SamplerOutput, IntermediateTensors]:
+    ) -> IntermediateTensors:
 
         if intermediate_tensors is not None:
             input_ids = None
@@ -995,15 +903,8 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         skip_prefixes = [
             "action_embed", "temporal_embed", "track_embed",
             "track_embed_decoder", "box_token", "cg_criterion", "cg_model",

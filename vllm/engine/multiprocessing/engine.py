@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pickle
 import signal
@@ -22,6 +23,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCIsSleepingResponse,
                                          RPCLoadAdapterRequest,
                                          RPCProcessRequest,
+                                         RPCResetMultiModalCacheRequest,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
@@ -32,6 +34,7 @@ from vllm.outputs import RequestOutput
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import deprecate_kwargs
 from vllm.worker.model_runner_base import InputProcessingError
 
 logger = init_logger(__name__)
@@ -41,19 +44,22 @@ HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
 
 
 class MQLLMEngine:
-    """A multiprocessing wrapper for :class:`LLMEngine`.
+    """A multiprocessing wrapper for
+    [`LLMEngine`][vllm.engine.llm_engine.LLMEngine].
 
-    This class is used to wrap the :class:`LLMEngine` class to enable use
+    This class is used to wrap the
+    [`LLMEngine`][vllm.engine.llm_engine.LLMEngine] class to enable use
     in concurrnet manner. It runs a background loop and uses zeromq to
     receive new requests and stream outputs incrementally via ipc.
 
-    The :class:`LLMEngine` generate or encode process is kicked off when a new
-    RPCProcessRequest is received by the input_socket.
+    The [`LLMEngine`][vllm.engine.llm_engine.LLMEngine] generate or encode
+    process is kicked off when a new RPCProcessRequest is received by the
+    input_socket.
 
     The self.engine_loop checks the input_socket for new requests,
     adds them to the LLMEngine if there are any, calls the internal
-    :class:`LLMEngine.step()`, and sends the RequestOutputs back over
-    the output_socket.
+    [`LLMEngine.step()`][vllm.engine.llm_engine.LLMEngine.step], and sends
+    the RequestOutputs back over the output_socket.
 
     If use_async_sockets is set, the logic associated with reading new
     requests from the socket and sending data to the socket is passed
@@ -64,8 +70,8 @@ class MQLLMEngine:
         ipc_path: Base path for zeromq interprocess messaging
         use_async_sockets: Whether to make send/recv async with GPU
         log_requests: Whether to log the requests.
-        *args: Arguments for :class:`LLMEngine`.
-        **kwargs: Arguments for :class:`LLMEngine`.
+        *args: Arguments for [`LLMEngine`][vllm.engine.llm_engine.LLMEngine].
+        **kwargs: Arguments for [`LLMEngine`][vllm.engine.llm_engine.LLMEngine].
     """
 
     def __init__(self,
@@ -115,10 +121,20 @@ class MQLLMEngine:
             return ENGINE_DEAD_ERROR()
 
     @classmethod
-    def from_vllm_config(cls, vllm_config: VllmConfig,
-                         usage_context: UsageContext,
-                         disable_log_requests: bool, disable_log_stats: bool,
-                         ipc_path: str) -> "MQLLMEngine":
+    @deprecate_kwargs(
+        "disable_log_requests",
+        additional_message=("This argument will have no effect. "
+                            "Use `enable_log_requests` instead."),
+    )
+    def from_vllm_config(
+            cls,
+            vllm_config: VllmConfig,
+            usage_context: UsageContext,
+            enable_log_requests: bool,
+            disable_log_stats: bool,
+            ipc_path: str,
+            disable_log_requests: bool = True,  # Deprecated, will be removed
+    ) -> "MQLLMEngine":
         # Setup plugins for each process
         from vllm.plugins import load_general_plugins
         load_general_plugins()
@@ -131,7 +147,7 @@ class MQLLMEngine:
             ipc_path=ipc_path,
             usage_context=usage_context,
             use_async_sockets=use_async_sockets,
-            log_requests=(not disable_log_requests),
+            log_requests=enable_log_requests,
             log_stats=(not disable_log_stats),
         )
 
@@ -145,7 +161,7 @@ class MQLLMEngine:
             ipc_path=ipc_path,
             vllm_config=vllm_config,
             usage_context=usage_context,
-            disable_log_requests=engine_args.disable_log_requests,
+            enable_log_requests=engine_args.enable_log_requests,
             disable_log_stats=engine_args.disable_log_stats,
         )
 
@@ -269,6 +285,8 @@ class MQLLMEngine:
                         self.stop_profile()
                 elif isinstance(request, RPCLoadAdapterRequest):
                     self._handle_load_adapter_request(request)
+                elif isinstance(request, RPCResetMultiModalCacheRequest):
+                    self.reset_mm_cache()
                 elif isinstance(request, RPCResetPrefixCacheRequest):
                     self.reset_prefix_cache()
                 elif isinstance(request, RPCSleepRequest):
@@ -284,7 +302,7 @@ class MQLLMEngine:
         except Exception as e:
             self._set_errored(e)
             self._send_unhealthy(e)
-            raise e
+            raise e from None
 
     def _handle_process_request(self, request: RPCProcessRequest):
         """Handle RPCProcessRequest by adding it to the LLMEngine."""
@@ -297,14 +315,12 @@ class MQLLMEngine:
             self._send_outputs(rpc_err)
 
         try:
-            self.engine.add_request(
-                request_id=request_id,
-                prompt=request.prompt,
-                params=request.params,
-                lora_request=request.lora_request,
-                trace_headers=request.trace_headers,
-                prompt_adapter_request=request.prompt_adapter_request,
-                priority=request.priority)
+            self.engine.add_request(request_id=request_id,
+                                    prompt=request.prompt,
+                                    params=request.params,
+                                    lora_request=request.lora_request,
+                                    trace_headers=request.trace_headers,
+                                    priority=request.priority)
 
             if self.log_requests:
                 logger.info("Added request %s.", request.request_id)
@@ -409,6 +425,9 @@ class MQLLMEngine:
     def stop_profile(self) -> None:
         self.engine.stop_profile()
 
+    def reset_mm_cache(self) -> bool:
+        return self.engine.reset_mm_cache()
+
     def reset_prefix_cache(self) -> bool:
         return self.engine.reset_prefix_cache()
 
@@ -428,7 +447,7 @@ def signal_handler(*_) -> None:
 
 def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
                   ipc_path: str, disable_log_stats: bool,
-                  disable_log_requests: bool, engine_alive):
+                  enable_log_requests: bool, engine_alive):
     try:
         # Ensure we can serialize transformer config before spawning
         maybe_register_config_serialize_by_value()
@@ -437,7 +456,7 @@ def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
             vllm_config=vllm_config,
             usage_context=usage_context,
             disable_log_stats=disable_log_stats,
-            disable_log_requests=disable_log_requests,
+            enable_log_requests=enable_log_requests,
             ipc_path=ipc_path)
 
         signal.signal(signal.SIGTERM, signal_handler)
@@ -447,4 +466,4 @@ def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
     except BaseException as e:
         logger.exception(e)
         engine_alive.value = False
-        raise e
+        raise e from None

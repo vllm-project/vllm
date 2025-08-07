@@ -1,17 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
 from collections import deque
+from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest  # noqa
+import torch
 from torch import Use  # noqa
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler, SchedulingBudget
 from vllm.lora.request import LoRARequest
-from vllm.sequence import SequenceGroup
+from vllm.sequence import SequenceGroup, SequenceStatus
 
 from .utils import (append_new_token, append_new_token_seq,
                     append_new_token_seq_group, create_dummy_prompt,
@@ -591,8 +594,8 @@ def test_decode_schedule_preempted():
     # should be preempted. 1 will also be preempted.
     budget = create_token_budget()
     output = scheduler._schedule_running(budget, curr_loras)
-    remainig_running = scheduler.running
-    assert len(remainig_running) == 0
+    remaining_running = scheduler.running
+    assert len(remaining_running) == 0
     assert len(output.decode_seq_groups) == 1
     assert len(output.prefill_seq_groups) == 0
     assert output.decode_seq_groups[0].seq_group.request_id == "0"
@@ -968,3 +971,367 @@ def test_no_multiple_partial_prefills_with_chunked_prefill_and_prefix_caching(
     ), "A partial prefix of C (4 tokens) should be prefilled, with the "
     "remaining tokens fit into 3 token budget (4-1 from the seqA). It will "
     "then be rounded down to 2 tokens on block size, thus 6 tokens in total."
+
+
+def test_no_batches_mixed_with_prompt_tokens_and_prompt_embeds():
+    """
+    Test that the scheduler does not schedule batches with prompt tokens and 
+    prompt embeddings co-mingled.
+    """
+    block_size = 2
+    max_seq_group = 3
+    scheduler = initialize_scheduler(
+        block_size=block_size,
+        num_cpu_blocks=16,
+        num_gpu_blocks=16,
+        max_num_seqs=max_seq_group,
+        max_model_len=100,
+        enable_prefix_caching=True,
+    )
+
+    # the odd indexed inputs should be passed in via embeddings,
+    # evens via token_ids
+    seq_length = 7
+    embedding_size = 5
+    num_seqs = 11
+    seq_tokens: list[list[int]] = []
+    seq_embeds: list[Optional[torch.Tensor]] = []
+    for i in range(num_seqs):
+        if i % 2:
+            seq_tokens.append(list(range(seq_length)))
+            seq_embeds.append(None)
+        else:
+            seq_tokens.append([0] * seq_length)
+            seq_embeds.append(torch.rand(embedding_size))
+
+    seq_and_seq_groups = [
+        create_dummy_prompt(f"{i}",
+                            prompt_tokens=seq_tokens[i],
+                            prompt_embeds=seq_embeds[i],
+                            block_size=block_size)
+        for i in range(len(seq_tokens))
+    ]
+
+    for _, seq_group in seq_and_seq_groups:
+        scheduler.add_seq_group(seq_group)
+
+    while not all(seq.is_finished() for seq, _ in seq_and_seq_groups):
+        unfinished_seq_groups = [
+            seq_group for _, seq_group in seq_and_seq_groups
+            if not seq_group.is_finished()
+        ]
+        _, out = schedule_and_update_computed_tokens(scheduler)
+        assert len(out.scheduled_seq_groups) > 0
+        batch_is_prompt_embeds = out.scheduled_seq_groups[
+            0].seq_group.uses_prompt_embeds()
+        expected_scheduled_seq_groups = [
+            seq_group for seq_group in unfinished_seq_groups
+            if seq_group.uses_prompt_embeds() == batch_is_prompt_embeds
+        ]
+
+        # We should have as many scheduled groups as possible, without mixing
+        assert len(out.scheduled_seq_groups) == min(
+            max_seq_group, len(expected_scheduled_seq_groups))
+        assert all(scheduled_seq_group.seq_group.uses_prompt_embeds() ==
+                   batch_is_prompt_embeds
+                   for scheduled_seq_group in out.scheduled_seq_groups)
+
+        # Finish the scheduled groups
+        for scheduled_seq_group in out.scheduled_seq_groups:
+            for seq in scheduled_seq_group.seq_group.seqs:
+                seq.status = SequenceStatus.FINISHED_STOPPED
+        scheduler.free_finished_seq_groups()
+
+
+def test_remove_seq_from_computed_blocks_tracker():
+    """
+    Test that computed_blocks_tracker correctly removes stale sequences
+    during scheduling.
+
+    The test covers 9 scheduling branches where stale seqs are removed:
+    - 1 in _schedule_swapped
+    - 1 in _schedule_priority_preemption
+    - 7 in _schedule_prefill
+
+    Each branch is tested to ensure proper cleanup of
+    _seq_id_to_num_tokens_computed.
+    """
+    # Budget can not schedule in swapped
+    block_size = 2
+    max_seq_group = 3
+    seq_tokens_with_swapped: list[list[int]] = []
+    blocks_to_swap_out: list[tuple[int, int]] = []
+    curr_loras: set[int] = set()
+
+    scheduler = initialize_scheduler(
+        block_size=block_size,
+        num_cpu_blocks=64,
+        num_gpu_blocks=16,
+        max_num_seqs=max_seq_group,
+        enable_prefix_caching=True,
+    )
+    budget = create_token_budget(token_budget=15)
+
+    seq_length = 16
+    num_seqs = 3
+    for i in range(num_seqs):
+        seq_tokens_with_swapped.append([i] * seq_length)
+
+    seq_and_seq_groups = [
+        create_dummy_prompt(f"{i}",
+                            prompt_tokens=seq_tokens_with_swapped[i],
+                            block_size=block_size)
+        for i in range(len(seq_tokens_with_swapped))
+    ]
+
+    for _, seq_group in seq_and_seq_groups:
+        scheduler._allocate_and_set_running(seq_group)
+        scheduler._swap_out(seq_group, blocks_to_swap_out)
+        scheduler._add_seq_group_to_swapped(seq_group)
+
+    scheduler._schedule_swapped(budget, curr_loras)
+    seq_id_to_num_tokens_computed = (
+        scheduler.block_manager._computed_blocks_tracker.
+        _seq_id_to_num_tokens_computed.get(1))
+    assert seq_id_to_num_tokens_computed is None
+
+    # Prefill schedule don't have a space for another LoRA, so
+    # we ignore this request for now.
+    block_size = 4
+    lora_config = LoRAConfig(max_lora_rank=8, max_loras=1)
+    scheduler = initialize_scheduler(lora_config=lora_config,
+                                     block_size=block_size,
+                                     num_cpu_blocks=64,
+                                     num_gpu_blocks=64,
+                                     enable_prefix_caching=True)
+    budget = create_token_budget(token_budget=120)
+    num_seqs = 2
+    for i in range(num_seqs):
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=seq_length,
+                                           block_size=block_size,
+                                           lora_request=LoRARequest(
+                                               lora_name=str(i),
+                                               lora_int_id=i + 1,
+                                               lora_path="abc"))
+        scheduler.add_seq_group(seq_group)
+
+    scheduler._schedule_prefills(budget, curr_loras)
+    seq_id_to_num_tokens_computed = (
+        scheduler.block_manager._computed_blocks_tracker.
+        _seq_id_to_num_tokens_computed.get(1))
+    assert seq_id_to_num_tokens_computed is None
+
+    # Priority preemption schedule
+    scheduler._schedule_priority_preemption(budget)
+    seq_id_to_num_tokens_computed = (
+        scheduler.block_manager._computed_blocks_tracker.
+        _seq_id_to_num_tokens_computed.get(1))
+    assert seq_id_to_num_tokens_computed is None
+
+    # Prefill scheduler does not schedule batches with prompt tokens and
+    # prompt embeddings co-mingled.
+    block_size = 2
+    max_seq_group = 3
+    scheduler = initialize_scheduler(
+        block_size=block_size,
+        num_cpu_blocks=16,
+        num_gpu_blocks=16,
+        max_num_seqs=max_seq_group,
+        max_model_len=100,
+        enable_prefix_caching=True,
+    )
+    seq_length = 7
+    embedding_size = 5
+    seq_tokens_with_embedding: list[list[int]] = []
+    seq_embeds: list[Optional[torch.Tensor]] = []
+
+    seq_tokens_with_embedding.append(list(range(seq_length)))
+    seq_embeds.append(None)
+    seq_tokens_with_embedding.append([0] * seq_length)
+    seq_embeds.append(torch.rand(embedding_size))
+
+    seq_and_seq_groups = [
+        create_dummy_prompt(f"{i}",
+                            prompt_tokens=seq_tokens_with_embedding[i],
+                            prompt_embeds=seq_embeds[i],
+                            block_size=block_size)
+        for i in range(len(seq_tokens_with_embedding))
+    ]
+
+    for _, seq_group in seq_and_seq_groups:
+        scheduler.add_seq_group(seq_group)
+
+    scheduler._schedule_default()
+    seq_id_to_num_tokens_computed = (
+        scheduler.block_manager._computed_blocks_tracker.
+        _seq_id_to_num_tokens_computed.get(1))
+    assert seq_id_to_num_tokens_computed is None
+
+    #  Prefill scheduler budget num_batched_tokens
+    #  >= scheduler_config max_num_batched_tokens
+    block_size = 2
+    max_seq_group = 3
+    seq_tokens_prefill_budget: list[list[int]] = []
+
+    scheduler = initialize_scheduler(
+        block_size=block_size,
+        max_token_budget=8,
+        num_cpu_blocks=16,
+        num_gpu_blocks=16,
+        max_num_seqs=max_seq_group,
+        max_model_len=5,
+        enable_prefix_caching=True,
+    )
+    seq_length = 4
+    num_seqs = 3
+    for i in range(num_seqs):
+        seq_tokens_prefill_budget.append([i] * seq_length)
+
+    seq_and_seq_groups = [
+        create_dummy_prompt(f"{i}",
+                            prompt_tokens=seq_tokens_prefill_budget[i],
+                            block_size=block_size)
+        for i in range(len(seq_tokens_prefill_budget))
+    ]
+
+    for _, seq_group in seq_and_seq_groups:
+        scheduler.add_seq_group(seq_group)
+
+    scheduler._schedule_default()
+    seq_id_to_num_tokens_computed = (
+        scheduler.block_manager._computed_blocks_tracker.
+        _seq_id_to_num_tokens_computed.get(2))
+    assert seq_id_to_num_tokens_computed is None
+
+    # Budget can not schedule in waiting
+    block_size = 2
+    max_seq_group = 3
+
+    scheduler = initialize_scheduler(
+        block_size=block_size,
+        max_token_budget=30,
+        num_cpu_blocks=16,
+        num_gpu_blocks=16,
+        max_num_seqs=max_seq_group,
+        max_model_len=30,
+        enable_prefix_caching=True,
+    )
+    seq_length = 16
+    num_seqs = 3
+    seq_tokens_prefill_budget_waiting: list[list[int]] = []
+
+    for i in range(num_seqs):
+        seq_tokens_prefill_budget_waiting.append(list(range(seq_length)))
+
+    seq_and_seq_groups = [
+        create_dummy_prompt(f"{i}",
+                            prompt_tokens=seq_tokens_prefill_budget_waiting[i],
+                            block_size=block_size)
+        for i in range(len(seq_tokens_prefill_budget_waiting))
+    ]
+
+    for _, seq_group in seq_and_seq_groups:
+        scheduler.add_seq_group(seq_group)
+
+    scheduler._schedule_default()
+    seq_id_to_num_tokens_computed = (
+        scheduler.block_manager._computed_blocks_tracker.
+        _seq_id_to_num_tokens_computed.get(1))
+    assert seq_id_to_num_tokens_computed is None
+
+    # Sequence num_new_tokens > prompt_limit marked FINISHED_IGNORED
+    block_size = 2
+    max_seq_group = 3
+    scheduler = initialize_scheduler(
+        block_size=block_size,
+        num_cpu_blocks=16,
+        num_gpu_blocks=16,
+        max_num_seqs=max_seq_group,
+        max_model_len=30,
+        enable_prefix_caching=True,
+    )
+
+    seq_length = 31
+    seq_tokens_prompt_limit: list[list[int]] = []
+    seq_tokens_prompt_limit.append(list(range(seq_length)))
+    seq_and_seq_groups = [
+        create_dummy_prompt("0",
+                            prompt_tokens=seq_tokens_prompt_limit[0],
+                            block_size=block_size)
+    ]
+    for _, seq_group in seq_and_seq_groups:
+        scheduler.add_seq_group(seq_group)
+    scheduler._schedule_default()
+    seq_id_to_num_tokens_computed = (
+        scheduler.block_manager._computed_blocks_tracker.
+        _seq_id_to_num_tokens_computed.get(0))
+    assert seq_id_to_num_tokens_computed is None
+
+    # Budget can not allocate, AllocStatus is NEVER marked FINISHED_IGNORED
+    block_size = 2
+    max_seq_group = 3
+    scheduler = initialize_scheduler(
+        block_size=block_size,
+        num_cpu_blocks=160,
+        num_gpu_blocks=160,
+        max_num_seqs=max_seq_group,
+        max_model_len=320,
+        enable_prefix_caching=True,
+    )
+
+    seq_length = 320
+    num_seqs = 1
+    seq_tokens_never: list[list[int]] = []
+    for i in range(num_seqs):
+        seq_tokens_never.append(list(range(seq_length)))
+
+    seq_and_seq_groups = [
+        create_dummy_prompt(f"{i}",
+                            prompt_tokens=seq_tokens_never[i],
+                            block_size=block_size)
+        for i in range(len(seq_tokens_never))
+    ]
+
+    for _, seq_group in seq_and_seq_groups:
+        scheduler.add_seq_group(seq_group)
+
+    scheduler._schedule_default()
+    seq_id_to_num_tokens_computed = (
+        scheduler.block_manager._computed_blocks_tracker.
+        _seq_id_to_num_tokens_computed.get(0))
+    assert seq_id_to_num_tokens_computed is None
+
+    # Budget can not allocate, AllocStatus is LATER
+    block_size = 2
+    max_seq_group = 3
+    scheduler = initialize_scheduler(
+        block_size=block_size,
+        num_cpu_blocks=160,
+        num_gpu_blocks=160,
+        max_num_seqs=max_seq_group,
+        max_model_len=320,
+        enable_prefix_caching=True,
+    )
+
+    seq_length = 160
+    num_seqs = 2
+    seq_tokens_later: list[list[int]] = []
+    for i in range(num_seqs):
+        seq_tokens_later.append(list(range(seq_length)))
+
+    seq_and_seq_groups = [
+        create_dummy_prompt(f"{i}",
+                            prompt_tokens=seq_tokens_later[i],
+                            block_size=block_size)
+        for i in range(len(seq_tokens_later))
+    ]
+
+    for _, seq_group in seq_and_seq_groups:
+        scheduler.add_seq_group(seq_group)
+
+    scheduler._schedule_default()
+    seq_id_to_num_tokens_computed = (
+        scheduler.block_manager._computed_blocks_tracker.
+        _seq_id_to_num_tokens_computed.get(1))
+    assert seq_id_to_num_tokens_computed is None

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 MODELS_ON_S3 = [
     "adept/fuyu-8b",
     "ai21labs/AI21-Jamba-1.5-Mini",
@@ -9,7 +10,7 @@ MODELS_ON_S3 = [
     "allenai/OLMoE-1B-7B-0924-Instruct",
     "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test",
     "AMead10/Llama-3.2-1B-Instruct-AWQ",
-    "ArthurZ/Ilama-3.2-1B",
+    "hmellor/Ilama-3.2-1B",
     "BAAI/bge-base-en-v1.5",
     "BAAI/bge-multilingual-gemma2",
     "BAAI/bge-reranker-v2-m3",
@@ -110,14 +111,14 @@ MODELS_ON_S3 = [
     "royokong/e5-v",
     "sentence-transformers/all-roberta-large-v1",
     "sentence-transformers/stsb-roberta-base-v2",
-    "shanearora/OLMo-7B-1124-hf",
+    "allenai/OLMo-2-0425-1B",
     "shuyuej/Llama-3.2-1B-Instruct-GPTQ",
     "ssmits/Qwen2-7B-Instruct-embed-base",
     "stabilityai/stablelm-3b-4e1t",
     "stabilityai/stablelm-zephyr-3b",
     "state-spaces/mamba-130m-hf",
     "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",
-    "THUDM/glm-4v-9b",
+    "zai-org/glm-4v-9b",
     "TIGER-Lab/Mantis-8B-siglip-llama3",
     "TIGER-Lab/VLM2Vec-Full",
     "tiiuae/falcon-40b",

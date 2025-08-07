@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Containing tests that check for regressions in vLLM's behavior.
 
 It should include tests that are reported by users and making sure they
@@ -60,6 +61,9 @@ def test_model_from_modelscope(monkeypatch: pytest.MonkeyPatch):
     # model: https://modelscope.cn/models/qwen/Qwen1.5-0.5B-Chat/summary
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_MODELSCOPE", "True")
+        # Don't use HF_TOKEN for ModelScope repos, otherwise it will fail
+        # with 400 Client Error: Bad Request.
+        m.setenv("HF_TOKEN", "")
         llm = LLM(model="qwen/Qwen1.5-0.5B-Chat")
 
         prompts = [

@@ -1,3 +1,4 @@
+# For vllm script, with -t option (tensor parallel size).
 # bash ./run-lm-eval-gsm-vllm-baseline.sh -m Qwen/Qwen2-57B-A14B-Instruct -b "auto" -l 250 -f 5 -t 4
 model_name: "Qwen/Qwen2-57B-A14B-Instruct"
 tasks:

@@ -1,8 +1,8 @@
-# SPDX-License-Identifier: Apache-2.0 Adapted from
-# https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
-from functools import cached_property
-from typing import (Iterable, Literal, Mapping, Optional, Sequence, Set, Tuple,
-                    TypedDict, Union, cast)
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Annotated, Literal, Optional, Union, cast
 
 import torch
 from torch import nn
@@ -17,46 +17,49 @@ from transformers.models.got_ocr2.image_processing_got_ocr2 import (
 
 from vllm.config import VllmConfig
 from vllm.jsontree import json_map_leaves
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargs
+from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargs
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo,
                                         MultiModalFieldConfig,
                                         PromptReplacement, PromptUpdate,
-                                        encode_tokens)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+                                        PromptUpdateDetails)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
-from .vision import scatter_patch_features, select_patch_features
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix,
+                    merge_multimodal_embeddings)
 
 
-class AyaVisionImagePixelInputs(TypedDict):
+class AyaVisionImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - np: The total number of patches over each image over each prompt in
+              the batch
+        - c: Number of channels
+        - h: Height of each image patch
+        - w: Width of each image patch
+        - bn: Batch size * number of images
+    """
+
     type: Literal["pixel_values"]
-    pixel_values: torch.Tensor
-    """
-    Shape: `(num_patches_total, num_channels, height, width)`
 
-    `num_patches_total` is the total number of patches over each image over each
-    prompt in the batch.
-    """
+    pixel_values: Annotated[
+        torch.Tensor,
+        TensorShape("np", 3, "h", "w"),
+    ]
 
-    num_patches: torch.Tensor
-    """Shape: `(batch_size * num_images)`"""
-
-    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
-    """
-    A boolean mask indicating which image embeddings correspond to patch tokens.
-
-    Shape: `(batch_size * num_images, num_embeds)`
-    """
+    num_patches: Annotated[
+        torch.Tensor,
+        TensorShape("bn"),
+    ]
 
 
 class AyaVisionMultiModalProjector(nn.Module):
@@ -122,34 +125,8 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> AyaVisionProcessor:
         return self.ctx.get_hf_processor(AyaVisionProcessor, **kwargs)
 
-    def get_image_processor(self) -> GotOcr2ImageProcessor:
-        return self.get_hf_processor().image_processor
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
-
-    def get_max_image_tokens(self) -> int:
-        hf_processor = self.get_hf_processor()
-        image_processor = hf_processor.image_processor
-        image_size = self.get_image_size_with_most_features()
-        tokenizer = hf_processor.tokenizer
-        num_patches = self.get_num_patches(
-            image_width=image_size.width,
-            image_height=image_size.height,
-            size=image_processor.size,
-            min_patches=image_processor.min_patches,
-            max_patches=image_processor.max_patches)
-        image_string = hf_processor._prompt_split_image(num_patches)
-        x = encode_tokens(
-            tokenizer,
-            image_string,
-            add_special_tokens=False,
-        )
-        return len(x)
+    def get_image_processor(self, **kwargs: object) -> GotOcr2ImageProcessor:
+        return self.get_hf_processor(**kwargs).image_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -180,28 +157,29 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
 class AyaVisionDummyInputsBuilder(
         BaseDummyInputsBuilder[AyaVisionProcessingInfo]):
 
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
         processor = self.info.get_hf_processor()
         image_token = processor.image_token
 
+        return image_token * num_images
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         image_size = \
             self.info.get_image_size_with_most_features()
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=image_size.width,
                                    height=image_size.height,
                                    num_images=num_images)
         }
-        return ProcessorInputs(
-            prompt_text=image_token * num_images,
-            mm_data=mm_data,
-        )
 
 
 class AyaVisionMultiModalProcessor(
@@ -212,20 +190,19 @@ class AyaVisionMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,
             mm_kwargs,
+            tok_kwargs,
         )
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         image_processor = hf_processor.image_processor
 
-        hf_config = self.info.get_hf_config()
         # HF processor pops the `num_patches` kwarg, which is needed by vLLM
-        if (images :=
-                mm_data.get("images")) is not None and '<image>' in prompt:
-            assert isinstance(images, list)
+        if (images := mm_data.get("images")) is not None:
             parsed_images = (self._get_data_parser().parse_mm_data({
                 "image":
                 images
@@ -234,6 +211,7 @@ class AyaVisionMultiModalProcessor(
                 parsed_images.get_image_size(i)
                 for i in range(len(parsed_images))
             ]
+
             num_patches = [
                 self.info.get_num_patches(
                     image_width=image_size.width,
@@ -243,20 +221,6 @@ class AyaVisionMultiModalProcessor(
                     max_patches=image_processor.max_patches)
                 for image_size in image_sizes
             ]
-            image_tokens_list = [
-                hf_processor._prompt_split_image(num_patch)
-                for num_patch in num_patches
-            ]
-            tokenizer = self.info.get_tokenizer()
-            image_token_ids = [
-                tokenizer.encode(image_tokens, add_special_tokens=False)
-                for image_tokens in image_tokens_list
-            ]
-            embed_is_patch = [
-                torch.tensor(image_repl_tokens) == hf_config.image_token_index
-                for image_repl_tokens in image_token_ids
-            ]
-            processed_outputs["embed_is_patch"] = embed_is_patch
             processed_outputs["num_patches"] = torch.tensor(num_patches)
 
         return processed_outputs
@@ -271,7 +235,6 @@ class AyaVisionMultiModalProcessor(
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "image", num_patches),
             num_patches=MultiModalFieldConfig.batched("image"),
-            embed_is_patch=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
@@ -283,6 +246,7 @@ class AyaVisionMultiModalProcessor(
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token = hf_processor.image_token
+        img_patch_token = hf_processor.img_patch_token
         image_processor = hf_processor.image_processor
 
         def get_replacement(item_idx: int):
@@ -294,8 +258,11 @@ class AyaVisionMultiModalProcessor(
                 image_height=image_size.height,
                 size=image_processor.size,
                 min_patches=image_processor.min_patches,
-                max_patches=image_processor.max_patches)
-            return hf_processor._prompt_split_image(num_patches=num_patches)
+                max_patches=image_processor.max_patches,
+            )
+            repl = hf_processor._prompt_split_image(num_patches=num_patches)
+
+            return PromptUpdateDetails.select_text(repl, img_patch_token)
 
         return [
             PromptReplacement(
@@ -333,6 +300,22 @@ def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
 class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # mapping for new names in checkpoint saved after transformers v4.52
+            "model.language_model.": "language_model.model.",
+            "model.vision_tower.": "vision_tower.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
+            "lm_head.": "language_model.lm_head.",
+        })
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: AyaVisionConfig = vllm_config.model_config.hf_config
@@ -361,10 +344,10 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def dtype(self):
         return next(self.parameters()).dtype
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def _image_pixels_to_features(self, vision_tower: SiglipVisionModel,
                                   pixel_values: torch.Tensor,
@@ -405,61 +388,35 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             e.flatten(0, 2) for e in image_embeds.split(num_patches.tolist())
         ]
 
-    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        h = w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            if d.shape != expected_dims:
-                raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f"is {expected_dims}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[AyaVisionImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         num_patches = kwargs.pop("num_patches", None)
-        embed_is_patch = kwargs.pop("embed_is_patch", None)
         image_embeds = kwargs.pop("image_embeds", None)
         assert image_embeds is None, "Aya Vision does not support image_embeds."
 
-        if not isinstance(pixel_values, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
-        if num_patches is not None and not isinstance(num_patches,
-                                                      (torch.Tensor, list)):
-            raise ValueError("Incorrect type of num_patches. "
-                             f"Got type: {type(num_patches)}")
+        if pixel_values is None:
+            return None
 
-        if not isinstance(embed_is_patch, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of embed_is_patch. "
-                             f"Got type: {type(embed_is_patch)}")
-
-        pixel_values = flatten_bn(pixel_values, concat=True)
-        num_patches = flatten_bn(num_patches, concat=True)
-        embed_is_patch = flatten_bn(embed_is_patch)
         return AyaVisionImagePixelInputs(
             type="pixel_values",
-            pixel_values=self._validate_pixel_values(pixel_values),
-            num_patches=num_patches,
-            embed_is_patch=embed_is_patch,
-        )
+            pixel_values=flatten_bn(pixel_values, concat=True),
+            num_patches=flatten_bn(num_patches, concat=True),
+            resolve_bindings={
+                "h": self.config.vision_config.image_size,
+                "w": self.config.vision_config.image_size,
+            })
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
-        image_features = self._process_image_input(image_input, **kwargs)
-        return scatter_patch_features(
-            image_features,
-            image_input["embed_is_patch"],
-        )
+            return []
+
+        return self._process_image_input(image_input, **kwargs)
 
     def get_input_embeddings(
         self,
@@ -467,13 +424,14 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,
-                multimodal_embeddings=select_patch_features(
-                    multimodal_embeddings),
-                placeholder_token_id=self.config.image_token_index)
+                multimodal_embeddings=multimodal_embeddings,
+                placeholder_token_id=self.config.image_token_index,
+            )
 
         return inputs_embeds
 
@@ -511,17 +469,3 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
-
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)

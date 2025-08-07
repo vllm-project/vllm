@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/ssd_state_passing.py
@@ -6,8 +7,8 @@
 # ruff: noqa: E501
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import tl, triton
 
 
 @triton.autotune(
@@ -150,8 +151,6 @@ def _state_passing_fwd(
             #   are used for continuous batching. In which case we
             #   require seq_idx to be provided
             assert seq_idx is not None, ""
-            assert initial_states.shape == (seq_idx.max().item() + 1, nheads,
-                                            dim)
         else:
             # - this is the regular batching case, where initial
             #   states are used are for each example of the batch.
