@@ -475,6 +475,13 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
+    
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,
