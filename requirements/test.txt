@@ -276,7 +276,7 @@ h5py==3.13.0
     # via terratorch
 harfile==0.3.0
     # via schemathesis
-hf-xet==1.1.3
+hf-xet==1.1.7
     # via huggingface-hub
 hiredis==3.0.0
     # via tensorizer
@@ -288,7 +288,6 @@ httpx==0.27.2
     #   schemathesis
 huggingface-hub==0.34.3
     # via
-    #   -r requirements/test.in
     #   accelerate
     #   datasets
     #   evaluate
