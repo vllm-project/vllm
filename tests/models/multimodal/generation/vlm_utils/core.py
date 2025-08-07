@@ -62,9 +62,7 @@ def run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
 
-    vllm_runner_kwargs_: dict[str, Any] = {
-        "disable_mm_preprocessor_cache": True,
-    }
+    vllm_runner_kwargs_: dict[str, Any] = {"mm_processor_cache_gb": 0}
     if model_info.tokenizer:
         vllm_runner_kwargs_["tokenizer_name"] = model_info.tokenizer
     if model_info.tokenizer_mode:
