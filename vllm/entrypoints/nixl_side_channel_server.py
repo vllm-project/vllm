@@ -33,6 +33,9 @@ class NixlSideChannelServer:
                                             tp_rank: Optional[int] = None):
             kv_meta = self.vllm_config.parallel_config.xfer_handshake_metadata
 
+            if kv_meta is None:
+                return {}
+
             if dp_rank is None:
                 return kv_meta
 
