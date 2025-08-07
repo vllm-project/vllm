@@ -312,22 +312,25 @@ class ipex_ops:
         except RuntimeError as e:
             if "XMX" in str(e) or "chunked_prefill" in str(e):
                 # Fallback to basic attention implementation without XMX
-                from vllm.platforms import current_platform
                 import torch.nn.functional as F
                 import warnings
                 warnings.warn(
-                    f"XMX acceleration not available ({e}). "
-                    "Falling back to basic attention implementation. "
-                    "Performance will be reduced on Intel integrated GPUs.",
-                    UserWarning
+                    f"XMX acceleration not available on Intel GPU. "
+                    "Using manual attention fallback with reduced performance. "
+                    f"Original error: {e}",
+                    UserWarning,
+                    stacklevel=2
                 )
                 
-                # Basic scaled dot product attention fallback
+                # Manual attention computation as fallback
                 q = q.contiguous()
-                k = k.contiguous() 
+                k = k.contiguous()
                 v = v.contiguous()
                 
-                # Reshape for batch processing
+                # Get tensor dimensions: [total_tokens, num_heads, head_dim]
+                total_tokens_q, num_heads, head_dim = q.shape
+                total_tokens_k = k.shape[0]
+                
                 batch_size = cu_seqlens_q.shape[0] - 1
                 outputs = []
                 
@@ -337,20 +340,45 @@ class ipex_ops:
                     start_k = cu_seqlens_k[i].item()
                     end_k = cu_seqlens_k[i + 1].item()
                     
-                    q_seq = q[start_q:end_q].unsqueeze(0)
-                    k_seq = k[start_k:end_k].unsqueeze(0)
-                    v_seq = v[start_k:end_k].unsqueeze(0)
+                    seq_len_q = end_q - start_q
+                    seq_len_k = end_k - start_k
                     
-                    # Use PyTorch's scaled dot product attention as fallback
-                    attn_out = F.scaled_dot_product_attention(
-                        q_seq, k_seq, v_seq,
-                        scale=softmax_scale,
-                        is_causal=causal
-                    )
-                    outputs.append(attn_out.squeeze(0))
+                    if seq_len_q == 0 or seq_len_k == 0:
+                        continue
+                        
+                    # Extract sequences: [seq_len, num_heads, head_dim]
+                    q_seq = q[start_q:end_q]  # [seq_len_q, num_heads, head_dim]
+                    k_seq = k[start_k:end_k]  # [seq_len_k, num_heads, head_dim]
+                    v_seq = v[start_k:end_k]  # [seq_len_k, num_heads, head_dim]
+                    
+                    # Transpose for batch-first: [num_heads, seq_len, head_dim]
+                    q_seq = q_seq.transpose(0, 1)
+                    k_seq = k_seq.transpose(0, 1)  
+                    v_seq = v_seq.transpose(0, 1)
+                    
+                    # Compute attention scores: [num_heads, seq_len_q, seq_len_k]
+                    attn_scores = torch.matmul(q_seq, k_seq.transpose(-2, -1)) * softmax_scale
+                    
+                    # Apply causal mask if needed
+                    if causal and seq_len_q == seq_len_k:
+                        causal_mask = torch.triu(
+                            torch.full((seq_len_q, seq_len_k), float('-inf'), 
+                                     device=q.device, dtype=q.dtype), diagonal=1)
+                        attn_scores = attn_scores + causal_mask
+                    
+                    # Apply softmax and compute output
+                    attn_weights = F.softmax(attn_scores, dim=-1)
+                    attn_out = torch.matmul(attn_weights, v_seq)
+                    
+                    # Transpose back: [seq_len_q, num_heads, head_dim]
+                    attn_out = attn_out.transpose(0, 1)
+                    outputs.append(attn_out)
                 
-                result = torch.cat(outputs, dim=0)
-                out.copy_(result)
+                if outputs:
+                    result = torch.cat(outputs, dim=0)
+                    out.copy_(result)
+                else:
+                    out.zero_()
                 return out
             else:
                 raise
