@@ -1010,7 +1010,7 @@ class NixlConnectorWorker:
 
         local_block_ids = meta.local_block_ids
         self.copy_blocks(self.host_xfer_buffers, self.device_kv_caches,
-                         local_block_ids, local_block_ids, "h2d")
+                         local_block_ids, local_block_ids, "h2d", self.block_size)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "synced recved kv of request[%s] to device kv buffer,"
@@ -1030,7 +1030,7 @@ class NixlConnectorWorker:
                     ",".join(map(str, meta.local_block_ids)))
             # blocking
             self.copy_blocks(self.device_kv_caches, self.host_xfer_buffers,
-                             meta.local_block_ids, meta.local_block_ids, "d2h")
+                             meta.local_block_ids, meta.local_block_ids, "d2h", self.block_size)
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
