@@ -155,6 +155,9 @@ class AWQMarlinConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             from vllm.model_executor.layers.quantization.moe_wna16 import (
                 MoeWNA16Config)
+            if is_layer_skipped_awq(
+                    prefix, getattr(self, "modules_to_not_convert", [])):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
             if not check_moe_marlin_supports_layer(layer, self.group_size):
                 logger.warning_once(
                     f"Layer '{prefix}' is not supported by AWQMoeMarlin. "
