@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Keep Decode-only SequenceClassification models support auto prefix cache
 import pytest
 import torch
 from transformers import AutoModelForSequenceClassification
