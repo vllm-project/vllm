@@ -436,7 +436,7 @@ COPY tools/install_deepgemm.sh install_deepgemm.sh
 ENV CUDA_HOME=/usr/local/cuda
 RUN bash install_python_libraries.sh \
     && bash install_deepgemm.sh \
-    && bash install_nixl.sh --force \
+    && bash install_nixl.sh --force
 
 #################### vLLM installation IMAGE ####################
 
