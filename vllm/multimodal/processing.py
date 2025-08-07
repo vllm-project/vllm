@@ -1363,14 +1363,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_cache_items_or_hashes: dict[str, list[_CacheItemOrHash]],
         mm_missing_kwargs: MultiModalKwargs,
     ) -> dict[str, list[MultiModalKwargsItem]]:
-        mm_missing_next_idx = {
-            modality: 0
-            for modality in mm_missing_kwargs.modalities
-        }
+        mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
         merged_items = defaultdict[str, list[MultiModalKwargsItem]](list)
-        for modality, cache_items in mm_cache_items_or_hashes.items():
-            for item_or_hash in cache_items:
+        for modality, items_or_hashes in mm_cache_items_or_hashes.items():
+            for item_or_hash in items_or_hashes:
                 if isinstance(item_or_hash, str):
                     kw_item = mm_missing_kwargs.get_item(
                         modality,
