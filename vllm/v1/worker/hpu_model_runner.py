@@ -2485,9 +2485,9 @@ def _make_src_and_dst_indices(
 
     for idx in range(len(src_block_ids)):
         src_block_id = src_block_ids[idx]
-        src_indices = torch.range(block_size * src_block_id, block_size * (1 + src_block_id))
+        src_indices = torch.range(block_size * src_block_id, block_size * (1 + src_block_id), dtype=torch.int)
         dst_block_id = dst_block_ids[idx]
-        dst_indices = torch.range(block_size * dst_block_id, block_size * (1 + dst_block_id))
+        dst_indices = torch.range(block_size * dst_block_id, block_size * (1 + dst_block_id), dtype=torch.int)
 
 
     return src_indices, dst_indices
