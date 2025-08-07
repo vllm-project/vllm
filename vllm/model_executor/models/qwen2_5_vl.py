@@ -396,13 +396,13 @@ class Qwen2_5_VisionBlock(nn.Module):
             max_seqlen: Optional[int] = None,  # Only used for Flash Attention
             seqlens: Optional[list[int]] = None,  # Only used for xFormers
     ) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x),
-                          cu_seqlens=cu_seqlens,
-                          rotary_pos_emb=rotary_pos_emb,
-                          max_seqlen=max_seqlen,
-                          seqlens=seqlens)
-
-        x = x + self.mlp(self.norm2(x))
+        x_attn = self.attn(self.norm1(x),
+                           cu_seqlens=cu_seqlens,
+                           rotary_pos_emb=rotary_pos_emb,
+                           max_seqlen=max_seqlen,
+                           seqlens=seqlens)
+        x_fused_norm, residual = self.norm2(x, residual=x_attn)
+        x = residual + self.mlp(x_fused_norm)
         return x
 
 
