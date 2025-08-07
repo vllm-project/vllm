@@ -896,8 +896,8 @@ class ModelConfig:
     def set_mm_processor_cache_gb(self, value: int) -> None:
         mm_config = self.get_multimodal_config()
 
-        self.mm_processor_cache_gb = 0
-        mm_config.mm_processor_cache_gb = 0
+        self.mm_processor_cache_gb = value
+        mm_config.mm_processor_cache_gb = value
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
