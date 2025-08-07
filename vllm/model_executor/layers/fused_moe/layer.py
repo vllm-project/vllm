@@ -34,7 +34,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import (direct_register_custom_op, has_deep_ep, has_pplx,
-                        round_up)
+                        has_triton_kernels, round_up)
 from vllm.utils.flashinfer import has_flashinfer
 
 if current_platform.is_cuda_alike():
@@ -721,10 +721,14 @@ class FusedMoE(torch.nn.Module):
         self.global_num_experts = num_experts + num_redundant_experts
 
         # we padding globally so EP buffer allocation works
-        if quant_config and quant_config.get_name() == "mxfp4" and (
-                envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
-            hidden_size = round_up(hidden_size, 256)
+        if quant_config and quant_config.get_name() == "mxfp4":
+            if current_platform.is_device_capability(
+                    90) and not has_triton_kernels():
+                raise NotImplementedError(
+                    "Triton kernels must be installed for mxfp4 on hopper")
+            if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+                    or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+                hidden_size = round_up(hidden_size, 256)
 
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config

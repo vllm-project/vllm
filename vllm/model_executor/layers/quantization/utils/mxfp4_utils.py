@@ -4,9 +4,39 @@ from typing import Callable, Optional
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 OCP_MX_BLOCK_SIZE = 32
+
+
+def _swizzle_mxfp4(quant_tensor, scale, num_warps):
+    """ weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel
+    """
+    import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
+    from triton_kernels.numerics import InFlexData
+    from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
+    from triton_kernels.tensor_details import layout
+    value_layout, value_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
+        mx_axis=1)
+    scale_layout, scale_layout_opts = (
+        layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=1,
+                                                        num_warps=num_warps))
+    if current_platform.is_cuda() and \
+        current_platform.is_device_capability(100):
+        constraints = {
+            "is_persistent": True,
+            "epilogue_subtile": 1,
+        }
+        opt_flags.update_opt_flags_constraints(constraints)
+    # transpose the tensor so that the quantization axis is on dim1
+    quant_tensor = quant_tensor.transpose(-2, -1)
+    scale = scale.transpose(-2, -1)
+    quant_tensor = convert_layout(wrap_torch_tensor(quant_tensor, dtype=FP4),
+                                  value_layout, **value_layout_opts)
+    scale = convert_layout(wrap_torch_tensor(scale), scale_layout,
+                           **scale_layout_opts)
+    return quant_tensor, InFlexData(), scale
 
 
 def _can_support_mxfp4(use_grouped_topk: bool = False,
