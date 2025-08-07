@@ -165,7 +165,7 @@ def _cached_get_attn_backend(
 
 @contextmanager
 def global_force_attn_backend_context_manager(
-    attn_backend: _Backend, ) -> Generator[None, None, None]:
+        attn_backend: _Backend) -> Generator[None, None, None]:
     """
     Globally force a vLLM attention backend override within a
     context manager, reverting the global attention backend
