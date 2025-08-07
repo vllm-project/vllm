@@ -132,9 +132,6 @@ class OpenAIServingResponses(OpenAIServing):
                 "\"auto\" tool choice has been enabled please note that while"
                 " the parallel_tool_calls client option is preset for "
                 "compatibility reasons, it will be ignored.")
-            if not self.use_harmony:
-                raise NotImplementedError("Auto tool choice is not supported "
-                                          "yet unless using Harmony")
 
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
@@ -212,8 +209,8 @@ class OpenAIServingResponses(OpenAIServing):
                     await self._make_request(request, prev_response,
                                              tokenizer))
 
-        except (ValueError, TypeError, RuntimeError,
-                jinja2.TemplateError) as e:
+        except (ValueError, TypeError, RuntimeError, jinja2.TemplateError,
+                NotImplementedError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
 
@@ -313,6 +310,9 @@ class OpenAIServingResponses(OpenAIServing):
         prev_response: Optional[ResponsesResponse],
         tokenizer: AnyTokenizer,
     ):
+        if len(request.tools) > 0:
+            raise NotImplementedError(
+                "Tool use is not supported in Responses API without Harmony")
         # Construct the input messages.
         messages = self._construct_input_messages(request, prev_response)
         _, request_prompts, engine_prompts = await self._preprocess_chat(
