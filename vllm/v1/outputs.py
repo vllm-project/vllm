@@ -125,3 +125,14 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               prompt_logprobs_dict={},
                                               pooler_output=[],
                                               num_nans_in_logits=None)
+
+EMPTY_MODEL_RUNNER_WITH_KVC_OUTPUT = ModelRunnerOutput(
+    req_ids=[],
+    req_id_to_index={},
+    sampled_token_ids=[],
+    spec_token_ids=None,
+    logprobs=None,
+    prompt_logprobs_dict={},
+    pooler_output=[],
+    num_nans_in_logits=None,
+    kv_connector_output=KVConnectorOutput())

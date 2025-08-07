@@ -14,8 +14,8 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput,
-                             ModelRunnerOutput)
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_WITH_KVC_OUTPUT,
+                             KVConnectorOutput, ModelRunnerOutput)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -68,9 +68,9 @@ class KVConnectorModelRunnerMixin:
 
         if (not kv_connector_output.finished_sending
                 and not kv_connector_output.finished_recving):
-            return EMPTY_MODEL_RUNNER_OUTPUT
+            return EMPTY_MODEL_RUNNER_WITH_KVC_OUTPUT
 
-        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output = copy.copy(EMPTY_MODEL_RUNNER_WITH_KVC_OUTPUT)
         output.kv_connector_output = kv_connector_output
         return output
 

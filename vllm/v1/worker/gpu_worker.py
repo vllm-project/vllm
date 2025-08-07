@@ -27,7 +27,8 @@ from vllm.tasks import SupportedTask
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_WITH_KVC_OUTPUT,
+                             ModelRunnerOutput)
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
@@ -377,9 +378,9 @@ class Worker(WorkerBase):
             # kv_connector_output
             if (not kv_connector_output.finished_sending
                     and not kv_connector_output.finished_recving):
-                return EMPTY_MODEL_RUNNER_OUTPUT
+                return EMPTY_MODEL_RUNNER_WITH_KVC_OUTPUT
 
-            output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+            output = copy.copy(EMPTY_MODEL_RUNNER_WITH_KVC_OUTPUT)
             output.kv_connector_output = kv_connector_output
             return output
 
