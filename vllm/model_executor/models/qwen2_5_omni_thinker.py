@@ -431,7 +431,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         tokenization_kwargs: Mapping[str, object],
         *,
         enable_hf_prompt_update: bool,
-    ) -> tuple[list[int], MultiModalKwargs, bool]:
+    ) -> tuple[list[int], BatchFeature, bool]:
         """
         Qwen2.5-Omni reimplements this function to handle text only.
         """
@@ -448,20 +448,20 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         else:
             prompt_ids = self._apply_hf_processor_tokens_only(prompt)
 
-        mm_kwargs = self._apply_hf_processor_mm_only(
+        mm_processed_data = self._apply_hf_processor_mm_only(
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
         )
 
-        return prompt_ids, mm_kwargs, False
+        return prompt_ids, mm_processed_data, False
 
     def _apply_hf_processor_mm_only(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-    ) -> MultiModalKwargs:
+    ) -> BatchFeature:
         """
         Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`.
         """
@@ -473,14 +473,14 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             assert "audio" in mm_counts
             mm_counts["audio"] -= mm_counts["video"]
 
-        _, mm_kwargs, _ = self._apply_hf_processor_text_mm(
+        _, mm_processed_data, _ = self._apply_hf_processor_text_mm(
             prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
         )
 
-        return mm_kwargs
+        return mm_processed_data
 
     def _validate_mm_placeholders(
         self,
