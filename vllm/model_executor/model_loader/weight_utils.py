@@ -783,7 +783,7 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
 
     # Check if name ends with k_scale or v_scale
     if name.endswith((".k_scale", ".v_scale")):
-        import re
+        import regex as re
 
         for pattern, replacement in scale_mapping_patterns:
             if re.search(pattern, name):
