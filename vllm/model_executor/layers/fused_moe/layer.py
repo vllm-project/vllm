@@ -464,11 +464,22 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 expert_map=expert_map,
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
+        elif self.fused_experts is not None:
+            return self.fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+            )
         else:
-            fused_experts_fn = (fused_experts if self.fused_experts is None
-                                else self.fused_experts)
-            assert fused_experts_fn is not None
-            return fused_experts_fn(
+            assert fused_experts is not None
+            return fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
