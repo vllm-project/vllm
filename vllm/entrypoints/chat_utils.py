@@ -29,6 +29,7 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
 from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
 from openai.types.responses import ResponseInputImageParam
+from openai_harmony import Message as OpenAIHarmonyMessage
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 # yapf: enable
@@ -207,7 +208,8 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
 
 
 ChatCompletionMessageParam = Union[OpenAIChatCompletionMessageParam,
-                                   CustomChatCompletionMessageParam]
+                                   CustomChatCompletionMessageParam,
+                                   OpenAIHarmonyMessage]
 
 
 # TODO: Make fields ReadOnly once mypy supports it
