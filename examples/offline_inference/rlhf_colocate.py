@@ -154,7 +154,6 @@ for bundle_index, training_actor in enumerate(training_actors):
 for i, bundle_indices in enumerate([[0, 1], [2, 3]]):
     # Use the following syntax instead of the @ray.remote decorator so that
     # the placement group is customized for each bundle.
-    # env_vars = {current_platform.device_control_env_var: bundle_indices_str}
     llm = ray.remote(
         num_cpus=0,
         num_gpus=0,
