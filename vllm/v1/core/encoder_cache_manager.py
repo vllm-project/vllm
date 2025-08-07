@@ -189,8 +189,7 @@ def compute_encoder_budget(
             in the input sequence.
     """
 
-    if not model_config.is_multimodal_model or \
-        not mm_registry.supports_multimodal_inputs(model_config):
+    if not mm_registry.supports_multimodal_inputs(model_config):
         return 0, 0
 
     # TODO: handle encoder-decoder models once we support them.
