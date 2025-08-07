@@ -105,7 +105,6 @@ vllm serve "$MODEL_NAME" \
   --enforce-eager \
   --override-pooler-config "$POOLER_CONFIG" \
   --served-model-name ${MODEL_CODE} \
-  --task embed \
   --api-key "$API_KEY" \
   --trust-remote-code \
   --port "$PORT" \
