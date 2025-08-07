@@ -5,12 +5,12 @@ import contextlib
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
-from vllm.utils.flashinfer import has_flashinfer
+
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
-
+from vllm.utils.flashinfer import has_flashinfer
 
 logger = init_logger(__name__)
 
@@ -659,13 +659,16 @@ if has_flashinfer():
         dtype: torch.dtype,
         backend: str,
     ) -> torch.Tensor:
-        return flashinfer_mm_fp4_(
-            A, B, A_scale, B_scale, g_scale, dtype, block_size=16, backend=backend
-        )
+        return flashinfer_mm_fp4_(A,
+                                  B,
+                                  A_scale,
+                                  B_scale,
+                                  g_scale,
+                                  dtype,
+                                  block_size=16,
+                                  backend=backend)
 
-    @torch.library.register_fake(
-        "vllm::flashinfer_mm_fp4",
-    )
+    @torch.library.register_fake("vllm::flashinfer_mm_fp4", )
     def flashinfer_mm_fp4_fake(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -675,7 +678,11 @@ if has_flashinfer():
         dtype: torch.dtype,
         backend: str,
     ) -> torch.Tensor:
-        return torch.empty(A.shape[0], B.shape[1], dtype=dtype, device=A.device)
+        return torch.empty(A.shape[0],
+                           B.shape[1],
+                           dtype=dtype,
+                           device=A.device)
+
 
 # cutlass
 def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
@@ -707,10 +714,12 @@ def cutlass_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
                                        alpha)
     return out
 
+
 def flashinfer_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
-                          block_scale_a: torch.Tensor,
-                          block_scale_b: torch.Tensor, alpha: torch.Tensor,
-                          out_dtype: torch.dtype, backend: str) -> torch.Tensor:
+                             block_scale_a: torch.Tensor,
+                             block_scale_b: torch.Tensor, alpha: torch.Tensor,
+                             out_dtype: torch.dtype,
+                             backend: str) -> torch.Tensor:
     assert a.ndim == 2 and b.ndim == 2
     assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
     assert a.stride(-1) == 1 and b.stride(-1) == 1
@@ -723,14 +732,14 @@ def flashinfer_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
         block_scale_b = block_scale_b.view(torch.uint8)
 
     return flashinfer_mm_fp4(
-            a,
-            b.t(),
-            block_scale_a,
-            block_scale_b.t(),
-            alpha,
-            out_dtype,
-            backend=backend,
-        )
+        a,
+        b.t(),
+        block_scale_a,
+        block_scale_b.t(),
+        alpha,
+        out_dtype,
+        backend=backend,
+    )
 
 
 def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
