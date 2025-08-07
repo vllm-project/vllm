@@ -576,7 +576,6 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     scale2 *= *k_scale;
 #ifdef __FP8__PA__
     q_max = warpReduceMax(q_max);
-    // The max value for fp8 e4m3 is 448. We scale to 224.0 to avoid saturation.
     constexpr float FP8_E4M3_SCALE_TARGET = 224.0f;
     q_scale = q_max > 0 ? FP8_E4M3_SCALE_TARGET / q_max : 1.0f;
     scale2 /= q_scale;
