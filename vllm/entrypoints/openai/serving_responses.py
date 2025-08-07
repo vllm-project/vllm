@@ -422,24 +422,6 @@ class OpenAIServingResponses(OpenAIServing):
             usage=usage,
         )
 
-        # Log complete response if output logging is enabled
-        if self.enable_log_outputs and self.request_logger:
-            output_text = ""
-            if content:
-                output_text = content
-            elif reasoning_content:
-                output_text = f"[reasoning: {reasoning_content}]"
-
-            if output_text:
-                self.request_logger.log_outputs(
-                    request_id=request.request_id,
-                    outputs=output_text,
-                    output_token_ids=final_output.token_ids,
-                    finish_reason=final_output.finish_reason,
-                    is_streaming=False,
-                    delta=False,
-                )
-
         if request.store:
             async with self.response_store_lock:
                 stored_response = self.response_store.get(response.id)
@@ -468,6 +450,24 @@ class OpenAIServingResponses(OpenAIServing):
         else:
             reasoning_content = None
             content = final_output.text
+
+        # Log complete response if output logging is enabled
+        if self.enable_log_outputs and self.request_logger:
+            output_text = ""
+            if content:
+                output_text = content
+            elif reasoning_content:
+                output_text = f"[reasoning: {reasoning_content}]"
+
+            if output_text:
+                self.request_logger.log_outputs(
+                    request_id=request.request_id,
+                    outputs=output_text,
+                    output_token_ids=final_output.token_ids,
+                    finish_reason=final_output.finish_reason,
+                    is_streaming=False,
+                    delta=False,
+                )
 
         output = []
         if reasoning_content:
