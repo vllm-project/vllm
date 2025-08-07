@@ -50,7 +50,6 @@ ENV MODEL_PATH=/app/models/custom_model
 # Install GCC
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
 
-# Install FlashInfer
-RUN pip install "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl"
+# TODO: Install a compatible FlashInfer wheel for current PyTorch and CUDA version
 
 ENTRYPOINT ["sh", "-c", "exec python3 -m vllm.entrypoints.openai.api_server --model $MODEL_PATH $VLLM_ARGS"]
