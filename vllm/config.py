@@ -444,8 +444,7 @@ class ModelConfig:
     model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
     """
     disable_mm_preprocessor_cache: bool = False
-    """If `True`, disable caching of the multi-modal preprocessor/mapper (not
-    recommended)."""
+    """If `True`, disable caching of the multi-modal processor."""
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -1704,6 +1703,31 @@ class ModelConfig:
     @property
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
+
+    @property
+    def processor_return_mm_hashes(self) -> bool:
+        """Whether the multi-modal processor should output hashes."""
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            return False
+
+        return not mm_config.disable_mm_preprocessor_cache
+
+    @property
+    def enable_mm_input_cache(self) -> bool:
+        """Whether the multi-modal input cache should be enabled."""
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            return False
+
+        return not mm_config.disable_mm_preprocessor_cache
+
+    def get_mm_input_cache_gb(self) -> int:
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            return 0
+
+        return envs.VLLM_MM_INPUT_CACHE_GIB
 
     @property
     def is_cross_encoder(self) -> bool:
@@ -3382,7 +3406,7 @@ class MultiModalConfig:
 
     disable_mm_preprocessor_cache: bool = False
     """
-    If `True`, disable caching of the processed multi-modal inputs.
+    If `True`, disable caching of the multi-modal processor.
     """
 
     interleave_mm_strings: bool = False
