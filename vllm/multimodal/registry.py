@@ -117,7 +117,8 @@ class MultiModalRegistry:
             return False
 
         mm_config = model_config.get_multimodal_config()
-        return not mm_config.disable_mm_preprocessor_cache
+
+        return mm_config.mm_processor_cache_gb > 0
 
     def reset_processor_cache(self) -> bool:
         """Reset the multi-modal processing cache."""
