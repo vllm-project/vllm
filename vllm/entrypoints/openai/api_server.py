@@ -8,6 +8,7 @@ import importlib
 import inspect
 import json
 import multiprocessing
+import multiprocessing.forkserver as forkserver
 import os
 import signal
 import socket
@@ -92,6 +93,7 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription, OpenAIServingTranslation)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.entrypoints.tool_server import DemoToolServer, ToolServer
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     log_non_default_args, with_cancellation)
 from vllm.logger import init_logger
@@ -153,6 +155,15 @@ async def build_async_engine_client(
     disable_frontend_multiprocessing: Optional[bool] = None,
     client_config: Optional[dict[str, Any]] = None,
 ) -> AsyncIterator[EngineClient]:
+
+    if os.getenv("VLLM_WORKER_MULTIPROC_METHOD") == "forkserver":
+        # The executor is expected to be mp.
+        # Pre-import heavy modules in the forkserver process
+        logger.debug("Setup forkserver with pre-imports")
+        multiprocessing.set_start_method('forkserver')
+        multiprocessing.set_forkserver_preload(["vllm.v1.engine.async_llm"])
+        forkserver.ensure_running()
+        logger.debug("Forkserver setup complete!")
 
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
@@ -1620,6 +1631,11 @@ async def init_app_state(
                     "This discrepancy may lead to performance degradation.",
                     resolved_chat_template, args.model)
 
+    if args.tool_server == "demo":
+        tool_server: Optional[ToolServer] = DemoToolServer()
+    else:
+        tool_server = None
+
     # Merge default_mm_loras into the static lora_modules
     default_mm_loras = (vllm_config.lora_config.default_mm_loras
                         if vllm_config.lora_config is not None else {})
@@ -1654,6 +1670,7 @@ async def init_app_state(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
+        tool_server=tool_server,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,

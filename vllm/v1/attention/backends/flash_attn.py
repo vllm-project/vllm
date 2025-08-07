@@ -154,13 +154,16 @@ def _get_sliding_window_configs(
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
-    # FA2 launches separte routines for prefill-decode and pure decode batches,
-    # while FA3 launches a unified varlen fwd kernel for both prefill-decode
-    # and pure decode batches.
-    cudagraph_support = AttentionCGSupport.ALWAYS
-
-    cudagraph_decode_preference = AttentionCGSupport.UNIFORM_BATCH \
-        if get_flash_attn_version() == 2 else None
+    # FA3 supports full cudagraphs for all cases, while FA2 has some nuances.
+    # For FA2, a graph is captured with max_query_len=1, (which is what we
+    # capture by default for num_tokens <= max_num_seqs when there is no
+    # spec-decode) then these graphs will not work for mixed prefill-decode
+    # (unlike FA3). This is due to special max_query_len=1 packed-GQA handing in
+    # FA2. Theres probably a better way to describe this using
+    # `AttentionCGSupport` but for now just set it to `UNIFORM_BATCH` to get
+    # use to drop down to FULL_AND_PIECEWISE.
+    cudagraph_support = AttentionCGSupport.ALWAYS \
+        if get_flash_attn_version() == 3 else AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -371,6 +374,7 @@ class FlashAttentionImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
+        sinks: Optional[torch.Tensor] = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -407,6 +411,14 @@ class FlashAttentionImpl(AttentionImpl):
             and not flash_attn_supports_fp8():
             raise NotImplementedError(
                 "FlashAttention does not support fp8 kv-cache on this device.")
+
+        self.sinks = sinks
+        if self.sinks is not None:
+            assert self.vllm_flash_attn_version == 3, (
+                "Sinks are only supported in FlashAttention 3")
+            assert self.sinks.shape[0] == num_heads, (
+                "Sinks must have the same number of heads as the number of "
+                "heads in the layer")
 
     def forward(
         self,
@@ -532,6 +544,7 @@ class FlashAttentionImpl(AttentionImpl):
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
                 num_splits=attn_metadata.max_num_splits,
+                s_aux=self.sinks,
             )
             return output
 
