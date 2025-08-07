@@ -561,7 +561,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_VIDEO_LOADER_BACKEND":
     lambda: os.getenv("VLLM_VIDEO_LOADER_BACKEND", "opencv"),
 
-    # Cache size (in GiB per process) for multimodal input cache
+    # [DEPRECATED] Cache size (in GiB per process) for multimodal input cache
     # Default is 4 GiB per API process + 4 GiB per engine core process
     "VLLM_MM_INPUT_CACHE_GIB":
     lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "4")),
