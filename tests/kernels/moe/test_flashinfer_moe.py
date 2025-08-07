@@ -78,6 +78,11 @@ def test_flashinfer_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
 
         assert is_valid_flashinfer_cutlass_fused_moe(a, w1_q, w2_q)
 
+        assert w1_gs is not None
+        assert w2_gs is not None
+        assert w1_blockscale is not None
+        assert w2_blockscale is not None
+
         flashinfer_experts = FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             FlashInferExperts(
