@@ -80,7 +80,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__()
         self.moe = moe
-        self.fused_experts = None
+        self.fused_experts: Optional[Callable] = None
         self.topk_indices_dtype = None
 
     @abstractmethod
