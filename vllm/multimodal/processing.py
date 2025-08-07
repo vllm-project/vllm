@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import (Callable, Generator, ItemsView, Iterable, Mapping,
@@ -16,16 +15,16 @@ import torch
 from typing_extensions import assert_never
 
 from vllm.inputs import InputProcessingContext
-from vllm.jsontree import json_map_leaves, json_reduce_leaves
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
-from vllm.utils import GiB_bytes, LRUCache, flatten_2d_lists, full_groupby
+from vllm.utils import GiB_bytes, flatten_2d_lists, full_groupby
 
+from .cache import MultiModalCache
 from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                      MultiModalFieldConfig, MultiModalInputs, MultiModalKwargs,
-                     MultiModalKwargsItem, NestedTensors, PlaceholderRange)
+                     MultiModalKwargsItem, PlaceholderRange)
 from .parse import (DictEmbeddingItems, EmbeddingItems, MultiModalDataItems,
                     MultiModalDataParser)
 
@@ -888,9 +887,6 @@ def find_mm_placeholders(
     return dict(full_groupby_modality(it))
 
 
-_V = TypeVar("_V", bound="Union[MultiModalKwargs, MultiModalKwargsItem]")
-
-
 class ProcessingCacheOptionalItem(NamedTuple):
     key: str
     value: Optional[MultiModalKwargsItem]
@@ -901,48 +897,7 @@ class ProcessingCacheItem(NamedTuple):
     value: MultiModalKwargsItem
 
 
-class ProcessingCache:
-
-    @staticmethod
-    def get_lru_cache(
-        capacity_gb: float,
-        value_type: type[_V],
-        *,
-        debug: bool = False,
-    ) -> LRUCache[str, _V]:
-
-        def get_leaf_size(leaf: object) -> int:
-            # MultiModalKwargs is not a subclass of dict
-            if isinstance(leaf, MultiModalKwargs):
-                return get_item_size(leaf.data)
-
-            # MultiModalKwargsItem is not a subclass of dict
-            if isinstance(leaf, MultiModalKwargsItem):
-                leaf_data = {k: v.data for k, v in leaf.items()}
-                return get_item_size(leaf_data)
-
-            # sys.getsizeof doesn't work for tensors
-            if isinstance(leaf, torch.Tensor):
-                return leaf.nbytes
-
-            return sys.getsizeof(leaf)
-
-        def get_item_size(
-            value: Union[MultiModalKwargs, MultiModalKwargsItem,
-                         Mapping[str, NestedTensors]]
-        ) -> int:
-            size = json_reduce_leaves(
-                lambda a, b: a + b,
-                json_map_leaves(get_leaf_size, value),
-            )
-
-            if debug:
-                logger.debug("Calculated size of %s to be %.2f GiB",
-                             type(value), size / GiB_bytes)
-
-            return size
-
-        return LRUCache(GiB_bytes * capacity_gb, getsizeof=get_item_size)
+class ProcessingCache(MultiModalCache):
 
     def __init__(
         self,
