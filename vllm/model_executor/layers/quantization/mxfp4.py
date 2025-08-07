@@ -300,7 +300,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                                       requires_grad=False)
             return
         elif self.use_marlin:
-            prepare_moe_fp4_layer_for_marlin(layer)
+            prepare_moe_fp4_layer_for_marlin(layer, w13_interleaved=True)
 
     def _get_tile_tokens_dim(self, x: torch.Tensor, top_k: int):
         # Number of tokens in the input tensor.
