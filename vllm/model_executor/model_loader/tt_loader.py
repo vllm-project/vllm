@@ -36,6 +36,7 @@ class TTModelLoader(BaseModelLoader):
             model_config.hf_config,
             device_config.device,
             scheduler_config.max_num_seqs,
+            max_seq_len=model_config.max_model_len,
             tt_data_parallel=data_parallel,
         )
         return model
