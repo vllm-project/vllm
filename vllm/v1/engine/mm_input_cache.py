@@ -15,21 +15,32 @@ if TYPE_CHECKING:
 # server in the core process (=P1).
 #
 # -- P0:
-#  - BaseMultiModalProcessor processes MultiModalData into MultiModalKwargs
-#    while outputting mm_hash as its identifier.
-#  - MultiModalInputCacheClient keeps track of the cached entries and
-#    determine whether to send the MultiModalKwargs to P1.
+#  - BaseMultiModalProcessor calls MultiModalHasher to get the `mm_hash` of
+#    each input multi-modal item (e.g. image),
+#  - BaseMultiModalProcessor processes the input items into `mm_inputs`,
+#    which are MultiModalKwargsItem instances that each correspond to an
+#    input multi-modal item.
+#  - MultiModalInputCacheClient accepts the `mm_inputs` and corresponding
+#    `mm_hash` for each item. It stores the `mm_hash` as keys and the size
+#    of `mm_inputs`, but not the `mm_inputs` themselves, to avoid taking
+#    up additional memory in P0.
+#  - The `mm_hash` is always sent to P1.
+#  - The corresponding `mm_inputs` are only sent to P1 if they are not cached
+#    in MultiModalInputCacheServer.
 #
 # -- P1:
-#  - MultiModalInputCacheServer stores the MultiModalKwargs from P0.
+#  - If the `mm_hash` is cached (i.e. `mm_inputs` are not sent from P0),
+#    MultiModalInputCacheServer retrieves the corresponding `mm_inputs`.
+#  - If the `mm_hash` is not cached (i.e. `mm_inputs` are sent from P0),
+#    MultiModalInputCacheServer stores `mm_inputs` under the key `mm_hash`.
+#  - Either way, the `mm_hash` and corresponding `mm_inputs` are sent to
+#    the engine for model execution.
 #
-# The keys of MultiModalInputCacheClient and MultiModalInputCacheServer
-# are mirrored, and this allows us to avoid the serialization of `mm_inputs`
-# (like pixel values) between client (=P0) and server (=P1) processes if the
-# `mm_hash` is found in the client cache.
-
-# Both Client and Server must use the same cache size (to remain mirrored).
-# This cache size is set by the env variable `VLLM_MM_INPUT_CACHE_GIB`.
+# Both Client and Server must perform cache update and eviction based on the
+# same item size. This ensures that the keys of MultiModalInputCacheClient
+# and MultiModalInputCacheServer are mirrored, allowing us to determine in P0
+# whether a key is cached in MultiModalInputCacheServer by querying
+# MultiModalInputCacheClient without having to communicate with P1.
 
 
 class MultiModalInputCacheClient:
