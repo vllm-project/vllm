@@ -969,6 +969,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_MOE_FP8":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))),
 
+    # Allow use of FlashInfer CUTLASS MoE kernels for fused moe ops.
+    "VLLM_FLASHINFER_MOE_FP8_BACKEND":
+    lambda: os.getenv("VLLM_FLASHINFER_MOE_FP8_BACKEND", "flashinfer"),
+
     # Allow use of FlashInfer CUTLASS kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP4":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))),

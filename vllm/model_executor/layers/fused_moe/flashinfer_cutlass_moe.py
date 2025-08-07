@@ -121,7 +121,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         aq_m, aq_n = aq.shape
         workspace2 = ()
-        output_shape = (aq_m, aq_n * 2)
+        output_shape = (aq_m, aq_n * 2) if self.use_fp8_w8a8 else (aq_m, aq_n)
         workspace_dtype = a.dtype
         workspace1 = output_shape
         # The workspace is determined by `aq`, since it comes after any
