@@ -236,7 +236,7 @@ class MotifAttention(nn.Module):
                 ), diff_attn_err_msg
 
     def lambda_init_fn(self, depth):
-        return 0.8 - 0.6 * math.exp(-0.3 * depth)
+        return 0.8 - 0.6 * math.exp(-0.3 * (depth - 1))
 
     def forward(
         self,
