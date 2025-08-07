@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
-    VLLM_MM_INPUT_CACHE_GIB: int = 8
+    VLLM_MM_INPUT_CACHE_GIB: int = 4
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
@@ -152,8 +152,7 @@ if TYPE_CHECKING:
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
-    VLLM_USE_TRTLLM_CONTEXT_ATTENTION: bool = False
-    VLLM_USE_TRTLLM_DECODE_ATTENTION: bool = False
+    VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
 
@@ -562,8 +561,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_VIDEO_LOADER_BACKEND":
     lambda: os.getenv("VLLM_VIDEO_LOADER_BACKEND", "opencv"),
 
-    # Cache size (in GiB) for multimodal input cache
-    # Default is 4 GiB
+    # [DEPRECATED] Cache size (in GiB per process) for multimodal input cache
+    # Default is 4 GiB per API process + 4 GiB per engine core process
     "VLLM_MM_INPUT_CACHE_GIB":
     lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "4")),
 
@@ -990,6 +989,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE":
     lambda: int(os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")),
 
+    # MoE routing strategy selector.
+    # See `RoutingSimulator.get_available_strategies()` # for available
+    # strategies.
+    # Cutstom routing strategies can be registered by
+    # RoutingSimulator.register_strategy()
+    # Note: custom strategies may not produce correct model outputs
+    "VLLM_MOE_ROUTING_SIMULATION_STRATEGY":
+    lambda: os.environ.get("VLLM_MOE_ROUTING_SIMULATION_STRATEGY", "").lower(),
+
     # Regex timeout for use by the vLLM tool parsing plugins.
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS":
     lambda: int(os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")),
@@ -1043,13 +1051,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_CUDNN_PREFILL":
     lambda: bool(int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))),
 
-    # If set to 1, use the TRTLLM Context Attention backend in flashinfer.
-    "VLLM_USE_TRTLLM_CONTEXT_ATTENTION":
-    lambda: bool(int(os.getenv("VLLM_USE_TRTLLM_CONTEXT_ATTENTION", "0"))),
-
-    # If set to 1, use the TRTLLM Decode Attention backend in flashinfer.
-    "VLLM_USE_TRTLLM_DECODE_ATTENTION":
-    lambda: bool(int(os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", "0"))),
+    # If set to 1, use the TRTLLM attention backend in flashinfer.
+    "VLLM_USE_TRTLLM_ATTENTION":
+    lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
 
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
