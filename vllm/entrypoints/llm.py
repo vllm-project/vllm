@@ -1096,11 +1096,12 @@ class LLM:
                 "Try passing `--runner pooling` to use the model as a "
                 "pooling model.")
 
-        if (pooling_task == "encode"
-                and self.llm_engine.cache_config.enable_prefix_caching):
+        if (pooling_task == "encode" and self.llm_engine.vllm_config.
+                scheduler_config.chunked_prefill_enabled):
             raise ValueError("LLM.encode() uses ALL pooling, which does "
-                             "not support prefix_caching. "
-                             "Please turn off prefix_caching before using it.")
+                             "not support chunked prefill. "
+                             "Please turn off chunked prefill by "
+                             "`--no-enable-chunked-prefill` before using it.")
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
