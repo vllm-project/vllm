@@ -25,7 +25,8 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ConfigFormat, ConfigType, ConvertOption,
                          DecodingConfig, DetailedTraceModules, Device,
                          DeviceConfig, DistributedExecutorBackend,
-                         GuidedDecodingBackend, HfOverrides, KVEventsConfig,
+                         GuidedDecodingBackend, HfOverrides,
+                         IntermediateLoggingConfig, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
                          LoRAConfig, ModelConfig, ModelDType, ModelImpl,
                          MultiModalConfig, ObservabilityConfig, ParallelConfig,
@@ -403,6 +404,7 @@ class EngineArgs:
 
     speculative_config: Optional[Dict[str, Any]] = None
 
+
     show_hidden_metrics_for_version: Optional[str] = \
         ObservabilityConfig.show_hidden_metrics_for_version
     otlp_traces_endpoint: Optional[str] = \
@@ -447,6 +449,9 @@ class EngineArgs:
     async_scheduling: bool = SchedulerConfig.async_scheduling
     # DEPRECATED
     enable_prompt_adapter: bool = False
+    intermediate_log_config_path: Optional[str] = None
+
+    intermediate_log_config: Optional[IntermediateLoggingConfig] = None
 
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
@@ -848,6 +853,14 @@ class EngineArgs:
             title="VllmConfig",
             description=VllmConfig.__doc__,
         )
+
+        vllm_group.add_argument("--intermediate-log-config",
+                                **vllm_kwargs["intermediate_log_config"])
+        vllm_group.add_argument(
+            "--intermediate-log-config-path",
+            type=str,
+            help="The path to the configurations for intermediate loggings. "
+            "Should be a string.")
         vllm_group.add_argument("--kv-transfer-config",
                                 **vllm_kwargs["kv_transfer_config"])
         vllm_group.add_argument('--kv-events-config',
@@ -985,6 +998,18 @@ class EngineArgs:
             use_tqdm_on_load=self.use_tqdm_on_load,
             pt_load_map_location=self.pt_load_map_location,
         )
+
+    def create_intermediate_log_config_from_path(self, ) -> None:
+        """set intermediate_log_config from intermediate_log_config_path
+        """
+        if self.intermediate_log_config_path is not None:
+            if self.intermediate_log_config is not None:
+                logger.warning("The `intermediate_log_config` is set,"
+                               "`intermediate_log_config_path` "
+                               "will be ignored.")
+            with open(self.intermediate_log_config_path) as f:
+                self.intermediate_log_config = \
+                    IntermediateLoggingConfig.from_dict(json.load(f))
 
     def create_speculative_config(
         self,
@@ -1269,6 +1294,8 @@ class EngineArgs:
             disable_log_stats=self.disable_log_stats,
         )
 
+        self.create_intermediate_log_config_from_path()
+
         # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         if self.num_scheduler_steps > 1:
@@ -1355,7 +1382,6 @@ class EngineArgs:
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
         )
-
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1370,6 +1396,7 @@ class EngineArgs:
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            intermediate_log_config=self.intermediate_log_config,
             additional_config=self.additional_config,
         )
 

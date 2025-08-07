@@ -6,8 +6,10 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.config import IntermediateLoggingConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.v1.intermediates.intermediates_logging import (
+    register_intermediate_hooks)
 from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.worker.worker_base import WorkerBase as WorkerBaseV0
 
@@ -63,3 +65,26 @@ class WorkerBase(WorkerBaseV0):
     def check_health(self) -> None:
         """Basic health check (override for device-specific checks)."""
         return
+
+    def register_intermediate_hooks(
+            self, config: Optional[IntermediateLoggingConfig] = None) -> None:
+        """Register hooks for intermediate tensor logging.
+        
+        This method is called via collective_rpc from the engine core.
+        It registers hooks on the model to dump intermediate tensors during 
+        execution.
+        
+        Args:
+            config: Configuration for intermediate logging. If provided, this
+            takes precedence over kwargs.
+        """
+        if self.model_runner is None or not hasattr(
+                self.model_runner, "model") or self.model_runner.model is None:
+            logger.error("Could not register intermediate hooks: "
+                         "model_runner.model is not accessible")
+            return
+        model = self.model_runner.model
+        try:
+            register_intermediate_hooks(model, config)
+        except Exception:
+            logger.exception("Error registering intermediate hooks")
