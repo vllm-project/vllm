@@ -1831,7 +1831,7 @@ class CacheConfig:
     mamba_page_size_padded: Optional[int] = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
-    mamba_ssm_cache_dtype: Optional[str] = "auto"
+    mamba_ssm_cache_dtype: str = "auto"
     """The data type to use for the Mamba SSM cache. If set to 'auto', the
     data type will be inferred from the model config."""
 
