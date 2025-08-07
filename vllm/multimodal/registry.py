@@ -19,7 +19,7 @@ from .profiling import (BaseDummyInputsBuilder, DummyDecoderData,
                         DummyEncoderData, MultiModalProfiler)
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, MultiModalConfig
+    from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
 
@@ -117,8 +117,7 @@ class MultiModalRegistry:
         processor = self.create_processor(model_config, disable_cache=False)
         supported_modalities = processor.info.get_supported_mm_limits()
 
-        assert model_config.multimodal_config is not None
-        mm_config: MultiModalConfig = model_config.multimodal_config
+        mm_config = model_config.get_multimodal_config()
 
         # Check if all supported modalities have limit == 0
         if all(
