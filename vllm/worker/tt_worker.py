@@ -196,9 +196,11 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         appended to.
         """
         # TODO: Add proper implementation which runs profiling on TT devices
-        if ("Llama-3.1-8B" in self.model_config.model
+        if (("Llama-3.1-8B" in self.model_config.model
+             or "Mistral-7B" in self.model_config.model)
                 and self.device_config.device.get_num_devices() == 1
-                and "wormhole_b0" in ttnn.get_arch_name()):  # Llama8B on N150
+                and "wormhole_b0" in ttnn.get_arch_name()
+            ):  # Llama8B on N150 and Mistral7B on N150
             max_tokens_all_users = 65536
         elif ("Llama-3.2-90B" in self.model_config.model
               and self.device_config.device.get_num_devices() == 8
