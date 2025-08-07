@@ -509,6 +509,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
             x,
             layer.w13_qweight,
             layer.w2_qweight,
+            None,
+            None,
             layer.w13_scales,
             layer.w2_scales,
             router_logits,

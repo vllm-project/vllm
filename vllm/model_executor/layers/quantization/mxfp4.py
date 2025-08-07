@@ -13,11 +13,14 @@ from vllm.model_executor.layers.linear import (LinearBase,
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    prepare_moe_fp4_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _can_support_mxfp4)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.scalar_type import scalar_types
 from vllm.utils import next_power_of_2, round_up
 
 if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
@@ -39,7 +42,7 @@ class Mxfp4Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 100
+        return 80
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -78,6 +81,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         super().__init__()
         self.topk_indices_dtype = None
         self.moe = moe
+        self.use_marlin = torch.cuda.get_device_capability()[0] in [8, 9]
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -100,8 +104,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             intermediate_size_per_partition
         # pad the intermediate size to be a multiple of 2 * mxfp4_block
         # for to hold non-uniform sharded tensor as well as swizzling
-        if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+        if not self.use_marlin and (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8 or
+                                    envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 256)
             hidden_size = round_up(hidden_size, 256)
@@ -162,8 +166,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer):
-        if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+        if not self.use_marlin and (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8 or
+                                    envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
             layer.gemm1_alpha = Parameter(torch.tensor(
                 [1.702] * self.num_experts, dtype=torch.float32).cuda(),
                                           requires_grad=False)
@@ -285,6 +289,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 self.num_experts, -1),
                                       requires_grad=False)
             return
+        elif self.use_marlin:
+            prepare_moe_fp4_layer_for_marlin(layer)
 
     def _get_tile_tokens_dim(self, x: torch.Tensor, top_k: int):
         # Number of tokens in the input tensor.
@@ -335,6 +341,37 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         if enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")
+
+        if self.use_marlin:
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias)
+
+            return torch.ops.vllm.fused_marlin_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_bias,
+                layer.w2_bias,
+                layer.w13_weight_scale.view(torch.float8_e8m0fnu),
+                layer.w2_weight_scale.view(torch.float8_e8m0fnu),
+                router_logits,
+                topk_weights,
+                topk_ids,
+                global_scale1=None,
+                global_scale2=None,
+                quant_type_id=scalar_types.float4_e2m1f.id,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map)
 
         assert _can_support_mxfp4(
             use_grouped_topk, topk_group, num_expert_group, expert_map,
