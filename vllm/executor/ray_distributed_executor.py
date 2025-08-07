@@ -207,7 +207,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
             env_vars = {
                 current_platform.device_control_env_var: bundle_indices_str
             }
-            ray_remote_kwargs = {"runtime_env": {"env_vars": env_vars}}
+            runtime_env = ray_remote_kwargs.setdefault("runtime_env", {})
+            runtime_env.setdefault("env_vars", {}).update(env_vars)
 
         for rank, bundle_id in enumerate(bundle_indices):
             scheduling_strategy = PlacementGroupSchedulingStrategy(
