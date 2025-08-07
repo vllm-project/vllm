@@ -11,8 +11,8 @@ import pytest_asyncio
 import torch
 from transformers import AutoConfig
 
-from ...conftest import ImageTestAssets
-from ...utils import RemoteOpenAIServer
+from tests.conftest import ImageTestAssets
+from tests.utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
