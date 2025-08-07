@@ -379,7 +379,7 @@ __global__ void Marlin(
   const int zp_expert_stride =
       is_zp_float ? prob_n * prob_k / group_size / 8
                   : prob_n * prob_k / group_size / (pack_factor * 4);
-  const int b_bias_expert_stride = prob_n / 16;
+  const int b_bias_expert_stride = prob_n / 8;
 
   // parallel: num valid moe blocks
   int num_tokens_past_padded = num_tokens_past_padded_ptr[0];
@@ -832,8 +832,8 @@ __global__ void Marlin(
   // shared memory used by weight.
   static_assert(thread_m_blocks * 16 * thread_n_blocks * 16 / 8 <=
                 stages * b_sh_stage);
-  int4* sh_a = sh_s + sh_s_size;
-  int4* sh_bias = sh_a;
+  int4* sh_bias = sh_s + sh_s_size;
+  int4* sh_a = sh_bias + (thread_n_blocks * 16 / 8);
   constexpr int shm_size_used =
       moe_block_size + stages * (g_idx_stage + zp_sh_stage) + sh_s_size +
       (sh_red_size > sh_b_size ? sh_red_size : sh_b_size);
@@ -1871,13 +1871,6 @@ __global__ void Marlin(
         }
       }
 
-      if (has_bias && last) {
-        cp_async_wait<0>();
-        reinterpret_cast<int4*>(&frag_bias)[0] = sh_bias[bias_sh_rd];
-        reinterpret_cast<int4*>(&frag_bias)[1] = sh_bias[bias_sh_rd + 4];
-        __syncthreads();
-      }
-
       // For 8-bit channelwise, we apply the scale before the global reduction
       // that converts the fp32 results to fp16 (so that we avoid possible
       // overflow in fp16)
@@ -1919,6 +1912,15 @@ __global__ void Marlin(
         }
         barrier_release(&locks[locks_off], last);
       }
+
+      if (has_bias && last) {
+        cp_async_wait<0>();
+        __syncthreads();
+        reinterpret_cast<int4*>(&frag_bias)[0] = sh_bias[bias_sh_rd];
+        reinterpret_cast<int4*>(&frag_bias)[1] = sh_bias[bias_sh_rd + 4];
+        __syncthreads();
+      }
+
       if (use_atomic_add && slice_count > 1 && slice_idx != 0)
         wait_negative_and_add(&locks[locks_off]);
       if (last || use_atomic_add)
