@@ -2,6 +2,7 @@
 Comprehensive GPT-OSS example demonstrating reasoning capabilities.
 This script shows how to use GPT-OSS with MXFP4 quantization, reasoning, and tools.
 """
+
 import asyncio
 import json
 from typing import Any, Dict
@@ -11,42 +12,38 @@ from vllm import LLM, SamplingParams
 from vllm.entrypoints.openai.api_server import _populate_arg_parser as populate_api_args
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 
+
 def create_gpt_oss_config() -> Dict[str, Any]:
     """Create a configuration for GPT-OSS model."""
-    
+
     config = {
         # Model configuration
         "model": "openai/gpt-oss",  # Placeholder path
         "tokenizer_mode": "auto",
         "trust_remote_code": True,
-        
         # Quantization with MXFP4
         "quantization": "mxfp4",
-        
         # Flash Attention 3 with sinks
         "use_v2_block_manager": True,
         "attention_backend": "FLASH_ATTN_3",
-        
         # GPT-OSS specific settings
         "max_model_len": 4096,
         "tensor_parallel_size": 1,
         "dtype": "bfloat16",
-        
         # Reasoning settings
         "enable_reasoning": True,
         "reasoning_mode": "full",  # full, summary, or none
-        
-        # Tool server settings  
+        # Tool server settings
         "enable_mcp_tool_server": True,
         "tool_server_port": 8001,
     }
-    
+
     return config
 
 
 def demonstrate_reasoning_prompt() -> str:
     """Create a sample prompt that benefits from reasoning."""
-    
+
     prompt = """
     You are a helpful AI assistant with reasoning capabilities. Please solve this step by step:
     
@@ -61,13 +58,13 @@ def demonstrate_reasoning_prompt() -> str:
     
     Please show your reasoning clearly.
     """
-    
+
     return prompt
 
 
 def demonstrate_tool_usage_prompt() -> str:
     """Create a sample prompt that uses tools."""
-    
+
     prompt = """
     I need you to help me with some calculations and get the current time.
     
@@ -78,35 +75,36 @@ def demonstrate_tool_usage_prompt() -> str:
     
     Use the available tools for these tasks.
     """
-    
+
     return prompt
 
 
 async def run_gpt_oss_example():
     """Run a comprehensive GPT-OSS example."""
-    
+
     print("=" * 70)
     print("GPT-OSS Comprehensive Example")
     print("=" * 70)
-    
+
     # Note: This is a demonstration script
     # In practice, you would need a real GPT-OSS model checkpoint
-    
+
     config = create_gpt_oss_config()
     print("Configuration created:")
     for key, value in config.items():
         print(f"  {key}: {value}")
-    
+
     print("\n" + "=" * 70)
     print("Reasoning Example")
     print("=" * 70)
-    
+
     reasoning_prompt = demonstrate_reasoning_prompt()
     print("Prompt:")
     print(reasoning_prompt)
-    
+
     print("\nExpected GPT-OSS output format:")
-    print("""
+    print(
+        """
     <|reasoning|>
     Let me break this down step by step.
     
@@ -163,18 +161,20 @@ async def run_gpt_oss_example():
        - This would allow forming 5 more teams using the remaining 10 Engineering and 10 Sales people
        - Total teams would then be 25, with everyone included
     <|/final|>
-    """)
-    
+    """
+    )
+
     print("\n" + "=" * 70)
     print("Tool Usage Example")
     print("=" * 70)
-    
+
     tool_prompt = demonstrate_tool_usage_prompt()
     print("Prompt:")
     print(tool_prompt)
-    
+
     print("\nExpected GPT-OSS output with tool calls:")
-    print("""
+    print(
+        """
     I'll help you with those tasks using the available tools.
     
     1. Let me calculate (15 + 25) * 2 - 10:
@@ -196,12 +196,13 @@ async def run_gpt_oss_example():
     Result: Echo: GPT-OSS tool integration is working!
     
     All tasks completed successfully! The calculation result is 70, and the tools are working properly.
-    """)
-    
+    """
+    )
+
     print("\n" + "=" * 70)
     print("Implementation Notes")
     print("=" * 70)
-    
+
     notes = """
     Key Features Implemented:
     
@@ -251,41 +252,41 @@ async def run_gpt_oss_example():
     - transformers >= 4.55.0
     - torch with CUDA support
     """
-    
+
     print(notes)
 
 
 def create_api_request_example():
     """Show how to create API requests for GPT-OSS."""
-    
+
     print("\n" + "=" * 70)
     print("API Request Examples")
     print("=" * 70)
-    
+
     # Reasoning request
     reasoning_request = {
         "model": "gpt-oss",
         "messages": [
             {
                 "role": "user",
-                "content": "Solve this math problem step by step: If a train travels at 60 mph for 2.5 hours, how far does it go?"
+                "content": "Solve this math problem step by step: If a train travels at 60 mph for 2.5 hours, how far does it go?",
             }
         ],
         "include_reasoning": True,
         "temperature": 0.7,
-        "max_completion_tokens": 1000
+        "max_completion_tokens": 1000,
     }
-    
+
     print("1. Reasoning Request:")
     print(json.dumps(reasoning_request, indent=2))
-    
-    # Tool usage request  
+
+    # Tool usage request
     tool_request = {
         "model": "gpt-oss",
         "messages": [
             {
-                "role": "user", 
-                "content": "Calculate 25 * 4 + 10 and tell me the current time"
+                "role": "user",
+                "content": "Calculate 25 * 4 + 10 and tell me the current time",
             }
         ],
         "tools": [
@@ -299,15 +300,15 @@ def create_api_request_example():
                         "properties": {
                             "expression": {
                                 "type": "string",
-                                "description": "Mathematical expression to evaluate"
+                                "description": "Mathematical expression to evaluate",
                             }
                         },
-                        "required": ["expression"]
-                    }
-                }
+                        "required": ["expression"],
+                    },
+                },
             },
             {
-                "type": "function", 
+                "type": "function",
                 "function": {
                     "name": "get_time",
                     "description": "Get current time",
@@ -317,16 +318,16 @@ def create_api_request_example():
                             "timezone": {
                                 "type": "string",
                                 "description": "Timezone (optional)",
-                                "default": "UTC"
+                                "default": "UTC",
                             }
-                        }
-                    }
-                }
-            }
+                        },
+                    },
+                },
+            },
         ],
-        "tool_choice": "auto"
+        "tool_choice": "auto",
     }
-    
+
     print("\n2. Tool Usage Request:")
     print(json.dumps(tool_request, indent=2))
 
@@ -334,11 +335,11 @@ def create_api_request_example():
 if __name__ == "__main__":
     asyncio.run(run_gpt_oss_example())
     create_api_request_example()
-    
+
     print("\n" + "=" * 70)
     print("Setup Instructions")
     print("=" * 70)
-    
+
     setup_instructions = """
     To use this GPT-OSS implementation:
     
@@ -367,5 +368,5 @@ if __name__ == "__main__":
     This implementation provides a foundation for GPT-OSS support in vLLM
     with reasoning capabilities, tool integration, and efficient inference.
     """
-    
+
     print(setup_instructions)
