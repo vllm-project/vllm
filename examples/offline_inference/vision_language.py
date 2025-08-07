@@ -1609,7 +1609,6 @@ def main(args):
     engine_args = asdict(req_data.engine_args) | {
         "seed": args.seed,
         "disable_mm_preprocessor_cache": args.disable_mm_preprocessor_cache,
-        "mm_ipc_cache_gb": 0 if args.disable_mm_ipc_cache else 4,
     }
     llm = LLM(**engine_args)
 

@@ -19,7 +19,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.mm_ipc_cache import MultiModalIPCCacheLookup
+from vllm.v1.engine.mm_ipc_cache import MultiModalIPCCacheClient
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
 from vllm.v1.structured_output.backend_outlines import (
@@ -50,7 +50,7 @@ class Processor:
                                                     self.tokenizer,
                                                     mm_registry)
 
-        self.mm_ipc_cache = MultiModalIPCCacheLookup(self.model_config)
+        self.mm_ipc_cache = MultiModalIPCCacheClient(self.model_config)
 
     @property
     def mm_registry(self):

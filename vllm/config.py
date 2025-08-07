@@ -445,15 +445,6 @@ class ModelConfig:
     """
     disable_mm_preprocessor_cache: bool = False
     """If `True`, disable caching of the multi-modal processor."""
-    mm_ipc_cache_gb: int = 4
-    """The size (in GiB) of the multi-modal IPC cache, which is used to avoid
-    transfer of past multi-modal inputs between API and engine core processes.
-
-    Since the cache is located in engine core, it is duplicated for each
-    engine core process, resulting in a total memory usage of
-    `mm_ipc_cache_gb * data_parallel_size`.
-
-    Set to `0` to disable this cache completely (not recommended)."""
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -892,16 +883,15 @@ class ModelConfig:
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 disable_mm_preprocessor_cache=self.
                 disable_mm_preprocessor_cache,
-                mm_ipc_cache_gb=self.mm_ipc_cache_gb,
                 interleave_mm_strings=self.interleave_mm_strings)
 
         return None
 
-    def set_mm_ipc_cache_gb(self, value: int) -> None:
+    def set_disable_mm_preprocessor_cache(self, value: bool) -> None:
         mm_config = self.get_multimodal_config()
 
-        self.mm_ipc_cache_gb = value
-        mm_config.mm_ipc_cache_gb = value
+        self.disable_mm_preprocessor_cache = value
+        mm_config.disable_mm_preprocessor_cache = value
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -1702,8 +1692,7 @@ class ModelConfig:
         if mm_config is None:
             return False
 
-        return (not mm_config.disable_mm_preprocessor_cache
-                or mm_config.mm_ipc_cache_gb > 0)
+        return not mm_config.disable_mm_preprocessor_cache
 
     @property
     def enable_mm_ipc_cache(self) -> bool:
@@ -1712,14 +1701,14 @@ class ModelConfig:
         if mm_config is None:
             return False
 
-        return mm_config.mm_ipc_cache_gb > 0
+        return not mm_config.disable_mm_preprocessor_cache
 
     def get_mm_ipc_cache_gb(self) -> int:
         mm_config = self.multimodal_config
         if mm_config is None:
             return 0
 
-        return mm_config.mm_ipc_cache_gb
+        return envs.VLLM_MM_INPUT_CACHE_GIB
 
     @property
     def is_cross_encoder(self) -> bool:

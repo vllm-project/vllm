@@ -261,7 +261,6 @@ def build_model_context(
     mm_processor_kwargs: Optional[dict[str, Any]] = None,
     limit_mm_per_prompt: Optional[dict[str, int]] = None,
     disable_mm_preprocessor_cache: bool = True,
-    mm_ipc_cache_gb: int = 0,
 ):
     """Creates an InputContext for a given model.
 
@@ -292,7 +291,6 @@ def build_model_context(
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt=limit_mm_per_prompt,
         disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
-        mm_ipc_cache_gb=mm_ipc_cache_gb,
         hf_overrides=model_info.hf_overrides,
         **model_config_kwargs,
     )

@@ -35,7 +35,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
                             ReconfigureDistributedRequest, ReconfigureRankType,
                             UtilityOutput, UtilityResult)
-from vllm.v1.engine.mm_ipc_cache import MultiModalIPCCache
+from vllm.v1.engine.mm_ipc_cache import MultiModalIPCCacheServer
 from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -124,7 +124,7 @@ class EngineCore:
             log_stats=self.log_stats,
         )
 
-        self.mm_ipc_cache = MultiModalIPCCache(vllm_config.model_config)
+        self.mm_ipc_cache = MultiModalIPCCacheServer(vllm_config.model_config)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously

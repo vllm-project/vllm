@@ -14,26 +14,25 @@ if TYPE_CHECKING:
 # a server, where the client executes in the frontend process (=P0) and the
 # server in the core process (=P1).
 #
-# -- Client:
+# -- P0:
 #  - BaseMultiModalProcessor processes MultiModalData into MultiModalKwargs
 #    while outputting mm_hash as its identifier.
-#  - MultiModalIPCCacheLookup keeps track of the cached entries and
+#  - MultiModalIPCCacheClient keeps track of the cached entries and
 #    determine whether to send the MultiModalKwargs to P1.
 #
-# -- Server:
-#  - MultiModalIPCCache stores the MultiModalKwargs from P0.
+# -- P1:
+#  - MultiModalIPCCacheServer stores the MultiModalKwargs from P0.
 #
-# The keys of MultiModalIPCCacheLookup (in the client)
-# and the keys of MultiModalIPCCache (in the server)
+# The keys of MultiModalIPCCacheClient and MultiModalIPCCacheServer
 # are mirrored, and this allows us to avoid the serialization of `mm_inputs`
 # (like pixel values) between client (=P0) and server (=P1) processes if the
 # `mm_hash` is found in the client cache.
 
 # Both Client and Server must use the same cache size (to remain mirrored).
-# This cache size is set by the config variable `mm_ipc_cache_gb`.
+# This cache size is set by the env variable `VLLM_MM_INPUT_CACHE_GIB`.
 
 
-class MultiModalIPCCacheLookup:
+class MultiModalIPCCacheClient:
     """Used by P0 to check whether multi-modal kwargs are cached in P1."""
 
     def __init__(self, model_config: "ModelConfig") -> None:
@@ -72,7 +71,7 @@ class MultiModalIPCCacheLookup:
         self.mm_cache.clear()
 
 
-class MultiModalIPCCache:
+class MultiModalIPCCacheServer:
     """Used by P1 to avoid requiring past multi-modal kwargs from P0."""
 
     def __init__(self, model_config: "ModelConfig") -> None:

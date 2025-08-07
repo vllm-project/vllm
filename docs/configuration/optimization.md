@@ -162,32 +162,11 @@ the same multi-modal inputs via Hugging Face `AutoProcessor`,
 which commonly occurs in multi-turn conversations.
 
 You can adjust the size of the cache via `VLLM_MM_INPUT_CACHE_GIB` environment variable
-(default 4 GiB per API process).
+(default 4 GiB per API process + 4 GiB per engine core process).
 
 If you do not benefit much from the cache, you can disable it completely via `disable_mm_preprocessor_cache`:
 
 ```python
 llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
           disable_mm_preprocessor_cache=True)
-```
-
-### IPC Cache
-
-By default, the multi-modal IPC cache is enabled to avoid repeatedly transferring
-the same multi-modal inputs between API and engine core processes,
-which commonly occurs in multi-turn conversations.
-
-You can adjust the size of the cache by setting the `mm_ipc_cache_gb` engine argument
-(default 4 GiB per engine core process).
-
-If you do not benefit much from the cache, you can disable it completely by setting it to `0`:
-
-```python
-# Use a larger IPC cache
-llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-          mm_ipc_cache_gb=8)
-
-# Fully disable the IPC cache
-llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-          mm_ipc_cache_gb=0)
 ```
