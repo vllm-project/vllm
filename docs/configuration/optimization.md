@@ -150,7 +150,7 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
     API server scale-out is only available for online inference.
 
 !!! note
-    [Multi-modal IPC cache](#ipc-cache) is disabled when API server scale-out is enabled
+    [Multi-modal processor cache](#processor-cache) is disabled when API server scale-out is enabled
     because it requires a one-to-one correspondance between API and engine core processes.
 
 ### GPU Multi-Modal Processing
@@ -184,15 +184,22 @@ llm = LLM(model="Qwen/Qwen2-Audio-7B-Instruct",
 
 ### Processor Cache
 
-By default, the multi-modal processor cache is enabled to avoid repeatedly calling Hugging Face processors
-on the same multi-modal inputs, which commonly occurs in multi-turn conversations.
+By default, the multi-modal processor cache is enabled to avoid repeatedly processing
+the same multi-modal inputs via Hugging Face `AutoProcessor`,
+which commonly occurs in multi-turn conversations.
 
-You can adjust the size of the cache via `VLLM_MM_INPUT_CACHE_GIB` environment variable (default 4 GiB).
-The actual memory usage is double of this value because the cache is mirrored across API and engine core processes.
+You can adjust the size of the cache by setting the value of `mm_processor_cache_gb`
+(default 4 GiB per API process + 4 GiB per engine core process).
+If you do not benefit much from the cache, you can disable it completely via `mm_processor_cache_gb=0`.
 
-If you do not benefit much from the cache, you can disable it completely via `disable_mm_preprocessor_cache`:
+Examples:
 
 ```python
+# Use a larger cache
 llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-          disable_mm_preprocessor_cache=True)
+          mm_processor_cache_gb=8)
+
+# Disable the cache
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          mm_processor_cache_gb=0)
 ```
