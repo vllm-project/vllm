@@ -141,17 +141,16 @@ class MCPToolServer(ToolServer):
         return self.harmony_tool_descriptions.get(tool_name)
 
     @asynccontextmanager
-    async def get_tool_session(self, tool_name: str):
+    async def new_session(self, tool_name: str):
         from mcp import ClientSession
         from mcp.client.sse import sse_client
         url = self.urls.get(tool_name)
-        if url:
-            async with sse_client(url=url) as streams, ClientSession(
-                    *streams) as session:
-                await session.initialize()
-                yield session
-        else:
-            logger.warning("Tool %s not found", tool_name)
+        if not url:
+            raise KeyError(f"Tool '{tool_name}' is not supported")
+        async with sse_client(url=url) as streams, ClientSession(
+                *streams) as session:
+            await session.initialize()
+            yield session
 
 
 class DemoToolServer(ToolServer):
@@ -183,4 +182,6 @@ class DemoToolServer(ToolServer):
 
     @asynccontextmanager
     async def new_session(self, tool_name: str):
+        if tool_name not in self.tools:
+            raise KeyError(f"Tool '{tool_name}' is not supported")
         yield self.tools[tool_name]
