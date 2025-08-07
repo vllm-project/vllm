@@ -22,9 +22,9 @@ from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.rocm_aiter_fa import (
     AiterFlashAttentionMetadata)
-from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
                                                   TreeAttentionMetadataBuilder)
+from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -240,13 +240,13 @@ class EagleProposer:
             assert isinstance(
                 attn_metadata,
                 (TritonAttentionMetadata, AiterFlashAttentionMetadata,
-                 FlashAttentionMetadata, TreeAttentionMetadata))
+                 FlashAttentionMetadata))
         else:
-            # Currently, only FlashAttention and TreeAttention support multi-token
-            # eagle spec decode. This is because the code below
+            # Currently, only FlashAttention and TreeAttention support
+            # multi-token eagle spec decode. This is because the code below
             # makes assumptions about attn_metadata attributes available.
             assert isinstance(attn_metadata,
-                            (FlashAttentionMetadata, TreeAttentionMetadata))
+                              (FlashAttentionMetadata, TreeAttentionMetadata))
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
