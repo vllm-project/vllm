@@ -314,7 +314,7 @@ class MsgpackDecoder:
     def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:
         return [self._decode_mm_item(v) for v in obj]
 
-    def _decode_mm_item(self, obj: dict) -> MultiModalKwargsItem:
+    def _decode_mm_item(self, obj: list) -> MultiModalKwargsItem:
         return MultiModalKwargsItem.from_elems(
             [self._decode_mm_field_elem(v) for v in obj])
 
