@@ -121,6 +121,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
+    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
     VLLM_ALL2ALL_BACKEND: str = "naive"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
@@ -831,6 +832,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # IP address used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_HOST":
     lambda: os.getenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "localhost"),
+
+    # Time (in seconds) after which the KV cache on the producer side is
+    # automatically cleared if no READ notification is received from the
+    # consumer. This is only applicable when using NixlConnector in a
+    # disaggregated decode-prefill setup.
+    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT":
+    lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "120")),
 
     # Port used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_PORT":

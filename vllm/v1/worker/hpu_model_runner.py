@@ -8,7 +8,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeAlias, Union, Literal
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -865,7 +865,7 @@ class HPUModelRunner:
         assert num_reqs > 0
 
         if scheduler_output.kv_connector_metadata:
-            requests = scheduler_output.kv_connector_metadata.requests
+            requests = scheduler_output.kv_connector_metadata.reqs_to_save
         else:
             requests = None
 
@@ -878,9 +878,9 @@ class HPUModelRunner:
 
             if requests is not None and req_id not in self.input_batch.req_type:
                 for request in requests:
-                    if request.req_id == req_id:
+                    if request == req_id:
                         self.input_batch.req_type[req_id] = "prefill" \
-                            if request.load_spec is None else "decode"
+                            if request is not None else "decode"
                         break
 
             num_computed_tokens = self.input_batch.num_computed_tokens_cpu[i]
@@ -2433,6 +2433,7 @@ class HPUModelRunner:
             #import remote_pdb; remote_pdb.set_trace()
             kv_caches = { layer: torch.stack((tup[0], tup[1])) for layer,tup in kv_caches.items()}
             get_kv_transfer_group().register_kv_caches(kv_caches)
+            get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
 
         htorch.hpu.synchronize()
 
@@ -2473,3 +2474,69 @@ class HPUModelRunner:
         output.finished_sending = finished_sending
         output.finished_recving = finished_recving
         return output
+
+def _make_src_and_dst_indices(
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    src_device: Union[torch.device, str],
+    dst_device: Union[torch.device, str],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    src_indices = torch.tensor(src_block_ids,
+                               device=src_device,
+                               dtype=torch.int64)
+    dst_indices = torch.tensor(dst_block_ids,
+                               device=dst_device,
+                               dtype=torch.int64)
+    return src_indices, dst_indices
+
+
+def _insert_blocks_to_hpu(
+    cpu_cache: torch.Tensor,
+    hpu_cache: torch.Tensor,
+    cpu_block_indices: torch.Tensor,
+    hpu_block_indices: torch.Tensor,
+) -> None:
+    torch.ops.xla.dynamo_set_buffer_donor_(hpu_cache, True)
+    hpu_cache[hpu_block_indices] = cpu_cache[cpu_block_indices].to(
+        hpu_cache.device)
+
+
+def _swap_out_hpu_blocks(
+    hpu_cache: torch.Tensor,
+    cpu_cache: torch.Tensor,
+    hpu_block_indices: torch.Tensor,
+    cpu_block_indices: torch.Tensor,
+) -> None:
+    """ tpu blocks to cpu blocks"""
+    torch.ops.xla.dynamo_set_buffer_donor_(hpu_cache, True)
+    cpu_cache[cpu_block_indices] = hpu_cache[hpu_block_indices].cpu()
+
+def copy_kv_blocks(
+    src_kv_caches: dict[str, torch.Tensor],
+    dst_kv_caches: dict[str, torch.Tensor],
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    direction: Literal["h2d", "d2h"],
+) -> None:
+    """Copy kv blocks between different buffers."""
+    if not src_kv_caches or not dst_kv_caches or \
+       not src_block_ids or not dst_block_ids or \
+       len(src_block_ids) != len(dst_block_ids):
+        return
+
+    src_device = next(iter(src_kv_caches.values())).device
+    dst_device = next(iter(dst_kv_caches.values())).device
+
+    src_indices, dst_indices = _make_src_and_dst_indices(
+        src_block_ids=src_block_ids,
+        dst_block_ids=dst_block_ids,
+        src_device=src_device,
+        dst_device=dst_device)
+
+    _copy_fn = _insert_blocks_to_hpu if direction == "h2d" else \
+               _swap_out_hpu_blocks
+    for layer_name in src_kv_caches:
+        src_tensor = src_kv_caches[layer_name]
+        dst_tensor = dst_kv_caches[layer_name]
+        _copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
+
