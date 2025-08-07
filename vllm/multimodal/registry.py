@@ -120,7 +120,7 @@ class MultiModalRegistry:
         text-only mode for multimodal models.
         """
 
-        if self.supports_multimodal_inputs(model_config):
+        if not self.supports_multimodal_inputs(model_config):
             return False
 
         mm_config = model_config.get_multimodal_config()
