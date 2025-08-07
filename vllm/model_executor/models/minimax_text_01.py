@@ -35,6 +35,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateShapeCalculator)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -334,12 +336,13 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
 
     @property
     def mamba_type(self) -> str:
-        return "MiniMaxText01LinearAttention"
+        return "linear_attention"
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
-        state_shape = (self.num_heads // self.tp_size, self.head_dim,
-                       self.head_dim)
-        return (state_shape, )
+        return MambaStateShapeCalculator.linear_attention_state_shape(
+            num_heads=self.num_heads,
+            tp_size=self.tp_size,
+            head_dim=self.head_dim)
 
     def __init__(
         self,
@@ -1425,8 +1428,8 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
 
-        state_shape = (hf_config.num_attention_heads //
-                       parallel_config.tensor_parallel_size,
-                       hf_config.head_dim, hf_config.head_dim)
-
-        return (state_shape, )
+        return MambaStateShapeCalculator.linear_attention_state_shape(
+            num_heads=hf_config.num_attention_heads,
+            tp_size=parallel_config.tensor_parallel_size,
+            head_dim=hf_config.head_dim,
+        )

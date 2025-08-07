@@ -126,7 +126,10 @@ for name, p in train_model.named_parameters():
 
 # Synchronize the updated weights to the inference engine.
 for name, p in train_model.named_parameters():
-    handle = llm.collective_rpc.remote("update_weight", args=(name, p.dtype, p.shape))
+    dtype_name = str(p.dtype).split(".")[-1]
+    handle = llm.collective_rpc.remote(
+        "update_weight", args=(name, dtype_name, p.shape)
+    )
     model_update_group.broadcast(p, src=0, stream=torch.cuda.current_stream())
     ray.get(handle)
 

@@ -202,7 +202,9 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
-def test_propose(num_speculative_tokens):
+@pytest.mark.parametrize("backend",
+                         [_Backend.FLASH_ATTN_VLLM_V1, _Backend.TREE_ATTN])
+def test_propose(num_speculative_tokens, backend):
     # Use GPU device
     device = torch.device(current_platform.device_type)
 
@@ -301,8 +303,7 @@ def test_propose(num_speculative_tokens):
                                    device=device)
     sampling_metadata = mock.MagicMock()
 
-    attn_metadata_builder_cls, _ = get_attention_backend(
-        _Backend.FLASH_ATTN_VLLM_V1)
+    attn_metadata_builder_cls, _ = get_attention_backend(backend)
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
         layer_names=proposer.attn_layer_names,
@@ -312,7 +313,8 @@ def test_propose(num_speculative_tokens):
 
     # Mock runner for attention metadata building
     proposer.runner = mock.MagicMock()
-    proposer.runner.attn_metadata_builders = [attn_metadata_builder]
+    proposer.runner.attn_groups.append([mock.MagicMock()])
+    proposer.runner.attn_groups[0][0].metadata_builder = attn_metadata_builder
 
     result = proposer.propose(target_token_ids=target_token_ids,
                               target_positions=target_positions,
