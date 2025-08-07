@@ -459,7 +459,6 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     break
 
-
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
                 # This information is used to determine if a load is
