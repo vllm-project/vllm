@@ -415,8 +415,12 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
-    enable_nano_split: bool = False
-    """Enable nano split for the model"""
+    enable_nano_batch_split: bool = False
+    """Enable spliting the input batch into nano-batches for intra-device parallelism"""
+    max_num_nano_batches: int = 2
+    """Maximum number of nano-batches to split the input batch into"""
+    min_nano_split_tokens: int = 512
+    """Minimum number of tokens to split the input batch"""
 
     def compute_hash(self) -> str:
         """
@@ -445,7 +449,9 @@ class ModelConfig:
         factors.append(self.override_generation_config)
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
-        factors.append(self.enable_nano_split)
+        factors.append(self.enable_nano_batch_split)
+        factors.append(self.max_num_nano_batches)
+        factors.append(self.min_nano_split_tokens)
         # hf_config can control how the model looks!
         factors.append(self.hf_config.to_json_string())
         str_factors = str(factors)

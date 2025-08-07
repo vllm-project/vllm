@@ -60,10 +60,12 @@ def prepare_nano_split_and_set_hooks(
     attn_metadatas = []
     start_req_idx = 0
     end_req_idx = 0
-    for nano_batch_size in split_config.batch_sizes:
-        start_req_idx = end_req_idx
-        end_req_idx = start_req_idx + nano_batch_size
+    for nano_batch_idx in range(split_config.num_nano_batches):
+        start_req_idx = split_config.batch_indices[nano_batch_idx]
+        end_req_idx = split_config.batch_indices[nano_batch_idx + 1]
         nano_batch_req_ids = req_ids[start_req_idx:end_req_idx]
+        start_token_idx = split_config.split_indices[nano_batch_idx]
+        end_token_idx = split_config.split_indices[nano_batch_idx + 1]
 
         # Gather per-request info for this group
         nano_batch_num_scheduled_tokens = np.array(
@@ -95,7 +97,7 @@ def prepare_nano_split_and_set_hooks(
         ):
             blk_table = input_batch.block_table[kv_cache_group_id]
             blk_table_tensor = blk_table.get_device_tensor()[start_req_idx:end_req_idx]
-            slot_mapping = blk_table.slot_mapping[:nano_batch_total_tokens]
+            slot_mapping = blk_table.slot_mapping[start_token_idx:end_token_idx]
 
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc[
@@ -111,7 +113,7 @@ def prepare_nano_split_and_set_hooks(
                 num_computed_tokens_cpu=input_batch.num_computed_tokens_cpu_tensor[
                     start_req_idx:end_req_idx
                 ],
-                num_reqs=nano_batch_size,
+                num_reqs=split_config.batch_sizes[nano_batch_idx],
                 num_actual_tokens=nano_batch_total_tokens,
                 max_query_len=int(max(nano_batch_num_scheduled_tokens)),
                 block_table_tensor=blk_table_tensor,

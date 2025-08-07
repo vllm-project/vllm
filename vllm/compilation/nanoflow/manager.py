@@ -11,23 +11,22 @@ from vllm.compilation.nanoflow.split_utils import (
     NanoOpInfo,
     NanoSplitConfig,
     FakeModule,
-    display_graph,
     get_split_config,
     tag_graph,
 )
-from vllm.config import CompilationConfig
+from vllm.config import VllmConfig
 
 
 class NanoSplitManager:
     def __init__(
-        self, graph_module: torch.fx.GraphModule, compilation_config: CompilationConfig,
+        self, graph_module: torch.fx.GraphModule, vllm_config: VllmConfig,
     ) -> None:
         self.original_graph_module = graph_module
         self.original_graph = graph_module.graph
 
         # Nano split preparation
-        # NOTE(yi): move this to compilation config
-        self.max_nano_splits = 2
+        self.min_nano_split_tokens = vllm_config.model_config.min_nano_split_tokens
+        self.max_num_nano_batches = vllm_config.model_config.max_num_nano_batches
         # Initialize the base graph
         tag_graph(
             self.original_graph_module,
@@ -52,7 +51,7 @@ class NanoSplitManager:
         setattr(self.original_graph_module, self.wrapper_fn, None)
 
         splittable_inputs, base_graph = analyze_graph(self.original_graph)
-        for num_splits in range(2, self.max_nano_splits + 1):
+        for num_splits in range(2, self.max_num_nano_batches + 1):
             new_graph = copy.deepcopy(base_graph)
             split_graph(
                 self.original_graph,
@@ -175,7 +174,13 @@ class NanoSplitManager:
         num_tokens: List[int],
         cached_seqlens: List[int],
     ) -> NanoSplitConfig:
-        self.cached_config = get_split_config(batch_size, num_tokens, cached_seqlens)
+        self.cached_config = get_split_config(
+            batch_size,
+            num_tokens,
+            cached_seqlens,
+            self.max_num_nano_batches,
+            self.min_nano_split_tokens,
+        )
         return self.cached_config
 
     def set_hooks(self, op_hook: Callable[[NanoOpInfo], ContextManager[None]]):
@@ -185,10 +190,10 @@ class NanoSplitManager:
 _split_manager = None
 
 
-def get_callable(graph_module: torch.fx.GraphModule, compilation_config: CompilationConfig) -> Callable:
+def get_callable(graph_module: torch.fx.GraphModule, vllm_config: VllmConfig) -> Callable:
     global _split_manager
     if _split_manager is None:
-        _split_manager = NanoSplitManager(graph_module, compilation_config)
+        _split_manager = NanoSplitManager(graph_module, vllm_config)
     return _split_manager.get_callable()
 
 

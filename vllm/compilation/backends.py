@@ -549,7 +549,7 @@ class VllmBackend:
         self.graph = graph
         self.configure_post_pass()
 
-        if self.vllm_config.model_config.enable_nano_split:
+        if self.vllm_config.model_config.enable_nano_batch_split:
             self.split_gm, self.piecewise_graphs = split_graph(graph, [
                 "vllm.all_reduce"
             ])
@@ -592,10 +592,10 @@ class VllmBackend:
 
         if not self.compilation_config.use_cudagraph or \
             not self.compilation_config.cudagraph_copy_inputs:
-            if self.vllm_config.model_config.enable_nano_split:
+            if self.vllm_config.model_config.enable_nano_batch_split:
                 return nano_manager.get_callable(
                     self.split_gm,
-                    compilation_config=self.compilation_config
+                    vllm_config=self.vllm_config
                 )
             else:
                 return self.split_gm

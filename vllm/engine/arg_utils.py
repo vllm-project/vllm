@@ -424,7 +424,9 @@ class EngineArgs:
         get_field(ModelConfig, "override_generation_config")
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str = ModelConfig.override_attention_dtype
-    enable_nano_split: bool = ModelConfig.enable_nano_split
+    enable_nano_batch_split: bool = ModelConfig.enable_nano_batch_split
+    max_num_nano_batches: int = ModelConfig.max_num_nano_batches
+    min_nano_split_tokens: int = ModelConfig.min_nano_split_tokens
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
 
@@ -541,8 +543,12 @@ class EngineArgs:
                                  **model_kwargs["model_impl"])
         model_group.add_argument("--override-attention-dtype",
                                  **model_kwargs["override_attention_dtype"])
-        model_group.add_argument("--enable-nano-split",
-                                 **model_kwargs["enable_nano_split"])
+        model_group.add_argument("--enable-nano-batch-split",
+                                 **model_kwargs["enable_nano_batch_split"])
+        model_group.add_argument("--max-num-nano-batches",
+                                 **model_kwargs["max_num_nano_batches"])
+        model_group.add_argument("--min-nano-split-tokens",
+                                 **model_kwargs["min_nano_split_tokens"])
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
         load_group = parser.add_argument_group(
@@ -935,7 +941,9 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
-            enable_nano_split=self.enable_nano_split,
+            enable_nano_batch_split=self.enable_nano_batch_split,
+            max_num_nano_batches=self.max_num_nano_batches,
+            min_nano_split_tokens=self.min_nano_split_tokens,
         )
 
     def validate_tensorizer_args(self):

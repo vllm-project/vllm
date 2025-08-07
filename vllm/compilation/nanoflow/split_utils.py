@@ -1,3 +1,4 @@
+import itertools
 import torch
 from typing import Callable, List, Tuple, Union
 import dataclasses
@@ -37,27 +38,36 @@ def get_split_config(
     batch_size: int,
     num_tokens: List[int],
     cached_seqlens: List[int],
+    max_num_nano_batches: int,
+    min_nano_split_tokens: int,
 ) -> NanoSplitConfig:
-    if batch_size == 1:
-        nano_batch_sizes = [1]
-        nano_batch_indices = [0, 1]
-        nano_batch_num_tokens = num_tokens.copy()
-        nano_batch_split_indices = [0, num_tokens[0]]
-    else:
-        nano_batch_sizes = [batch_size // 2, batch_size - batch_size // 2]
-        nano_batch_indices = [0, batch_size // 2, batch_size]
-        nano_batch_num_tokens = [
-            sum(num_tokens[: batch_size // 2]),
-            sum(num_tokens[batch_size // 2 :]),
-        ]
-        nano_batch_split_indices = [
-            0,
-            nano_batch_num_tokens[0],
-            sum(nano_batch_num_tokens),
-        ]
+    token_batch_size = sum(num_tokens)
+    num_nano_batches = min(
+        batch_size,
+        (token_batch_size + min_nano_split_tokens - 1) // min_nano_split_tokens,
+        max_num_nano_batches,
+    )
+    nano_batch_split_indices = [0]
+    nano_batch_indices = [0]
+    nano_batch_sizes = []
+    nano_batch_num_tokens = []
+    prefix_sum = [0] + list(itertools.accumulate(num_tokens))
+    remaining_batches = num_nano_batches - len(nano_batch_split_indices) + 1
+    remaining_tokens = token_batch_size
+    while remaining_batches > 0:
+        next_index = min(
+            range(nano_batch_indices[-1], batch_size - remaining_batches + 1),
+            key=lambda x: abs(prefix_sum[x + 1] - prefix_sum[nano_batch_indices[-1]] - remaining_tokens / remaining_batches)
+        )
+        nano_batch_indices.append(next_index + 1)
+        nano_batch_split_indices.append(prefix_sum[next_index + 1])
+        nano_batch_sizes.append(nano_batch_indices[-1] - nano_batch_indices[-2])
+        nano_batch_num_tokens.append(nano_batch_split_indices[-1] - nano_batch_split_indices[-2])
+        remaining_tokens = token_batch_size - prefix_sum[next_index + 1]
+        remaining_batches -= 1
 
     return NanoSplitConfig(
-        num_nano_batches=len(nano_batch_sizes),
+        num_nano_batches=num_nano_batches,
         batch_sizes=nano_batch_sizes,
         batch_indices=nano_batch_indices,
         num_tokens=nano_batch_num_tokens,
@@ -111,10 +121,8 @@ def analyze_graph(
             shape = input_tensor.shape
             if shape[0] == batch_size:
                 splittable_inputs.append(node)
-                print(f"Found splittable input: {node.name} with shape {shape}")
             else:
                 weight_nodes.add(node)
-                print(f"Found weight tensor: {node.name} with shape {shape}")
         # Copy all placeholder nodes to the new graph
         base_graph.node_copy(node, arg_transform=lambda n: n)
     return splittable_inputs, base_graph
@@ -149,7 +157,7 @@ def split_graph(
                 args=(node, i),
             )
             mapping[node].append(slice_node)
-    
+
     # Step 2: Split computation nodes
     def _transform(idx, n) -> torch.fx.Node:
         if n in mapping:
@@ -208,7 +216,6 @@ def split_graph(
                 )
 
             new_outputs.append(concat_node)
-            print(f"Concatenated {len(split_outputs)} output splits")
         else:
             raise ValueError(
                 f"Original output {original_output} not found in node_splits"

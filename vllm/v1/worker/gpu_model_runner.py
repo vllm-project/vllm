@@ -222,7 +222,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             == CompilationLevel.PIECEWISE
             and self.vllm_config.compilation_config.use_cudagraph
             and not self.model_config.enforce_eager
-            and not self.model_config.enable_nano_split)
+            and not self.model_config.enable_nano_batch_split)
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
         # self.cudagraph_batch_sizes sorts in ascending order.
@@ -1417,7 +1417,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_cuda_graphs=skip_cuda_graphs,
         ):
             self.maybe_setup_kv_connector(scheduler_output)
-            if self.vllm_config.model_config.enable_nano_split:
+            if self.vllm_config.model_config.enable_nano_batch_split:
                 self._prepare_nano_split(scheduler_output)
 
             model_output = self.model(
