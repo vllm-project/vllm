@@ -29,6 +29,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.tool_server import ToolServer
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
@@ -53,6 +54,7 @@ class OpenAIServingResponses(OpenAIServing):
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         tool_parser: Optional[str] = None,
+        tool_server: Optional[ToolServer] = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
     ) -> None:
@@ -113,6 +115,8 @@ class OpenAIServingResponses(OpenAIServing):
         self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
 
         self.background_tasks: dict[str, asyncio.Task] = {}
+
+        self.tool_server = tool_server
 
     async def create_responses(
         self,
