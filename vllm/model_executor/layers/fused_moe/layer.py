@@ -495,6 +495,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         else:
             fused_experts_fn = (fused_experts if self.fused_experts is None
                                 else self.fused_experts)
+            assert fused_experts_fn is not None
             return fused_experts_fn(
                 hidden_states=x,
                 w1=layer.w13_weight,
