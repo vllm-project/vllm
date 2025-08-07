@@ -381,6 +381,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float4_e2m1f.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
+                swiglu_config=(1.702, 0, 1, 1, 7),
                 expert_map=expert_map)
 
         assert _can_support_mxfp4(

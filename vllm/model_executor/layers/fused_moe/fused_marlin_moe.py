@@ -28,6 +28,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
                      quant_type_id: int,
                      apply_router_weight_on_input: bool = False,
                      global_num_experts: int = -1,
+                     swiglu_config: Optional[tuple] = None,
                      expert_map: Optional[torch.Tensor] = None,
                      global_scale1: Optional[torch.Tensor] = None,
                      global_scale2: Optional[torch.Tensor] = None,
@@ -164,14 +165,20 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         use_fp32_reduce=True,
         is_zp_float=False)
 
-    if True:
+    if swiglu_config is None:
         torch.ops._C.silu_and_mul(intermediate_cache2,
                                 intermediate_cache1.view(-1, 2 * N))
     else:
+        # TODO: optimize this
+        gate_alpha, gate_beta, up_alpha, up_beta, limit = \
+            swiglu_config
         gate_up = intermediate_cache1.view(-1, 2 * N)
         gate, up = gate_up[..., :N], gate_up[..., N:]
-        glu = gate * torch.sigmoid(gate * 1.702)
-        intermediate_cache2 = (up + 1) * glu
+        if limit is not None:
+            gate = gate.clamp(min=None, max=limit)
+            up = up.clamp(min=-limit, max=limit)
+        glu = gate * torch.sigmoid(gate_alpha * gate + gate_beta)
+        intermediate_cache2 = (up_alpha * up + up_beta) * glu
 
     if expert_map is not None:
         intermediate_cache3.zero_()
