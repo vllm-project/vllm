@@ -44,10 +44,10 @@ class LoRAParserAction(argparse.Action):
 
         lora_list: list[LoRAModulePath] = []
         for item in values:
-            if item in [None, '']:  # Skip if item is None or empty string
+            if item in [None, ""]:  # Skip if item is None or empty string
                 continue
-            if '=' in item and ',' not in item:  # Old format: name=path
-                name, path = item.split('=')
+            if "=" in item and "," not in item:  # Old format: name=path
+                name, path = item.split("=")
                 lora_list.append(LoRAModulePath(name, path))
             else:  # Assume JSON format
                 try:
@@ -167,6 +167,9 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     enable_tokenizer_info_endpoint: bool = False
     """Enable the /get_tokenizer_info endpoint. May expose chat
     templates and other tokenizer configuration."""
+    enable_log_outputs: bool = False
+    """If set to True, enable logging of model outputs (generations) 
+    in addition to the input logging that is enabled by default."""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
