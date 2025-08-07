@@ -493,9 +493,11 @@ class OpenAIServingResponses(OpenAIServing):
             sys_msg = get_system_message(
                 reasoning_effort=reasoning_effort,
                 browser_description=self.tool_server.get_tool_description(
-                    "browser") if enable_browser else None,
+                    "browser")
+                if enable_browser and self.tool_server is not None else None,
                 python_description=self.tool_server.get_tool_description(
-                    "python") if enable_code_interpreter else None,
+                    "python") if enable_code_interpreter
+                and self.tool_server is not None else None,
             )
             messages.append(sys_msg)
             dev_msg = get_developer_message(request.instructions,
@@ -510,8 +512,9 @@ class OpenAIServingResponses(OpenAIServing):
             # message. Note that this also removes these messages from the
             # msg_store.
             if len(prev_msgs) > 0:
-                assert isinstance(prev_msgs[-1], OpenAIHarmonyMessage)
-                if prev_msgs[-1].channel == "final":
+                last_msg = prev_msgs[-1]
+                assert isinstance(last_msg, OpenAIHarmonyMessage)
+                if last_msg.channel == "final":
                     prev_final_msg_idx = -1
                     for i in range(len(prev_msgs) - 2, -1, -1):
                         if prev_msgs[i].channel == "final":
@@ -520,6 +523,7 @@ class OpenAIServingResponses(OpenAIServing):
                     recent_turn_msgs = prev_msgs[prev_final_msg_idx + 1:]
                     del prev_msgs[prev_final_msg_idx + 1:]
                     for msg in recent_turn_msgs:
+                        assert isinstance(msg, OpenAIHarmonyMessage)
                         if msg.channel != "analysis":
                             prev_msgs.append(msg)
             messages.extend(prev_msgs)
