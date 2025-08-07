@@ -2908,11 +2908,6 @@ class SpeculativeConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
-    @classmethod
-    def from_dict(cls, dict_value: dict) -> "SpeculativeConfig":
-        """Parse the CLI value for the speculative config."""
-        return cls(**dict_value)
-
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         if hf_config.model_type == "deepseek_v3":
