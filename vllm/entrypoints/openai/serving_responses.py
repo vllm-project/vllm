@@ -65,6 +65,7 @@ class OpenAIServingResponses(OpenAIServing):
         tool_server: Optional[ToolServer] = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        enable_log_outputs: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -77,6 +78,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        self.enable_log_outputs = enable_log_outputs
 
         self.reasoning_parser: Optional[Callable[[AnyTokenizer],
                                                  ReasoningParser]] = None
@@ -427,6 +429,24 @@ class OpenAIServingResponses(OpenAIServing):
             status="completed",
             usage=usage,
         )
+
+        # Log complete response if output logging is enabled
+        if self.enable_log_outputs and self.request_logger:
+            output_text = ""
+            if content:
+                output_text = content
+            elif reasoning_content:
+                output_text = f"[reasoning: {reasoning_content}]"
+
+            if output_text:
+                self.request_logger.log_outputs(
+                    request_id=request.request_id,
+                    outputs=output_text,
+                    output_token_ids=final_output.token_ids,
+                    finish_reason=final_output.finish_reason,
+                    is_streaming=False,
+                    delta=False,
+                )
 
         if request.store:
             async with self.response_store_lock:
