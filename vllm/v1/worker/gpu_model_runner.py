@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import dataclasses
 import gc
 import itertools
 import time
@@ -58,7 +57,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         supports_dynamo)
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
-    make_kv_sharing_fast_prefill_attention_metadata,
+    create_fast_prefill_custom_backend,
     reorder_batch_to_split_decodes_and_prefills)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (AttentionSpec,
@@ -84,9 +83,10 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
-                    gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
-                    sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
+from .utils import (AttentionGroup, MultiModalBudget,
+                    add_kv_sharing_layers_to_kv_cache_groups, bind_kv_cache,
+                    gather_mm_placeholders, sanity_check_mm_encoder_outputs,
+                    scatter_mm_placeholders)
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -815,6 +815,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
         spec_decode_common_attn_metadata = None
 
+        if (self.cache_config.kv_sharing_fast_prefill
+                and self.input_batch.num_prompt_logprobs):
+            logger.warning(
+                "Encountered at least one request with prompt_logprobs set "
+                "with --kv-sharing-fast-prefill enabled. Fast prefill doesn't "
+                "produce correct logits for prompt tokens, so fast prefill will"
+                " be disabled for this iteration.")
+
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -860,6 +868,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 max_seq_len=max_seq_len,
                 block_table_tensor=blk_table_tensor,
                 slot_mapping=slot_mapping,
+                logits_indices_padded=logits_indices_padded,
+                num_logits_indices=logits_indices.size(0),
+                prompt_logprobs=len(self.input_batch.num_prompt_logprobs) > 0,
                 causal=True,
             )
 
@@ -884,28 +895,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     common_attn_metadata=common_attn_metadata,
                 ))
 
-                fast_prefill_metadata = attn_metadata_i
-                if (self.cache_config.kv_sharing_fast_prefill
-                        and self.kv_sharing_fast_prefill_eligible_layers):
-                    # Dynamically create a a dataclass type that inherits
-                    # from attention metadata type but includes additional
-                    # fields logits_indices_padded and num_logits_indices
-                    # which are required for prefill truncation
-                    fast_prefill_metadata_type = (
-                        make_kv_sharing_fast_prefill_attention_metadata(
-                            metadata_cls=type(attn_metadata_i), ))
-                    fast_prefill_metadata = fast_prefill_metadata_type(
-                        **dataclasses.asdict(attn_metadata_i),
-                        logits_indices_padded=logits_indices_padded,
-                        num_logits_indices=logits_indices.size(0),
-                    )
-
                 for layer_name in attn_group.layer_names:
-                    if (self.cache_config.kv_sharing_fast_prefill
-                            and layer_name
-                            in self.kv_sharing_fast_prefill_eligible_layers):
-                        attn_metadata[layer_name] = fast_prefill_metadata
-                        continue
                     attn_metadata[layer_name] = attn_metadata_i
 
         # Hot-Swap lora model
@@ -2741,6 +2731,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # layer.
             for layer_name in layer_names:
                 attn_backend = layers[layer_name].get_attn_backend()
+
+                if layer_name in self.kv_sharing_fast_prefill_eligible_layers:
+                    attn_backend = create_fast_prefill_custom_backend(
+                        "FastPrefill",
+                        attn_backend,
+                    )
+
                 key = attn_backend.full_cls_name()
                 attn_backends[key] = attn_backend
                 attn_backend_layers[key].append(layer_name)
@@ -2965,7 +2962,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for kv_cache_spec, group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             for layer_name in group.layer_names:
-                if layer_name in self.runner_only_attn_layers:
+                if (
+                    layer_name in self.runner_only_attn_layers
+                ):
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
                 assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
@@ -3099,6 +3098,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                       self.kv_caches)
         return kv_caches
 
+    def maybe_add_kv_sharing_layers_to_kv_cache_groups(
+            self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Add layers that re-use KV cache to KV cache group of its target layer.
+        Mapping of KV cache tensors happens in `initialize_kv_cache_tensors()`
+        """
+        if not self.shared_kv_cache_layers:
+            # No cross-layer KV sharing, return
+            return
+
+        add_kv_sharing_layers_to_kv_cache_groups(
+            self.shared_kv_cache_layers,
+            kv_cache_config.kv_cache_groups,
+        )
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -3107,9 +3121,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             cache size of each layer
         """
         kv_cache_config = deepcopy(kv_cache_config)
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+        self.maybe_add_kv_sharing_fast_prefill_layers(attn_layers)
         self.kv_cache_config = kv_cache_config
         self.may_reinitialize_input_batch(kv_cache_config)
         self.may_add_encoder_only_layers_to_kv_cache_config()
+        self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
@@ -3148,6 +3165,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             spec, layer_names = encoder_only_attn_specs.popitem()
             self.kv_cache_config.kv_cache_groups.append(
                 KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec))
+
+    def maybe_add_kv_sharing_fast_prefill_layers(self,
+                                                 attn_layers: dict[str,
+                                                                   Attention]):
+        """
+        In You Only Cache Once (https://arxiv.org/abs/2405.05254), or other 
+        similar KV sharing setups, the layers that re-use the shared KV cache 
+        (cross-decoder layers) can skip prefill, as only the earlier layers 
+        that generate KV caches are involved in the prefill phase.
+        """
+        if not self.cache_config.kv_sharing_fast_prefill:
+            # Optimization disabled, return
+            return
+
+        # Iterate in reversed order and add layers that re-use KV cache
+        for layer_name in reversed(attn_layers):
+            if layer_name in self.shared_kv_cache_layers:
+                self.kv_sharing_fast_prefill_eligible_layers.add(layer_name)
+            else:
+                break
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
