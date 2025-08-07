@@ -28,6 +28,8 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
+from vllm.model_executor.layers.fused_moe.routing_simulator import (
+    RoutingSimulator)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -1362,6 +1364,16 @@ class FusedMoE(torch.nn.Module):
         """
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 
+        # Check if we should use a routing simulation strategy
+        routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
+        if routing_strategy != "":
+            return RoutingSimulator.simulate_routing(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                strategy_name=routing_strategy,
+                top_k=top_k,
+                indices_type=indices_type)
+
         # DeepSeekv2 uses grouped_top_k
         if use_grouped_topk:
             assert topk_group is not None
@@ -1430,22 +1442,9 @@ class FusedMoE(torch.nn.Module):
             # to the modular kernel, we can move this logic there
             # to achieve better efficiency.
 
-            # `expert_load_view`: (num_logical_experts,)
+            # `expert_load_view`: (num_physical_experts,)
 
-            # Mask out non-local experts
-            if expert_map is not None:
-                topk_ids_local = expert_map[topk_ids]
-                topk_ids_flatten = topk_ids_local.flatten()
-            else:
-                topk_ids_flatten = topk_ids.flatten()
-
-            # Should be equivalent to:
-            # ```
-            # topk_ids_masked = topk_ids_local[topk_ids_local >= 0]
-            # expert_load_view += topk_ids_masked.bincount(
-            #     minlength=expert_load_view.shape[0])
-            # ```
-            # We use `scatter_add_` since `bincount` cannot be compiled
+            topk_ids_flatten = topk_ids.flatten()
 
             # Performance optimization:
             # `masked_fill` is significantly faster than `masked_select`
