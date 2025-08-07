@@ -32,9 +32,8 @@ from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
-                          PoolingRequestOutput, RequestOutput)
+                          PoolingOutput, PoolingRequestOutput, RequestOutput)
 from vllm.pooling_params import PoolingParams
-from vllm.transformers_utils.config import try_get_tokenizer_config
 
 logger = init_logger(__name__)
 
@@ -149,41 +148,8 @@ class EmbeddingMixin(OpenAIServing):
         )
 
     def _get_max_position_embeddings(self) -> int:
-        """Get the model's effective maximum sequence length for chunking.
-        
-        This uses the same logic as vLLM's _get_and_verify_max_len to determine
-        the actual sequence length limit,
-        considering both model config and tokenizer config.
-        When max_model_len is set and smaller than max_position_embeddings,
-        use max_model_len for chunking.
-        """
-        hf_config = self.model_config.hf_config
-
-        # Start with max_position_embeddings from model config
-        derived_max_len = getattr(hf_config, 'max_position_embeddings', 512)
-
-        # Get tokenizer config for pooling models (embedding models)
-        if self.model_config.runner_type == "pooling":
-            tokenizer_config = try_get_tokenizer_config(
-                self.model_config.tokenizer,
-                trust_remote_code=self.model_config.trust_remote_code,
-                revision=self.model_config.tokenizer_revision)
-
-            # Consider model_max_length in tokenizer_config
-            # (same logic as _get_and_verify_max_len)
-            if tokenizer_config:
-                tokenizer_model_max_length = tokenizer_config.get(
-                    'model_max_length', derived_max_len)
-                derived_max_len = min(derived_max_len,
-                                      tokenizer_model_max_length)
-
-        # Consider max_model_len when it's set and smaller than other limits
-        # max_model_len is set in OpenAIServing.__init__
-        # from model_config.max_model_len
-        if self.max_model_len is not None:
-            derived_max_len = min(derived_max_len, self.max_model_len)
-
-        return int(derived_max_len)
+        """Get the model's effective maximum sequence length for chunking."""
+        return self.model_config.max_model_len
 
     def _should_use_chunked_processing(self, request) -> bool:
         """Check if chunked processing should be used for this request."""
@@ -585,7 +551,6 @@ class EmbeddingMixin(OpenAIServing):
 
                             # Create a PoolingRequestOutput
                             # for the aggregated result
-                            from vllm.outputs import PoolingOutput
                             pooling_output_data = PoolingOutput(
                                 data=final_embedding)
 
