@@ -96,6 +96,9 @@ class RequestState:
         arrival_time: float,
         queue: Optional[RequestOutputCollector],
         log_stats: bool,
+        top_p: Optional[float] = None,
+        n: Optional[int] = None,
+        temperature: Optional[float] = None,
     ):
         self.request_id = request_id
         self.parent_req = parent_req
@@ -108,6 +111,9 @@ class RequestState:
         self.logprobs_processor = logprobs_processor
         self.detokenizer = detokenizer
         self.max_tokens_param = max_tokens_param
+        self.top_p = top_p
+        self.n = n
+        self.temperature = temperature
         self.is_prefilling = True
         self.queue = queue
 
@@ -139,10 +145,16 @@ class RequestState:
                 request=request,
             )
             max_tokens_param = sampling_params.max_tokens
+            top_p = sampling_params.top_p
+            n = sampling_params.n
+            temperature = sampling_params.temperature
         else:
             logprobs_processor = None
             detokenizer = None
             max_tokens_param = None
+            top_p = None
+            n = None
+            temperature = None
             assert request.pooling_params is not None
             output_kind = request.pooling_params.output_kind
 
@@ -158,6 +170,9 @@ class RequestState:
             logprobs_processor=logprobs_processor,
             detokenizer=detokenizer,
             max_tokens_param=max_tokens_param,
+            top_p=top_p,
+            n=n,
+            temperature=temperature,
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
@@ -474,13 +489,16 @@ class OutputProcessor:
 
             # meta
             span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, req_state.request_id)
-            if req_state.parent_req and req_state.parent_req.sampling_params:
-                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TOP_P, req_state.parent_req.sampling_params.top_p)
+            if req_state.top_p:
+                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TOP_P, req_state.top_p)
+            if req_state.max_tokens_param:
                 span.set_attribute(SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS,
-                                   req_state.parent_req.sampling_params.max_tokens)
+                                   req_state.max_tokens_param)
+            if req_state.temperature:
                 span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TEMPERATURE,
-                                   req_state.parent_req.sampling_params.temperature)
-                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N, req_state.parent_req.sampling_params.n)
+                                   req_state.temperature)
+            if req_state.n:
+                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N, req_state.n)
 
     def _update_stats_from_output(self, req_state: RequestState,
                                   engine_core_output: EngineCoreOutput,
