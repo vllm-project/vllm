@@ -124,7 +124,7 @@ class EngineCore:
             log_stats=self.log_stats,
         )
 
-        self.mm_input_cache = MultiModalInputCacheServer(
+        self.mm_input_cache_server = MultiModalInputCacheServer(
             vllm_config.model_config)
 
         # Setup batch queue for pipeline parallelism.
@@ -346,7 +346,7 @@ class EngineCore:
             logger.warning("Resetting the multi-modal cache when requests are "
                            "in progress may lead to desynced internal caches.")
 
-        self.mm_input_cache.reset()
+        self.mm_input_cache_server.reset()
 
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
@@ -410,9 +410,9 @@ class EngineCore:
         if request.mm_hashes is not None:
             assert request.mm_inputs is not None
             # Note on thread safety: no race condition.
-            # `mm_input_cache` is reset at the end of LLMEngine init,
+            # `mm_input_cache_server` is reset at the end of LLMEngine init,
             # and will only accessed in the input processing thread afterwards.
-            request.mm_inputs = self.mm_input_cache.get_and_update(
+            request.mm_inputs = self.mm_input_cache_server.get_and_update(
                 request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)

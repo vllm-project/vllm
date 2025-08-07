@@ -50,7 +50,8 @@ class Processor:
                                                     self.tokenizer,
                                                     mm_registry)
 
-        self.mm_input_cache = MultiModalInputCacheClient(self.model_config)
+        self.mm_input_cache_client = MultiModalInputCacheClient(
+            self.model_config)
 
     @property
     def mm_registry(self):
@@ -337,7 +338,7 @@ class Processor:
                 ]
 
             if sorted_mm_hashes is not None:
-                sorted_mm_inputs = self.mm_input_cache.get_and_update(
+                sorted_mm_inputs = self.mm_input_cache_client.get_and_update(
                     orig_sorted_mm_inputs, sorted_mm_hashes)
             else:
                 sorted_mm_inputs = orig_sorted_mm_inputs
