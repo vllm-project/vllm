@@ -6,8 +6,6 @@ import multiprocessing
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional
 
-import numpy as np
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -22,17 +20,11 @@ if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
     import torch
-    import xgrammar.kernels.apply_token_bitmask_inplace_torch_compile as xgr_torch_compile  # noqa: E501
 
     from vllm.reasoning import ReasoningParser
-    from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.request import Request
-    from vllm.v1.worker.gpu_input_batch import InputBatch
 else:
     torch = LazyLoader("torch", globals(), "torch")
-    xgr_torch_compile = LazyLoader(
-        "xgr_torch_compile", globals(),
-        "xgrammar.kernels.apply_token_bitmask_inplace_torch_compile")
 
 logger = init_logger(__name__)
 
