@@ -150,7 +150,7 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
     API server scale-out is only available for online inference.
 
 !!! note
-    [Multi-modal IPC cache](#ipc-cache) is disabled when API server scale-out is enabled
+    [Multi-modal processor cache](#processor-cache) is disabled when API server scale-out is enabled
     because it requires a one-to-one correspondance between API and engine core processes.
 
 ## Multi-Modal Caching
