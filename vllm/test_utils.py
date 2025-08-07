@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Optional
+
+import torch
+
+from vllm.config import VllmConfig
+from vllm.sampling_params import SamplingParams
+from vllm.v1.sample.logits_processor import (BatchUpdate, LogitsProcessor,
+                                             MoveDirectionality)
+
 MODELS_ON_S3 = [
     "adept/fuyu-8b",
     "ai21labs/AI21-Jamba-1.5-Mini",
@@ -128,3 +137,81 @@ MODELS_ON_S3 = [
 ]
 
 MODEL_WEIGHTS_S3_BUCKET = "s3://vllm-ci-model-weights"
+
+DUMMY_LOGITPROC_ENTRYPOINT = "dummy_logitproc"
+
+DUMMY_LOGITPROC_FQCN = "vllm.test_utils:DummyLogitsProcessor"
+
+
+class DummyLogitsProcessor(LogitsProcessor):
+    """Fake logit processor to support unit testing and examples"""
+
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
+                 is_pin_memory: bool):
+        self.req_info: dict[int, SamplingParams] = {}
+
+    def is_argmax_invariant(self) -> bool:
+        """Never impacts greedy sampling"""
+        return False
+
+    def update_state(self, batch_update: Optional[BatchUpdate]):
+        if not batch_update:
+            return
+
+        # Process added requests.
+        for index, params, _, _ in batch_update.added:
+            assert params is not None
+            if params.extra_args and (target_token := params.extra_args.get(
+                    "target_token", None)):
+                self.req_info[index] = target_token
+
+        if self.req_info:
+            # Process removed requests.
+            for index in batch_update.removed:
+                self.req_info.pop(index, None)
+
+            # Process moved requests, unidirectional move (a->b) and swap
+            # (a<->b)
+            for adx, bdx, direct in batch_update.moved:
+                if direct == MoveDirectionality.SWAP:
+                    # Sparse swap
+                    a_val = self.req_info.pop(adx, None)
+                    b_val = self.req_info.pop(bdx, None)
+                    if a_val is not None:
+                        self.req_info[bdx] = a_val
+                    if b_val is not None:
+                        self.req_info[adx] = b_val
+                else:
+                    # Sparse unidirectional move
+                    if adx in self.req_info:
+                        self.req_info[bdx] = self.req_info.pop(adx)
+                    else:
+                        self.req_info.pop(bdx, None)
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        # Save target values before modification
+        rows_list = list(self.req_info.keys())
+        cols = torch.tensor([self.req_info[i] for i in rows_list],
+                            dtype=torch.long)
+        rows = torch.tensor(rows_list, dtype=torch.long)
+        values_to_keep = logits[rows, cols].clone()
+
+        # Mask all but target tokens
+        logits[rows] = float('-inf')
+        logits[rows, cols] = values_to_keep
+
+        return logits
+
+
+class EntryPoint:
+    """Fake entrypoint class"""
+
+    def __init__(self):
+        self.name = DUMMY_LOGITPROC_ENTRYPOINT
+        self.value = DUMMY_LOGITPROC_FQCN
+
+    def load(self):
+        return DummyLogitsProcessor
+
+
+entry_points = lambda group: [EntryPoint()]

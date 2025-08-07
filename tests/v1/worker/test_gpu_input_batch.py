@@ -13,7 +13,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.v1.pool.metadata import PoolingMetadata
-from vllm.v1.sample.logits_processor import LogitsProcessorManager
+from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import BlockTable, MultiGroupBlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -169,7 +169,7 @@ def _construct_expected_sampling_metadata(
                       and all(x == 1 for x in repetition_penalties)),
         allowed_token_ids_mask=allowed_token_ids_mask,
         bad_words_token_ids=bad_words_token_ids,
-        logitsprocs=LogitsProcessorManager(),
+        logitsprocs=LogitsProcessors(),
     )
 
 
@@ -256,7 +256,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     input_batch.condense()
 
     # Generate the sampling metadata
-    sampling_metadata = input_batch._make_sampling_metadata()
+    sampling_metadata = input_batch.make_sampling_metadata()
 
     # Create expected output.
     expected_sampling_metadata = _construct_expected_sampling_metadata(

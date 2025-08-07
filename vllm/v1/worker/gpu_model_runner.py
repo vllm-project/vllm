@@ -60,6 +60,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
@@ -72,7 +73,6 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from ..sample.logits_processor import LogitsProcessorManager
 from .utils import (MultiModalBudget, bind_kv_cache, gather_mm_placeholders,
                     initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
@@ -212,6 +212,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
+            logitsprocs=build_logitsprocs(
+                self.vllm_config, self.device, self.pin_memory,
+                self.is_pooling_model,
+                self.vllm_config.model_config.logits_processors),
+            is_pooling_model=self.is_pooling_model,
         )
 
         self.use_cuda_graph = (
@@ -565,18 +570,29 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # NOTE(woosuk): `num_tokens` here may include spec tokens.
                 self.input_batch.num_tokens[req_index] += num_spec_tokens
 
-        # Add the new or resumed requests to the persistent batch.
-        # The smaller empty indices are filled first.
-        for req_id in req_ids_to_add:
-            req_state = self.requests[req_id]
-            self.input_batch.add_request(req_state)
+        if self.is_pooling_model:
+            # Pooling models only: place new requests at contiguous indices
+            # starting from 0
+            for adx, req_id in enumerate(req_ids_to_add):
+                req_state = self.requests[req_id]
+                self.input_batch.add_request(req_state, req_index=adx)
 
-        # Condense the batched states if there are gaps left by removed requests
-        self.input_batch.condense()
-        # Allow attention backend to reorder the batch, potentially
-        self._may_reorder_batch(scheduler_output)
-        # Refresh batch metadata with any pending updates.
-        self.input_batch.refresh_metadata()
+            # Refresh sampling metadata with added/removed pooling requests
+            self.input_batch.refresh_sampling_metadata()
+        else:
+            # Autoregressive models only: add the new or resumed requests to
+            # the persistent batch. The smaller empty indices are filled first.
+            for req_id in req_ids_to_add:
+                req_state = self.requests[req_id]
+                self.input_batch.add_request(req_state)
+
+            # Condense the batched states if there are gaps left by removed
+            # requests
+            self.input_batch.condense()
+            # Allow attention backend to reorder the batch, potentially
+            self._may_reorder_batch(scheduler_output)
+            # Refresh batch metadata and sampling metadata
+            self.input_batch.refresh_metadata()
 
     def _extract_mm_kwargs(
         self,
@@ -2334,7 +2350,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             output_token_ids=[[] for _ in range(num_reqs)],
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
-            logitsprocs=LogitsProcessorManager(),
+            logitsprocs=LogitsProcessors(),
         )
         try:
             sampler_output = self.sampler(logits=logits,
@@ -2723,6 +2739,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
+                logitsprocs=self.input_batch.logitsprocs,
+                is_pooling_model=self.is_pooling_model,
             )
 
     def _allocate_kv_cache_tensors(
