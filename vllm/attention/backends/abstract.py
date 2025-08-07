@@ -106,6 +106,10 @@ class AttentionBackend(ABC):
                      block_size: int, num_seqs: int, num_queries: int) -> None:
         raise NotImplementedError
 
+    @classmethod
+    def full_cls_name(cls) -> tuple[str, str]:
+        return (cls.__module__, cls.__qualname__)
+
 
 @dataclass
 class AttentionMetadata:

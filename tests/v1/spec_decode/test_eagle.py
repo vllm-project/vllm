@@ -313,7 +313,8 @@ def test_propose(num_speculative_tokens, backend):
 
     # Mock runner for attention metadata building
     proposer.runner = mock.MagicMock()
-    proposer.runner.attn_metadata_builders = [attn_metadata_builder]
+    proposer.runner.attn_groups.append([mock.MagicMock()])
+    proposer.runner.attn_groups[0][0].metadata_builder = attn_metadata_builder
 
     result = proposer.propose(target_token_ids=target_token_ids,
                               target_positions=target_positions,
