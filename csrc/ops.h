@@ -130,6 +130,9 @@ void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
                         torch::Tensor& scale);
 
+void silu_and_mul_nvfp4_quant(torch::Tensor& out, torch::Tensor& output_scale,
+                              torch::Tensor& input, torch::Tensor& scale);
+
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
