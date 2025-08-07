@@ -1,18 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import datetime
+import json
 from collections.abc import Iterable, Sequence
 from typing import Literal, Optional, Union
 
-from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
+from openai.types.responses import (ResponseFunctionToolCall,
+                                    ResponseOutputItem, ResponseOutputMessage,
+                                    ResponseOutputText, ResponseReasoningItem)
+from openai.types.responses.response_function_web_search import (
+    ActionFind, ActionOpenPage, ActionSearch, ResponseFunctionWebSearch)
+from openai.types.responses.response_reasoning_item import (
+    Content as ResponseReasoningTextContent)
 from openai.types.responses.tool import Tool
 from openai_harmony import (Author, Conversation, DeveloperContent,
                             HarmonyEncodingName, Message, ReasoningEffort,
                             Role, StreamableParser, SystemContent, TextContent,
                             ToolDescription, load_harmony_encoding)
 
-from vllm.entrypoints.openai.protocol import (ResponseInputOutputItem,
-                                              ResponseReasoningItem)
+from vllm.entrypoints.openai.protocol import ResponseInputOutputItem
+from vllm.utils import random_uuid
 
 REASONING_EFFORT = {
     "high": ReasoningEffort.HIGH,
@@ -158,6 +165,146 @@ def render_for_completion(messages: list[Message]) -> list[int]:
     token_ids = get_encoding().render_conversation_for_completion(
         conversation, Role.ASSISTANT)
     return token_ids
+
+
+def parse_output_message(message: Message) -> list[ResponseOutputItem]:
+    """
+    Parse a Harmony message into a list of output response items.
+    """
+    if message.author.role != "assistant":
+        # This is a message from a tool to the assistant (e.g., search result).
+        # Don't include it in the final output for now. This aligns with
+        # OpenAI's behavior on models like o4-mini.
+        return []
+
+    output_items: list[ResponseOutputItem] = []
+    recipient = message.recipient
+    if recipient is not None and recipient.startswith("browser."):
+        if len(message.content) != 1:
+            raise ValueError("Invalid number of contents in browser message")
+        content = message.content[0]
+        browser_call = json.loads(content.text)
+        # TODO: translate to url properly!
+        if recipient == "browser.search":
+            action = ActionSearch(
+                query=f"cursor:{browser_call.get('query', '')}", type="search")
+        elif recipient == "browser.open":
+            action = ActionOpenPage(
+                url=f"cursor:{browser_call.get('url', '')}", type="open_page")
+        elif recipient == "browser.find":
+            action = ActionFind(pattern=browser_call["pattern"],
+                                url=f"cursor:{browser_call.get('url', '')}",
+                                type="find")
+        else:
+            raise ValueError(f"Unknown browser action: {recipient}")
+        web_search_item = ResponseFunctionWebSearch(
+            id=f"ws_{random_uuid()}",
+            action=action,
+            status="completed",
+            type="web_search_call",
+        )
+        output_items.append(web_search_item)
+    elif message.channel == "analysis":
+        for content in message.content:
+            reasoning_item = ResponseReasoningItem(
+                id=f"rs_{random_uuid()}",
+                summary=[],
+                type="reasoning",
+                content=[
+                    ResponseReasoningTextContent(text=content.text,
+                                                 type="reasoning_text")
+                ],
+                status=None,
+            )
+            output_items.append(reasoning_item)
+    elif message.channel == "commentary":
+        if message.recipient.startswith("functions."):
+            function_name = message.recipient.split(".")[-1]
+            for content in message.content:
+                random_id = random_uuid()
+                response_item = ResponseFunctionToolCall(
+                    arguments=content.text,
+                    call_id=f"call_{random_id}",
+                    type="function_call",
+                    name=function_name,
+                    id=f"ft_{random_id}",
+                )
+                output_items.append(response_item)
+        elif message.recipient.startswith(
+                "python") or message.recipient.startswith("browser"):
+            for content in message.content:
+                reasoning_item = ResponseReasoningItem(
+                    id=f"rs_{random_uuid()}",
+                    summary=[],
+                    type="reasoning",
+                    text=content.text,
+                    status=None,
+                )
+                output_items.append(reasoning_item)
+        else:
+            raise ValueError(f"Unknown recipient: {message.recipient}")
+    elif message.channel == "final":
+        contents = []
+        for content in message.content:
+            output_text = ResponseOutputText(
+                text=content.text,
+                annotations=[],  # TODO
+                type="output_text",
+                logprobs=None,  # TODO
+            )
+            contents.append(output_text)
+        text_item = ResponseOutputMessage(
+            id=f"msg_{random_uuid()}",
+            content=contents,
+            role=message.author.role,
+            status="completed",
+            type="message",
+        )
+        output_items.append(text_item)
+    else:
+        raise ValueError(f"Unknown channel: {message.channel}")
+    return output_items
+
+
+def parse_remaining_state(
+        parser: StreamableParser) -> list[ResponseOutputItem]:
+    if not parser.current_content:
+        return []
+    if parser.current_role != Role.ASSISTANT:
+        return []
+    current_recipient = parser.current_recipient
+    if (current_recipient is not None
+            and current_recipient.startswith("browser.")):
+        return []
+
+    if parser.current_channel == "analysis":
+        reasoning_item = ResponseReasoningItem(
+            id=f"rs_{random_uuid()}",
+            summary=[],
+            type="reasoning",
+            content=[
+                ResponseReasoningTextContent(text=parser.current_content,
+                                             type="reasoning_text")
+            ],
+            status=None,
+        )
+        return [reasoning_item]
+    elif parser.current_channel == "final":
+        output_text = ResponseOutputText(
+            text=parser.current_content,
+            annotations=[],  # TODO
+            type="output_text",
+            logprobs=None,  # TODO
+        )
+        text_item = ResponseOutputMessage(
+            id=f"msg_{random_uuid()}",
+            content=[output_text],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        return [text_item]
+    return []
 
 
 def get_stop_tokens_for_assistant_actions() -> list[int]:
