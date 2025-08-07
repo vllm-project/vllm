@@ -327,9 +327,37 @@ class ipex_ops:
                 k = k.contiguous()
                 v = v.contiguous()
                 
-                # Get tensor dimensions: [total_tokens, num_heads, head_dim]
-                total_tokens_q, num_heads, head_dim = q.shape
-                total_tokens_k = k.shape[0]
+                # Debug tensor shapes
+                print(f"DEBUG: q.shape={q.shape}, k.shape={k.shape}, v.shape={v.shape}")
+                print(f"DEBUG: cu_seqlens_q={cu_seqlens_q}, cu_seqlens_k={cu_seqlens_k}")
+                
+                # Get tensor dimensions
+                if len(q.shape) == 3:
+                    # Format: [total_tokens, num_heads, head_dim]
+                    total_tokens_q, num_heads, head_dim = q.shape
+                elif len(q.shape) == 2:
+                    # Format: [total_tokens, hidden_dim] - need to reshape
+                    total_tokens_q, hidden_dim = q.shape
+                    # Assume this is num_heads * head_dim
+                    # We need to infer num_heads - this is tricky without more info
+                    # Let's try a common case: assume head_dim = 64 or 128
+                    if hidden_dim % 64 == 0:
+                        head_dim = 64
+                        num_heads = hidden_dim // 64
+                    elif hidden_dim % 128 == 0:
+                        head_dim = 128
+                        num_heads = hidden_dim // 128
+                    else:
+                        head_dim = hidden_dim // 32  # fallback
+                        num_heads = 32
+                    
+                    # Reshape to [total_tokens, num_heads, head_dim]
+                    q = q.view(total_tokens_q, num_heads, head_dim)
+                    k = k.view(k.shape[0], num_heads, head_dim)
+                    v = v.view(v.shape[0], num_heads, head_dim)
+                    print(f"DEBUG: Reshaped to q.shape={q.shape}, k.shape={k.shape}, v.shape={v.shape}")
+                else:
+                    raise ValueError(f"Unexpected q tensor shape: {q.shape}")
                 
                 batch_size = cu_seqlens_q.shape[0] - 1
                 outputs = []
@@ -343,6 +371,8 @@ class ipex_ops:
                     seq_len_q = end_q - start_q
                     seq_len_k = end_k - start_k
                     
+                    print(f"DEBUG: Batch {i}: seq_len_q={seq_len_q}, seq_len_k={seq_len_k}")
+                    
                     if seq_len_q == 0 or seq_len_k == 0:
                         continue
                         
@@ -351,10 +381,14 @@ class ipex_ops:
                     k_seq = k[start_k:end_k]  # [seq_len_k, num_heads, head_dim]
                     v_seq = v[start_k:end_k]  # [seq_len_k, num_heads, head_dim]
                     
+                    print(f"DEBUG: q_seq.shape={q_seq.shape}, k_seq.shape={k_seq.shape}, v_seq.shape={v_seq.shape}")
+                    
                     # Transpose for batch-first: [num_heads, seq_len, head_dim]
                     q_seq = q_seq.transpose(0, 1)
                     k_seq = k_seq.transpose(0, 1)  
                     v_seq = v_seq.transpose(0, 1)
+                    
+                    print(f"DEBUG: After transpose: q_seq.shape={q_seq.shape}, k_seq.shape={k_seq.shape}")
                     
                     # Compute attention scores: [num_heads, seq_len_q, seq_len_k]
                     attn_scores = torch.matmul(q_seq, k_seq.transpose(-2, -1)) * softmax_scale
