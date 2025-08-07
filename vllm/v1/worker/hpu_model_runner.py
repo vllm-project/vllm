@@ -2476,11 +2476,11 @@ class HPUModelRunner:
         return output
 
 def _make_src_and_dst_indices(
+    block_size: int,
     src_block_ids: list[int],
     dst_block_ids: list[int],
     src_device: Union[torch.device, str],
     dst_device: Union[torch.device, str],
-    block_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
 
     for idx in range(len(src_block_ids)):
@@ -2532,11 +2532,12 @@ def copy_kv_blocks(
     dst_device = next(iter(dst_kv_caches.values())).device
 
     src_indices, dst_indices = _make_src_and_dst_indices(
+        block_size,
         src_block_ids=src_block_ids,
         dst_block_ids=dst_block_ids,
         src_device=src_device,
         dst_device=dst_device,
-        block_size)
+        )
     
     for idx, (layer, kv_layer) in enumerate(src_kv_caches):
         if direction == "h2d":
