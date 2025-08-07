@@ -46,9 +46,10 @@ if TYPE_CHECKING:
 class MultiModalInputCacheClient:
     """Used by P0 to check whether multi-modal kwargs are cached in P1."""
 
-    def __init__(self, model_config: "ModelConfig", mm_registry: MultiModalRegistry) -> None:
+    def __init__(self, model_config: "ModelConfig",
+                 mm_registry: MultiModalRegistry) -> None:
         super().__init__()
-        
+
         self.enabled = mm_registry.enable_mm_input_cache(model_config)
         self.mm_cache = MultiModalCache.get_lru_cache(
             model_config.get_mm_input_cache_gb(),
@@ -85,10 +86,11 @@ class MultiModalInputCacheClient:
 class MultiModalInputCacheServer:
     """Used by P1 to avoid requiring past multi-modal kwargs from P0."""
 
-    def __init__(self, model_config: "ModelConfig") -> None:
+    def __init__(self, model_config: "ModelConfig",
+                 mm_registry: MultiModalRegistry) -> None:
         super().__init__()
 
-        self.enabled = model_config.enable_mm_input_cache
+        self.enabled = mm_registry.enable_mm_input_cache(model_config)
         self.mm_cache = MultiModalCache.get_lru_cache(
             model_config.get_mm_input_cache_gb(),
             MultiModalKwargs,
