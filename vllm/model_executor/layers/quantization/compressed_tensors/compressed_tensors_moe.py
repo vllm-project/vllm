@@ -652,6 +652,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             from vllm.model_executor.layers.fused_moe import (
                 CutlassBatchedExpertsFp8, CutlassExpertsFp8)
 
+            experts: FusedMoEPermuteExpertsUnpermute
+
             num_dispatchers = prepare_finalize.num_dispatchers()
 
             if (prepare_finalize.activation_format ==
