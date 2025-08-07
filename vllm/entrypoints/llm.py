@@ -411,6 +411,8 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         priority: Optional[list[int]] = None,
+        tqdm_desc: str = "Processed prompts",
+        add_request_tqdm_desc: str = "Adding requests"
     ) -> list[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -434,6 +436,9 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             priority: The priority of the requests, if any.
                 Only applicable when priority scheduling policy is enabled.
+            tqdm_desc: The description to show on the tqdm progress bar.
+            add_request_tqdm_desc: The description to show on the tqdm progress
+                bar for adding requests.
 
         Returns:
             A list of `RequestOutput` objects containing the
@@ -484,9 +489,10 @@ class LLM:
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
+            tqdm_desc=add_request_tqdm_desc
         )
 
-        outputs = self._run_engine(use_tqdm=use_tqdm)
+        outputs = self._run_engine(use_tqdm=use_tqdm, tqdm_desc=tqdm_desc)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
     def _get_modality_specific_lora_reqs(
@@ -626,6 +632,7 @@ class LLM:
         params: BeamSearchParams,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         use_tqdm: bool = False,
+        tqdm_desc: str = "Beam search",
     ) -> list[BeamSearchOutput]:
         """
         Generate sequences using beam search.
@@ -701,7 +708,7 @@ class LLM:
         token_iter = range(max_tokens)
         if use_tqdm:
             token_iter = tqdm(token_iter,
-                              desc="Beam search",
+                              desc=tqdm_desc,
                               unit="token",
                               unit_scale=False)
             logger.warning(
@@ -795,6 +802,7 @@ class LLM:
         tools: Optional[list[dict[str, Any]]] = None,
         chat_template_kwargs: Optional[dict[str, Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        tqdm_desc: str = "Processed messages",
     ) -> list[RequestOutput]:
         """
         Generate responses for a chat conversation.
@@ -841,6 +849,7 @@ class LLM:
                 template.
             mm_processor_kwargs: Multimodal processor kwarg overrides for this
                 chat request. Only used for offline requests.
+            tqdm_desc: The description to show on the tqdm progress bar.
 
         Returns:
             A list of `RequestOutput` objects containing the generated
@@ -923,6 +932,7 @@ class LLM:
             sampling_params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            tqdm_desc=tqdm_desc,
         )
 
     @overload
@@ -1039,6 +1049,8 @@ class LLM:
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         pooling_task: Optional[PoolingTask] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
+        tqdm_desc: str = "Processed prompts",
+        add_request_tqdm_desc: str = "Adding requests",
     ) -> list[PoolingRequestOutput]:
         """Apply pooling to the hidden states corresponding to the input
         prompts.
@@ -1059,6 +1071,9 @@ class LLM:
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             pooling_task: Override the pooling task to use.
+            tqdm_desc: The description to show on the tqdm progress bar.
+            add_request_tqdm_desc: The description to show on the tqdm progress
+                bar for adding requests.
 
         Returns:
             A list of `PoolingRequestOutput` objects containing the
@@ -1127,9 +1142,10 @@ class LLM:
             use_tqdm=use_tqdm,
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
+            tqdm_desc=add_request_tqdm_desc
         )
 
-        outputs = self._run_engine(use_tqdm=use_tqdm)
+        outputs = self._run_engine(use_tqdm=use_tqdm, tqdm_desc=tqdm_desc)
         return self.engine_class.validate_outputs(outputs,
                                                   PoolingRequestOutput)
 
@@ -1143,6 +1159,8 @@ class LLM:
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        tqdm_desc: str = "Processed prompts",
+        add_request_tqdm_desc: str = "Adding requests",
     ) -> list[EmbeddingRequestOutput]:
         """
         Generate an embedding vector for each prompt.
@@ -1162,6 +1180,9 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
+            tqdm_desc: The description to show on the tqdm progress bar.
+            add_request_tqdm_desc: The description to show on the tqdm progress
+                bar for adding requests.
 
         Returns:
             A list of `EmbeddingRequestOutput` objects containing the
@@ -1179,6 +1200,8 @@ class LLM:
             pooling_params=pooling_params,
             lora_request=lora_request,
             pooling_task="embed",
+            tqdm_desc=tqdm_desc,
+            add_request_tqdm_desc=add_request_tqdm_desc,
         )
 
         return [EmbeddingRequestOutput.from_base(item) for item in items]
@@ -1192,6 +1215,8 @@ class LLM:
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        tqdm_desc: str = "Processed prompts",
+        add_request_tqdm_desc: str = "Adding requests",
     ) -> list[ClassificationRequestOutput]:
         """
         Generate class logits for each prompt.
@@ -1211,6 +1236,9 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
+            tqdm_desc: The description to show on the tqdm progress bar.
+            add_request_tqdm_desc: The description to show on the tqdm progress
+                bar for adding requests.
         Returns:
             A list of `ClassificationRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
@@ -1226,6 +1254,8 @@ class LLM:
             pooling_params=pooling_params,
             lora_request=lora_request,
             pooling_task="classify",
+            tqdm_desc=tqdm_desc,
+            add_request_tqdm_desc=add_request_tqdm_desc
         )
 
         return [ClassificationRequestOutput.from_base(item) for item in items]
@@ -1240,6 +1270,8 @@ class LLM:
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        tqdm_desc: str = "Processed prompts",
+        add_request_tqdm_desc: str = "Adding requests",
     ) -> list[PoolingRequestOutput]:
         """
         Generate rewards for each prompt.
@@ -1255,6 +1287,9 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
+            tqdm_desc: The description to show on the tqdm progress bar.
+            add_request_tqdm_desc: The description to show on the tqdm progress
+                bar for adding requests.
         Returns:
             A list of `PoolingRequestOutput` objects containing the
             pooled hidden states in the same order as the input prompts.
@@ -1267,6 +1302,8 @@ class LLM:
             pooling_params=pooling_params,
             truncate_prompt_tokens=truncate_prompt_tokens,
             pooling_task="encode",
+            tqdm_desc=tqdm_desc,
+            add_request_tqdm_desc=add_request_tqdm_desc,
         )
 
     def _embedding_score(
@@ -1278,6 +1315,8 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        tqdm_desc: str = "Processed prompts",
+        add_request_tqdm_desc: str = "Adding requests",
     ) -> list[ScoringRequestOutput]:
 
         encoded_output: list[PoolingRequestOutput] = self.encode(
@@ -1287,6 +1326,8 @@ class LLM:
             lora_request=lora_request,
             pooling_params=pooling_params,
             pooling_task="embed",
+            tqdm_desc=tqdm_desc,
+            add_request_tqdm_desc=add_request_tqdm_desc,
         )
 
         encoded_output_1: list[PoolingRequestOutput] = encoded_output[
@@ -1314,6 +1355,8 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        tqdm_desc: str = "Processed prompts",
+        add_request_tqdm_desc: str = "Adding requests",
     ) -> list[ScoringRequestOutput]:
         model_config = self.llm_engine.model_config
 
@@ -1373,9 +1416,10 @@ class LLM:
             params=pooling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            tqdm_desc=add_request_tqdm_desc
         )
 
-        outputs = self._run_engine(use_tqdm=use_tqdm)
+        outputs = self._run_engine(use_tqdm=use_tqdm, tqdm_desc=tqdm_desc)
         items = self.engine_class.validate_outputs(outputs,
                                                    PoolingRequestOutput)
 
@@ -1393,6 +1437,8 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        tqdm_desc: str = "Processed prompts",
+        add_request_tqdm_desc: str = "Adding requests",
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
           `<multi-modal data, multi-modal data pair>`.
@@ -1425,6 +1471,9 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
+            tqdm_desc: The description to show on the tqdm progress bar.
+            add_request_tqdm_desc: The description to show on the tqdm progress
+                bar for adding requests.
         Returns:
             A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
@@ -1509,7 +1558,9 @@ class LLM:
                 truncate_prompt_tokens,
                 use_tqdm,
                 pooling_params,
-                lora_request)
+                lora_request,
+                tqdm_desc=tqdm_desc,
+                add_request_tqdm_desc=add_request_tqdm_desc)
         else:
             return self._embedding_score(
                 tokenizer,
@@ -1518,7 +1569,9 @@ class LLM:
                 truncate_prompt_tokens,
                 use_tqdm,
                 pooling_params,
-                lora_request)
+                lora_request,
+                tqdm_desc=tqdm_desc,
+                add_request_tqdm_desc=add_request_tqdm_desc)
 
     def start_profile(self) -> None:
         self.llm_engine.start_profile()
@@ -1631,6 +1684,7 @@ class LLM:
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         priority: Optional[list[int]] = None,
+        tqdm_desc: str = "Adding requests"
     ) -> None:
         if isinstance(prompts, (str, dict)):
             # Convert a single prompt to a list.
@@ -1654,7 +1708,7 @@ class LLM:
         it = prompts
         if use_tqdm:
             tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
-            it = tqdm_func(it, desc="Adding requests")
+            it = tqdm_func(it)
 
         for i, prompt in enumerate(it):
             self._add_request(
@@ -1687,7 +1741,8 @@ class LLM:
     def _run_engine(
         self,
         *,
-        use_tqdm: Union[bool, Callable[..., tqdm]] = True
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        tqdm_desc: str = "Processed prompts"
     ) -> list[Union[RequestOutput, PoolingRequestOutput]]:
         # Initialize tqdm.
         if use_tqdm:
@@ -1695,7 +1750,7 @@ class LLM:
             tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
             pbar = tqdm_func(
                 total=num_requests,
-                desc="Processed prompts",
+                desc=tqdm_desc,
                 dynamic_ncols=True,
                 postfix=(f"est. speed input: {0:.2f} toks/s, "
                          f"output: {0:.2f} toks/s"),
