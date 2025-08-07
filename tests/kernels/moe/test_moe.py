@@ -776,12 +776,7 @@ def test_fused_marlin_moe_with_bias():
     topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
 
     with set_current_vllm_config(vllm_config):
-        torch_output = torch_moe(a,
-                                 w_ref1,
-                                 w_ref2,
-                                 score,
-                                 topk,
-                                 b_bias1,
+        torch_output = torch_moe(a, w_ref1, w_ref2, score, topk, b_bias1,
                                  b_bias2)
 
     marlin_output = torch.ops.vllm.fused_marlin_moe(

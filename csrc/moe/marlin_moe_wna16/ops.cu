@@ -46,7 +46,7 @@ __global__ void permute_cols_kernel(
     const int32_t* __restrict__ sorted_token_ids_ptr,
     const int32_t* __restrict__ expert_ids_ptr,
     const int32_t* __restrict__ num_tokens_past_padded_ptr, int size_m,
-    int size_k, int top_k) {};
+    int size_k, int top_k){};
 
 }  // namespace marlin
 
@@ -352,7 +352,6 @@ bool is_valid_config(thread_config_t const& th_config, bool m_block_size_8,
     BIGGROUP_GET_IF_M234(W_TYPE, 16, 4, 256) \
     BIGGROUP_GET_IF_M234(W_TYPE, 8, 4, 128)
 
-
   #define NVFP4_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)      \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 1, NUM_THREADS, false) \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)
@@ -511,15 +510,15 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
 
 template <typename scalar_t>
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
-               void* s, void* s2, void* zp, void* g_idx, void* perm, void* a_tmp,
-               void* sorted_token_ids, void* expert_ids,
+               void* s, void* s2, void* zp, void* g_idx, void* perm,
+               void* a_tmp, void* sorted_token_ids, void* expert_ids,
                void* num_tokens_past_padded, void* topk_weights,
                int moe_block_size, int top_k, bool mul_topk_weights, bool is_ep,
                int prob_m, int prob_n, int prob_k, void* workspace,
-               vllm::ScalarType const& q_type, bool has_bias, bool has_act_order,
-               bool is_k_full, bool has_zp, int num_groups, int group_size,
-               int dev, cudaStream_t stream, int thread_k, int thread_n,
-               int sms, bool use_atomic_add, bool use_fp32_reduce,
+               vllm::ScalarType const& q_type, bool has_bias,
+               bool has_act_order, bool is_k_full, bool has_zp, int num_groups,
+               int group_size, int dev, cudaStream_t stream, int thread_k,
+               int thread_n, int sms, bool use_atomic_add, bool use_fp32_reduce,
                bool is_zp_float) {
   int thread_m_blocks = div_ceil(moe_block_size, 16);
   bool m_block_size_8 = moe_block_size == 8;
@@ -688,8 +687,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
 torch::Tensor moe_wna16_marlin_gemm(
     torch::Tensor& a, std::optional<torch::Tensor> const& c_or_none,
-    torch::Tensor& b_q_weight, std::optional<torch::Tensor> const& b_bias_or_none,
-    torch::Tensor& b_scales,
+    torch::Tensor& b_q_weight,
+    std::optional<torch::Tensor> const& b_bias_or_none, torch::Tensor& b_scales,
     std::optional<torch::Tensor> const& global_scale_or_none,
     std::optional<torch::Tensor> const& b_zeros_or_none,
     std::optional<torch::Tensor> const& g_idx_or_none,
@@ -944,13 +943,14 @@ torch::Tensor moe_wna16_marlin_gemm(
 
     MARLIN_NAMESPACE_NAME::marlin_mm<half>(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
-        c_tmp.data_ptr<float>(), b_bias.data_ptr<at::Half>(), scales_ptr, global_scale.data_ptr<at::Half>(),
-        b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
-        a_tmp.data_ptr<at::Half>(), sorted_token_ids.data_ptr(),
-        expert_ids.data_ptr(), num_tokens_past_padded.data_ptr(),
-        topk_weights.data_ptr(), moe_block_size, top_k, mul_topk_weights, is_ep,
-        size_m, size_n, size_k, workspace.data_ptr(), b_q_type, has_bias, has_act_order,
-        is_k_full, has_zp, num_groups, group_size, dev,
+        c_tmp.data_ptr<float>(), b_bias.data_ptr<at::Half>(), scales_ptr,
+        global_scale.data_ptr<at::Half>(), b_zeros.data_ptr(), g_idx.data_ptr(),
+        perm.data_ptr(), a_tmp.data_ptr<at::Half>(),
+        sorted_token_ids.data_ptr(), expert_ids.data_ptr(),
+        num_tokens_past_padded.data_ptr(), topk_weights.data_ptr(),
+        moe_block_size, top_k, mul_topk_weights, is_ep, size_m, size_n, size_k,
+        workspace.data_ptr(), b_q_type, has_bias, has_act_order, is_k_full,
+        has_zp, num_groups, group_size, dev,
         at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
@@ -977,9 +977,10 @@ torch::Tensor moe_wna16_marlin_gemm(
         sorted_token_ids.data_ptr(), expert_ids.data_ptr(),
         num_tokens_past_padded.data_ptr(), topk_weights.data_ptr(),
         moe_block_size, top_k, mul_topk_weights, is_ep, size_m, size_n, size_k,
-        workspace.data_ptr(), b_q_type, has_bias, has_act_order, is_k_full, has_zp,
-        num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-        thread_k, thread_n, sms, use_atomic_add, use_fp32_reduce, is_zp_float);
+        workspace.data_ptr(), b_q_type, has_bias, has_act_order, is_k_full,
+        has_zp, num_groups, group_size, dev,
+        at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
+        use_atomic_add, use_fp32_reduce, is_zp_float);
   } else {
     TORCH_CHECK(false,
                 "moe_wna16_marlin_gemm only supports bfloat16 and float16");
