@@ -248,7 +248,7 @@ async def test_single_chat_session_input_audio(
 @pytest.mark.parametrize("audio_url", TEST_AUDIO_URLS)
 async def test_chat_streaming_audio(client: openai.AsyncOpenAI,
                                     model_name: str, audio_url: str):
-    messages = messages = dummy_messages_from_audio_url(audio_url)
+    messages = dummy_messages_from_audio_url(audio_url)
 
     # test single completion
     chat_completion = await client.chat.completions.create(
