@@ -3,7 +3,61 @@
 import numpy as np
 
 from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.ngram_proposer import (
+    NgramProposer, _find_longest_matched_ngram_and_propose_tokens)
+
+
+def test_find_longest_matched_ngram_and_propose_tokens():
+    tokens = np.array([1, 2, 3, 4, 1, 2, 3, 5, 6])
+    assert _find_longest_matched_ngram_and_propose_tokens(origin_tokens=tokens,
+                                                          min_ngram=2,
+                                                          max_ngram=2,
+                                                          max_model_len=1024,
+                                                          k=2) is None
+
+    tokens = np.array([1, 2, 3, 4, 1, 2, 3])
+    np.testing.assert_array_equal(
+        _find_longest_matched_ngram_and_propose_tokens(origin_tokens=tokens,
+                                                       min_ngram=2,
+                                                       max_ngram=2,
+                                                       max_model_len=1024,
+                                                       k=3),
+        np.array([4, 1, 2]))
+    np.testing.assert_array_equal(
+        _find_longest_matched_ngram_and_propose_tokens(origin_tokens=tokens,
+                                                       min_ngram=2,
+                                                       max_ngram=2,
+                                                       max_model_len=1024,
+                                                       k=2), np.array([4, 1]))
+    np.testing.assert_array_equal(
+        _find_longest_matched_ngram_and_propose_tokens(origin_tokens=tokens,
+                                                       min_ngram=1,
+                                                       max_ngram=1,
+                                                       max_model_len=1024,
+                                                       k=3),
+        np.array([4, 1, 2]))
+    np.testing.assert_array_equal(
+        _find_longest_matched_ngram_and_propose_tokens(origin_tokens=tokens,
+                                                       min_ngram=1,
+                                                       max_ngram=1,
+                                                       max_model_len=1024,
+                                                       k=2), np.array([4, 1]))
+
+    tokens = np.array([1, 3, 6, 2, 3, 4, 1, 2, 3])
+    np.testing.assert_array_equal(
+        _find_longest_matched_ngram_and_propose_tokens(origin_tokens=tokens,
+                                                       min_ngram=2,
+                                                       max_ngram=2,
+                                                       max_model_len=1024,
+                                                       k=3),
+        np.array([4, 1, 2]))
+    # Return on the first match
+    np.testing.assert_array_equal(
+        _find_longest_matched_ngram_and_propose_tokens(origin_tokens=tokens,
+                                                       min_ngram=1,
+                                                       max_ngram=1,
+                                                       max_model_len=1024,
+                                                       k=2), np.array([6, 2]))
 
 
 def test_ngram_proposer():
