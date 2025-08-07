@@ -655,7 +655,7 @@ v0 has support for OpenTelemetry tracing:
 - Added by <gh-pr:4687>
 - Configured with `--oltp-traces-endpoint` and `--collect-detailed-traces`
 - [OpenTelemetry blog post](https://opentelemetry.io/blog/2024/llm-observability/)
-- [User-facing docs](../examples/online_serving/opentelemetry/README.md)
+- [User-facing docs](https://docs.vllm.ai/en/latest/examples/online_serving/opentelemetry.html)
 - [Blog post](https://medium.com/@ronen.schaffer/follow-the-trail-supercharging-vllm-with-opentelemetry-distributed-tracing-aa655229b46f)
 - [IBM product docs](https://www.ibm.com/docs/en/instana-observability/current?topic=mgaa-monitoring-large-language-models-llms-vllm-public-preview)
   
