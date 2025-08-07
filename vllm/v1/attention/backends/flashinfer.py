@@ -215,6 +215,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
         # Global hyperparameters shared by all attention layers
+        # TODO: discard this for trtllm-gen backend
         self.global_hyperparameters = infer_global_hyperparameters(
             get_per_layer_parameters(vllm_config, layer_names, FlashInferImpl))
 
@@ -523,16 +524,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         head_dim = self.kv_cache_spec.head_size
 
         # currently prefill trtllm attention does not support fp8 kv cache
-        # trtllm may not support sliding window
-        prefill_use_trtllm = (self.global_hyperparameters.window_left == -1
-                              and not cache_dtype.startswith("fp8")
-                              and use_trtllm_attention(
+        prefill_use_trtllm = use_trtllm_attention(
                                 num_prefill_tokens, max_seq_len, cache_dtype,
-                                num_qo_heads, num_kv_heads, head_dim))
-        decode_use_trtllm = (self.global_hyperparameters.window_left == -1
-                             and use_trtllm_attention(
+                                num_qo_heads, num_kv_heads, head_dim)
+        decode_use_trtllm = use_trtllm_attention(
                                 num_decode_tokens, max_seq_len, cache_dtype,
-                                num_qo_heads, num_kv_heads, head_dim))
+                                num_qo_heads, num_kv_heads, head_dim)
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -793,6 +790,8 @@ class FlashInferImpl(AttentionImpl):
                     batch_size=attn_metadata.num_prefills,
                     cum_seq_lens_q=attn_metadata.qo_indptr_gpu,
                     cum_seq_lens_kv=attn_metadata.paged_kv_indptr_gpu,
+                    window_left=window_left,
+                    sinks=self.sinks,
                     out=output[num_decode_tokens:],
                 )
 
@@ -839,6 +838,8 @@ class FlashInferImpl(AttentionImpl):
                     max_seq_len=attn_metadata.max_seq_len,
                     bmm1_scale=layer._k_scale_float * self.scale,
                     bmm2_scale=layer._v_scale_float,
+                    window_left=window_left,
+                    sinks=self.sinks,
                     out=output[:num_decode_tokens],
                 )
         return output_padded
