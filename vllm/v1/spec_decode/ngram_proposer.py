@@ -58,11 +58,6 @@ class NgramProposer:
               followed that pattern. Here we will return [4,2,3] because 
               we only have three tokens after the match.
         """
-        # Do not generate draft tokens beyond the max model length.
-        k = min(self.k, self.max_model_len - context_token_ids.shape[0])
-        if k <= 0:
-            return None
-
         # TODO(woosuk): Optimize this.
         return _find_longest_matched_ngram_and_propose_tokens(
             origin_tokens=context_token_ids,
