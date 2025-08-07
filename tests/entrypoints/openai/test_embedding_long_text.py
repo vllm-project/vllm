@@ -8,7 +8,7 @@ text inputs that exceed the model's maximum token length, specifically targeting
 the intfloat/multilingual-e5-small model (max token length: 512).
 """
 
-import os
+import random
 
 import openai
 import pytest
@@ -19,24 +19,191 @@ from vllm.entrypoints.openai.protocol import EmbeddingResponse
 from ...utils import RemoteOpenAIServer
 
 
-def _load_text_file(filename: str) -> str:
-    """Load text content from file in the same directory."""
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(current_dir, filename)
-    with open(file_path, encoding='utf-8') as f:
-        return f.read().strip()
+def _generate_random_text(word_count: int) -> str:
+    """Generate random text with approximately the specified word count."""
+    # Common English words with focus on verbs and nouns for realistic text
+    common_words = [
+        # Essential articles and pronouns (minimal)
+        "the",
+        "and",
+        "you",
+        "they",
+        "this",
+        "that",
+        "these",
+        "those",
+
+        # Action verbs
+        "create",
+        "build",
+        "develop",
+        "design",
+        "implement",
+        "execute",
+        "analyze",
+        "process",
+        "generate",
+        "calculate",
+        "evaluate",
+        "optimize",
+        "transform",
+        "integrate",
+        "configure",
+        "deploy",
+        "monitor",
+        "manage",
+        "discover",
+        "explore",
+        "investigate",
+        "research",
+        "study",
+        "examine",
+        "improve",
+        "enhance",
+        "upgrade",
+        "modify",
+        "update",
+        "maintain",
+        "solve",
+        "resolve",
+        "handle",
+        "address",
+        "tackle",
+        "overcome",
+        "communicate",
+        "collaborate",
+        "coordinate",
+        "organize",
+        "plan",
+        "achieve",
+        "accomplish",
+        "complete",
+        "finish",
+        "deliver",
+        "provide",
+
+        # Technology and science nouns
+        "system",
+        "application",
+        "software",
+        "hardware",
+        "network",
+        "database",
+        "algorithm",
+        "model",
+        "framework",
+        "platform",
+        "interface",
+        "protocol",
+        "architecture",
+        "infrastructure",
+        "component",
+        "module",
+        "service",
+        "technology",
+        "innovation",
+        "solution",
+        "methodology",
+        "approach",
+        "artificial",
+        "intelligence",
+        "machine",
+        "learning",
+        "neural",
+        "network",
+        "computer",
+        "processor",
+        "memory",
+        "storage",
+        "computation",
+        "data",
+        "information",
+        "knowledge",
+        "insight",
+        "pattern",
+        "trend",
+        "analysis",
+        "research",
+        "development",
+        "engineering",
+        "science",
+        "mathematics",
+        "statistics",
+        "probability",
+        "optimization",
+        "performance",
+        "efficiency",
+
+        # General nouns
+        "project",
+        "team",
+        "organization",
+        "company",
+        "business",
+        "industry",
+        "market",
+        "customer",
+        "user",
+        "client",
+        "product",
+        "feature",
+        "function",
+        "requirement",
+        "specification",
+        "documentation",
+        "report",
+        "result",
+        "outcome",
+        "impact",
+        "benefit",
+        "advantage",
+        "challenge",
+        "problem",
+        "opportunity",
+        "strategy",
+        "goal",
+        "objective",
+        "target",
+        "milestone",
+        "process",
+        "procedure",
+        "workflow",
+        "pipeline",
+        "operation",
+        "task",
+        "activity",
+        "event",
+        "session",
+        "meeting",
+        "discussion",
+        "decision"
+    ]
+
+    words = []
+    for _ in range(word_count):
+        words.append(random.choice(common_words))
+
+    # Add some punctuation for more realistic text
+    text = " ".join(words)
+    # Add periods every 10-20 words
+    words_list = text.split()
+    result = []
+    for i, word in enumerate(words_list):
+        result.append(word)
+        if ((i + 1) % random.randint(10, 20) == 0 and i < len(words_list) - 1):
+            result[-1] += "."
+
+    return " ".join(result)
 
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DTYPE = "bfloat16"
 
-# Test text: Load text with approximately 1500 words to exceed 1024 tokens
-LONG_TEXT_1500_WORDS = _load_text_file(
-    './test_embedding_long_text_datasets/long_text_1500_words.txt')
+# Test text: Generate text with approximately 1500 words to exceed 1024 tokens
+LONG_TEXT_1500_WORDS = _generate_random_text(1500)
 
-# Test text: Construct text with approximately 2500 words to exceed 2048 tokens
-LONG_TEXT_2500_WORDS = _load_text_file(
-    './test_embedding_long_text_datasets/long_text_2500_words.txt')
+# Test text: Generate text with approximately 2500 words to exceed 2048 tokens
+LONG_TEXT_2500_WORDS = _generate_random_text(2500)
 
 
 @pytest.fixture(scope="module")
