@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import datetime
 from collections.abc import Iterable, Sequence
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
+from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
 from openai.types.responses.tool import Tool
-from openai_harmony import (Conversation, DeveloperContent,
+from openai_harmony import (Author, Conversation, DeveloperContent,
                             HarmonyEncodingName, Message, ReasoningEffort,
                             Role, StreamableParser, SystemContent, TextContent,
                             ToolDescription, load_harmony_encoding)
+
+from vllm.entrypoints.openai.protocol import (ResponseInputOutputItem,
+                                              ResponseReasoningItem)
 
 REASONING_EFFORT = {
     "high": ReasoningEffort.HIGH,
@@ -83,6 +87,58 @@ def get_developer_message(instructions: Optional[str] = None,
 
 def get_user_message(content: str) -> Message:
     return Message.from_role_and_content(Role.USER, content)
+
+
+def parse_response_input(
+    response_msg: ResponseInputOutputItem,
+    prev_responses: list[Union[ResponseOutputItem, ResponseReasoningItem]]
+) -> Message:
+    if not isinstance(response_msg, dict):
+        response_msg = response_msg.model_dump()
+    if "type" not in response_msg or response_msg["type"] == "message":
+        role = response_msg["role"]
+        content = response_msg["content"]
+        if role == "system":
+            # User is trying to set a system message. Change it to:
+            # <|start|>developer<|message|># Instructions
+            # {instructions}<|end|>
+            role = "developer"
+            text_prefix = "Instructions:\n"
+        else:
+            text_prefix = ""
+        if isinstance(content, str):
+            msg = Message.from_role_and_content(role, text_prefix + content)
+        else:
+            contents = [
+                TextContent(text=text_prefix + c["text"]) for c in content
+            ]
+            msg = Message.from_role_and_contents(role, contents)
+    elif response_msg["type"] == "function_call_output":
+        call_id = response_msg["call_id"]
+        call_response: Optional[ResponseFunctionToolCall] = None
+        for prev_response in reversed(prev_responses):
+            if isinstance(prev_response, ResponseFunctionToolCall
+                          ) and prev_response.call_id == call_id:
+                call_response = prev_response
+                break
+        if call_response is None:
+            raise ValueError(f"No call message found for {call_id}")
+        msg = Message.from_author_and_content(
+            Author.new(Role.TOOL, f"functions.{call_response.name}"),
+            response_msg["output"])
+    elif response_msg["type"] == "reasoning":
+        content = response_msg["content"]
+        assert len(content) == 1
+        msg = Message.from_role_and_content(Role.ASSISTANT, content[0]["text"])
+    elif response_msg["type"] == "function_call":
+        msg = Message.from_role_and_content(Role.ASSISTANT,
+                                            response_msg["arguments"])
+        msg = msg.with_channel("commentary")
+        msg = msg.with_recipient(f"functions.{response_msg['name']}")
+        msg = msg.with_content_type("json")
+    else:
+        raise ValueError(f"Unknown input type: {response_msg['type']}")
+    return msg
 
 
 def parse_chat_input(chat_msg) -> Message:

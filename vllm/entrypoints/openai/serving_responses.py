@@ -4,12 +4,15 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
+from copy import copy
 from http import HTTPStatus
 from typing import Callable, Final, Optional, Union
 
 import jinja2
 from fastapi import Request
-from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+from openai.types.responses import (ResponseFunctionToolCall,
+                                    ResponseOutputMessage, ResponseOutputText)
+from openai_harmony import Message as OpenAIHarmonyMessage
 
 from vllm import envs
 from vllm.config import ModelConfig
@@ -17,6 +20,10 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption)
 from vllm.entrypoints.context import ConversationContext, SimpleContext
+from vllm.entrypoints.harmony_utils import (
+    get_developer_message, get_stop_tokens_for_assistant_actions,
+    get_system_message, get_user_message, parse_response_input,
+    render_for_completion)
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -30,6 +37,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.tool_server import ToolServer
+from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
@@ -103,6 +111,29 @@ class OpenAIServingResponses(OpenAIServing):
                 "`VLLM_ENABLE_RESPONSES_API_STORE` is enabled. This may "
                 "cause a memory leak since we never remove responses from "
                 "the store.")
+
+        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
+        if self.use_harmony:
+            logger.warning("For gpt-oss, we ignore --enable-auto-tool-choice "
+                           "and always enable tool use.")
+            # OpenAI models have two EOS-like tokens: <|return|> and <|call|>.
+            # We need to add them to the stop token ids.
+            if "stop_token_ids" not in self.default_sampling_params:
+                self.default_sampling_params["stop_token_ids"] = []
+            self.default_sampling_params["stop_token_ids"].extend(
+                get_stop_tokens_for_assistant_actions())
+
+        # set up tool use
+        self.enable_auto_tools: bool = enable_auto_tools
+        if self.enable_auto_tools:
+            logger.info(
+                "\"auto\" tool choice has been enabled please note that while"
+                " the parallel_tool_calls client option is preset for "
+                "compatibility reasons, it will be ignored.")
+            if not self.use_harmony:
+                raise NotImplementedError("Auto tool choice is not supported "
+                                          "yet unless using Harmony")
+
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove responses from the store.
@@ -165,21 +196,20 @@ class OpenAIServingResponses(OpenAIServing):
                 return self._make_not_found_error(prev_response_id)
         else:
             prev_response = None
-        # Construct the input messages.
-        messages = self._construct_input_messages(request, prev_response)
 
         try:
             lora_request = self._maybe_get_adapters(request)
             model_name = self._get_model_name(request.model, lora_request)
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-            _, request_prompts, engine_prompts = await self._preprocess_chat(
-                request,
-                tokenizer,
-                messages,
-                chat_template=self.chat_template,
-                chat_template_content_format=self.chat_template_content_format,
-            )
+            if self.use_harmony:
+                messages, request_prompts, engine_prompts = (
+                    self._make_request_with_harmony(request, prev_response))
+            else:
+                messages, request_prompts, engine_prompts = (
+                    await self._make_request(request, prev_response,
+                                             tokenizer))
+
         except (ValueError, TypeError, RuntimeError,
                 jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
@@ -274,6 +304,38 @@ class OpenAIServingResponses(OpenAIServing):
             )
         except Exception as e:
             return self.create_error_response(str(e))
+
+    async def _make_request(
+        self,
+        request: ResponsesRequest,
+        prev_response: Optional[ResponsesResponse],
+        tokenizer: AnyTokenizer,
+    ):
+        # Construct the input messages.
+        messages = self._construct_input_messages(request, prev_response)
+        _, request_prompts, engine_prompts = await self._preprocess_chat(
+            request,
+            tokenizer,
+            messages,
+            chat_template=self.chat_template,
+            chat_template_content_format=self.chat_template_content_format,
+        )
+        return messages, request_prompts, engine_prompts
+
+    def _make_request_with_harmony(
+        self,
+        request: ResponsesRequest,
+        prev_response: Optional[ResponsesResponse],
+    ):
+        if request.tool_choice != "auto":
+            raise NotImplementedError(
+                "Only 'auto' tool_choice is supported in "
+                "response API with Harmony")
+        messages = self._construct_input_messages_with_harmony(
+            request, prev_response)
+        prompt_token_ids = render_for_completion(messages)
+        engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
+        return messages, [prompt_token_ids], [engine_prompt]
 
     async def responses_full_generator(
         self,
@@ -409,6 +471,82 @@ class OpenAIServingResponses(OpenAIServing):
             messages.append({"role": "user", "content": request.input})
         else:
             messages.extend(request.input)  # type: ignore
+        return messages
+
+    def _construct_input_messages_with_harmony(
+        self,
+        request: ResponsesRequest,
+        prev_response: Optional[ResponsesResponse],
+    ) -> list[OpenAIHarmonyMessage]:
+        messages: list[OpenAIHarmonyMessage] = []
+        if prev_response is None:
+            # New conversation.
+            reasoning_effort = (request.reasoning.effort
+                                if request.reasoning else None)
+            tool_types = [tool.type for tool in request.tools]
+            enable_browser = ("web_search_preview" in tool_types
+                              and self.tool_server is not None
+                              and self.tool_server.has_tool("browser"))
+            enable_code_interpreter = ("code_interpreter" in tool_types
+                                       and self.tool_server is not None
+                                       and self.tool_server.has_tool("python"))
+            sys_msg = get_system_message(
+                reasoning_effort=reasoning_effort,
+                browser_description=self.tool_server.get_tool_description(
+                    "browser")
+                if enable_browser and self.tool_server is not None else None,
+                python_description=self.tool_server.get_tool_description(
+                    "python") if enable_code_interpreter
+                and self.tool_server is not None else None,
+            )
+            messages.append(sys_msg)
+            dev_msg = get_developer_message(request.instructions,
+                                            request.tools)
+            messages.append(dev_msg)
+        else:
+            # Continue the previous conversation.
+            # FIXME(woosuk): Currently, request params like reasoning and
+            # instructions are ignored.
+            prev_msgs = self.msg_store[prev_response.id]
+            # Remove the previous chain-of-thoughts if there is a new "final"
+            # message. Note that this also removes these messages from the
+            # msg_store.
+            if len(prev_msgs) > 0:
+                last_msg = prev_msgs[-1]
+                assert isinstance(last_msg, OpenAIHarmonyMessage)
+                if last_msg.channel == "final":
+                    prev_final_msg_idx = -1
+                    for i in range(len(prev_msgs) - 2, -1, -1):
+                        prev_msg_i = prev_msgs[i]
+                        assert isinstance(prev_msg_i, OpenAIHarmonyMessage)
+                        if prev_msg_i.channel == "final":
+                            prev_final_msg_idx = i
+                            break
+                    recent_turn_msgs = prev_msgs[prev_final_msg_idx + 1:]
+                    del prev_msgs[prev_final_msg_idx + 1:]
+                    for msg in recent_turn_msgs:
+                        assert isinstance(msg, OpenAIHarmonyMessage)
+                        if msg.channel != "analysis":
+                            prev_msgs.append(msg)
+            messages.extend(prev_msgs)
+        # Append the new input.
+        # Reponses API supports simple text inputs without chat format.
+        if isinstance(request.input, str):
+            messages.append(get_user_message(request.input))
+        else:
+            if prev_response is not None:
+                prev_outputs = copy(prev_response.output)
+            else:
+                prev_outputs = []
+            for response_msg in request.input:
+                messages.append(
+                    parse_response_input(response_msg, prev_outputs))
+                # User passes in a a tool call request and its output. We need
+                # to add the tool call request to prev_outputs so that the
+                # parse_response_input can find the tool call request when
+                # parsing the tool call output.
+                if isinstance(response_msg, ResponseFunctionToolCall):
+                    prev_outputs.append(response_msg)
         return messages
 
     async def _run_background_request(
