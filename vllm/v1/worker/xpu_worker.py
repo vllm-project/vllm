@@ -67,17 +67,31 @@ class XPUWorker(Worker):
     # return correct free_gpu_memory on intel client GPU. We need to
     # calculate/estiamte it.
     def xpu_get_mem_info(self):
-        if current_platform.is_data_center_gpu():
-            return torch.xpu.mem_get_info()
-        else:
-            _, total_gpu_memory = torch.xpu.mem_get_info()
-            # FIXME: memory_allocated() doesn't count non-torch allocations,
-            # and we don't have any API to get it. so we mark it as 128MB.
+        try:
+            if current_platform.is_data_center_gpu():
+                return torch.xpu.mem_get_info()
+            else:
+                _, total_gpu_memory = torch.xpu.mem_get_info()
+                # FIXME: memory_allocated() doesn't count non-torch allocations,
+                # and we don't have any API to get it. so we mark it as 128MB.
+                used_memory = torch.xpu.memory_allocated()
+                non_torch_allocations = 128 * 1024 * 1024
+                free_gpu_memory = total_gpu_memory - (used_memory +
+                                                      non_torch_allocations)
+                return free_gpu_memory, total_gpu_memory
+        except Exception as e:
+            logger.warning(
+                f"Failed to query XPU memory info: {e}. This is expected on "
+                "Intel Arc integrated GPUs. Using fallback memory estimation.")
+            # For integrated GPUs that share system memory, use a conservative
+            # fallback based on available system memory
+            import psutil
+            system_memory = psutil.virtual_memory().available
+            # Use 80% of available system memory as a conservative estimate
+            fallback_memory = int(system_memory * 0.8)
             used_memory = torch.xpu.memory_allocated()
-            non_torch_allocations = 128 * 1024 * 1024
-            free_gpu_memory = total_gpu_memory - (used_memory +
-                                                  non_torch_allocations)
-            return free_gpu_memory, total_gpu_memory
+            free_memory = fallback_memory - used_memory
+            return max(0, free_memory), fallback_memory
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -95,7 +109,7 @@ class XPUWorker(Worker):
         torch.xpu.empty_cache()
         torch.xpu.reset_peak_memory_stats()
 
-        free_gpu_memory, total_gpu_memory = torch.xpu.mem_get_info()
+        free_gpu_memory, total_gpu_memory = self.xpu_get_mem_info()
         current_allocated_bytes = torch.xpu.memory_allocated()
         msg = ("Before memory profiling run, "
                f"total GPU memory: {total_gpu_memory / 1024**2:.2f} MB, "
@@ -146,8 +160,16 @@ class XPUWorker(Worker):
             self.device = torch.device(f"xpu:{self.local_rank}")
             current_platform.set_device(self.device)
             torch.xpu.empty_cache()
-            self.init_gpu_memory = torch.xpu.get_device_properties(
-                self.local_rank).total_memory
+            try:
+                self.init_gpu_memory = torch.xpu.get_device_properties(
+                    self.local_rank).total_memory
+            except Exception as e:
+                logger.warning(
+                    f"Failed to get XPU device properties: {e}. "
+                    "Using fallback memory estimation for integrated GPUs.")
+                # Use the fallback mechanism from xpu_get_mem_info
+                _, total_memory = self.xpu_get_mem_info()
+                self.init_gpu_memory = total_memory
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
