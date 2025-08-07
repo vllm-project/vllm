@@ -573,8 +573,7 @@ class Siglip2VisionTransformer(nn.Module):
             output += (hidden_states, ) if output_hidden_states else ()
             return output
 
-        return BaseModelOutputWithNoAttention(
-            last_hidden_state=last_hidden_state, hidden_states=hidden_states)
+        return last_hidden_state
 
 
 class Siglip2NavitModel(torch.nn.Module):

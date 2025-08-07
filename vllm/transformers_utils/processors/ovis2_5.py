@@ -26,8 +26,14 @@ class Ovis2_5ProcessorKwargs(ProcessingKwargs,
         },
         "images_kwargs": {
             'convert_to_rgb': True,
+            'min_pixels': 448 * 448,
+            'max_pixels': 1344 * 1792,
         },
-        "videos_kwargs": {}
+        "videos_kwargs": {
+            'convert_to_rgb': True,
+            'min_pixels': 448 * 448,
+            'max_pixels': 1344 * 1792,
+        }
     }
 
 
@@ -83,7 +89,7 @@ class Ovis2_5Processor(ProcessorMixin):
         extra_special_tokens = {
             "image_token": -200,
             "video_token": -201,
-            "image_atom": -300,
+            "video_atom": -300,
             "image_start": -301,
             "image_end": -302,
             "video_start": -303,
@@ -161,7 +167,7 @@ class Ovis2_5Processor(ProcessorMixin):
             **kwargs,
         )
         # Process all images first
-        image_features = {}
+        visual_features = {}
         output = BatchFeature()
         if images is not None:
             processed_images = []
@@ -169,33 +175,36 @@ class Ovis2_5Processor(ProcessorMixin):
             grids = []
             # Process each image
             for image in images if isinstance(images, list) else [images]:
-                pixel_values, image_placeholders, grid = self.preprocess_image(
-                    images=image, **output_kwargs["images_kwargs"])
+                pixel_values, image_placeholders, grid = (
+                    self.preprocess_multidata(
+                        images=image, **output_kwargs["images_kwargs"]))
                 processed_images.append(pixel_values)
                 image_placeholders_list.append(image_placeholders)
                 grids.append(grid)
 
             # assign all processed images
             if processed_images:
-                image_features["image_placeholders"] = image_placeholders_list
+                visual_features["image_placeholders"] = image_placeholders_list
             output["pixel_values"] = processed_images
             output["grids"] = grids
 
         if videos is not None:
-            processed_images = []
-            image_placeholders_list = []
+            processed_videos = []
+            videos_placeholders_list = []
             grids = []
-            # Process each image
+            # Process each video
             for video in videos if isinstance(videos, list) else [videos]:
-                pixel_values, image_placeholders, grid = self.preprocess_image(
-                    video=video, **output_kwargs["videos_kwargs"])
-                processed_images.append(pixel_values)
-                image_placeholders_list.append(image_placeholders)
+                pixel_values, video_placeholders, grid = (
+                    self.preprocess_multidata(
+                        video=video, **output_kwargs["videos_kwargs"]))
+                processed_videos.append(pixel_values)
+                videos_placeholders_list.append(video_placeholders)
                 grids.append(grid)
-            # assign all processed images
-            if processed_images:
-                image_features["video_placeholders"] = image_placeholders_list
-            output["video_pixel_values"] = processed_images
+            # assign all processed videos
+            if processed_videos:
+                visual_features[
+                    "video_placeholders"] = videos_placeholders_list
+            output["video_pixel_values"] = processed_videos
             output["video_grids"] = grids
 
         # Process text input
@@ -210,13 +219,13 @@ class Ovis2_5Processor(ProcessorMixin):
             video_idx = 0
             for ids_tensor in tokenized_batched_text:
                 has_image_tokens = (image_token_id in ids_tensor
-                                    and "image_placeholders" in image_features
+                                    and "image_placeholders" in visual_features
                                     and image_idx < len(
-                                        image_features["image_placeholders"]))
+                                        visual_features["image_placeholders"]))
                 has_video_tokens = (video_token_id in ids_tensor
-                                    and "video_placeholders" in image_features
+                                    and "video_placeholders" in visual_features
                                     and video_idx < len(
-                                        image_features["video_placeholders"]))
+                                        visual_features["video_placeholders"]))
                 if has_image_tokens or has_video_tokens:
                     # Convert to list for easier manipulation
                     ids_list = ids_tensor.tolist()
@@ -225,12 +234,14 @@ class Ovis2_5Processor(ProcessorMixin):
                     # Replace placeholders
                     for token_id in ids_list:
                         if token_id == image_token_id:
-                            new_ids.extend(image_features["image_placeholders"]
-                                           [image_idx])
+                            new_ids.extend(
+                                visual_features["image_placeholders"]
+                                [image_idx])
                             image_idx += 1
                         elif token_id == video_token_id:
-                            new_ids.extend(image_features["video_placeholders"]
-                                           [video_idx])
+                            new_ids.extend(
+                                visual_features["video_placeholders"]
+                                [video_idx])
                             video_idx += 1
                         else:
                             new_ids.append(token_id)
@@ -245,7 +256,7 @@ class Ovis2_5Processor(ProcessorMixin):
 
             return output
         # If only images were provided
-        return BatchFeature(data=image_features)
+        return BatchFeature(data=visual_features)
 
     def _tokenize_with_visual_symbol(self,
                                      text_list: list[str]) -> torch.LongTensor:
@@ -317,23 +328,10 @@ class Ovis2_5Processor(ProcessorMixin):
             w_bar = math.ceil(width * beta / factor) * factor
         return h_bar, w_bar
 
-    def get_image_size(
-        self,
-        min_pixels: int = 448 * 448,
-        max_pixels: int = 1344 * 1792,
-    ):
-        num_pixels = (min_pixels + max_pixels) / 2
-        height = int(num_pixels**0.5)
-        width = int(num_pixels**0.5)
-        height, width = self.smart_resize(height, width,
-                                          self.patch_size * self.hidden_stride,
-                                          min_pixels, max_pixels)
-        return height, width
-
     def get_token_value(self, tok):
         return self.extra_special_tokens[tok]
 
-    def construct_image_indicators(self, grid, is_video: bool = False):
+    def construct_visual_indicators(self, grid, is_video: bool = False):
         if is_video:
             start_token = self.get_token_value('video_start')
             end_token = self.get_token_value('video_end')
@@ -341,20 +339,21 @@ class Ovis2_5Processor(ProcessorMixin):
             start_token = self.get_token_value('image_start')
             end_token = self.get_token_value('image_end')
 
-        image_placeholders = [start_token, self.get_token_value('image_atom')]
+        image_placeholders = [start_token, self.get_token_value('video_atom')]
         if grid[0] * grid[1] > 1:
             for r in range(grid[0]):
                 for c in range(grid[1]):
                     image_placeholders.append(
-                        self.get_token_value('image_atom'))
+                        self.get_token_value('video_atom'))
 
         image_placeholders.append(end_token)
         return image_placeholders
 
-    def construct_image_placeholders(self, grid, is_video: bool = False):
-        image_placeholders = self.construct_image_indicators((1, 1), is_video)
+    def construct_visual_placeholders(self, grid, is_video: bool = False):
+        visual_placeholders = self.construct_visual_indicators((1, 1),
+                                                               is_video)
 
-        image_atom_token_id = self.get_token_value('image_atom')
+        image_atom_token_id = self.get_token_value('video_atom')
         # Extract the padding token ID from tokenizer
         image_padding_token_id = self.get_token_value('image_pad')
 
@@ -364,7 +363,7 @@ class Ovis2_5Processor(ProcessorMixin):
 
         # Create a new list with padding tokens inserted
         padded_placeholder_tokens = []
-        for token in image_placeholders:
+        for token in visual_placeholders:
             if token == image_atom_token_id:
                 padded_placeholder_tokens.extend([image_padding_token_id] *
                                                  num_image_atoms)
@@ -372,13 +371,13 @@ class Ovis2_5Processor(ProcessorMixin):
                 padded_placeholder_tokens.append(image_padding_token_id)
         return padded_placeholder_tokens
 
-    def preprocess_image(
+    def preprocess_multidata(
         self,
         images: Optional[Union[PIL.Image.Image, list[PIL.Image.Image]]] = None,
         video: Optional[Union[list[PIL.Image.Image], np.ndarray]] = None,
         convert_to_rgb: Optional[bool] = True,
-        min_pixels: Optional[int] = 448 * 448,
-        max_pixels: Optional[int] = 1344 * 1792,
+        min_pixels: int = 448 * 448,
+        max_pixels: int = 1344 * 1792,
         return_tensors: Optional[str] = 'pt',
     ):
         is_video = False
@@ -447,10 +446,11 @@ class Ovis2_5Processor(ProcessorMixin):
             grid_t * grid_h * grid_w, channel * self.temporal_patch_size *
             self.patch_size * self.patch_size)
 
-        image_placeholders = self.construct_image_placeholders(
+        visual_placeholders = self.construct_visual_placeholders(
             [grid_t, grid_h, grid_w], is_video)
-        return torch.tensor(flatten_patches), image_placeholders, torch.tensor(
-            [[grid_t, grid_h, grid_w]])
+        return torch.tensor(
+            flatten_patches), visual_placeholders, torch.tensor(
+                [[grid_t, grid_h, grid_w]])
 
 
 AutoProcessor.register("Ovis2_5Processor", Ovis2_5Processor)
