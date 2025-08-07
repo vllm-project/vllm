@@ -4145,6 +4145,9 @@ class CUDAGraphMode(enum.Enum):
         return (self.decode_mode() == CUDAGraphMode.PIECEWISE
                 or self.mixed_mode() == CUDAGraphMode.PIECEWISE)
 
+    def max_cudagraph_mode(self) -> 'CUDAGraphMode':
+        return max(self.value) if self.separate_routine() else self
+
     def separate_routine(self) -> bool:
         return isinstance(self.value, tuple)
 

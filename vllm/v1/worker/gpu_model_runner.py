@@ -1539,13 +1539,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.cudagraph_dispatcher.dispatch(
                 BatchDescriptor(num_tokens=num_input_tokens,
                                 uniform_decode=uniform_decode))
-        # sanity check, in case speculative decoding on uniform batch
-        # is not supported with full cudagraph
-        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            assert attention_cuda_graphs, \
-                f"Current batch {batch_descriptor} is not compatible with " \
-                f"full cudagraph for attention backend " \
-                f"{self.attn_backends[0].__name__}"
+
+        # attention_cuda_graphs needed to capture full cudagraphs
+        assert (cudagraph_runtime_mode != CUDAGraphMode.FULL
+                or attention_cuda_graphs)
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
@@ -2580,6 +2577,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
                 "ensure `cudagraph_mode` was not manually set to `NONE`")
             return
+        else:
+            self.initialize_cudagraph_capture()
 
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
@@ -2727,7 +2726,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                             attn_metadata_builder_i,
                                             layer_names)
                 attn_groups.append(attn_group)
-
             return attn_groups
 
         for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
@@ -2752,109 +2750,100 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Calculate reorder batch threshold (if neeeded)
         self.calculate_reorder_batch_threshold()
 
-        if len(self.attn_groups) == 0:
-            # Check if model is encoder-only
-            block_size = self.vllm_config.cache_config.block_size
-            use_mla = self.vllm_config.model_config.use_mla
-            attn_specs = list[AttentionSpec]()
-            for attn_module in attn_layers.values():
-
-                if attn_module.attn_type == AttentionType.ENCODER_ONLY:
-                    assert attn_module.sliding_window is None, "Sliding "
-                    "window attention is not supported for encoder-only models"
-
-                    attn_specs.append(
-                        FullAttentionSpec(block_size=block_size,
-                                          num_kv_heads=attn_module.num_kv_heads,
-                                          head_size=attn_module.head_size,
-                                          dtype=self.kv_cache_dtype,
-                                          use_mla=use_mla))
-                else:
-                    raise ValueError("Expected only encoder-only layers")
-
-            if len(attn_specs) > 0:
-                assert len(attn_specs) == len(attn_layers), \
-                    "All or none of the layers are expected to be encoder-only"
-
-                attn_backends = get_attn_backends_for_layers(attn_layers.keys())
-
-                self.attn_groups.append(
-                    create_attn_groups(attn_backends, attn_specs[0]))
-                self.is_encoder_only_model = True
-
         if len(self.attn_groups) > 0:
-            min_cg_support = AttentionCGSupport.ALWAYS
-            min_cg_builder_name = self.attn_groups[
-                0].metadata_builder.__class__.__name__
-            preferred_cg_separate_routine = False
-            preferred_separate_builder_name = None
+            return
 
-            for attn_group in self.attn_groups:
-                builder = attn_group.metadata_builder
-                if getattr(builder, "cudagraph_decode_preference", None):
-                    preferred_cg_separate_routine = True
-                    preferred_separate_builder_name = builder.__class__.__name__
+        # Check if model is encoder-only
+        block_size = self.vllm_config.cache_config.block_size
+        use_mla = self.vllm_config.model_config.use_mla
+        attn_specs = list[AttentionSpec]()
+        for attn_module in attn_layers.values():
 
-                if builder.cudagraph_support.value < min_cg_support.value:
-                    min_cg_support = builder.cudagraph_support
-                    min_cg_builder_name = builder.__class__.__name__
+            if attn_module.attn_type == AttentionType.ENCODER_ONLY:
+                assert attn_module.sliding_window is None, "Sliding "
+                "window attention is not supported for encoder-only models"
 
-            # Flexible resolve the cudagraph mode
-            cudagraph_mode = self.compilation_config.cudagraph_mode
-            # check cudagraph for mixed batch is supported
-            if cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL \
-                and min_cg_support != AttentionCGSupport.ALWAYS:
-                msg = (f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
-                       f"with {min_cg_builder_name} backend (support: "
-                       f"{min_cg_support})")
-                if min_cg_support == AttentionCGSupport.NEVER:
-                    # if not supported any full cudagraphs, just raise it.
-                    msg += "; please try cudagraph_mode=PIECEWISE, and "\
-                        "make sure compilation level is piecewise"
-                    raise ValueError(msg)
+                attn_specs.append(
+                    FullAttentionSpec(block_size=block_size,
+                                      num_kv_heads=attn_module.num_kv_heads,
+                                      head_size=attn_module.head_size,
+                                      dtype=self.kv_cache_dtype,
+                                      use_mla=use_mla))
+            else:
+                raise ValueError("Expected only encoder-only layers")
 
-                # attempt to resolve the full cudagraph related mode
-                if self.compilation_config.is_attention_splitting:
-                    msg += "; resolving cudagraph_mode=FULL_AND_PIECEWISE"
-                    cudagraph_mode = self.compilation_config.cudagraph_mode = \
-                        CUDAGraphMode.FULL_AND_PIECEWISE
-                else:
-                    msg += "; resolving cudagraph_mode=FULL_DECODE_ONLY"
-                    cudagraph_mode = self.compilation_config.cudagraph_mode = \
-                        CUDAGraphMode.FULL_DECODE_ONLY
-                logger.warning(msg)
+        if len(attn_specs) > 0:
+            assert len(attn_specs) == len(attn_layers), \
+                "All or none of the layers are expected to be encoder-only"
 
-            # check full cudagraph for decode is supported and/or compatible
-            # with sepc-decode
-            if cudagraph_mode.separate_routine() and \
-                cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
-                error_msg = None
-                if min_cg_support == AttentionCGSupport.NEVER:
-                    error_msg = (
-                        f"CUDAGraphMode.{cudagraph_mode.name} is not "
-                        f"supported with {min_cg_builder_name} backend ("
-                        f"support:{min_cg_support})")
+            attn_backends = get_attn_backends_for_layers(attn_layers.keys())
 
-                if self.uniform_decode_query_len > 1 and min_cg_support.value \
-                    < AttentionCGSupport.UNIFORM_BATCH.value:
-                    error_msg = (
-                        f"CUDAGraphMode.{cudagraph_mode.name} is not supported"
-                        f" with spec-decode for attention backend "
-                        f"{min_cg_builder_name} (support: {min_cg_support})")
-                if error_msg is not None:
-                    error_msg += "; please try cudagraph_mode=PIECEWISE, "\
-                        "and make sure compilation level is piecewise"
-                    raise ValueError(error_msg)
+            self.attn_groups.append(
+                create_attn_groups(attn_backends, attn_specs[0]))
+            self.is_encoder_only_model = True
 
-            # logging perference mode for decode if needed when
-            # cudagraph_mode=FULL.
-            if cudagraph_mode==CUDAGraphMode.FULL and \
-                preferred_cg_separate_routine:
-                logger.warning(
-                    "NOTE: %s backend prefers full cuda-graphs for"
-                    " decodes, using `cudagraph_mode=FULL_AND_PIECEWISE` "
-                    "will likely boost performance",
-                    preferred_separate_builder_name)
+    def initialize_cudagraph_capture(self) -> None:
+        min_cg_support = AttentionCGSupport.ALWAYS
+        min_cg_builder_name = None
+
+        for attn_group in self._attn_group_iterator():
+            builder = attn_group.metadata_builder
+            if builder.cudagraph_support.value < min_cg_support.value:
+                min_cg_support = builder.cudagraph_support
+                min_cg_builder_name = builder.__class__.__name__
+
+        # Flexible resolve the cudagraph mode
+        cudagraph_mode = self.compilation_config.cudagraph_mode
+        # check cudagraph for mixed batch is supported
+        if cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL \
+            and min_cg_support != AttentionCGSupport.ALWAYS:
+            msg = (f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
+                   f"with {min_cg_builder_name} backend (support: "
+                   f"{min_cg_support})")
+            if min_cg_support == AttentionCGSupport.NEVER:
+                # if not supported any full cudagraphs, just raise it.
+                msg += "; please try cudagraph_mode=PIECEWISE, and "\
+                    "make sure compilation level is piecewise"
+                raise ValueError(msg)
+
+            # attempt to resolve the full cudagraph related mode
+            if self.compilation_config.is_attention_splitting:
+                msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
+                cudagraph_mode = self.compilation_config.cudagraph_mode = \
+                    CUDAGraphMode.FULL_AND_PIECEWISE
+            else:
+                msg += "; setting cudagraph_mode=FULL_DECODE_ONLY"
+                cudagraph_mode = self.compilation_config.cudagraph_mode = \
+                    CUDAGraphMode.FULL_DECODE_ONLY
+            logger.warning(msg)
+
+        # check that if we are doing spec-decode + decode full-cudagraphs it is
+        # supported
+        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+            if self.uniform_decode_query_len > 1 and min_cg_support.value \
+                < AttentionCGSupport.UNIFORM_BATCH.value:
+                msg = (f"CUDAGraphMode.{cudagraph_mode.name} is not supported"
+                       f" with spec-decode for attention backend "
+                       f"{min_cg_builder_name} (support: {min_cg_support})")
+            if self.compilation_config.is_attention_splitting:
+                msg += "; setting cudagraph_mode=PIECEWISE"
+                cudagraph_mode = self.compilation_config.cudagraph_mode = \
+                    CUDAGraphMode.PIECEWISE
+            else:
+                msg += "; setting cudagraph_mode=NONE"
+                cudagraph_mode = self.compilation_config.cudagraph_mode = \
+                    CUDAGraphMode.NONE
+            logger.warning(msg)
+
+        # double check that we can support full cudagraph if they are requested
+        # even after automatic downgrades
+        if cudagraph_mode.max_cudagraph_mode() == CUDAGraphMode.FULL \
+            and min_cg_support == AttentionCGSupport.NEVER:
+            raise ValueError(f"CUDAGraphMode.{cudagraph_mode.name} is not "
+                             f"supported with {min_cg_builder_name} backend ("
+                             f"support:{min_cg_support}) "
+                             "; please try cudagraph_mode=PIECEWISE, "
+                             "and make sure compilation level is piecewise")
 
         # Trigger cudagraph dispatching keys initialization here (after
         # initializing attn backends).

@@ -4,6 +4,7 @@
 from typing import Optional
 
 import torch
+from packaging import version
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -110,7 +111,8 @@ class BitBLASLinearKernel(MPLinearKernel):
 
         try:
             import bitblas
-            if bitblas.__version__ < MINIMUM_BITBLAS_VERSION:
+            if version.parse(bitblas.__version__) < version.parse(
+                    MINIMUM_BITBLAS_VERSION):
                 raise ImportError(
                     "bitblas version is wrong. Please "
                     f"install bitblas>={MINIMUM_BITBLAS_VERSION}")

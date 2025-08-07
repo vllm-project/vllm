@@ -161,7 +161,7 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         if not isinstance(processor, GotOcr2ImageProcessorFast):
             raise ValueError(f'GotOcr2ImageProcessorFast is expected but got '
                              f'{type(processor)}')
-        num_image_patches = processor.get_number_of_image_tokens(
+        num_image_patches = processor.get_number_of_image_patches(
             image_height, image_width, images_kwargs=dict())
         num_image_tokens = self.get_hf_processor(
         ).image_seq_length * num_image_patches
