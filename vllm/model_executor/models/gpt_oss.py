@@ -28,7 +28,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 
-from .utils import extract_layer_index, maybe_prefix
+from .utils import (AutoWeightsLoader, WeightsMapper, extract_layer_index,
+                    maybe_prefix)
 
 
 class OAIAttention(nn.Module):
@@ -226,64 +227,15 @@ class GptOssModel(nn.Module):
         x = self.norm(x)
         return x
 
-
-class GptOssForCausalLM(nn.Module):
-
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config.hf_config
-        self.model = GptOssModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
-        )
-        self.lm_head = ParallelLMHead(
-            self.model_config.vocab_size,
-            self.model_config.hidden_size,
-        )
-        self.logits_processor = LogitsProcessor(self.model_config.vocab_size)
-
-    def forward(self,
-                input_ids: torch.Tensor,
-                positions: torch.Tensor,
-                intermediate_tensors: Optional[IntermediateTensors] = None,
-                inputs_embeds: Optional[torch.Tensor] = None) -> torch.Tensor:
-        assert intermediate_tensors is None
-        assert inputs_embeds is None
-        return self.model(input_ids, positions)
-
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
-        return logits
-
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        rename_mapping = {
-            "self_attn": "attn",
-            "input_layernorm.weight": "attn.norm.weight",
-            "post_attention_layernorm.weight": "mlp.norm.weight",
-            "embed_tokens": "embedding",
-        }
-
-        def maybe_rename(name: str) -> str:
-            for remap_name, new_name in rename_mapping.items():
-                if remap_name in name:
-                    return name.replace(remap_name, new_name)
-            return name
-
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         mxfp4_block = 32
 
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
-        intermediate_size = self.model_config.intermediate_size
+        intermediate_size = self.config.intermediate_size
         intermediate_size_block = intermediate_size // mxfp4_block
         per_rank_intermediate_size_block = cdiv(intermediate_size_block,
                                                 tp_size)
@@ -296,13 +248,13 @@ class GptOssForCausalLM(nn.Module):
                           intermediate_size)
 
         # Attention heads per rank
-        heads_per_rank = self.model_config.num_attention_heads // tp_size
+        heads_per_rank = self.config.num_attention_heads // tp_size
         head_start = tp_rank * heads_per_rank
 
         use_ep = self.vllm_config.parallel_config.enable_expert_parallel
         ep_size = get_ep_group().world_size
         ep_rank = get_ep_group().rank
-        num_experts = self.model_config.num_local_experts
+        num_experts = self.config.num_local_experts
         experts_per_rank = num_experts // ep_size
         ep_rank_start = ep_rank * experts_per_rank
         ep_rank_end = (ep_rank + 1) * experts_per_rank
@@ -443,7 +395,6 @@ class GptOssForCausalLM(nn.Module):
                 loaded_params.add(new_name)
             elif "sinks" in name:
                 # Handle attention sinks (distributed across ranks)
-                name = name.replace("self_attn", "attn")
                 param = params_dict[name]
                 narrow_weight = weight.narrow(0, head_start, heads_per_rank)
                 param.data.copy_(narrow_weight)
@@ -451,7 +402,6 @@ class GptOssForCausalLM(nn.Module):
             elif "q_proj" in name or "k_proj" in name or "v_proj" in name:
                 shard_id = ("q" if "q_proj" in name else
                             "k" if "k_proj" in name else "v")
-                name = name.replace("self_attn", "attn")
                 param_name = name.replace(f"{shard_id}_proj", "qkv")
                 param = params_dict[param_name]
                 weight_loader = param.weight_loader
@@ -459,13 +409,60 @@ class GptOssForCausalLM(nn.Module):
                 loaded_params.add(param_name)
             else:
                 # Handle all other weights with potential renaming
-                renamed_name = maybe_rename(name)
-                if renamed_name not in params_dict:
+                if name not in params_dict:
                     continue
-                param = params_dict[renamed_name]
+                param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, weight)
-                loaded_params.add(renamed_name)
+                loaded_params.add(name)
 
         return loaded_params
+
+
+class GptOssForCausalLM(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "self_attn": "attn",
+            "input_layernorm.weight": "attn.norm.weight",
+            "post_attention_layernorm.weight": "mlp.norm.weight",
+            "embed_tokens": "embedding",
+        })
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config.hf_config
+        self.model = GptOssModel(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+        )
+        self.lm_head = ParallelLMHead(
+            self.model_config.vocab_size,
+            self.model_config.hidden_size,
+        )
+        self.logits_processor = LogitsProcessor(self.model_config.vocab_size)
+
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds: Optional[torch.Tensor] = None) -> torch.Tensor:
+        assert intermediate_tensors is None
+        assert inputs_embeds is None
+        return self.model(input_ids, positions)
+
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+        return logits
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
