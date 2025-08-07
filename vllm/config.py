@@ -1846,10 +1846,6 @@ class CacheConfig:
     num_cpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
-    xfer_handshake_metadata: Optional[dict[int, dict[
-        int, KVConnectorHandshakeMetadata]]] = field(default=None, init=False)
-    """Metadata for KV connector handshake. Structure: dp_rank -> tp_rank"""
-
     kv_sharing_fast_prefill: bool = False
     """This feature is work in progress and no prefill optimization takes place
     with this flag enabled currently.
@@ -2087,6 +2083,10 @@ class ParallelConfig:
     """Enable expert parallelism load balancing for MoE layers."""
     num_redundant_experts: int = 0
     """Number of redundant experts to use for expert parallelism."""
+
+    xfer_handshake_metadata: Optional[dict[int, dict[
+        int, KVConnectorHandshakeMetadata]]] = field(default=None, init=False)
+    """Metadata for KV connector handshake. Structure: dp_rank -> tp_rank"""
     eplb_window_size: int = 1000
     """Window size for expert load recording."""
     eplb_step_interval: int = 3000
@@ -4889,7 +4889,8 @@ class VllmConfig:
             if (self.kv_transfer_config is not None
                     and self.kv_transfer_config.is_kv_transfer_instance):
                 from collections import defaultdict
-                self.cache_config.xfer_handshake_metadata = defaultdict(dict)
+                self.parallel_config.xfer_handshake_metadata = defaultdict(
+                    dict)
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True

@@ -9,8 +9,6 @@ from fastapi import FastAPI
 
 from vllm import envs
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorHandshakeMetadata)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -33,26 +31,21 @@ class NixlSideChannelServer:
         @self.app.get("/get_kv_connector_metadata/{dp_rank}/{tp_rank}")
         async def get_kv_connector_metadata(dp_rank: Optional[int] = None,
                                             tp_rank: Optional[int] = None):
-            kv_meta: Optional[dict[int, dict[
-                int, KVConnectorHandshakeMetadata]]] = (
-                    self.vllm_config.cache_config.xfer_handshake_metadata)
+            kv_meta = self.vllm_config.parallel_config.xfer_handshake_metadata
 
-            if kv_meta is None:
-                return None
+            if dp_rank is None:
+                return kv_meta
 
-            if dp_rank is not None:
-                if dp_rank not in kv_meta:
-                    return {}
-                dp_data = kv_meta[dp_rank]
+            if not (dp_data := kv_meta.get(dp_rank)):
+                return {}
 
-                if tp_rank is not None:
-                    if tp_rank not in dp_data:
-                        return {}
-                    return {dp_rank: {tp_rank: dp_data[tp_rank]}}
-                else:
-                    return {dp_rank: dp_data}
+            if tp_rank is None:
+                return {dp_rank: dp_data}
 
-            return kv_meta
+            if not (tp_data := dp_data.get(tp_rank)):
+                return {}
+
+            return {dp_rank: {tp_rank: tp_data}}
 
     async def start_async(self):
         if self.server is not None:
