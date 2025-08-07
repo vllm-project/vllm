@@ -10,7 +10,7 @@ from vllm.utils import is_list_of
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
 
-# The idea of multimodal IPC caching is based on having a client and
+# The idea of multimodal input caching is based on having a client and
 # a server, where the client executes in the frontend process (=P0) and the
 # server in the core process (=P1).
 #

@@ -1696,7 +1696,7 @@ class ModelConfig:
 
     @property
     def enable_mm_input_cache(self) -> bool:
-        """Whether the multi-modal IPC cache should be enabled."""
+        """Whether the multi-modal input cache should be enabled."""
         mm_config = self.multimodal_config
         if mm_config is None:
             return False
