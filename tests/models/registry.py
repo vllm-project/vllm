@@ -427,7 +427,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6",
                                 trust_remote_code=True),
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
-                                extras={"2.6": "openbmb/MiniCPM-V-2_6"},  # noqa: E501
+                                extras={"2.6": "openbmb/MiniCPM-V-2_6", "4.0": "openbmb/MiniCPM-V-4"},  # noqa: E501
                                 trust_remote_code=True),
     "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo("MiniMaxAI/MiniMax-VL-01", # noqa: E501
                                               trust_remote_code=True,
