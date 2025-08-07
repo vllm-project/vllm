@@ -2,8 +2,8 @@ from vllm import LLM, SamplingParams
 
 if __name__ == "__main__":
     llm = LLM(
-        model="meta-llama/Llama-3.1-8B",
-        tokenizer="meta-llama/Llama-3.1-8B",
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        tokenizer="meta-llama/Llama-3.1-8B-Instruct",
         tokenizer_mode="auto",
         trust_remote_code=True,
         dtype="bfloat16",

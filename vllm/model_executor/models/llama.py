@@ -128,7 +128,7 @@ class LlamaAttention(nn.Module):
         
         # Sparse attention parameters
         # self.sp_threshold = sp_threshold
-        self.sp_threshold = 0.5
+        self.sp_threshold = 0.625
         self.topk = int(self.sp_threshold * self.total_num_heads)
         # print(f' Attention sparse activation: {self.sp_threshold}')
         if self.total_num_kv_heads >= tp_size:
@@ -220,7 +220,7 @@ class LlamaAttention(nn.Module):
         #     else:
         #         print('prefill stage')
 
-        if is_decode:
+        if is_decode and self.sp_threshold < 1:
             batch_size = attn_output.shape[0]
             attn_out_sparse = attn_output.view(batch_size, self.total_num_heads, self.head_dim) # shape(batch_size, num_heads, head_dim)
             # print('attn_out_sparse.shape', attn_out_sparse.shape) if self.layer_idx == 0 else None
@@ -234,7 +234,7 @@ class LlamaAttention(nn.Module):
 
             attn_out_sparse = attn_out_sparse * mask
             attn_output = attn_out_sparse.view(batch_size, self.total_num_heads * self.head_dim)
-            print('Sparse attention applied.') if self.layer_idx == 0 else None
+            # print('Sparse attention applied.') if self.layer_idx == 0 else None
 
 
         output, _ = self.o_proj(attn_output)
