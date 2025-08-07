@@ -161,12 +161,18 @@ By default, the multi-modal processor cache is enabled to avoid repeatedly proce
 the same multi-modal inputs via Hugging Face `AutoProcessor`,
 which commonly occurs in multi-turn conversations.
 
-You can adjust the size of the cache by setting `mm_processor_cache_gb`
+You can adjust the size of the cache by setting the value of `mm_processor_cache_gb`
 (default 4 GiB per API process + 4 GiB per engine core process).
+If you do not benefit much from the cache, you can disable it completely via `mm_processor_cache_gb=0`.
 
-If you do not benefit much from the cache, you can disable it completely via `mm_processor_cache_gb`:
+Examples:
 
 ```python
+# Use a larger cache
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          mm_processor_cache_gb=8)
+
+# Disable the cache
 llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
           mm_processor_cache_gb=0)
 ```
