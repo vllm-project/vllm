@@ -1695,7 +1695,7 @@ class ModelConfig:
         return not mm_config.disable_mm_preprocessor_cache
 
     @property
-    def enable_mm_ipc_cache(self) -> bool:
+    def enable_mm_input_cache(self) -> bool:
         """Whether the multi-modal IPC cache should be enabled."""
         mm_config = self.multimodal_config
         if mm_config is None:
@@ -1703,7 +1703,7 @@ class ModelConfig:
 
         return not mm_config.disable_mm_preprocessor_cache
 
-    def get_mm_ipc_cache_gb(self) -> int:
+    def get_mm_input_cache_gb(self) -> int:
         mm_config = self.multimodal_config
         if mm_config is None:
             return 0
@@ -3388,18 +3388,6 @@ class MultiModalConfig:
     disable_mm_preprocessor_cache: bool = False
     """
     If `True`, disable caching of the multi-modal processor.
-    """
-
-    mm_ipc_cache_gb: int = 4
-    """
-    The size (in GiB) of the multi-modal IPC cache, which is used to avoid
-    transfer of past multi-modal inputs between API and engine core processes.
-
-    Since the cache is located in engine core, it is duplicated for each
-    engine core process, resulting in a total memory usage of
-    `mm_ipc_cache_gb * data_parallel_size`.
-
-    Set to `0` to disable this cache completely (not recommended).
     """
 
     interleave_mm_strings: bool = False

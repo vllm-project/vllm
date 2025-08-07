@@ -1231,9 +1231,9 @@ class EngineArgs:
         )
 
         if model_config.is_multimodal_model:
-            dp_supports_mm_ipc_cache = (self.data_parallel_size == 1
-                                        or data_parallel_external_lb)
-            if (not dp_supports_mm_ipc_cache
+            dp_supports_mm_input_cache = (self.data_parallel_size == 1
+                                          or data_parallel_external_lb)
+            if (not dp_supports_mm_input_cache
                     and not model_config.disable_mm_preprocessor_cache):
                 logger.warning(
                     "Multi-modal processor cache is disabled because "

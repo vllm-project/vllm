@@ -17,13 +17,13 @@ if TYPE_CHECKING:
 # -- P0:
 #  - BaseMultiModalProcessor processes MultiModalData into MultiModalKwargs
 #    while outputting mm_hash as its identifier.
-#  - MultiModalIPCCacheClient keeps track of the cached entries and
+#  - MultiModalInputCacheClient keeps track of the cached entries and
 #    determine whether to send the MultiModalKwargs to P1.
 #
 # -- P1:
-#  - MultiModalIPCCacheServer stores the MultiModalKwargs from P0.
+#  - MultiModalInputCacheServer stores the MultiModalKwargs from P0.
 #
-# The keys of MultiModalIPCCacheClient and MultiModalIPCCacheServer
+# The keys of MultiModalInputCacheClient and MultiModalInputCacheServer
 # are mirrored, and this allows us to avoid the serialization of `mm_inputs`
 # (like pixel values) between client (=P0) and server (=P1) processes if the
 # `mm_hash` is found in the client cache.
@@ -32,15 +32,15 @@ if TYPE_CHECKING:
 # This cache size is set by the env variable `VLLM_MM_INPUT_CACHE_GIB`.
 
 
-class MultiModalIPCCacheClient:
+class MultiModalInputCacheClient:
     """Used by P0 to check whether multi-modal kwargs are cached in P1."""
 
     def __init__(self, model_config: "ModelConfig") -> None:
         super().__init__()
 
-        self.enabled = model_config.enable_mm_ipc_cache
+        self.enabled = model_config.enable_mm_input_cache
         self.mm_cache = MultiModalCache.get_lru_cache(
-            model_config.get_mm_ipc_cache_gb(),
+            model_config.get_mm_input_cache_gb(),
             MultiModalCacheItemMetadata,
         )
 
@@ -71,15 +71,15 @@ class MultiModalIPCCacheClient:
         self.mm_cache.clear()
 
 
-class MultiModalIPCCacheServer:
+class MultiModalInputCacheServer:
     """Used by P1 to avoid requiring past multi-modal kwargs from P0."""
 
     def __init__(self, model_config: "ModelConfig") -> None:
         super().__init__()
 
-        self.enabled = model_config.enable_mm_ipc_cache
+        self.enabled = model_config.enable_mm_input_cache
         self.mm_cache = MultiModalCache.get_lru_cache(
-            model_config.get_mm_ipc_cache_gb(),
+            model_config.get_mm_input_cache_gb(),
             MultiModalKwargs,
         )
 
