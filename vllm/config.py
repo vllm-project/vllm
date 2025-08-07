@@ -444,8 +444,7 @@ class ModelConfig:
     model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
     """
     disable_mm_preprocessor_cache: bool = False
-    """If `True`, disable caching of the multi-modal preprocessor/mapper (not
-    recommended)."""
+    """If `True`, disable caching of the multi-modal processor."""
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -912,15 +911,6 @@ class ModelConfig:
                 for k, v in base_config.items():
                     if getattr(pooler_config, k) is None:
                         setattr(pooler_config, k, v)
-
-            if self.is_matryoshka:
-                if pooler_config.normalize is None:
-                    pooler_config.normalize = True
-                elif not pooler_config.normalize:
-                    raise ValueError(
-                        "`normalize` must be enabled (set to True) "
-                        "for models that are compatible with "
-                        "Matryoshka Representation.")
 
             return pooler_config
 
@@ -1700,6 +1690,31 @@ class ModelConfig:
     @property
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
+
+    @property
+    def processor_return_mm_hashes(self) -> bool:
+        """Whether the multi-modal processor should output hashes."""
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            return False
+
+        return not mm_config.disable_mm_preprocessor_cache
+
+    @property
+    def enable_mm_input_cache(self) -> bool:
+        """Whether the multi-modal input cache should be enabled."""
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            return False
+
+        return not mm_config.disable_mm_preprocessor_cache
+
+    def get_mm_input_cache_gb(self) -> int:
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            return 0
+
+        return envs.VLLM_MM_INPUT_CACHE_GIB
 
     @property
     def is_cross_encoder(self) -> bool:
@@ -3378,7 +3393,7 @@ class MultiModalConfig:
 
     disable_mm_preprocessor_cache: bool = False
     """
-    If `True`, disable caching of the processed multi-modal inputs.
+    If `True`, disable caching of the multi-modal processor.
     """
 
     interleave_mm_strings: bool = False
@@ -3438,25 +3453,34 @@ class PoolerConfig:
     [`vllm.model_executor.layers.pooler.PoolingType`][].
     """
 
+    ## for embeddings models
     normalize: Optional[bool] = None
     """
-    Whether to normalize the pooled outputs. Usually, this should be set to
-    ``True`` for embedding outputs.
+    Whether to normalize the embeddings outputs. 
+    """
+    dimensions: Optional[int] = None
+    """
+    Reduce the dimensions of embeddings if model 
+    support matryoshka representation.
     """
 
+    ## for classification models
+    activation: Optional[bool] = None
+    """
+    Whether to apply activation function to the classification outputs. 
+    """
+
+    ## for reward models
     softmax: Optional[bool] = None
     """
-    Whether to apply softmax to the pooled outputs. Usually, this should be set
-    to ``True`` for classification outputs.
+    Whether to apply softmax to the reward outputs. 
     """
-
     step_tag_id: Optional[int] = None
     """
     If set, only the score corresponding to the ``step_tag_id`` in the
     generated sentence should be returned. Otherwise, the scores for all tokens
     are returned.
     """
-
     returned_token_ids: Optional[list[int]] = None
     """
     A list of indices for the vocabulary dimensions to be extracted,
