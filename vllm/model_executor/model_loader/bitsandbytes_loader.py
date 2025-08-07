@@ -12,6 +12,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 import torch
 from huggingface_hub import HfApi
+from packaging import version
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
@@ -193,7 +194,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         try:
             import bitsandbytes
 
-            if bitsandbytes.__version__ < "0.46.1":
+            if version.parse(
+                    bitsandbytes.__version__) < version.parse("0.46.1"):
                 raise ImportError("bitsandbytes version is wrong. Please "
                                   "install bitsandbytes>=0.46.1.")
         except ImportError as err:
