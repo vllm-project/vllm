@@ -312,25 +312,25 @@ class MsgpackDecoder:
         return arr.view(torch_dtype).view(shape)
 
     def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:
-        decoded_items = []
-        for item in obj:
-            elems = []
-            for v in item:
-                v["data"] = self._decode_nested_tensors(v["data"])
-                # Reconstruct the field processor using MultiModalFieldConfig
-                factory_meth_name, *field_args = v["field"]
-                factory_meth = getattr(MultiModalFieldConfig,
-                                       factory_meth_name)
+        return [self._decode_mm_item(v) for v in obj]
 
-                # Special case: decode the union "slices" field of
-                # MultiModalFlatField
-                if factory_meth_name == "flat":
-                    field_args[0] = self._decode_nested_slices(field_args[0])
+    def _decode_mm_item(self, obj: list) -> MultiModalKwargsItem:
+        return MultiModalKwargsItem.from_elems(
+            [self._decode_mm_field_elem(v) for v in obj])
 
-                v["field"] = factory_meth(None, *field_args).field
-                elems.append(MultiModalFieldElem(**v))
-            decoded_items.append(MultiModalKwargsItem.from_elems(elems))
-        return decoded_items
+    def _decode_mm_field_elem(self, obj: dict) -> MultiModalFieldElem:
+        obj["data"] = self._decode_nested_tensors(obj["data"])
+        # Reconstruct the field processor using MultiModalFieldConfig
+        factory_meth_name, *field_args = obj["field"]
+        factory_meth = getattr(MultiModalFieldConfig, factory_meth_name)
+
+        # Special case: decode the union "slices" field of
+        # MultiModalFlatField
+        if factory_meth_name == "flat":
+            field_args[0] = self._decode_nested_slices(field_args[0])
+
+        obj["field"] = factory_meth(None, *field_args).field
+        return MultiModalFieldElem(**obj)
 
     def _decode_nested_tensors(self, obj: Any) -> NestedTensors:
         if isinstance(obj, (int, float)):
