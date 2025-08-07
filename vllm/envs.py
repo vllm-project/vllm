@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
+    VLLM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -64,13 +65,12 @@ if TYPE_CHECKING:
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
-    VLLM_MM_INPUT_CACHE_GIB: int = 8
+    VLLM_MM_INPUT_CACHE_GIB: int = 4
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
     VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
-    VLLM_NO_DEPRECATION_WARNING: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
@@ -152,6 +152,9 @@ if TYPE_CHECKING:
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
+    VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
+    VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
+    VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
 
 
 def get_default_cache_root():
@@ -325,6 +328,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
     lambda:
     (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower() in
+     ("true", "1")),
+
+    # Use AITER triton unified attention for V1 attention
+    "VLLM_USE_AITER_UNIFIED_ATTENTION":
+    lambda:
+    (os.getenv("VLLM_USE_AITER_UNIFIED_ATTENTION", "False").lower() in
      ("true", "1")),
 
     # Force vllm to use a specific flash-attention version (2 or 3), only valid
@@ -552,8 +561,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_VIDEO_LOADER_BACKEND":
     lambda: os.getenv("VLLM_VIDEO_LOADER_BACKEND", "opencv"),
 
-    # Cache size (in GiB) for multimodal input cache
-    # Default is 4 GiB
+    # [DEPRECATED] Cache size (in GiB per process) for multimodal input cache
+    # Default is 4 GiB per API process + 4 GiB per engine core process
     "VLLM_MM_INPUT_CACHE_GIB":
     lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "4")),
 
@@ -581,10 +590,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING":
     lambda: bool(
         int(os.getenv("VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING", "1"))),
-
-    # If set, vllm will skip the deprecation warnings.
-    "VLLM_NO_DEPRECATION_WARNING":
-    lambda: bool(int(os.getenv("VLLM_NO_DEPRECATION_WARNING", "0"))),
 
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
@@ -928,6 +933,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_MOE_FP4":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))),
 
+    # If set to 1, use the FlashInfer
+    # MXFP8 (activation) x MXFP4 (weight) MoE backend.
+    "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0"))),
+
+    # If set to 1, use the FlashInfer
+    # BF16 (activation) x MXFP4 (weight) MoE backend.
+    "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0"))),
+
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
     # It can be changed with this variable if needed for some reason.
@@ -973,6 +988,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This is used to prevent the kernel from running out of memory.
     "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE":
     lambda: int(os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")),
+
+    # MoE routing strategy selector.
+    # See `RoutingSimulator.get_available_strategies()` # for available
+    # strategies.
+    # Cutstom routing strategies can be registered by
+    # RoutingSimulator.register_strategy()
+    # Note: custom strategies may not produce correct model outputs
+    "VLLM_MOE_ROUTING_SIMULATION_STRATEGY":
+    lambda: os.environ.get("VLLM_MOE_ROUTING_SIMULATION_STRATEGY", "").lower(),
 
     # Regex timeout for use by the vLLM tool parsing plugins.
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS":
@@ -1027,7 +1051,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_CUDNN_PREFILL":
     lambda: bool(int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))),
 
-    # If set to 1, use the TRTLLM Attention backend in flashinfer.
+    # If set to 1, use the TRTLLM attention backend in flashinfer.
     "VLLM_USE_TRTLLM_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
 
