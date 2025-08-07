@@ -29,19 +29,16 @@ from vllm import envs
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
-                                             DbrxConfig, DeepseekVLV2Config,
-                                             EAGLEConfig, Exaone4Config,
-                                             ExaoneConfig, JAISConfig,
+from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
+                                             EAGLEConfig, JAISConfig,
                                              KimiVLConfig, MedusaConfig,
-                                             MiniMaxText01Config,
-                                             MiniMaxVL01Config, MllamaConfig,
-                                             MLPSpeculatorConfig, MPTConfig,
+                                             MllamaConfig, MLPSpeculatorConfig,
                                              Nemotron_Nano_VL_Config,
                                              NemotronConfig, NVLM_D_Config,
                                              OvisConfig, RWConfig,
-                                             SkyworkR1VChatConfig, SolarConfig,
-                                             Telechat2Config, UltravoxConfig)
+                                             SpeculatorsConfig,
+                                             Step3TextConfig, Step3VLConfig,
+                                             UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
@@ -77,29 +74,22 @@ _CONFIG_REGISTRY_OVERRIDE_HF: dict[str, type[PretrainedConfig]] = {
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
-    "cohere2": Cohere2Config,
-    "dbrx": DbrxConfig,
     "deepseek_vl_v2": DeepseekVLV2Config,
     "kimi_vl": KimiVLConfig,
     "Llama_Nemotron_Nano_VL": Nemotron_Nano_VL_Config,
-    "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
     "jais": JAISConfig,
     "mlp_speculator": MLPSpeculatorConfig,
     "medusa": MedusaConfig,
     "eagle": EAGLEConfig,
-    "exaone": ExaoneConfig,
-    "exaone4": Exaone4Config,
-    "minimax_text_01": MiniMaxText01Config,
-    "minimax_vl_01": MiniMaxVL01Config,
+    "speculators": SpeculatorsConfig,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
     "ovis": OvisConfig,
-    "solar": SolarConfig,
-    "skywork_chat": SkyworkR1VChatConfig,
-    "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
+    "step3_vl": Step3VLConfig,
+    "step3_text": Step3TextConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
@@ -301,6 +291,36 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     return config
 
 
+def maybe_override_with_speculators_target_model(
+    model: str,
+    tokenizer: str,
+    trust_remote_code: bool,
+    revision: Optional[str] = None,
+    **kwargs,
+) -> tuple[str, str]:
+    """
+    If running a speculators config, override running model with target model
+    """
+    is_gguf = check_gguf_file(model)
+    if is_gguf:
+        kwargs["gguf_file"] = Path(model).name
+        gguf_model_repo = Path(model).parent
+    else:
+        gguf_model_repo = None
+    config_dict, _ = PretrainedConfig.get_config_dict(
+        model if gguf_model_repo is None else gguf_model_repo,
+        revision=revision,
+        trust_remote_code=trust_remote_code,
+        token=_get_hf_token(),
+        **kwargs,
+    )
+    spec_config = config_dict.get("speculators_config", None)
+    # Return the target model
+    if spec_config is not None:
+        model = tokenizer = spec_config["verifier"]["name_or_path"]
+    return model, tokenizer
+
+
 def get_config(
     model: Union[str, Path],
     trust_remote_code: bool,
@@ -359,9 +379,12 @@ def get_config(
             token=_get_hf_token(),
             **kwargs,
         )
-
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
+        if model_type is None:
+            model_type = "speculators" if config_dict.get(
+                "speculators_config") is not None else model_type
+
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
@@ -427,6 +450,20 @@ def get_config(
                 f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
+
+    # ModelOpt 0.31.0 and after saves the quantization config in the model
+    # config file.
+    quantization_config = config_dict.get("quantization_config", None)
+
+    # ModelOpt 0.29.0 and before saves the quantization config in a separate
+    # "hf_quant_config.json" in the same directory as the model config file.
+    if quantization_config is None \
+        and file_or_path_exists(model, "hf_quant_config.json", revision):
+        quantization_config = get_hf_file_to_dict("hf_quant_config.json",
+                                                  model, revision)
+
+    if quantization_config is not None:
+        config.quantization_config = quantization_config
 
     if hf_overrides_kw:
         logger.debug("Overriding HF config with %s", hf_overrides_kw)

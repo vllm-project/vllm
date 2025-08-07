@@ -23,14 +23,6 @@ RERANK_MODELS = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
-
-
 @pytest.mark.parametrize("model_info", EMBEDDING_MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner,
                            model_info: EmbedModelInfo) -> None:
@@ -92,7 +84,7 @@ def test_matryoshka(
         hf_outputs = matryoshka_fy(hf_outputs, dimensions)
 
     with vllm_runner(model_info.name,
-                     task="embed",
+                     runner="pooling",
                      dtype=dtype,
                      max_model_len=None) as vllm_model:
         assert vllm_model.llm.llm_engine.model_config.is_matryoshka

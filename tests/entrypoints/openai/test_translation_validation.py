@@ -73,8 +73,9 @@ async def test_non_asr_model(foscolo):
         res = await client.audio.translations.create(model=model_name,
                                                      file=foscolo,
                                                      temperature=0.0)
-        assert res.code == 400 and not res.text
-        assert res.message == "The model does not support Translations API"
+        err = res.error
+        assert err["code"] == 400 and not res.text
+        assert err["message"] == "The model does not support Translations API"
 
 
 @pytest.mark.asyncio

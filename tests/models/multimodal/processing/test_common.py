@@ -58,13 +58,10 @@ def _test_processing_correctness(
 
     model_config = ModelConfig(
         model_id,
-        task="auto",
         tokenizer=model_info.tokenizer or model_id,
         tokenizer_mode=model_info.tokenizer_mode,
-        trust_remote_code=model_info.trust_remote_code,
-        seed=0,
-        dtype="auto",
         revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
     )
 
@@ -274,8 +271,8 @@ def _test_processing_correctness_one(
     "microsoft/Florence-2-base",
     "adept/fuyu-8b",
     "google/gemma-3-4b-it",
-    "THUDM/glm-4v-9b",
-    "THUDM/GLM-4.1V-9B-Thinking",
+    "zai-org/glm-4v-9b",
+    "zai-org/GLM-4.1V-9B-Thinking",
     "ibm-granite/granite-speech-3.3-2b",
     "h2oai/h2ovl-mississippi-800m",
     "internlm/Intern-S1",

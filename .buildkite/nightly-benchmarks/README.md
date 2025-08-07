@@ -28,6 +28,7 @@ See [vLLM performance dashboard](https://perf.vllm.ai) for the latest performanc
 ## Trigger the benchmark
 
 Performance benchmark will be triggered when:
+
 - A PR being merged into vllm.
 - Every commit for those PRs with `perf-benchmarks` label AND `ready` label.
 
@@ -38,6 +39,7 @@ bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
 Runtime environment variables:
+
 - `ON_CPU`: set the value to '1' on Intel® Xeon® Processors. Default value is 0.
 - `SERVING_JSON`: JSON file to use for the serving tests. Default value is empty string (use default file).
 - `LATENCY_JSON`: JSON file to use for the latency tests. Default value is empty string (use default file).
@@ -46,12 +48,14 @@ Runtime environment variables:
 - `REMOTE_PORT`: Port for the remote vLLM service to benchmark. Default value is empty string.
 
 Nightly benchmark will be triggered when:
+
 - Every commit for those PRs with `perf-benchmarks` label and `nightly-benchmarks` label.
 
 ## Performance benchmark details
 
 See [performance-benchmarks-descriptions.md](performance-benchmarks-descriptions.md) for detailed descriptions, and use `tests/latency-tests.json`, `tests/throughput-tests.json`, `tests/serving-tests.json` to configure the test cases.
 > NOTE: For Intel® Xeon® Processors, use `tests/latency-tests-cpu.json`, `tests/throughput-tests-cpu.json`, `tests/serving-tests-cpu.json` instead.
+>
 ### Latency test
 
 Here is an example of one test inside `latency-tests.json`:
@@ -100,7 +104,6 @@ We test the throughput by using `vllm bench serve` with request rate = inf to co
             "tensor_parallel_size": 1,
             "swap_space": 16,
             "disable_log_stats": "",
-            "disable_log_requests": "",
             "load_format": "dummy"
         },
         "client_parameters": {
@@ -149,6 +152,7 @@ Here is an example using the script to compare result_a and result_b without det
 
 Here is an example using the script to compare result_a and result_b with detail test name.
 `python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json`
+
 |   | results_a/benchmark_results.json_name | results_a/benchmark_results.json | results_b/benchmark_results.json_name | results_b/benchmark_results.json | perf_ratio        |
 |---|---------------------------------------------|----------------------------------------|---------------------------------------------|----------------------------------------|----------|
 | 0 | serving_llama8B_tp1_sharegpt_qps_1          | 142.633982                             | serving_llama8B_tp1_sharegpt_qps_1          | 156.526018                             | 1.097396 |
@@ -164,9 +168,9 @@ See [nightly-descriptions.md](nightly-descriptions.md) for the detailed descript
 ### Workflow
 
 - The [nightly-pipeline.yaml](nightly-pipeline.yaml) specifies the docker containers for different LLM serving engines.
-- Inside each container, we run [run-nightly-suite.sh](run-nightly-suite.sh), which will probe the serving engine of the current container.
-- The `run-nightly-suite.sh` will redirect the request to `tests/run-[llm serving engine name]-nightly.sh`, which parses the workload described in [nightly-tests.json](tests/nightly-tests.json) and performs the benchmark.
-- At last, we run [scripts/plot-nightly-results.py](scripts/plot-nightly-results.py) to collect and plot the final benchmarking results, and update the results to buildkite.
+- Inside each container, we run [scripts/run-nightly-benchmarks.sh](scripts/run-nightly-benchmarks.sh), which will probe the serving engine of the current container.
+- The `scripts/run-nightly-benchmarks.sh` will parse the workload described in [nightly-tests.json](tests/nightly-tests.json) and launch the right benchmark for the specified serving engine via `scripts/launch-server.sh`.
+- At last, we run [scripts/summary-nightly-results.py](scripts/summary-nightly-results.py) to collect and plot the final benchmarking results, and update the results to buildkite.
 
 ### Nightly tests
 
@@ -176,6 +180,6 @@ In [nightly-tests.json](tests/nightly-tests.json), we include the command line a
 
 The docker containers for benchmarking are specified in `nightly-pipeline.yaml`.
 
-WARNING: the docker versions are HARD-CODED and SHOULD BE ALIGNED WITH `nightly-descriptions.md`. The docker versions need to be hard-coded as there are several version-specific bug fixes inside `tests/run-[llm serving engine name]-nightly.sh`.
+WARNING: the docker versions are HARD-CODED and SHOULD BE ALIGNED WITH `nightly-descriptions.md`. The docker versions need to be hard-coded as there are several version-specific bug fixes inside `scripts/run-nightly-benchmarks.sh` and `scripts/launch-server.sh`.
 
 WARNING: populating `trt-llm` to latest version is not easy, as it requires updating several protobuf files in [tensorrt-demo](https://github.com/neuralmagic/tensorrt-demo.git).

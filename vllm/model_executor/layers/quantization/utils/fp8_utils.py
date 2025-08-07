@@ -82,6 +82,13 @@ if current_platform.is_rocm():
         fake_impl=rocm_aiter_gemm_w8a8_blockscale_fake,
         dispatch_key=current_platform.dispatch_key,
     )
+    if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
+            and current_platform.is_fp8_fnuz()):
+
+        import aiter as rocm_aiter
+        from aiter import get_hip_quant
+
+        aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
 
 
 def dispatch_w8a8_blockscale_func(
@@ -178,8 +185,12 @@ def apply_w8a8_block_fp8_linear(
                                       block_size, input.dtype)
 
     else:
-        q_input, x_scale = per_token_group_quant_fp8(
-            input_2d, block_size[1], column_major_scales=use_cutlass)
+        if use_aiter_and_is_supported:
+            q_input, x_scale = aiter_per1x128_quant(
+                input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8)
+        else:
+            q_input, x_scale = per_token_group_quant_fp8(
+                input_2d, block_size[1], column_major_scales=use_cutlass)
 
         output = w8a8_blockscale_func(q_input, weight, x_scale, weight_scale,
                                       block_size, input.dtype)
@@ -788,7 +799,8 @@ def requant_weight_ue8m0_inplace(
         s_exp = s_exp[:m_cur, :k_cur]
         w_dq = w_q.to(torch.float32) * s_exp
         # Re-quantise using power-of-two scaling (UE8M0).
-        w_requant, s_requant = per_block_cast_to_fp8(w_dq, [block_m, block_k])
+        w_requant, s_requant = per_block_cast_to_fp8(w_dq, [block_m, block_k],
+                                                     use_ue8m0=True)
 
         # Write back the results in-place.
         w_q.copy_(w_requant)

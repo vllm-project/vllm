@@ -134,6 +134,25 @@ class NixlConnector(KVConnectorBase_V1):
                 vllm_config, self.engine_id)
 
     ############################################################
+    # Class Methods
+    ############################################################
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
+        if vllm_config.model_config is None:
+            logger.warning_once("Unable to detect current VLLM config. "
+                                "Fallback to default kv cache layout.")
+            return None
+        use_mla = vllm_config.model_config.use_mla
+        if use_mla:
+            # return None when we have mla
+            # as the layout should not matter in that case,
+            # which fallback to the default behavior.
+            return None
+        logger.info_once("NixlConnector setting KV cache "
+                         "layout to HND for better xfer performance.")
+        return "HND"
+
+    ############################################################
     # Scheduler Side Methods
     ############################################################
 
@@ -236,13 +255,13 @@ class NixlConnectorScheduler:
         """
         For remote prefill, pull all prompt blocks from remote
         asynchronously relative to engine execution.
-        
+
         Args:
             request (Request): the request object.
             num_computed_tokens (int): the number of locally
                 computed tokens for this request
         Returns:
-            * the number of tokens that can be loaded from the 
+            * the number of tokens that can be loaded from the
               external KV cache beyond what is already computed.
             * true if the external KV cache tokens will be loaded
               asynchronously (between scheduler steps).
@@ -1025,6 +1044,11 @@ class NixlConnectorWorker:
             # Sorted dict, oldest requests are put first so we can exit early.
             if now < expires:
                 break
+            count = self.consumer_notification_counts_by_req.pop(req_id, 0)
+            logger.warning(
+                "Releasing expired KV blocks for request %s which were "
+                "retrieved by %d decode worker(s) within %d seconds.", req_id,
+                count, envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT)
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
 
@@ -1040,6 +1064,13 @@ class NixlConnectorWorker:
         for notifs in self.nixl_wrapper.get_new_notifs().values():
             for notif in notifs:
                 req_id, tp_ratio = notif.decode("utf-8").rsplit(":", 1)
+                if req_id not in self._reqs_to_send:
+                    logger.error(
+                        "Potentially invalid KV blocks for "
+                        "unrecognized request %s were retrieved by "
+                        "a decode worker. They may have expired.", req_id)
+                    continue
+
                 self.consumer_notification_counts_by_req[req_id] += 1
                 # Wait all consumers (D) to be done reading before freeing.
                 if self.consumer_notification_counts_by_req[req_id] == int(

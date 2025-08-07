@@ -5,9 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
-from typing_extensions import deprecated
 
-from vllm.envs import VLLM_MM_INPUT_CACHE_GIB
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
@@ -97,20 +95,24 @@ class MultiModalRegistry:
         self._processor_factories = ClassRegistry[nn.Module,
                                                   _ProcessorFactories]()
 
-        self._processing_cache = ProcessingCache(VLLM_MM_INPUT_CACHE_GIB)
+        self._processor_cache: Optional[ProcessingCache] = None
+
+    def _get_processor_cache(self, model_config: "ModelConfig"):
+        capacity_gb = model_config.mm_processor_cache_gb
+        if capacity_gb is None:
+            return None  # Overrides `disable_cache` argument
+
+        if self._processor_cache is None:
+            self._processor_cache = ProcessingCache(capacity_gb)
+
+        return self._processor_cache
 
     def reset_processor_cache(self) -> bool:
         """Reset the multi-modal processing cache."""
-        self._processing_cache.reset()
+        if self._processor_cache:
+            self._processor_cache.reset()
 
         return True  # Success
-
-    @deprecated("Legacy input processor/mapper pipeline has been removed. "
-                "Please update your model runner to use "
-                "`seq_group_metadata.multi_modal_data` directly without "
-                "further processing.")
-    def create_input_mapper(self, model_config: "ModelConfig"):
-        return lambda data, mm_processor_kwargs: data
 
     def get_max_tokens_per_item_by_modality(
         self,
@@ -129,7 +131,7 @@ class MultiModalRegistry:
         seq_len = model_config.max_model_len
         mm_limits = self.get_mm_limits_per_prompt(model_config)
 
-        return profiler.get_mm_max_tokens(
+        return profiler.get_mm_max_contiguous_tokens(
             seq_len,
             {
                 modality: 1
@@ -181,16 +183,6 @@ class MultiModalRegistry:
         for profiling the memory usage of a model.
         """
         return sum(self.get_max_tokens_by_modality(model_config).values())
-
-    @deprecated("Legacy input processor/mapper pipeline has been removed. "
-                "Please update your model runner to use "
-                "`seq_group_metadata.multi_modal_data` directly without "
-                "further processing.")
-    def init_mm_limits_per_prompt(
-        self,
-        model_config: "ModelConfig",
-    ) -> None:
-        pass
 
     def get_mm_limits_per_prompt(
         self,
@@ -246,13 +238,6 @@ class MultiModalRegistry:
         model_cls, _ = get_model_architecture(model_config)
         return model_cls
 
-    @deprecated("Legacy input processor/mapper pipeline has been removed. "
-                "Please update your model runner to use "
-                "`seq_group_metadata.multi_modal_data` directly without "
-                "further processing.")
-    def has_processor(self, model_config: "ModelConfig") -> bool:
-        return True
-
     def create_processor(
         self,
         model_config: "ModelConfig",
@@ -269,14 +254,14 @@ class MultiModalRegistry:
         if tokenizer is None and not model_config.skip_tokenizer_init:
             tokenizer = cached_tokenizer_from_config(model_config)
         if disable_cache is None:
-            mm_config = model_config.get_multimodal_config()
-            disable_cache = mm_config.disable_mm_preprocessor_cache
+            disable_cache = not model_config.enable_mm_processor_cache
 
         model_cls = self._get_model_cls(model_config)
         factories = self._processor_factories[model_cls]
 
         ctx = InputProcessingContext(model_config, tokenizer)
-        cache = None if disable_cache else self._processing_cache
+        cache = None if disable_cache else self._get_processor_cache(
+            model_config)
 
         return factories.build_processor(ctx, cache=cache)
 

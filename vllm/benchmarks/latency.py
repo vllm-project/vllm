@@ -13,9 +13,8 @@ import numpy as np
 from tqdm import tqdm
 
 import vllm.envs as envs
-from vllm import LLM, SamplingParams
-from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
-                                   write_to_json)
+from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
+                                       write_to_json)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
 from vllm.sampling_params import BeamSearchParams
@@ -84,6 +83,9 @@ def main(args: argparse.Namespace):
             "The environment variable 'VLLM_TORCH_PROFILER_DIR' is not set. "
             "Please set it to a valid path to use torch profiler.")
     engine_args = EngineArgs.from_cli_args(args)
+
+    # Lazy import to avoid importing LLM when the bench command is not selected.
+    from vllm import LLM, SamplingParams
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
