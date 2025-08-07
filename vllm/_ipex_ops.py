@@ -322,56 +322,91 @@ class ipex_ops:
                     stacklevel=2
                 )
                 
-                # Simple fallback using basic attention computation
-                # This is much simpler and avoids complex tensor reshaping
+                # Fallback attention that properly handles variable-length sequences
+                # This is critical for KV cache scenarios where Q and KV have different lengths
                 
-                # Use basic attention computation without variable-length complexity
-                # Just compute attention over the full concatenated sequences
-                total_q_tokens = q.shape[0]
+                print(f"XMX FALLBACK DEBUG: q.shape={q.shape}, k.shape={k.shape}, v.shape={v.shape}")
+                print(f"XMX FALLBACK DEBUG: cu_seqlens_q={cu_seqlens_q}, cu_seqlens_k={cu_seqlens_k}")
+                print(f"XMX FALLBACK DEBUG: max_seqlen_q={max_seqlen_q}, max_seqlen_k={max_seqlen_k}")
                 
-                # Ensure we have 3D tensors [tokens, heads, head_dim]
+                # Ensure tensors are 3D: [total_tokens, num_heads, head_dim]
                 if len(q.shape) == 2:
-                    # Need to reshape from [tokens, hidden] to [tokens, heads, head_dim]
                     hidden_dim = q.shape[1]
-                    # Common head dimensions
                     if hidden_dim % 64 == 0:
                         head_dim = 64
                     elif hidden_dim % 128 == 0:
-                        head_dim = 128
+                        head_dim = 128  
                     else:
                         head_dim = hidden_dim // 32
                     
                     num_heads = hidden_dim // head_dim
-                    q = q.reshape(total_q_tokens, num_heads, head_dim)
+                    q = q.reshape(q.shape[0], num_heads, head_dim)
                     k = k.reshape(k.shape[0], num_heads, head_dim)
                     v = v.reshape(v.shape[0], num_heads, head_dim)
+                    print(f"XMX FALLBACK DEBUG: Reshaped to q.shape={q.shape}, k.shape={k.shape}, v.shape={v.shape}")
                 
-                # Simple attention: treat as one big batch
-                # Transpose to [num_heads, total_tokens, head_dim]
-                q_t = q.transpose(0, 1)  # [heads, q_tokens, head_dim]
-                k_t = k.transpose(0, 1)  # [heads, k_tokens, head_dim] 
-                v_t = v.transpose(0, 1)  # [heads, k_tokens, head_dim]
+                # Process each sequence in the batch separately (this is what varlen attention does)
+                batch_size = cu_seqlens_q.shape[0] - 1
+                outputs = []
                 
-                # Compute attention scores [heads, q_tokens, k_tokens]
-                scores = torch.matmul(q_t, k_t.transpose(-2, -1)) * softmax_scale
+                for i in range(batch_size):
+                    start_q = cu_seqlens_q[i].item()
+                    end_q = cu_seqlens_q[i + 1].item()
+                    start_k = cu_seqlens_k[i].item()  
+                    end_k = cu_seqlens_k[i + 1].item()
+                    
+                    seq_len_q = end_q - start_q
+                    seq_len_k = end_k - start_k
+                    
+                    print(f"XMX FALLBACK DEBUG: Batch {i}: seq_len_q={seq_len_q}, seq_len_k={seq_len_k}")
+                    
+                    if seq_len_q == 0:
+                        continue
+                    
+                    # Extract the sequences for this batch item
+                    q_seq = q[start_q:end_q]  # [seq_len_q, num_heads, head_dim]
+                    k_seq = k[start_k:end_k]  # [seq_len_k, num_heads, head_dim]  
+                    v_seq = v[start_k:end_k]  # [seq_len_k, num_heads, head_dim]
+                    
+                    # Transpose for attention computation: [num_heads, seq_len, head_dim]
+                    q_seq = q_seq.transpose(0, 1)
+                    k_seq = k_seq.transpose(0, 1)
+                    v_seq = v_seq.transpose(0, 1)
+                    
+                    # Compute attention: [num_heads, seq_len_q, seq_len_k]
+                    scores = torch.matmul(q_seq, k_seq.transpose(-2, -1)) * softmax_scale
+                    
+                    # Apply causal mask if needed
+                    if causal:
+                        # In KV cache scenarios, we typically want causal mask that prevents
+                        # attending to future positions within the current context
+                        if seq_len_q == seq_len_k:
+                            # Standard causal mask for when Q and K are same length
+                            mask = torch.triu(
+                                torch.full((seq_len_q, seq_len_k), float('-inf'),
+                                         device=q.device, dtype=q.dtype), diagonal=1)
+                            scores = scores + mask
+                        else:
+                            # For KV cache, typically Q can attend to all previous K positions
+                            # No additional masking needed in most cases
+                            pass
+                    
+                    # Apply softmax and compute output
+                    attn_weights = F.softmax(scores, dim=-1)
+                    attn_out = torch.matmul(attn_weights, v_seq)
+                    
+                    # Transpose back: [seq_len_q, num_heads, head_dim]
+                    attn_out = attn_out.transpose(0, 1)
+                    outputs.append(attn_out)
                 
-                # Apply causal mask only if q and k have same token count
-                if causal and q_t.shape[1] == k_t.shape[1]:
-                    seq_len = q_t.shape[1]
-                    mask = torch.triu(
-                        torch.full((seq_len, seq_len), float('-inf'), 
-                                 device=q.device, dtype=q.dtype), diagonal=1)
-                    scores = scores + mask
+                # Concatenate all batch outputs
+                if outputs:
+                    result = torch.cat(outputs, dim=0)
+                    out.copy_(result)
+                else:
+                    out.zero_()
                 
-                # Softmax and attention
-                attn_weights = F.softmax(scores, dim=-1)
-                attn_out = torch.matmul(attn_weights, v_t)
-                
-                # Transpose back to [tokens, heads, head_dim]
-                result = attn_out.transpose(0, 1)
-                
-                # Copy to output tensor
-                out.copy_(result)
+                print(f"XMX FALLBACK DEBUG: Final result shape: {out.shape}")
                 return out
             else:
                 raise
