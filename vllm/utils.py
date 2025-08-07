@@ -480,11 +480,15 @@ class PyObjectCache:
         """
         self._index = 0
 
+VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
 @cache
 def is_fake_hpu() -> bool:
     return os.environ.get('VLLM_USE_FAKE_HPU', '0') != '0'
 
+def is_hip() -> bool:
+    return (VLLM_TARGET_DEVICE == "cuda"
+            or VLLM_TARGET_DEVICE == "rocm") and torch.version.hip is not None
 
 @cache
 def hpu_device_string():

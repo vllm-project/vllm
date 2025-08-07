@@ -14,7 +14,7 @@ protobuf # Required by LlamaTokenizer.
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
 aiohttp
 openai >= 1.98.0  # For Responses API with reasoning content
-openai-harmony >= 0.1.0  # For GPT-OSS model harmony integration
+openai-harmony >= 0.0.3  # For GPT-OSS model harmony integration
 pydantic >= 2.10
 prometheus_client >= 0.18.0
 pillow  # Required for image processing

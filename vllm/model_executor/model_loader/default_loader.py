@@ -276,6 +276,7 @@ class DefaultModelLoader(BaseModelLoader):
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking currently.
         if model_config.quantization is None and loaded_weights is not None:
+            # assert 0, f"weights_to_load: {weights_to_load}\n loaded_weights: {loaded_weights}"
             weights_not_loaded = weights_to_load - loaded_weights
             if weights_not_loaded:
                 raise ValueError("Following weights were not initialized from "
