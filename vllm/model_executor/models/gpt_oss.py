@@ -61,9 +61,9 @@ class OAIAttention(nn.Module):
                 "original_max_position_embeddings":
                 config.rope_scaling["original_max_position_embeddings"],
                 "beta_fast":
-                config.rope_ntk_beta,
+                config.rope_scaling["beta_fast"],
                 "beta_slow":
-                config.rope_ntk_alpha,
+                config.rope_scaling["beta_slow"],
             },
             is_neox_style=True,
         )
@@ -154,7 +154,7 @@ class MLPBlock(torch.nn.Module):
                                       dtype=torch.bfloat16)
         assert config.intermediate_size % self.world_size == 0
         self.experts = FusedMoE(num_experts=config.num_local_experts,
-                                top_k=config.num_experts_per_token,
+                                top_k=config.num_experts_per_tok,
                                 hidden_size=config.hidden_size,
                                 intermediate_size=config.intermediate_size,
                                 reduce_results=True,
