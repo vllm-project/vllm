@@ -517,7 +517,9 @@ class OpenAIServingResponses(OpenAIServing):
                 if last_msg.channel == "final":
                     prev_final_msg_idx = -1
                     for i in range(len(prev_msgs) - 2, -1, -1):
-                        if prev_msgs[i].channel == "final":
+                        prev_msg_i = prev_msgs[i]
+                        assert isinstance(prev_msg_i, OpenAIHarmonyMessage)
+                        if prev_msg_i.channel == "final":
                             prev_final_msg_idx = i
                             break
                     recent_turn_msgs = prev_msgs[prev_final_msg_idx + 1:]
