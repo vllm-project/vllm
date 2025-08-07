@@ -6,7 +6,8 @@ from typing import ClassVar, Optional
 
 import torch
 
-from vllm.attention.backends.abstract import (AttentionType,
+from vllm.attention.backends.abstract import (AttentionLayer,
+                                              AttentionType,
                                               is_quantized_kv_cache)
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
@@ -163,16 +164,13 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
                                       "are not implemented for "
                                       "FlashMLAImpl")
 
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "FlashMLA V1 with FP8 KV cache not yet supported")
-
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLAMetadata,
+        layer: AttentionLayer,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
@@ -191,6 +189,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             num_splits=attn_metadata.decode.num_splits,
             softmax_scale=self.scale,
             causal=True,
+            descale_q=layer._q_scale,
+            descale_k=layer._k_scale,
         )
 
         return self._v_up_proj(o)
