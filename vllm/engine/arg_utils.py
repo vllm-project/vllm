@@ -401,7 +401,8 @@ class EngineArgs:
     logits_processor_pattern: Optional[
         str] = ModelConfig.logits_processor_pattern
 
-    speculative_config: Optional[Dict[str, Any]] = None
+    speculative_config: Optional[
+        SpeculativeConfig] = VllmConfig.speculative_config
 
     show_hidden_metrics_for_version: Optional[str] = \
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -754,18 +755,6 @@ class EngineArgs:
         lora_group.add_argument("--default-mm-loras",
                                 **lora_kwargs["default_mm_loras"])
 
-        # Speculative arguments
-        speculative_group = parser.add_argument_group(
-            title="SpeculativeConfig",
-            description=SpeculativeConfig.__doc__,
-        )
-        speculative_group.add_argument(
-            "--speculative-config",
-            type=json.loads,
-            default=None,
-            help="The configurations for speculative decoding. Should be a "
-            "JSON string.")
-
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
         observability_group = parser.add_argument_group(
@@ -845,6 +834,8 @@ class EngineArgs:
             title="VllmConfig",
             description=VllmConfig.__doc__,
         )
+        vllm_group.add_argument("--speculative-config",
+                                **vllm_kwargs["speculative_config"])
         vllm_group.add_argument("--kv-transfer-config",
                                 **vllm_kwargs["kv_transfer_config"])
         vllm_group.add_argument('--kv-events-config',
@@ -966,20 +957,19 @@ class EngineArgs:
             pt_load_map_location=self.pt_load_map_location,
         )
 
-    def create_speculative_config(
+    def maybe_update_speculative_config(
         self,
         target_model_config: ModelConfig,
         target_parallel_config: ParallelConfig,
         enable_chunked_prefill: bool,
         disable_log_stats: bool,
-    ) -> Optional["SpeculativeConfig"]:
-        """Initializes and returns a SpeculativeConfig object based on
-        `speculative_config`.
+    ):
+        """
+        Auto-loads SpeculativeConfig from the model config if not set and HF
+        config is a SpeculatorsConfig.
 
-        This function utilizes `speculative_config` to create a
-        SpeculativeConfig object. The `speculative_config` can either be
-        provided as a JSON string input via CLI arguments or directly as a
-        dictionary from the engine.
+        If a speculative config is required, updates the necessary fields with
+        the parameters from other configs.
         """
 
         from vllm.transformers_utils.config import get_config
@@ -996,27 +986,21 @@ class EngineArgs:
             # no user input required / expected
             if isinstance(hf_config, SpeculatorsConfig):
                 # We create one since we dont create one
-                self.speculative_config = {}
-                self.speculative_config[
-                    "num_speculative_tokens"] = hf_config.num_lookahead_tokens
-                self.speculative_config["model"] = self.model
-                self.speculative_config["method"] = hf_config.method
+                self.speculative_config = SpeculativeConfig(
+                    num_speculative_tokens=hf_config.num_lookahead_tokens,
+                    model=self.model,
+                    method=hf_config.method,
+                )
             else:
                 return None
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
         # config.
-        self.speculative_config.update({
-            "target_model_config": target_model_config,
-            "target_parallel_config": target_parallel_config,
-            "enable_chunked_prefill": enable_chunked_prefill,
-            "disable_log_stats": disable_log_stats,
-        })
-        speculative_config = SpeculativeConfig.from_dict(
-            self.speculative_config)
-
-        return speculative_config
+        self.speculative_config.target_model_config = target_model_config
+        self.speculative_config.target_parallel_config = target_parallel_config
+        self.speculative_config.enable_chunked_prefill = enable_chunked_prefill
+        self.speculative_config.disable_log_stats = disable_log_stats
 
     def create_engine_config(
         self,
@@ -1242,7 +1226,7 @@ class EngineArgs:
                     "between API and engine core processes.")
                 model_config.set_disable_mm_preprocessor_cache(True)
 
-        speculative_config = self.create_speculative_config(
+        self.maybe_update_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
             enable_chunked_prefill=self.enable_chunked_prefill,
@@ -1252,7 +1236,7 @@ class EngineArgs:
         # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         if self.num_scheduler_steps > 1:
-            if speculative_config is not None:
+            if self.speculative_config is not None:
                 raise ValueError("Speculative decoding is not supported with "
                                  "multi-step (--num-scheduler-steps > 1)")
             if self.enable_chunked_prefill and self.pipeline_parallel_size > 1:
@@ -1269,8 +1253,8 @@ class EngineArgs:
         num_lookahead_slots = max(self.num_lookahead_slots,
                                   self.num_scheduler_steps - 1)
         num_lookahead_slots = num_lookahead_slots \
-            if speculative_config is None \
-            else speculative_config.num_lookahead_slots
+            if self.speculative_config is None \
+            else self.speculative_config.num_lookahead_slots
 
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
@@ -1343,7 +1327,7 @@ class EngineArgs:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
-            speculative_config=speculative_config,
+            speculative_config=self.speculative_config,
             load_config=load_config,
             decoding_config=decoding_config,
             observability_config=observability_config,
