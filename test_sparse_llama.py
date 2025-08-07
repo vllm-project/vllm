@@ -11,8 +11,17 @@ if __name__ == "__main__":
         enforce_eager=True,
     )
 
-    prompt = ["Explain why head sparsity speeds up transformer decoding."]
-    out = llm.generate(prompt, SamplingParams(max_tokens=20, temperature=0.0))
-    # print(out)
-    print("Prompt: ", out[0].prompt)
-    print(out[0].outputs[0].text)
+    prompt = ["Explain why head sparsity speeds up transformer decoding.", "How does head sparsity work?", 
+            "Hello, my name is",
+            "The president of the United States is",
+            "The capital of France is",
+            "The future of AI is",
+            "What is the capital of the United States?"]
+    out = llm.generate(prompt, SamplingParams(max_tokens=50, temperature=0.0))
+
+    print("-" * 50)
+    for output in out:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
+        print("-" * 50)

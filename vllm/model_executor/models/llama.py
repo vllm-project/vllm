@@ -129,6 +129,7 @@ class LlamaAttention(nn.Module):
         # Sparse attention parameters
         # self.sp_threshold = sp_threshold
         self.sp_threshold = 0.5
+        self.topk = int(self.sp_threshold * self.total_num_heads)
         # print(f' Attention sparse activation: {self.sp_threshold}')
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
@@ -209,18 +210,33 @@ class LlamaAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
-        forward_context = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
-        
-        # Check if in prefill or decode stage
-        is_prefill = attn_metadata.prefill_metadata is not None
-        is_decode = attn_metadata.decode_metadata is not None
-        # **Head-wise Sparsity Implementation**
-        if self.layer_idx == 0: 
-            print('attn_output.shape', attn_output.shape)
-            print('decode stage') if is_decode else print('prefill stage')
-        # TODO: add sparse decode logic here
-        
+
+        min_position = positions.min()
+        is_decode = True if min_position > 1 and positions.shape[0] < 10 else False
+
+        # if self.layer_idx == 0:
+        #     if is_decode:
+        #         print('decode stage')
+        #     else:
+        #         print('prefill stage')
+
+        if is_decode:
+            batch_size = attn_output.shape[0]
+            attn_out_sparse = attn_output.view(batch_size, self.total_num_heads, self.head_dim) # shape(batch_size, num_heads, head_dim)
+            # print('attn_out_sparse.shape', attn_out_sparse.shape) if self.layer_idx == 0 else None
+            
+            norms = attn_out_sparse.norm(dim=-1)  # Shape: (batch_size, num_heads)
+            _, topk_indices = norms.topk(self.topk, dim=-1)  # Shapes: (batch_size, k)
+            mask = torch.zeros_like(norms, dtype=torch.bool)  # Shape: (batch_size, num_heads)
+            mask.scatter_(-1, topk_indices, True)  # Now mask has True at top k head positions for each token
+            mask = mask.unsqueeze(-1)  # Shape: (batch_size, num_heads, 1)
+            # print('mask.shape', mask.shape) if self.layer_idx == 0 else None
+
+            attn_out_sparse = attn_out_sparse * mask
+            attn_output = attn_out_sparse.view(batch_size, self.total_num_heads * self.head_dim)
+            print('Sparse attention applied.') if self.layer_idx == 0 else None
+
+
         output, _ = self.o_proj(attn_output)
         return output
 
