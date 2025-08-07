@@ -1,7 +1,7 @@
 #!/bin/bash
 set -ex
 
-ln -sf "$(which python3)" /usr/local/bin/python3
+ln -sf "$(which python3)" /usr/local/bin/python
 
 WORKSPACE=$1
 if [ -z "$WORKSPACE" ]; then
