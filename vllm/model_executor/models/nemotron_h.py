@@ -55,8 +55,7 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import NemotronHConfig
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType,
-                        get_kv_cache_torch_dtype)
+from vllm.utils import LayerBlockType, get_kv_cache_torch_dtype
 
 
 class NemotronHMLP(nn.Module):
@@ -142,22 +141,20 @@ class NemotronHMambaDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        self.mixer = MambaMixer2(
-            hidden_size=config.hidden_size,
-            ssm_state_size=config.ssm_state_size,
-            conv_kernel_size=config.conv_kernel,
-            intermediate_size=config.expand * config.hidden_size,
-            use_conv_bias=config.use_conv_bias,
-            use_bias=config.use_bias,
-            n_groups=config.n_groups,
-            num_heads=config.mamba_num_heads,
-            head_dim=config.mamba_head_dim,
-            rms_norm_eps=config.rms_norm_eps,
-            activation=config.mamba_hidden_act,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mixer",
-            mamba_ssm_cache_dtype=STR_DTYPE_TO_TORCH_DTYPE[
-                cache_config.mamba_ssm_cache_dtype])
+        self.mixer = MambaMixer2(hidden_size=config.hidden_size,
+                                 ssm_state_size=config.ssm_state_size,
+                                 conv_kernel_size=config.conv_kernel,
+                                 intermediate_size=config.expand *
+                                 config.hidden_size,
+                                 use_conv_bias=config.use_conv_bias,
+                                 use_bias=config.use_bias,
+                                 n_groups=config.n_groups,
+                                 num_heads=config.mamba_num_heads,
+                                 head_dim=config.mamba_head_dim,
+                                 rms_norm_eps=config.rms_norm_eps,
+                                 activation=config.mamba_hidden_act,
+                                 quant_config=quant_config,
+                                 prefix=f"{prefix}.mixer")
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -544,6 +541,10 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
         mamba_cache_params = None
         if not envs.VLLM_USE_V1:
+            mamba_ssm_cache_dtype = get_kv_cache_torch_dtype(
+                self.vllm_config.cache_config.mamba_ssm_cache_dtype,
+                self.lm_head.weight.dtype)
+
             if self.mamba_cache is None:
 
                 num_mamba_layers = \
@@ -555,10 +556,6 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                     self.get_mamba_state_shape_from_config(
                         self.vllm_config, use_v1=False)
 
-                mamba_ssm_cache_dtype = get_kv_cache_torch_dtype(
-                    self.vllm_config.cache_config.mamba_ssm_cache_dtype,
-                    self.lm_head.weight.dtype)
-
                 self.mamba_cache = MambaCacheManager(
                     vllm_config=self.vllm_config,
                     dtype=self.lm_head.weight.dtype,
@@ -567,7 +564,8 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                     conv_state_shape=mamba_state_shape[0],
                     temporal_state_shape=mamba_state_shape[1])
 
-            mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
+            mamba_cache_params = self.mamba_cache.current_run_tensors(
+                mamba_ssm_cache_dtype=mamba_ssm_cache_dtype, **kwargs)
 
         hidden_states = self.model(input_ids, positions, mamba_cache_params,
                                    intermediate_tensors, inputs_embeds)

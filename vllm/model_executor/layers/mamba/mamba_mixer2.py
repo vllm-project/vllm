@@ -232,8 +232,7 @@ class MambaMixer2(MambaBase, CustomOp):
                  activation: str = "silu",
                  use_rms_norm: bool = True,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = "",
-                 mamba_ssm_cache_dtype: Optional[torch.dtype] = None):
+                 prefix: str = ""):
         super().__init__()
 
         # For TP, the sharding plan is as follows:
@@ -267,7 +266,6 @@ class MambaMixer2(MambaBase, CustomOp):
         self.ssm_state_size = ssm_state_size
         self.conv_kernel_size = conv_kernel_size
         self.activation = activation
-        self.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
 
         self.intermediate_size = intermediate_size
         self.head_dim = head_dim
@@ -669,7 +667,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
                                                 self.head_dim),
-                mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype)
+                mamba_ssm_cache_dtype=mamba_cache_params.mamba_ssm_cache_dtype)
 
             # update ssm states
             # - varlen state is a (num_prefills, nheads, headdim, dstate) tensor
