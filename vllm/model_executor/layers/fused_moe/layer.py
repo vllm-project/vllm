@@ -1430,22 +1430,9 @@ class FusedMoE(torch.nn.Module):
             # to the modular kernel, we can move this logic there
             # to achieve better efficiency.
 
-            # `expert_load_view`: (num_logical_experts,)
+            # `expert_load_view`: (num_physical_experts,)
 
-            # Mask out non-local experts
-            if expert_map is not None:
-                topk_ids_local = expert_map[topk_ids]
-                topk_ids_flatten = topk_ids_local.flatten()
-            else:
-                topk_ids_flatten = topk_ids.flatten()
-
-            # Should be equivalent to:
-            # ```
-            # topk_ids_masked = topk_ids_local[topk_ids_local >= 0]
-            # expert_load_view += topk_ids_masked.bincount(
-            #     minlength=expert_load_view.shape[0])
-            # ```
-            # We use `scatter_add_` since `bincount` cannot be compiled
+            topk_ids_flatten = topk_ids.flatten()
 
             # Performance optimization:
             # `masked_fill` is significantly faster than `masked_select`
