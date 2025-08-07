@@ -147,6 +147,10 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """Special the tool parser plugin write to parse the model-generated tool
     into OpenAI API format, the name register in this plugin can be used in
     `--tool-call-parser`."""
+    tool_server: Optional[str] = None
+    """Comma-separated list of host:port pairs (IPv4, IPv6, or hostname).
+    Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for demo
+    purpose."""
     log_config_file: Optional[str] = envs.VLLM_LOGGING_CONFIG_PATH
     """Path to logging config JSON file for both vllm and uvicorn"""
     max_log_len: Optional[int] = None
