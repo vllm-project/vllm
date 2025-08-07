@@ -442,9 +442,8 @@ class Scheduler(SchedulerInterface):
                 # extra block gets allocated which
                 # creates a mismatch between the number
                 # of local and remote blocks.
-                effective_lookahead_tokens = (0 if request.num_computed_tokens
-                                              == 0 else
-                                              self.num_lookahead_tokens)
+              effective_lookahead_tokens = self.num_lookahead_tokens if request.num_computed_tokens else 0
+
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
