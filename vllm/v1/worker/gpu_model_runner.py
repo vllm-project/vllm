@@ -2819,20 +2819,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # check that if we are doing spec-decode + decode full-cudagraphs it is
         # supported
-        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
-            if self.uniform_decode_query_len > 1 and min_cg_support.value \
-                < AttentionCGSupport.UNIFORM_BATCH.value:
-                msg = (f"CUDAGraphMode.{cudagraph_mode.name} is not supported"
-                       f" with spec-decode for attention backend "
-                       f"{min_cg_builder_name} (support: {min_cg_support})")
-                if self.compilation_config.is_attention_splitting:
-                    msg += "; setting cudagraph_mode=PIECEWISE"
-                    cudagraph_mode = self.compilation_config.cudagraph_mode = \
-                        CUDAGraphMode.PIECEWISE
-                else:
-                    msg += "; setting cudagraph_mode=NONE"
-                    cudagraph_mode = self.compilation_config.cudagraph_mode = \
-                        CUDAGraphMode.NONE
+        if (cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+                and self.uniform_decode_query_len > 1 and min_cg_support.value
+                < AttentionCGSupport.UNIFORM_BATCH.value):
+            msg = (f"CUDAGraphMode.{cudagraph_mode.name} is not supported"
+                   f" with spec-decode for attention backend "
+                   f"{min_cg_builder_name} (support: {min_cg_support})")
+            if self.compilation_config.is_attention_splitting:
+                msg += "; setting cudagraph_mode=PIECEWISE"
+                cudagraph_mode = self.compilation_config.cudagraph_mode = \
+                    CUDAGraphMode.PIECEWISE
+            else:
+                msg += "; setting cudagraph_mode=NONE"
+                cudagraph_mode = self.compilation_config.cudagraph_mode = \
+                    CUDAGraphMode.NONE
             logger.warning(msg)
 
         # double check that we can support full cudagraph if they are requested
