@@ -58,7 +58,7 @@ class Mistral3ImagePixelInputs(TensorSchema):
     # in which case the data is passed as a list instead of a batched tensor.
     pixel_values: Annotated[
         Union[torch.Tensor, list[torch.Tensor]],
-        TensorShape("bn", 3, "h", "w"),
+        TensorShape("bn", 3, "h", "w", dynamic_dims={"h", "w"}),
     ]
 
 
@@ -481,10 +481,6 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
         return Mistral3ImagePixelInputs(
             type="pixel_values_pixtral",
             pixel_values=flatten_bn(pixel_values),
-            resolve_bindings={
-                "h": self.config.vision_config.image_size,
-                "w": self.config.vision_config.image_size,
-            },
         )
 
     def _process_image_input(
