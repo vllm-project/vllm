@@ -323,6 +323,7 @@ class ResponsesRequest(OpenAIBaseModel):
         if (top_p := self.top_p) is None:
             top_p = default_sampling_params.get(
                 "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"])
+        stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
         guided_decoding = None
@@ -340,6 +341,7 @@ class ResponsesRequest(OpenAIBaseModel):
             top_p=top_p,
             max_tokens=max_tokens,
             logprobs=self.top_logprobs,
+            stop_token_ids=stop_token_ids,
             output_kind=(RequestOutputKind.DELTA
                          if self.stream else RequestOutputKind.FINAL_ONLY),
             guided_decoding=guided_decoding,
@@ -404,6 +406,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         Literal["required"],
         ChatCompletionNamedToolChoiceParam,
     ]] = "none"
+    reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
+    include_reasoning: bool = True
 
     # NOTE this will be ignored by vLLM -- the model determines the behavior
     parallel_tool_calls: Optional[bool] = False
