@@ -452,7 +452,13 @@ class OpenAIServingResponses(OpenAIServing):
         output = []
         if reasoning_content:
             reasoning_item = ResponseReasoningItem(
-                content=[ResponseReasoningTextContent(text=reasoning_content)],
+                id=f"rs_{random_uuid()}",
+                summary=[],
+                type="reasoning",
+                content=[
+                    ResponseReasoningTextContent(text=reasoning_content,
+                                                 type="reasoning_text")
+                ],
                 status=None,  # NOTE: Only the last output item has status.
             )
             output.append(reasoning_item)

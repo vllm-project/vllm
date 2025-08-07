@@ -207,7 +207,13 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
     elif message.channel == "analysis":
         for content in message.content:
             reasoning_item = ResponseReasoningItem(
-                content=[ResponseReasoningTextContent(text=content.text)],
+                id=f"rs_{random_uuid()}",
+                summary=[],
+                type="reasoning",
+                content=[
+                    ResponseReasoningTextContent(text=content.text,
+                                                 type="reasoning_text")
+                ],
                 status=None,
             )
             output_items.append(reasoning_item)
@@ -270,8 +276,12 @@ def parse_remaining_state(
 
     if parser.current_channel == "analysis":
         reasoning_item = ResponseReasoningItem(
+            id=f"rs_{random_uuid()}",
+            summary=[],
+            type="reasoning",
             content=[
-                ResponseReasoningTextContent(text=parser.current_content)
+                ResponseReasoningTextContent(text=parser.current_content,
+                                             type="reasoning_text")
             ],
             status=None,
         )

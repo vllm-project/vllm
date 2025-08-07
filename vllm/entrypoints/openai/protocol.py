@@ -1768,7 +1768,7 @@ class ResponsesResponse(OpenAIBaseModel):
     text: Optional[ResponseTextConfig] = None
     top_logprobs: int
     truncation: Literal["auto", "disabled"]
-    usage: Optional[UsageInfo] = None
+    usage: Optional[ResponseUsage] = None
     user: Optional[str] = None
 
     @classmethod
