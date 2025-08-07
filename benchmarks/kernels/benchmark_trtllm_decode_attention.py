@@ -10,6 +10,7 @@ import flashinfer
 import torch
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
+FP8_DTYPE = torch.float8_e4m3fn
 
 # KV Cache Layout for TRT-LLM
 # kv_cache_shape = (num_blocks, 2, num_kv_heads, page_size, head_dim)
@@ -32,11 +33,14 @@ def benchmark_decode(
     dtype=torch.bfloat16,
     kv_layout="HND",
     num_kv_heads=8,
-    kv_cache_dtype="auto",
+    kv_cache_dtype=torch.bfloat16,
+    fused_quant_dtype=None,
     head_dim=128,
     warmup=10,
     trials=20,
 ):
+    fused_quant_dtype = dtype if fused_quant_dtype is None else fused_quant_dtype
+
     torch.set_default_device("cuda")
     device = "cuda"
     torch.manual_seed(0)
@@ -52,9 +56,14 @@ def benchmark_decode(
     # For decode, batch_size is num_decode_token
     num_qo_heads = num_kv_heads * HEAD_GRP_SIZE
     sm_scale = float(1.0 / (head_dim**0.5))
-    q = torch.randn(num_seqs, num_qo_heads, head_dim, device=device, dtype=dtype)
-    kv_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
 
+    q = torch.randn(num_seqs, num_qo_heads, head_dim, device=device, dtype=dtype)
+    if fused_quant_dtype is FP8_DTYPE:
+        trtllm_q, _ = to_float8(q)
+    else:
+        trtllm_q = q
+
+    kv_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
     max_kv_len = max(kv_lens)
     kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int, device=device)
     max_num_blocks_per_seq = (max_kv_len + page_size - 1) // page_size
@@ -67,15 +76,15 @@ def benchmark_decode(
     kv_cache = torch.randn(size=kv_cache_shape, device=device, dtype=dtype)
     k_scale = v_scale = 1.0
 
-    if kv_cache_dtype.startswith("fp8"):
+    if kv_cache_dtype is FP8_DTYPE:
         kv_cache, _ = to_float8(kv_cache)
 
-    output_trtllm = torch.empty(q.shape, dtype=dtype)
+    output_trtllm = torch.empty(q.shape, dtype=fused_quant_dtype)
 
     # Benchmark TRT decode
     def trt_decode():
         return flashinfer.decode.trtllm_batch_decode_with_kv_cache(
-            q,
+            trtllm_q,
             kv_cache,
             workspace_buffer,
             block_tables,
@@ -140,7 +149,7 @@ def benchmark_decode(
         page_size,
         "NONE",
         q_data_type=dtype,
-        kv_data_type=torch.float8_e4m3fn if kv_cache_dtype.startswith("fp8") else dtype,
+        kv_data_type=kv_cache_dtype,
     )
 
     def baseline_decode():
@@ -165,7 +174,8 @@ def benchmark_decode(
         "baseline_std": baseline_std.item(),
         "speedup_percent": speedup_percent,
         "q_dtype": str(dtype),
-        "kv_cache_dtype": kv_cache_dtype,
+        "kv_cache_dtype": str(kv_cache_dtype),
+        "fused_quant_dtype": str(fused_quant_dtype),
         "page_size": page_size,
         "num_kv_heads": num_kv_heads,
         "head_dim": head_dim,
@@ -188,6 +198,7 @@ def write_results_to_csv(results, filename=None):
         "speedup_percent",
         "q_dtype",
         "kv_cache_dtype",
+        "fused_quant_dtype",
         "page_size",
         "num_kv_heads",
         "head_dim",
@@ -227,7 +238,7 @@ if __name__ == "__main__":
                 bs,
                 max_seq_len,
                 dtype=torch.bfloat16,
-                kv_cache_dtype="auto",
+                kv_cache_dtype=torch.bfloat16,
             )
             all_results.append(result)
 
@@ -245,7 +256,23 @@ if __name__ == "__main__":
                 bs,
                 max_seq_len,
                 dtype=torch.bfloat16,
-                kv_cache_dtype="fp8",
+                kv_cache_dtype=FP8_DTYPE,
+            )
+            all_results.append(result)
+
+    print("Running benchmark for q_dtype = fp8, kv_cache_dtype: fp8, output_dtype: fp8")
+    print(
+        "\tnum_seqs\tmax_seq_len\ttrt_mean\ttrt_std\tbaseline_mean\t"
+        "baseline_std\tspeedup_percent"
+    )
+    for max_seq_len in max_seq_lens:
+        for bs in num_seqs:
+            result = benchmark_decode(
+                bs,
+                max_seq_len,
+                dtype=torch.bfloat16,
+                kv_cache_dtype=FP8_DTYPE,
+                fused_quant_dtype=FP8_DTYPE,
             )
             all_results.append(result)
 
