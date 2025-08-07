@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
-    VLLM_MM_INPUT_CACHE_GIB: int = 8
+    VLLM_MM_INPUT_CACHE_GIB: int = 4
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
@@ -561,8 +561,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_VIDEO_LOADER_BACKEND":
     lambda: os.getenv("VLLM_VIDEO_LOADER_BACKEND", "opencv"),
 
-    # Cache size (in GiB) for multimodal input cache
-    # Default is 4 GiB
+    # Cache size (in GiB per process) for multimodal input cache
+    # Default is 4 GiB per API process + 4 GiB per engine core process
     "VLLM_MM_INPUT_CACHE_GIB":
     lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "4")),
 

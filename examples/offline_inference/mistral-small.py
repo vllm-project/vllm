@@ -166,7 +166,7 @@ def parse_args():
     parser.add_argument(
         "--disable-mm-preprocessor-cache",
         action="store_true",
-        help="If True, disables caching of multi-modal preprocessor/mapper.",
+        help="If True, disables caching of multi-modal processor.",
     )
     return parser.parse_args()
 
