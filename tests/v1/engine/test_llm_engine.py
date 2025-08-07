@@ -179,9 +179,8 @@ def test_llmengine_streaming_with_parallel_sampling(model, output_kind,
     )
 
     if output_kind is None:
-        assert (
-            sampling_params.output_kind == RequestOutputKind.CUMULATIVE
-        ), "default is CUMULATIVE"         
+        assert (sampling_params.output_kind == RequestOutputKind.CUMULATIVE
+                ), "default is CUMULATIVE"
 
     prompts = ["The history of the Earth is" for i in range(NUM_REQUESTS)]
     request_ids = []
@@ -230,14 +229,12 @@ def test_llmengine_streaming_with_parallel_sampling(model, output_kind,
                     assert len(partial_tokens[request_id]) == num_index
                     assert len(
                         set(token_all)) == 1 and token_all[0] == NUM_TOKENS
-                elif (
-                    sampling_params.output_kind == RequestOutputKind.FINAL_ONLY
-                ):
-                    assert (
-                        index_count == num_index and
-                        token_count == NUM_TOKENS
-                    )
-                    assert index_count == num_index and token_count == NUM_TOKENS
+                elif (sampling_params.output_kind ==
+                      RequestOutputKind.FINAL_ONLY):
+                    assert (index_count == num_index
+                            and token_count == NUM_TOKENS)
+                    assert (index_count == num_index
+                            and token_count == NUM_TOKENS)
                     assert len(partial_tokens[request_id]) == num_index
                     assert len(
                         set(token_all)) == 1 and token_all[0] == NUM_TOKENS
