@@ -20,7 +20,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.hunyuan_v1 import HunYuanDecoderLayer
+from vllm.model_executor.models.llama import LlamaDecoderLayer
 from vllm.v1.sample.metadata import SamplingMetadata
 
 from .utils import AutoWeightsLoader, maybe_prefix
@@ -28,19 +28,15 @@ from .utils import AutoWeightsLoader, maybe_prefix
 logger = init_logger(__name__)
 
 
-class Eagle3HunYuanDecoderLayer(HunYuanDecoderLayer):
+class Eagle3HunYuanDecoderLayer(LlamaDecoderLayer):
 
     def __init__(
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-        layer_id=-1,
     ) -> None:
-        super().__init__(config,
-                         quant_config=quant_config,
-                         prefix=prefix,
-                         layer_id=layer_id)
+        super().__init__(config, quant_config=quant_config, prefix=prefix)
 
         # override qkv
         self.self_attn.qkv_proj = QKVParallelLinear(
@@ -70,7 +66,7 @@ class Eagle3HunYuanDecoderLayer(HunYuanDecoderLayer):
         hidden_states = torch.cat([embeds, hidden_states], dim=-1)
 
         # Self Attention
-        hidden_states, ori_kv_states = self.self_attn(
+        hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
@@ -106,11 +102,9 @@ class Eagle3HunYuanModel(nn.Module):
         )
 
         self.layers = nn.ModuleList([
-            Eagle3HunYuanDecoderLayer(
-                self.config,
-                prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
-                layer_id=start_layer_id,
-            )
+            Eagle3HunYuanDecoderLayer(self.config,
+                                      prefix=maybe_prefix(
+                                          prefix, f"layers.{start_layer_id}"))
         ])
         if hasattr(self.config, "target_hidden_size"):
             self.fc = torch.nn.Linear(self.config.target_hidden_size * 3,
@@ -208,7 +202,12 @@ class Eagle3HunYuanDenseV1ForCausalLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if inputs_embeds is not None:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support multimodal inputs yet."
+            )
         return self.model(input_ids, positions, hidden_states)
 
     def compute_logits(
