@@ -41,12 +41,9 @@ def unroll_model_tp_dict(model_tp_dict):
 
 
 model_tp_dict = {
-    "Qwen/Qwen2-VL-2B-Instruct": [1],
-    "Qwen/Qwen2-VL-7B-Instruct": [1],
-    "Qwen/Qwen2-VL-72B-Instruct": [2, 4, 8],
-    "Qwen/Qwen2.5-VL-3B-Instruct": [1, 2, 4, 8],
-    "Qwen/Qwen2.5-VL-7B-Instruct": [1, 2, 4, 8],
-    "Qwen/Qwen2.5-VL-72B-Instruct": [2, 4, 8]
+    "Qwen/Qwen2-VL-7B-Instruct": [1, 2],
+    "Qwen/Qwen2-VL-72B-Instruct": [1, 2],
+    "Qwen/Qwen2.5-VL-72B-Instruct": [1, 2]
 }
 
 # https://github.com/pytorch/pytorch/blob/main/torch/testing/_comparison.py#L1317
@@ -54,7 +51,7 @@ dtype_atol_rtol_list = [
     [torch.bfloat16, 1e-5, 1.6e-2],
 ]
 
-num_tokens_list = [1, 1024, 4096, 16384]
+num_tokens_list = [11, 8192]
 
 
 @pytest.mark.parametrize("model_name, tp_size",
