@@ -2480,13 +2480,16 @@ def _make_src_and_dst_indices(
     dst_block_ids: list[int],
     src_device: Union[torch.device, str],
     dst_device: Union[torch.device, str],
+    block_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    src_indices = torch.tensor(src_block_ids,
-                               device=src_device,
-                               dtype=torch.int64)
-    dst_indices = torch.tensor(dst_block_ids,
-                               device=dst_device,
-                               dtype=torch.int64)
+
+    for idx in range(len(src_block_ids)):
+        src_block_id = src_block_ids[idx]
+        src_indices = torch.range(block_size * src_block_id, block_size * (1 + src_block_id))
+        dst_block_id = dst_block_ids[idx]
+        dst_indices = torch.range(block_size * dst_block_id, block_size * (1 + dst_block_id))
+
+
     return src_indices, dst_indices
 
 
@@ -2517,13 +2520,14 @@ def copy_kv_blocks(
     src_block_ids: list[int],
     dst_block_ids: list[int],
     direction: Literal["h2d", "d2h"],
+    block_size: int
 ) -> None:
     """Copy kv blocks between different buffers."""
     if not src_kv_caches or not dst_kv_caches or \
        not src_block_ids or not dst_block_ids or \
        len(src_block_ids) != len(dst_block_ids):
         return
-
+    assert len(src_block_ids) == len(dst_block_ids)
     src_device = next(iter(src_kv_caches.values())).device
     dst_device = next(iter(dst_kv_caches.values())).device
 
@@ -2531,12 +2535,14 @@ def copy_kv_blocks(
         src_block_ids=src_block_ids,
         dst_block_ids=dst_block_ids,
         src_device=src_device,
-        dst_device=dst_device)
-
-    _copy_fn = _insert_blocks_to_hpu if direction == "h2d" else \
-               _swap_out_hpu_blocks
-    for layer_name in src_kv_caches:
-        src_tensor = src_kv_caches[layer_name]
-        dst_tensor = dst_kv_caches[layer_name]
-        _copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
+        dst_device=dst_device,
+        block_size)
+    
+    for idx, (layer, kv_layer) in enumerate(src_kv_caches):
+        if direction == "h2d":
+            k, v = kv_layer[0], kv_layer[1]
+        else:
+            k, v = kv_layer
+        dst_kv_caches[layer][0][dst_indices].copy_(k[src_indices], non_blocking = False)
+        dst_kv_caches[layer][1][dst_indices].copy_(v[src_indices], non_blocking = False)
 
