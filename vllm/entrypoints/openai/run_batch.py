@@ -302,7 +302,7 @@ async def run_request(serving_engine_func: Callable,
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
             response=BatchResponseData(
-                status_code=response.code,
+                status_code=response.error.code,
                 request_id=f"vllm-batch-{random_uuid()}"),
             error=response,
         )
