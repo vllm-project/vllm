@@ -799,7 +799,8 @@ def requant_weight_ue8m0_inplace(
         s_exp = s_exp[:m_cur, :k_cur]
         w_dq = w_q.to(torch.float32) * s_exp
         # Re-quantise using power-of-two scaling (UE8M0).
-        w_requant, s_requant = per_block_cast_to_fp8(w_dq, [block_m, block_k])
+        w_requant, s_requant = per_block_cast_to_fp8(w_dq, [block_m, block_k],
+                                                     use_ue8m0=True)
 
         # Write back the results in-place.
         w_q.copy_(w_requant)
