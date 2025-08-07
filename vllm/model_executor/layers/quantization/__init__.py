@@ -37,6 +37,7 @@ QuantizationMethods = Literal[
     "auto-round",
     "rtn",
     "inc",
+    "mxfp4",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -110,6 +111,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .marlin import MarlinConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
+    from .mxfp4 import Mxfp4Config
     from .neuron_quant import NeuronQuantConfig
     from .ptpc_fp8 import PTPCFp8Config
     from .qqq import QQQConfig
@@ -148,6 +150,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "auto-round": AutoRoundConfig,
         "rtn": RTNConfig,
         "inc": INCConfig,
+        "mxfp4": Mxfp4Config,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)
