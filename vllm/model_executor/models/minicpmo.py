@@ -788,4 +788,4 @@ class MiniCPMO(MiniCPMV2_6):
                 multimodal_embeddings += tuple(audio_features)
 
         return multimodal_embeddings
-
+    
