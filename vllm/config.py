@@ -443,8 +443,15 @@ class ModelConfig:
     from `AutoProcessor.from_pretrained`. The available overrides depend on the
     model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
     """
-    disable_mm_preprocessor_cache: bool = False
-    """If `True`, disable caching of the multi-modal processor."""
+    mm_processor_cache_gb: int = 4
+    """The size (in GiB) of the multi-modal processor cache, which is used to
+    avoid re-processing past multi-modal inputs.
+
+    This cache is duplicated for each API process and engine core process,
+    resulting in a total memory usage of
+    `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
+
+    Set to `0` to disable this cache completely (not recommended)."""
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -881,17 +888,16 @@ class ModelConfig:
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
-                disable_mm_preprocessor_cache=self.
-                disable_mm_preprocessor_cache,
+                mm_processor_cache_gb=self.mm_processor_cache_gb,
                 interleave_mm_strings=self.interleave_mm_strings)
 
         return None
 
-    def set_disable_mm_preprocessor_cache(self, value: bool) -> None:
+    def set_mm_processor_cache_gb(self, value: int) -> None:
         mm_config = self.get_multimodal_config()
 
-        self.disable_mm_preprocessor_cache = value
-        mm_config.disable_mm_preprocessor_cache = value
+        self.mm_processor_cache_gb = value
+        mm_config.mm_processor_cache_gb = value
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -1711,7 +1717,16 @@ class ModelConfig:
         if mm_config is None:
             return False
 
-        return not mm_config.disable_mm_preprocessor_cache
+        return mm_config.mm_processor_cache_gb > 0
+
+    @property
+    def enable_mm_processor_cache(self) -> bool:
+        """Whether the multi-modal processor cache should be enabled."""
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            return False
+
+        return mm_config.mm_processor_cache_gb > 0
 
     @property
     def enable_mm_input_cache(self) -> bool:
@@ -1720,7 +1735,7 @@ class ModelConfig:
         if mm_config is None:
             return False
 
-        return not mm_config.disable_mm_preprocessor_cache
+        return mm_config.mm_processor_cache_gb > 0
 
     def get_mm_input_cache_gb(self) -> int:
         mm_config = self.multimodal_config
@@ -3404,9 +3419,15 @@ class MultiModalConfig:
     `{"num_crops": 4}`.
     """
 
-    disable_mm_preprocessor_cache: bool = False
+    mm_processor_cache_gb: int = 4
     """
-    If `True`, disable caching of the multi-modal processor.
+    The size (in GiB) of the multi-modal processor cache, which is used to
+
+    This cache is duplicated for each API process and engine core process,
+    resulting in a total memory usage of
+    `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
+
+    Set to `0` to disable this cache completely (not recommended).
     """
 
     interleave_mm_strings: bool = False

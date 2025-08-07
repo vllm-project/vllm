@@ -138,13 +138,13 @@ def run_multi_api_server(args: argparse.Namespace):
     num_api_servers = args.api_server_count
     assert num_api_servers > 0
 
-    orig_disable_mm_preprocessor_cache = args.disable_mm_preprocessor_cache
+    orig_mm_processor_cache_gb = args.mm_processor_cache_gb
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
 
         # Not compatible with API server scale-out
-        args.disable_mm_preprocessor_cache = True
+        args.mm_processor_cache_gb = 0
 
     listen_address, sock = setup_server(args)
 
@@ -161,8 +161,7 @@ def run_multi_api_server(args: argparse.Namespace):
             raise ValueError("VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used "
                              "with api_server_count > 1")
 
-        if model_config.is_multimodal_model and not (
-                orig_disable_mm_preprocessor_cache):
+        if model_config.is_multimodal_model and orig_mm_processor_cache_gb > 0:
             logger.warning("Multi-modal processor cache is disabled because "
                            "it is not compatible with `api_server_count > 1`.")
 

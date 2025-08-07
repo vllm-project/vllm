@@ -15,14 +15,14 @@ from ...utils import build_model_context
                          ["meta-llama/Llama-4-Scout-17B-16E-Instruct"])
 @pytest.mark.parametrize("mm_processor_kwargs", [{}])
 @pytest.mark.parametrize("num_imgs", [1, 5])
-@pytest.mark.parametrize("disable_mm_preprocessor_cache", [True, False])
+@pytest.mark.parametrize("mm_processor_cache_gb", [0, 4])
 @pytest.mark.parametrize("tokenized_prompt", [True, False])
 def test_processor_override(
     image_assets: ImageTestAssets,
     model_id: str,
     mm_processor_kwargs: dict,
     num_imgs: int,
-    disable_mm_preprocessor_cache: bool,
+    mm_processor_cache_gb: int,
     tokenized_prompt: bool,
 ):
     """Ensure llama4 processor works properly."""
@@ -30,7 +30,7 @@ def test_processor_override(
         model_id,
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt={"image": num_imgs},
-        disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
+        mm_processor_cache_gb=mm_processor_cache_gb,
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     config = processor.info.get_hf_config()
