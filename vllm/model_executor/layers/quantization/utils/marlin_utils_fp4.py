@@ -9,7 +9,7 @@ import vllm._custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT, marlin_make_workspace_new, marlin_permute_scales,
-    should_use_atomic_add_reduce)
+    marlin_permute_bias, should_use_atomic_add_reduce)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -86,7 +86,7 @@ def apply_fp4_marlin_linear(
         input: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        weight_scale_2: torch.Tensor,
+        weight_scale_2: Optional[torch.Tensor],
         workspace: torch.Tensor,
         size_n: int,
         size_k: int,
@@ -107,6 +107,7 @@ def apply_fp4_marlin_linear(
     output = ops.gptq_marlin_gemm(a=reshaped_x,
                                   c=None,
                                   b_q_weight=weight,
+                                  b_bias=bias,
                                   b_scales=weight_scale,
                                   global_scale=weight_scale_2,
                                   b_zeros=None,
@@ -120,9 +121,6 @@ def apply_fp4_marlin_linear(
                                   use_atomic_add=use_atomic_add,
                                   use_fp32_reduce=use_fp32_reduce)
 
-    if bias is not None:
-        output.add_(bias)  # In-place add
-
     return output.reshape(out_shape)
 
 
@@ -132,6 +130,9 @@ def prepare_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
         "FP4 quantization is being used. Weight-only FP4 compression will "
         "be used leveraging the Marlin kernel. This may degrade "
         "performance for compute-heavy workloads.")
+
+    is_nvfp4 = hasattr(layer, "weight_scale_2")
+    group_size = 16 if is_nvfp4 else 32
 
     part_size_n = layer.output_size_per_partition
     part_size_k = layer.input_size_per_partition
@@ -162,14 +163,26 @@ def prepare_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
     weight_scale = marlin_permute_scales(s=weight_scale,
                                          size_k=part_size_k,
                                          size_n=part_size_n,
-                                         group_size=16)
-    weight_scale = nvfp4_marlin_process_scales(weight_scale)
-    layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
+                                         group_size=group_size)
 
-    weight_scale_2 = layer.weight_scale_2.to(param_dtype)
-    weight_scale_2 = nvfp4_marlin_process_global_scale(weight_scale_2)
-    layer.weight_scale_2 = torch.nn.Parameter(weight_scale_2,
-                                              requires_grad=False)
+    if is_nvfp4:
+        weight_scale = nvfp4_marlin_process_scales(weight_scale)
+        layer.weight_scale = torch.nn.Parameter(weight_scale,
+                                                requires_grad=False)
+
+        weight_scale_2 = layer.weight_scale_2.to(param_dtype)
+        weight_scale_2 = nvfp4_marlin_process_global_scale(weight_scale_2)
+        layer.weight_scale_2 = torch.nn.Parameter(weight_scale_2,
+                                                  requires_grad=False)
+    else:
+        weight_scale = mxfp4_marlin_process_scales(weight_scale)
+        layer.weight_scale = torch.nn.Parameter(weight_scale,
+                                                requires_grad=False)
+
+    if hasattr(layer, "bias") and layer.bias is not None:
+        assert layer.bias.shape == (part_size_n, )
+        bias = marlin_permute_bias(layer.bias)
+        layer.bias = torch.nn.Parameter(bias, requires_grad=False)
 
     return
 
@@ -180,6 +193,9 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
         "FP4 quantization is being used. Weight-only FP4 compression will "
         "be used leveraging the Marlin kernel. This may degrade "
         "performance for compute-heavy workloads.")
+
+    is_nvfp4 = hasattr(layer, "w13_weight_scale_2")
+    group_size = 16 if is_nvfp4 else 32
 
     e = layer.num_experts
     k = layer.hidden_size
@@ -222,7 +238,9 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
     # Permute scales
     for name in ["w13", "w2"]:
         scales = getattr(layer, name + "_weight_scale").to(param_dtype)
-        global_scale = getattr(layer, name + "_weight_scale_2").to(param_dtype)
+        if is_nvfp4:
+            global_scale = getattr(layer,
+                                   name + "_weight_scale_2").to(param_dtype)
 
         tensor_list = []
         if "w13" in name:
@@ -234,17 +252,42 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
             marlin_scales = marlin_permute_scales(s=scales[i].T,
                                                   size_k=size_k,
                                                   size_n=size_n,
-                                                  group_size=16)
-            marlin_scales = nvfp4_marlin_process_scales(marlin_scales)
+                                                  group_size=group_size)
+            if is_nvfp4:
+                marlin_scales = nvfp4_marlin_process_scales(marlin_scales)
+            else:
+                marlin_scales = mxfp4_marlin_process_scales(marlin_scales)
             tensor_list.append(marlin_scales)
 
         scales = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
         scales = torch.nn.Parameter(scales, requires_grad=False)
         setattr(layer, name + "_weight_scale", scales)
 
-        global_scale = nvfp4_marlin_process_global_scale(global_scale)
-        global_scale = torch.nn.Parameter(global_scale, requires_grad=False)
-        setattr(layer, name + "_weight_scale_2", global_scale)
+        if is_nvfp4:
+            global_scale = nvfp4_marlin_process_global_scale(global_scale)
+            global_scale = torch.nn.Parameter(global_scale,
+                                              requires_grad=False)
+            setattr(layer, name + "_weight_scale_2", global_scale)
+
+    # BIAS
+    # Permute bias
+    for name in ["w13_bias", "w2_bias"]:
+        if not hasattr(layer, name):
+            continue
+        bias = getattr(layer, name).to(param_dtype)
+
+        tensor_list = []
+        if "w13" in name:
+            size_n, size_k = n * 2, k
+        else:
+            size_n, size_k = k, n
+
+        for i in range(e):
+            tensor_list.append(marlin_permute_bias(bias[i]))
+
+        bias = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
+        bias = torch.nn.Parameter(bias, requires_grad=False)
+        setattr(layer, name + "_bias", bias)
 
 
 def rand_marlin_weight_nvfp4_like(weight, group_size):

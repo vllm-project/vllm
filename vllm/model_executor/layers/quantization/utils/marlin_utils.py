@@ -416,6 +416,7 @@ def apply_gptq_marlin_linear(
     output = ops.gptq_marlin_gemm(reshaped_x,
                                   None,
                                   weight,
+                                  bias,
                                   weight_scale,
                                   None,
                                   weight_zp,
@@ -430,9 +431,6 @@ def apply_gptq_marlin_linear(
                                   use_atomic_add=use_atomic_add,
                                   use_fp32_reduce=use_fp32_reduce,
                                   is_zp_float=False)
-
-    if bias is not None:
-        output.add_(bias)  # In-place add
 
     return output.reshape(out_shape)
 
@@ -462,6 +460,7 @@ def apply_awq_marlin_linear(
     output = ops.gptq_marlin_gemm(reshaped_x,
                                   None,
                                   weight,
+                                  bias,
                                   weight_scale,
                                   None,
                                   weight_zp,
@@ -475,8 +474,5 @@ def apply_awq_marlin_linear(
                                   use_atomic_add=use_atomic_add,
                                   use_fp32_reduce=use_fp32_reduce,
                                   is_zp_float=False)
-
-    if bias is not None:
-        output.add_(bias)  # In-place add
 
     return output.reshape(out_shape)

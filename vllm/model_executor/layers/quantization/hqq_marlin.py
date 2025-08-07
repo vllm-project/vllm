@@ -307,6 +307,7 @@ class HQQMarlinMethod(LinearMethodBase):
             x,
             None,
             layer.marlin_qweight,
+            bias,
             scales,
             None,
             zeros,
@@ -325,8 +326,5 @@ class HQQMarlinMethod(LinearMethodBase):
 
         if orig_type != torch.float16:
             marlin_out = marlin_out.to(orig_type)
-
-        if bias is not None:
-            marlin_out.add_(bias)
 
         return marlin_out
