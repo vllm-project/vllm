@@ -17,7 +17,7 @@ async def test_simple_input(client: openai.AsyncOpenAI):
 
     # Whether the output contains the reasoning.
     assert outputs[0].type == "reasoning"
-    assert outputs[0].text != ""
+    assert outputs[0].content[0].text != ""
 
 
 @pytest.mark.asyncio
