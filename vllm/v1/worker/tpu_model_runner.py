@@ -1960,6 +1960,11 @@ def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
                                            page_size: int) -> int:
     """Calculates the padded number of KV cache update slices to avoid
     recompilation."""
+    # NOTE(chengjiyao): let's say R_i is the token num for i-th request,
+    # so it occupies most 2 + R_i // page_size pages. The total maximum
+    # possible number of pages needed is sum(2 + R_i // page_size), which
+    # is <= 2 * max_num_reqs + sum(R_i) // page_size
+    # = 2 * max_num_reqs + num_tokens // page_size
     padded_num_slices = 2 * max_num_reqs + num_tokens // page_size
     padded_num_slices = min(padded_num_slices, num_tokens)
     return padded_num_slices
