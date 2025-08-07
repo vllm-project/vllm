@@ -53,6 +53,8 @@ HF_UNSUPPORTED_MODELS = [
 ]
 
 V1_SUPPORTED_MODELS = [
+    "state-spaces/mamba-130m-hf",
+    "ai21labs/Jamba-tiny-dev",
     "mistralai/Mamba-Codestral-7B-v0.1",
     "ibm-ai-platform/Bamba-9B-v1",
     "Zyphra/Zamba2-1.2B-instruct",
