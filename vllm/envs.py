@@ -1185,6 +1185,7 @@ def compute_hash() -> str:
         "VLLM_DP_SIZE",
         "VLLM_USE_STANDALONE_COMPILE",
         "VLLM_FUSED_MOE_CHUNK_SIZE",
+        "VLLM_USE_TRTLLM_FP4_GEMM",
     ]
     for key in environment_variables_to_hash:
         if key in environment_variables:
