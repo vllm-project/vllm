@@ -224,7 +224,6 @@ def move_to_buffer(
 
     # 4. Execute the P2P operations. The real communication happens here.
     if p2p_ops and cuda_stream is not None:
-        dist.barrier(group=ep_group)
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
             with torch.cuda.stream(cuda_stream):
@@ -450,7 +449,7 @@ def rearrange_expert_weights_inplace(
             is_received_locally=is_received_locally, 
             experts_recv_loc=experts_recv_loc, 
             new_indices=new_global_expert_indices[layer].tolist(),
-            ep_group: ProcessGroup
+            ep_group=ep_group
         )
 
 def _map_old_expert_indices_with_rank_mapping(

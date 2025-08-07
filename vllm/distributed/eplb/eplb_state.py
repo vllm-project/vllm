@@ -121,11 +121,11 @@ class EplbState:
 
     Shape: (window_size, num_moe_layers, num_local_physical_experts)
     """
-    new_physical_to_logical_map: torch.Tensor
+    new_physical_to_logical_map: torch.Tensor = None
 
-    new_logical_to_physical_map: torch.Tensor
+    new_logical_to_physical_map: torch.Tensor = None
 
-    new_logical_replica_count: torch.Tensor
+    new_logical_replica_count: torch.Tensor = None
 
     expert_load_window_step: int = 0
     """
@@ -160,15 +160,15 @@ class EplbState:
 
     buffer_lock: threading.Lock = threading.Lock()
 
-    expert_buffer:list[torch.Tensor] = field(defalt_factory=list)
+    expert_buffer:list[torch.Tensor] = field(default_factory=list)
 
     rebalanced: bool = False  
 
-    is_unchanged: list[bool] = field(defalt_factory=list)
+    is_unchanged: list[bool] = field(default_factory=list)
 
-    is_received_locally: list[bool] = field(defalt_factory=list)
+    is_received_locally: list[bool] = field(default_factory=list)
 
-    experts_recv_loc: dict[int, int] = field(defalt_factory=dict)
+    experts_recv_loc: dict[int, int] = field(default_factory=dict)
 
     is_async: bool = False
 
@@ -311,6 +311,12 @@ class EplbState:
             physical_to_logical_map = new_physical_to_logical_map.to(device)
             logical_to_physical_map.copy_(new_logical_to_physical_map)
             logical_replica_count.copy_(new_logical_replica_count)
+        else:
+            new_physical_to_logical_map = None
+
+            new_logical_to_physical_map = None
+
+            new_logical_replica_count = None
         model.set_eplb_state(
             expert_load_pass,
             logical_to_physical_map,
@@ -356,7 +362,10 @@ class EplbState:
             - `max_tokens`: The maximum load across ranks.
             - `balancedness`: The ratio of average load to maximum load.
         """
-
+        if self.is_async:
+            is_profile = False
+        #Non-Blocking EPLB don't support profile now
+        ep_group = get_ep_group().device_group
         if is_profile:
             self.rearrange_calculate(model, is_profile=True)
             return
@@ -370,7 +379,6 @@ class EplbState:
             num_tokens = self.expert_load_pass.sum(dim=-1)
 
             # Collect load metrics from all ranks
-            ep_group = get_ep_group().device_group
             num_tokens_list = [
                 torch.empty_like(num_tokens) for _ in range(ep_group.size())
             ]
@@ -412,7 +420,7 @@ class EplbState:
         self.expert_rearrangement_step += 1
 
         if self.is_async and self.ep_buffer_ready:
-            self.move_to_workspace(model, ep_group=ep_group, is_profile)
+            self.move_to_workspace(model=model, ep_group=ep_group, is_profile=is_profile)
         if (self.expert_rearrangement_step
                 >= self.expert_rearrangement_step_interval):
             self.expert_rearrangement_step = 0
@@ -565,7 +573,7 @@ class EplbState:
             try:
                 loop.run_until_complete(
                     self.transfer_run_periodically(model=model,
-                                                   ep_group=ep_group
+                                                   ep_group=ep_group,
                                                    is_profile=is_profile, 
                                                    rank_mapping=rank_mapping))
             except Exception as e:
@@ -582,7 +590,7 @@ class EplbState:
     async def transfer_run_periodically(
             self, 
             model, 
-            ep_group: ProcessGroup
+            ep_group: ProcessGroup,
             is_profile: bool = False,
             rank_mapping: Optional[dict[int, int]] = None):
         experts_stream = torch.cuda.Stream()
@@ -600,7 +608,7 @@ class EplbState:
                         new_physical_to_logical_map,
                         expert_weights=model.expert_weights,
                         expert_weights_buffer=self.expert_buffer,
-                        ep_group=ep_group
+                        ep_group=ep_group,
                         is_profile=is_profile,
                         layer=self.layer,
                         cuda_stream=experts_stream,
