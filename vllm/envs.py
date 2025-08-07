@@ -1162,14 +1162,6 @@ def compute_hash() -> str:
     affect the choice of different kernels or attention backends should
     also be included in the factors list.
     """
-    factors: list[Any] = []
-
-    # summarize environment variables
-    def factorize(name: str):
-        if __getattr__(name):
-            factors.append(__getattr__(name))
-        else:
-            factors.append("None")
 
     # The values of envs may affects the computation graph.
     # TODO(DefTruth): hash all environment variables?
@@ -1184,10 +1176,44 @@ def compute_hash() -> str:
         "VLLM_DP_SIZE",
         "VLLM_USE_STANDALONE_COMPILE",
         "VLLM_FUSED_MOE_CHUNK_SIZE",
+        "VLLM_FLASHINFER_MOE_BACKEND",
+        "VLLM_V1_USE_PREFILL_DECODE_ATTENTION",
+        "VLLM_USE_AITER_UNIFIED_ATTENTION",
+        "VLLM_ATTENTION_BACKEND",
+        "VLLM_USE_FLASHINFER_SAMPLER",
+        "VLLM_FLASHINFER_FORCE_TENSOR_CORES",
+        "VLLM_DISABLED_KERNELS",
+        "VLLM_USE_DEEP_GEMM",
+        "VLLM_USE_FLASHINFER_MOE_FP8",
+        "VLLM_USE_FLASHINFER_MOE_FP4",
+        "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
+        "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
+        "VLLM_USE_CUDNN_PREFILL",
+        "VLLM_USE_TRTLLM_ATTENTION",
+        "VLLM_ROCM_USE_AITER",
+        "VLLM_ROCM_USE_AITER_PAGED_ATTN",
+        "VLLM_ROCM_USE_AITER_LINEAR",
+        "VLLM_ROCM_USE_AITER_MOE",
+        "VLLM_ROCM_USE_AITER_RMSNORM",
+        "VLLM_ROCM_USE_AITER_MLA",
+        "VLLM_ROCM_USE_AITER_MHA",
+        "VLLM_ROCM_USE_SKINNY_GEMM",
+        "VLLM_ROCM_FP8_PADDING",
+        "VLLM_ROCM_MOE_PADDING",
+        "VLLM_ROCM_CUSTOM_PAGED_ATTN",
+        "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
+        "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16",
+        "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB",
     ]
     for key in environment_variables_to_hash:
-        if key in environment_variables:
-            factorize(key)
+        # if this goes out of sync with environment_variables,
+        # it's not a user error, it's a bug
+        assert key in environment_variables, \
+            "Please update environment_variables_to_hash in envs.py"
+
+    factors = [
+        environment_variables[key]() for key in environment_variables_to_hash
+    ]
 
     hash_str = hashlib.md5(str(factors).encode(),
                            usedforsecurity=False).hexdigest()
