@@ -757,18 +757,6 @@ class EngineArgs:
         lora_group.add_argument("--default-mm-loras",
                                 **lora_kwargs["default_mm_loras"])
 
-        # Speculative arguments
-        speculative_group = parser.add_argument_group(
-            title="SpeculativeConfig",
-            description=SpeculativeConfig.__doc__,
-        )
-        speculative_group.add_argument(
-            "--speculative-config",
-            type=json.loads,
-            default=None,
-            help="The configurations for speculative decoding. Should be a "
-            "JSON string.")
-
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
         observability_group = parser.add_argument_group(
@@ -848,6 +836,8 @@ class EngineArgs:
             title="VllmConfig",
             description=VllmConfig.__doc__,
         )
+        vllm_group.add_argument("--speculative-config",
+                                **vllm_kwargs["speculative_config"])
         vllm_group.add_argument("--kv-transfer-config",
                                 **vllm_kwargs["kv_transfer_config"])
         vllm_group.add_argument('--kv-events-config',
@@ -1033,10 +1023,7 @@ class EngineArgs:
             "enable_chunked_prefill": enable_chunked_prefill,
             "disable_log_stats": disable_log_stats,
         })
-        speculative_config = SpeculativeConfig.from_dict(
-            self.speculative_config)
-
-        return speculative_config
+        return SpeculativeConfig(**self.speculative_config)
 
     def create_engine_config(
         self,
