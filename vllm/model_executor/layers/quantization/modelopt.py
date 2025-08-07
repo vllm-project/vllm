@@ -12,7 +12,9 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig, FusedMoEParallelConfig)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+    is_valid_flashinfer_cutlass_fused_moe)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -22,8 +24,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-    build_flashinfer_fp4_cutlass_moe_kernel,
-    flashinfer_fp4_cutlass_moe_forward, reorder_w1w3_to_w3w1)
+    build_flashinfer_fp4_cutlass_moe_prepare_finalize, reorder_w1w3_to_w3w1,
+    select_nvfp4_gemm_impl)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_flashinfer_per_tensor_scale_fp8, rotate_flashinfer_fp8_moe_weights,
     swap_w13_to_w31)
@@ -940,67 +942,28 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if not self.allow_flashinfer:
             return super().maybe_make_prepare_finalize(moe)
 
-        assert False, "fixme"
-        XXXXXXX build_flashinfer_fp4_cutlass_moe_kernel,
-
-        # default to TP/EP case only
-        use_dp = moe.moe_parallel_config.dp_size > 1
-
-        logger.debug_once("FlashInferCutlassMoEPrepareAndFinalize use_dp=%s",
-                          use_dp)
-
-        return FlashInferCutlassMoEPrepareAndFinalize(
-            use_dp,
+        prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
+            moe,
             a1_gscale=self.layer.w13_input_scale_quant,
         )
+        logger.debug_once("%s", prepare_finalize.__class__.__name__)
+        return prepare_finalize
 
-    # This method update self.fused_experts
-    # only prepare_finalize is not None call select_gemm_impl
-    # so when native cutlass fp4, fused_expert is in fuse_moe.py fused_expert
-    # when it's not called(TP case), we still have 2 kernels to use.
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        assert False, "fixme"
-        # assert moe is not None and prepare_finalize is not None
-        # from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (  # noqa: E501
-        #     select_nvfp4_gemm_impl)
-
-        # return select_nvfp4_gemm_impl(self.allow_flashinfer_cutlass, moe,
-        #                               logger)
-
-        assert moe is not None
-        assert prepare_finalize is not None
-        experts = None
-
-        if self.allow_flashinfer_cutlass:
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
-                FlashInferExperts)
-            logger.debug_once("Using FlashInferExperts")
-            # TODO(bnell): put scales in FusedMoEQuantConfig?
-            experts = FlashInferExperts(
-                g1_alphas=self.layer.g1_alphas,
-                g2_alphas=self.layer.g2_alphas,
-                a1_gscale=self.layer.w13_input_scale_quant,
-                a2_gscale=self.layer.w2_input_scale_quant,
-                out_dtype=moe.in_dtype,
-                quant_dtype="nvfp4",
-                ep_rank=moe.moe_parallel_config.ep_rank,
-                ep_size=moe.moe_parallel_config.ep_size,
-                tp_rank=moe.moe_parallel_config.tp_rank,
-                tp_size=moe.moe_parallel_config.tp_size,
-            )
-        else:
-            assert moe.dp_size > 1
-            logger.debug_once("Using CutlassExpertsFp4")
-            # Currently CutlassExpertsFp4 doesn't support DP
-            raise ValueError("CutlassExpertsFp4 doesn't support DP. "
-                             "Use flashinfer CUTLASS FusedMoE backend instead "
-                             "(set VLLM_USE_FLASHINFER_MOE_FP4=1)")
-
-        return select_nvfp4_gemm_impl(self.allow_flashinfer, moe, logger)
+        experts = select_nvfp4_gemm_impl(
+            moe,
+            g1_alphas=self.layer.g1_alphas,
+            g2_alphas=self.layer.g2_alphas,
+            a1_gscale=self.layer.w13_input_scale_quant,
+            a2_gscale=self.layer.w2_input_scale_quant,
+            allow_flashinfer=self.allow_flashinfer,
+        )
+        logger.debug_once("Using %s", experts.__class__.__name__)
+        return experts
 
     def uses_weight_scale_2_pattern(self) -> bool:
         """
@@ -1436,10 +1399,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         else:
-
-            assert False, "fixme"
-            #out = flashinfer_fp4_cutlass_moe_forward(
-
             # TP or DP case
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                 is_valid_flashinfer_cutlass_fused_moe)
@@ -1460,6 +1419,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 activation=activation,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
+                w1_scale=layer.w13_blockscale_swizzled,
+                w2_scale=layer.w2_blockscale_swizzled,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
 

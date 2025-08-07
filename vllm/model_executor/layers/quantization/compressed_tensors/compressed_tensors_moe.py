@@ -11,20 +11,21 @@ from compressed_tensors.quantization import (ActivationOrdering,
                                              QuantizationStrategy)
 
 import vllm.envs as envs
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE, FusedMoEActivationFormat, FusedMoEConfig, FusedMoEMethodBase,
     FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize,
     FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa
-    FlashInferCutlassMoEPrepareAndFinalize)
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+    is_valid_flashinfer_cutlass_fused_moe)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS, WNA16_SUPPORTED_TYPES_MAP)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-    build_flashinfer_fp4_cutlass_moe_kernel,
-    flashinfer_fp4_cutlass_moe_forward, reorder_w1w3_to_w3w1)
+    build_flashinfer_fp4_cutlass_moe_prepare_finalize, reorder_w1w3_to_w3w1,
+    select_nvfp4_gemm_impl)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer, marlin_make_workspace_new,
     marlin_moe_permute_scales)
@@ -91,7 +92,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 return CompressedTensorsWNA16MarlinMoEMethod(
                     quant_config, layer.moe_config)
         elif quant_config._is_fp4a4_nvfp4(weight_quant, input_quant):
-            return CompressedTensorsW4A4MoeMethod(layer.moe_config)
+            return CompressedTensorsW4A4MoeMethod(layer.moe_config, layer)
         elif (quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
               or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)
               or quant_config._is_fp8_w8a8(weight_quant, input_quant)):
@@ -107,7 +108,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
 class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
 
-    def __init__(self, moe: FusedMoEConfig):
+    def __init__(self, moe: FusedMoEConfig, layer: torch.nn.Module):
         from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (  # noqa: E501
             detect_nvfp4_moe_support)
         super().__init__(moe)
@@ -116,6 +117,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         self.allow_flashinfer = _nvfp4.allow_flashinfer
         self.use_marlin = _nvfp4.use_marlin
         self.group_size = 16
+        self.layer = layer
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -272,19 +274,36 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         layer.w2_input_scale_quant = torch.nn.Parameter(
             (layer.w2_input_global_scale), requires_grad=False)
 
-    def maybe_swap_experts_impl(self, moe_parallel_config):
+    def maybe_make_prepare_finalize(
+        self,
+        moe: FusedMoEConfig,
+    ) -> Optional[mk.FusedMoEPrepareAndFinalize]:
         if not self.allow_flashinfer:
-            return
-        self.fused_experts = build_flashinfer_fp4_cutlass_moe_kernel(
-            moe_parallel_config)
+            return super().maybe_make_prepare_finalize(moe)
 
-    def select_gemm_impl(self, prepare_finalize, moe):
+        prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
+            moe,
+            a1_gscale=self.layer.w13_input_scale_quant,
+        )
+        logger.debug_once("%s", prepare_finalize.__class__.__name__)
+        return prepare_finalize
+
+    def select_gemm_impl(
+        self,
+        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+        moe: FusedMoEConfig,
+    ) -> mk.FusedMoEPermuteExpertsUnpermute:
         """Return the appropriate GEMM experts implementation."""
-        assert moe is not None and prepare_finalize is not None
-        from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (  # noqa: E501
-            select_nvfp4_gemm_impl)
-
-        return select_nvfp4_gemm_impl(self.allow_flashinfer, moe, logger)
+        experts = select_nvfp4_gemm_impl(
+            moe,
+            g1_alphas=self.layer.g1_alphas,
+            g2_alphas=self.layer.g2_alphas,
+            a1_gscale=self.layer.w13_input_scale_quant,
+            a2_gscale=self.layer.w2_input_scale_quant,
+            allow_flashinfer=self.allow_flashinfer,
+        )
+        logger.debug_once("Using %s", experts.__class__.__name__)
+        return experts
 
     def apply(
         self,
@@ -350,15 +369,22 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
 
         # FlashInfer fused experts path
         if self.fused_experts is not None:
-            return flashinfer_fp4_cutlass_moe_forward(
-                self.fused_experts,
-                layer,
-                x,
-                topk_weights,
-                topk_ids,
+            assert is_valid_flashinfer_cutlass_fused_moe(
+                x, layer.w13_weight, layer.w2_weight), (
+                    "Flashinfer CUTLASS Fused MoE not applicable!")
+
+            return self.fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=False,  # TODO(shuw): fix later, now output is high prec
                 activation=activation,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
+                w1_scale=layer.w13_blockscale_swizzled,
+                w2_scale=layer.w2_blockscale_swizzled,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
 
