@@ -107,6 +107,13 @@ class MultiModalRegistry:
 
         return self._processor_cache
 
+    def reset_processor_cache(self) -> bool:
+        """Reset the multi-modal processing cache."""
+        if self._processor_cache:
+            self._processor_cache.reset()
+
+        return True  # Success
+
     def enable_mm_input_cache(self, model_config: "ModelConfig") -> bool:
         """Whether the multi-modal input cache should be enabled.
         NOTE: This is put under MultiModalRegistry on purpose to respect 
@@ -119,13 +126,6 @@ class MultiModalRegistry:
         mm_config = model_config.get_multimodal_config()
 
         return mm_config.mm_processor_cache_gb > 0
-
-    def reset_processor_cache(self) -> bool:
-        """Reset the multi-modal processing cache."""
-        if self._processor_cache:
-            self._processor_cache.reset()
-
-        return True  # Success
 
     def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
         """
