@@ -8,8 +8,8 @@ This involves the exchange of expert weights between GPUs.
 from collections.abc import Iterable, MutableSequence, Sequence
 from functools import partial
 from typing import Optional, List, Dict, Set, Sequence, Iterable
-
 import torch
+import torch.distributed as dist
 from torch.distributed import (P2POp, ProcessGroup, all_gather, barrier,
                                batch_isend_irecv, get_global_rank)
 
@@ -224,19 +224,18 @@ def move_to_buffer(
 
     # 4. Execute the P2P operations. The real communication happens here.
     if p2p_ops and cuda_stream is not None:
+        dist.barrier(group=ep_group)
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
             with torch.cuda.stream(cuda_stream):
                 req.wait()
+            cuda_stream.synchronize()    
     elif p2p_ops:
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
             req.wait()
     # wait for the communication to finish   
-    if cuda_stream is not None:         
-        cuda_stream.synchronize()
-        with torch.cuda.stream(cuda_stream):
-            barrier(group=ep_group)
+    barrier(group=ep_group)
     return is_unchanged, is_received_locally, experts_recv_loc
 
 def move_from_buffer(

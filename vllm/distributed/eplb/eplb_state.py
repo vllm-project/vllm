@@ -28,7 +28,7 @@ import asyncio
 import threading
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Set, Sequence, Iterable, Union
 
 import torch
@@ -160,15 +160,15 @@ class EplbState:
 
     buffer_lock: threading.Lock = threading.Lock()
 
-    expert_buffer:list[torch.Tensor] = []
+    expert_buffer:list[torch.Tensor] = field(defalt_factory=list)
 
     rebalanced: bool = False  
 
-    is_unchanged: list[bool] = []
+    is_unchanged: list[bool] = field(defalt_factory=list)
 
-    is_received_locally: list[bool] = []
+    is_received_locally: list[bool] = field(defalt_factory=list)
 
-    experts_recv_loc: dict[int, int] = {}
+    experts_recv_loc: dict[int, int] = field(defalt_factory=dict)
 
     is_async: bool = False
 
@@ -321,11 +321,11 @@ class EplbState:
             physical_to_logical_map,
             logical_to_physical_map,
             logical_replica_count,
+            expert_load_pass,
+            expert_load_window,
             new_physical_to_logical_map,
             new_logical_to_physical_map,
             new_logical_replica_count,
-            expert_load_pass,
-            expert_load_window,
             is_async=is_async,
             expert_load_window_size=expert_load_window_size,
             expert_rearrangement_step=expert_rearrangement_step,
@@ -623,7 +623,9 @@ class EplbState:
                           model: MixtureOfExperts,
                           ep_group: ProcessGroup,
                           is_profile: bool = False):
-        with self.buffer_lock:
+        if not self.buffer_lock.acquire(blocking=False):
+            return 
+        try:
             move_from_buffer(
                 expert_weights=model.expert_weights[self.layer],
                 expert_weights_buffer=self.expert_buffer,
@@ -634,8 +636,10 @@ class EplbState:
                     self.layer].tolist(),
                 ep_group=ep_group
             )
-        self.layer += 1
-        self.ep_buffer_ready = False
+            self.layer += 1
+            self.ep_buffer_ready = False
+        finally:
+            self.buffer_lock.release()
 
     def post_eplb(self,
                   model: MixtureOfExperts,
