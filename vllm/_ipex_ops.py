@@ -271,6 +271,7 @@ class ipex_ops:
         k_descale=None,
         v_descale=None,
         num_splits=0,
+        s_aux=None,
     ):
         if cu_seqlens_k is None:
             # cu_seqlens_k is not used in ipex kernel.
@@ -286,25 +287,101 @@ class ipex_ops:
         else:
             assert len(window_size) == 2
             real_window_size = (window_size[0], window_size[1])
-        return ipex.llm.modules.PagedAttention.flash_attn_varlen_func(
-            out,
-            q.contiguous(),
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            softmax_scale,
-            causal,
-            block_table,
-            alibi_slopes,
-            softcap=softcap,
-            window_size_left=real_window_size[0],
-            window_size_right=real_window_size[1],
-            k_scale=1.0,
-            v_scale=1.0,
-        )
+
+        # Check for XMX support and fallback to basic attention if not available
+        try:
+            return ipex.llm.modules.PagedAttention.flash_attn_varlen_func(
+                out,
+                q.contiguous(),
+                k,
+                v,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                softmax_scale,
+                causal,
+                block_table,
+                alibi_slopes,
+                softcap=softcap,
+                window_size_left=real_window_size[0],
+                window_size_right=real_window_size[1],
+                k_scale=1.0,
+                v_scale=1.0,
+            )
+        except RuntimeError as e:
+            if "XMX" in str(e) or "chunked_prefill" in str(e):
+                # Fallback to basic attention implementation without XMX
+                import torch.nn.functional as F
+                import warnings
+                warnings.warn(
+                    f"XMX acceleration not available on Intel GPU. "
+                    "Using manual attention fallback with reduced performance. "
+                    f"Original error: {e}",
+                    UserWarning,
+                    stacklevel=2
+                )
+                
+                # Manual attention computation as fallback
+                q = q.contiguous()
+                k = k.contiguous()
+                v = v.contiguous()
+                
+                # Get tensor dimensions: [total_tokens, num_heads, head_dim]
+                total_tokens_q, num_heads, head_dim = q.shape
+                total_tokens_k = k.shape[0]
+                
+                batch_size = cu_seqlens_q.shape[0] - 1
+                outputs = []
+                
+                for i in range(batch_size):
+                    start_q = cu_seqlens_q[i].item()
+                    end_q = cu_seqlens_q[i + 1].item()
+                    start_k = cu_seqlens_k[i].item()
+                    end_k = cu_seqlens_k[i + 1].item()
+                    
+                    seq_len_q = end_q - start_q
+                    seq_len_k = end_k - start_k
+                    
+                    if seq_len_q == 0 or seq_len_k == 0:
+                        continue
+                        
+                    # Extract sequences: [seq_len, num_heads, head_dim]
+                    q_seq = q[start_q:end_q]  # [seq_len_q, num_heads, head_dim]
+                    k_seq = k[start_k:end_k]  # [seq_len_k, num_heads, head_dim]
+                    v_seq = v[start_k:end_k]  # [seq_len_k, num_heads, head_dim]
+                    
+                    # Transpose for batch-first: [num_heads, seq_len, head_dim]
+                    q_seq = q_seq.transpose(0, 1)
+                    k_seq = k_seq.transpose(0, 1)  
+                    v_seq = v_seq.transpose(0, 1)
+                    
+                    # Compute attention scores: [num_heads, seq_len_q, seq_len_k]
+                    attn_scores = torch.matmul(q_seq, k_seq.transpose(-2, -1)) * softmax_scale
+                    
+                    # Apply causal mask if needed
+                    if causal and seq_len_q == seq_len_k:
+                        causal_mask = torch.triu(
+                            torch.full((seq_len_q, seq_len_k), float('-inf'), 
+                                     device=q.device, dtype=q.dtype), diagonal=1)
+                        attn_scores = attn_scores + causal_mask
+                    
+                    # Apply softmax and compute output
+                    attn_weights = F.softmax(attn_scores, dim=-1)
+                    attn_out = torch.matmul(attn_weights, v_seq)
+                    
+                    # Transpose back: [seq_len_q, num_heads, head_dim]
+                    attn_out = attn_out.transpose(0, 1)
+                    outputs.append(attn_out)
+                
+                if outputs:
+                    result = torch.cat(outputs, dim=0)
+                    out.copy_(result)
+                else:
+                    out.zero_()
+                return out
+            else:
+                raise
 
     @staticmethod
     def get_scheduler_metadata(
