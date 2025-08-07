@@ -159,7 +159,12 @@ def prepare_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
 
     # WEIGHT SCALES
     # Permute scales
-    weight_scale = layer.weight_scale.T.to(param_dtype)
+    weight_scale = layer.weight_scale.T.contiguous()
+
+    if not is_nvfp4:
+        scales = scales.view(torch.float8_e8m0fnu)
+
+    weight_scale = weight_scale.to(param_dtype)
     weight_scale = marlin_permute_scales(s=weight_scale,
                                          size_k=part_size_k,
                                          size_n=part_size_n,
@@ -237,7 +242,10 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
     # WEIGHT SCALES
     # Permute scales
     for name in ["w13", "w2"]:
-        scales = getattr(layer, name + "_weight_scale").to(param_dtype)
+        scales = getattr(layer, name + "_weight_scale")
+        if not is_nvfp4:
+            scales = scales.view(torch.float8_e8m0fnu)
+        scales = scales.to(param_dtype)
         if is_nvfp4:
             global_scale = getattr(layer,
                                    name + "_weight_scale_2").to(param_dtype)
