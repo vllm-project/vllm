@@ -209,8 +209,8 @@ class OpenAIServingResponses(OpenAIServing):
                     await self._make_request(request, prev_response,
                                              tokenizer))
 
-        except (ValueError, TypeError, RuntimeError,
-                jinja2.TemplateError) as e:
+        except (ValueError, TypeError, RuntimeError, jinja2.TemplateError,
+                NotImplementedError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
 
