@@ -266,6 +266,7 @@ class Sampler(nn.Module):
             # between decode runs.
             self._init_sampling_tensors(logits, sampling_metadata)
 
+        self.skip_softmax_for_greedy = sampling_metadata.skip_softmax_for_greedy
         assert self._sampling_tensors is not None
         sampling_tensors = self._sampling_tensors
         do_penalties = self._do_penalties
@@ -284,8 +285,9 @@ class Sampler(nn.Module):
 
         # Use float32 to apply temperature scaling.
         # Use in-place division to avoid creating a new tensor.
-        logits = logits.to(torch.float)
-        logits.div_(sampling_tensors.temperatures.unsqueeze(dim=1))
+        if not self.skip_softmax_for_greedy:
+            logits = logits.to(torch.float)
+            logits.div_(sampling_tensors.temperatures.unsqueeze(dim=1))
 
         if do_top_p_top_k and flashinfer_top_k_top_p_sampling is None:
             # If we have a scalar p and k, we can use the optimized version.
@@ -302,9 +304,11 @@ class Sampler(nn.Module):
 
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
-        probs = torch.softmax(logits, dim=-1, dtype=torch.float)
+        probs = logits if self.skip_softmax_for_greedy \
+            else torch.softmax(logits, dim=-1, dtype=torch.float)
         # Compute the log probabilities.
-        logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
+        logprobs = logits if self.skip_softmax_for_greedy \
+            else torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
         # Sample the next tokens.
         maybe_deferred_sample_results, maybe_sampled_tokens_tensor = _sample(
