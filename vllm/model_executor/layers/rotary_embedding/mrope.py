@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from transformers import PretrainedConfig
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .base import RotaryEmbedding
@@ -37,9 +38,6 @@ def mrope_forward_native(
     assert key is not None
 
     num_tokens = positions.shape[-1]
-    ## Do these two outside
-    # cos_sin = self.cos_sin_cache[positions]
-    # cos, sin = cos_sin.chunk(2, dim=-1)
     query_shape = query.shape
     key_shape = key.shape
 
@@ -252,6 +250,8 @@ class MRotaryEmbedding(RotaryEmbedding):
         if self.mrope_section:
             assert sum(self.mrope_section) == rotary_dim // 2
 
+        self.use_triton = current_platform.is_cuda_alike()
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -267,12 +267,19 @@ class MRotaryEmbedding(RotaryEmbedding):
             query: [num_tokens, num_heads * head_size]
             key: [num_tokens, num_kv_heads * head_size]
         """
+
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
 
         num_tokens = positions.shape[-1]
         cos_sin = self.cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
+
+        if not self.use_triton:
+            return mrope_forward_native(positions, query, key, cos, sin,
+                                        self.mrope_section, self.is_neox_style,
+                                        self.head_size, self.rotary_dim)
+
         query_shape = query.shape
         key_shape = key.shape
         if positions.ndim == 2:
