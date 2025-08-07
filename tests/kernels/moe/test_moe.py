@@ -715,7 +715,6 @@ def test_fused_marlin_moe_with_bias():
     w_ref1_l = []
     qweight1_l = []
     scales1_l = []
-    global_scale1_l = []
     g_idx1_l = []
     sort_indices1_l = []
 
@@ -735,7 +734,7 @@ def test_fused_marlin_moe_with_bias():
     w_ref1 = stack_and_dev(w_ref1_l)
     qweight1 = stack_and_dev(qweight1_l).contiguous()
     scales1 = stack_and_dev(scales1_l)
-    global_scale1 = stack_and_dev(global_scale1_l)
+    global_scale1 = None
     g_idx1 = stack_and_dev(g_idx1_l) if g_idx1_l else None
     zeros1 = None
     sort_indices1 = stack_and_dev(sort_indices1_l) if sort_indices1_l else None
@@ -745,7 +744,6 @@ def test_fused_marlin_moe_with_bias():
     w_ref2_l = []
     qweight2_l = []
     scales2_l = []
-    global_scale2_l = []
     g_idx2_l = []
     sort_indices2_l = []
 
@@ -765,7 +763,7 @@ def test_fused_marlin_moe_with_bias():
     w_ref2 = stack_and_dev(w_ref2_l)
     qweight2 = stack_and_dev(qweight2_l).contiguous()
     scales2 = stack_and_dev(scales2_l)
-    global_scale2 = stack_and_dev(global_scale2_l)
+    global_scale2 = None
     g_idx2 = stack_and_dev(g_idx2_l) if g_idx2_l else None
     zeros2 = None
     sort_indices2 = stack_and_dev(sort_indices2_l) if sort_indices2_l else None

@@ -340,7 +340,7 @@ def rand_marlin_weight_mxfp4_like(weight, group_size):
                                           size_k=size_k,
                                           size_n=size_n,
                                           group_size=group_size)
-    
+
     marlin_scales = mxfp4_marlin_process_scales(marlin_scales)
 
     return weight_ref.T, marlin_qweight, marlin_scales.to(torch.float8_e8m0fnu)
