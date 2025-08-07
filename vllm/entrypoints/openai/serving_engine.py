@@ -47,10 +47,10 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingChatRequest,
                                               EmbeddingCompletionRequest,
                                               EmbeddingRequest,
-                                              EmbeddingResponse, ErrorResponse,
-                                              PoolingResponse, RerankRequest,
-                                              ResponsesRequest, ScoreRequest,
-                                              ScoreResponse,
+                                              EmbeddingResponse, ErrorInfo,
+                                              ErrorResponse, PoolingResponse,
+                                              RerankRequest, ResponsesRequest,
+                                              ScoreRequest, ScoreResponse,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
                                               TokenizeResponse,
@@ -412,21 +412,18 @@ class OpenAIServing:
             message: str,
             err_type: str = "BadRequestError",
             status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
-        return ErrorResponse(message=message,
-                             type=err_type,
-                             code=status_code.value)
+        return ErrorResponse(error=ErrorInfo(
+            message=message, type=err_type, code=status_code.value))
 
     def create_streaming_error_response(
             self,
             message: str,
             err_type: str = "BadRequestError",
             status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> str:
-        json_str = json.dumps({
-            "error":
+        json_str = json.dumps(
             self.create_error_response(message=message,
                                        err_type=err_type,
-                                       status_code=status_code).model_dump()
-        })
+                                       status_code=status_code).model_dump())
         return json_str
 
     async def _check_model(
@@ -445,7 +442,7 @@ class OpenAIServing:
             if isinstance(load_result, LoRARequest):
                 return None
             if isinstance(load_result, ErrorResponse) and \
-                load_result.code == HTTPStatus.BAD_REQUEST.value:
+                load_result.error.code == HTTPStatus.BAD_REQUEST.value:
                 error_response = load_result
 
         return error_response or self.create_error_response(

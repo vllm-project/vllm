@@ -78,12 +78,15 @@ class OpenAIBaseModel(BaseModel):
         return result
 
 
-class ErrorResponse(OpenAIBaseModel):
-    object: str = "error"
+class ErrorInfo(OpenAIBaseModel):
     message: str
     type: str
     param: Optional[str] = None
     code: int
+
+
+class ErrorResponse(OpenAIBaseModel):
+    error: ErrorInfo
 
 
 class ModelPermission(OpenAIBaseModel):
