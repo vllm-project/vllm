@@ -104,8 +104,8 @@ class TimeCollector:
         else:
             self._max = max(self._max, v)
 
-    def avg(self) -> float:
-        return self._sum * 1.0 / self.cnt / self.scale
+    def avg(self) -> Union[float, str]:
+        return self._sum * 1.0 / self.cnt / self.scale if self.cnt > 0 else "N/A"
 
     def max(self) -> Union[float, str]:
         return self._max / self.scale if self._max else "N/A"
