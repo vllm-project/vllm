@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
-from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Annotated, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -14,7 +14,6 @@ from transformers import BartTokenizer, BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.bart import (BartDecoder, BartEncoder,
                                              BartParallelLMHead,
@@ -30,16 +29,28 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
                          SupportsV0Only)
 from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings
 
 
-class Florence2ImagePixelInputs(TypedDict):
+class Florence2ImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - b: Batch size
+        - c: Number of channels (3)
+        - h: Height of the image
+        - w: Width of the image
+    """
+
     type: Literal["pixel_values"]
-    data: torch.Tensor
-    """Shape: (batch_size, num_channel, height, width)"""
+
+    data: Annotated[
+        torch.Tensor,
+        TensorShape("b", 3, "h", "w"),
+    ]
 
 
 # ViT implementation are all copied from
@@ -673,7 +684,6 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
 
         self.logits_processor = LogitsProcessor(self.vocab_size,
                                                 config.vocab_size)
-        self.sampler = get_sampler()
 
     def forward(
         self,
@@ -716,13 +726,8 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
                                        sampling_metadata)
         return logits
 
-    def sample(self, logits: torch.Tensor,
-               sampling_metadata: SamplingMetadata) -> SamplerOutput:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -731,7 +736,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
         ]
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
@@ -755,12 +760,6 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
 
 
 class Florence2ProcessingInfo(BaseProcessingInfo):
-
-    def get_hf_config(self):
-        return self.ctx.get_hf_config()
-
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor()
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
@@ -801,6 +800,7 @@ class Florence2MultiModalProcessor(
         prompt_text: str,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
     ) -> bool:
         return False
 
@@ -835,10 +835,11 @@ class Florence2MultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
             processed_outputs = super()._call_hf_processor(
-                prompt, mm_data, mm_kwargs)
+                prompt, mm_data, mm_kwargs, tok_kwargs)
         else:
             hf_processor = self.info.get_hf_processor()
             tokenizer = hf_processor.tokenizer
@@ -881,6 +882,13 @@ class Florence2MultiModalProcessor(
     dummy_inputs=Florence2DummyInputsBuilder)
 class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsV0Only):
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return None
+
+        raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -929,41 +937,13 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
             raise NotImplementedError(
                 'Florence2 only supports COSINE as temporal embedding.')
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-        return get_sampler()
-
-    def _validate_pixel_values(
-        self, data: Union[torch.Tensor, List[torch.Tensor]]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
-
-        size = self.processor_config["size"]
-        h, w = size["height"], size["width"]
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape)
-
-            if actual_dims != expected_dims:
-                expected_expr = tuple(*map(str, expected_dims))
-                raise ValueError(
-                    "The expected shape of pixel values per batch "
-                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
-
     def _parse_and_validate_image_input(self, **kwargs: object):
-        pixel_values: Optional[Union[List[List[torch.Tensor]],
-                                     List[torch.Tensor],
+        pixel_values: Optional[Union[list[list[torch.Tensor]],
+                                     list[torch.Tensor],
                                      torch.Tensor]] = kwargs.pop(
                                          "pixel_values", None)
-        image_embeds: Optional[Union[List[List[torch.Tensor]],
-                                     List[torch.Tensor],
+        image_embeds: Optional[Union[list[list[torch.Tensor]],
+                                     list[torch.Tensor],
                                      torch.Tensor]] = kwargs.pop(
                                          "image_embeds", None)
 
@@ -975,10 +955,16 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 "Both pixel values and image embeds are provided.")
 
         if pixel_values is not None:
+            size = self.processor_config["size"]
+            expected_h, expected_w = size["height"], size["width"]
+
             return Florence2ImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(
-                    flatten_bn(pixel_values, concat=True)),
+                data=flatten_bn(pixel_values, concat=True),
+                resolve_bindings={
+                    "h": expected_h,
+                    "w": expected_w
+                },
             )
 
         if image_embeds is not None:
@@ -1045,11 +1031,11 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
@@ -1059,7 +1045,8 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 self.pad_token_id)
@@ -1110,14 +1097,7 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput:
-        return self.language_model.sample(logits, sampling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

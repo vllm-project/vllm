@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
 import json
-import re
 from collections.abc import Sequence
 from typing import Any, Union
 
+import regex as re
 from transformers import PreTrainedTokenizerBase
 
+import vllm.envs as envs
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -61,8 +63,18 @@ class PythonicToolParser(ToolParser):
         """
         Extract the tool calls from a complete model response.
         """
+        is_tool_call_pattern = False
+        try:
+            is_tool_call_pattern = self.TOOL_CALL_REGEX.match(
+                model_output,
+                timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS) is not None
+        except TimeoutError:
+            logger.warning(
+                "Regex timeout occurred when matching tool call pattern.")
+            logger.debug("Regex timeout occurred when matching user input: %s",
+                         model_output)
 
-        if not (self.TOOL_CALL_REGEX.match(model_output)):
+        if not is_tool_call_pattern:
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)
@@ -200,9 +212,12 @@ def _handle_single_tool(call: ast.Call) -> ToolCall:
     arguments = {}
     for keyword in call.keywords:
         arguments[keyword.arg] = _get_parameter_value(keyword.value)
-    return ToolCall(type="function",
-                    function=FunctionCall(name=function_name,
-                                          arguments=json.dumps(arguments)))
+    return ToolCall(
+        type="function",
+        function=FunctionCall(name=function_name,
+                              arguments=json.dumps(arguments,
+                                                   ensure_ascii=False)),
+    )
 
 
 def _make_valid_python(text: str) -> Union[tuple[str, str], None]:
@@ -280,6 +295,7 @@ def _compute_tool_delta(previously_sent_args: str, new_call: ToolCall,
         new_call_args = new_call_args[:-len(withheld_suffix)]
     if not previously_sent_args:
         return DeltaToolCall(id=new_call.id,
+                             type="function",
                              index=index,
                              function=DeltaFunctionCall(
                                  name=new_call.function.name,
@@ -288,5 +304,5 @@ def _compute_tool_delta(previously_sent_args: str, new_call: ToolCall,
 
     arg_diff = new_call_args[len(previously_sent_args):]
     return DeltaToolCall(
-        id="", index=index, function=DeltaFunctionCall(
+        id=None, index=index, function=DeltaFunctionCall(
             arguments=arg_diff)) if arg_diff else None

@@ -65,5 +65,19 @@
   AT_DISPATCH_CASE(at::ScalarType::Int, __VA_ARGS__)   \
   AT_DISPATCH_CASE(at::ScalarType::Long, __VA_ARGS__)
 
+#define VLLM_DISPATCH_CASE_INTEGRAL_AND_UNSIGNED_TYPES(...) \
+  AT_DISPATCH_CASE(at::ScalarType::Byte, __VA_ARGS__)       \
+  AT_DISPATCH_CASE(at::ScalarType::Char, __VA_ARGS__)       \
+  AT_DISPATCH_CASE(at::ScalarType::Short, __VA_ARGS__)      \
+  AT_DISPATCH_CASE(at::ScalarType::Int, __VA_ARGS__)        \
+  AT_DISPATCH_CASE(at::ScalarType::Long, __VA_ARGS__)       \
+  AT_DISPATCH_CASE(at::ScalarType::UInt16, __VA_ARGS__)     \
+  AT_DISPATCH_CASE(at::ScalarType::UInt32, __VA_ARGS__)     \
+  AT_DISPATCH_CASE(at::ScalarType::UInt64, __VA_ARGS__)
+
 #define VLLM_DISPATCH_INTEGRAL_TYPES(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_INTEGRAL_TYPES(__VA_ARGS__))
+
+#define VLLM_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES(TYPE, NAME, ...) \
+  AT_DISPATCH_SWITCH(                                              \
+      TYPE, NAME, VLLM_DISPATCH_CASE_INTEGRAL_AND_UNSIGNED_TYPES(__VA_ARGS__))

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 import time
@@ -18,8 +19,8 @@ prompts = [
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-if __name__ == "__main__":
 
+def main():
     # Create an LLM.
     llm = LLM(model="facebook/opt-125m", tensor_parallel_size=1)
 
@@ -42,3 +43,7 @@ if __name__ == "__main__":
     # Add a buffer to wait for profiler in the background process
     # (in case MP is on) to finish writing profiling output.
     time.sleep(10)
+
+
+if __name__ == "__main__":
+    main()

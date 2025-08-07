@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from https://huggingface.co/mosaicml/mpt-7b/tree/main
 import math
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+from transformers import MptConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -18,13 +21,11 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.mpt import MPTConfig
 
 from .interfaces import SupportsPP
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
@@ -49,7 +50,7 @@ class MPTAttention(nn.Module):
 
     def __init__(
         self,
-        config: MPTConfig,
+        config: MptConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -58,15 +59,15 @@ class MPTAttention(nn.Module):
         self.d_model = config.d_model
         self.total_num_heads = config.n_heads
         self.head_dim = self.d_model // self.total_num_heads
-        self.clip_qkv = config.attn_config["clip_qkv"]
-        self.qk_ln = config.attn_config["qk_ln"]
-        self.alibi_bias_max = config.attn_config["alibi_bias_max"]
+        self.clip_qkv = config.attn_config.clip_qkv
+        self.qk_ln = config.attn_config.qk_ln
+        self.alibi_bias_max = config.attn_config.alibi_bias_max
         if "kv_n_heads" in config.attn_config:
-            self.total_num_kv_heads = config.attn_config['kv_n_heads']
+            self.total_num_kv_heads = config.attn_config.kv_n_heads
         else:
             self.total_num_kv_heads = self.total_num_heads
-        assert not config.attn_config["prefix_lm"]
-        assert config.attn_config["alibi"]
+        assert not config.attn_config.prefix_lm
+        assert config.attn_config.alibi
 
         # pylint: disable=invalid-name
         self.Wqkv = QKVParallelLinear(
@@ -143,7 +144,7 @@ class MPTMLP(nn.Module):
 
     def __init__(
         self,
-        config: MPTConfig,
+        config: MptConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -175,7 +176,7 @@ class MPTBlock(nn.Module):
 
     def __init__(
         self,
-        config: MPTConfig,
+        config: MptConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -266,10 +267,10 @@ class MPTModel(nn.Module):
         hidden_states = self.norm_f(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
@@ -298,7 +299,6 @@ class MPTForCausalLM(nn.Module, SupportsPP):
                                     prefix=maybe_prefix(prefix, "transformer"))
         self.lm_head = self.transformer.wte
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 
@@ -325,15 +325,7 @@ class MPTForCausalLM(nn.Module, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

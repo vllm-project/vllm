@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """E2E tests to verify the correctness of the encoder-decoder framework
 
 Run `pytest tests/encoder_decoder/test_e2e_correctness.py`.

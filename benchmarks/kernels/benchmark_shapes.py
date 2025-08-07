@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 WEIGHT_SHAPES = {
     "ideal": [[4 * 256 * 32, 256 * 32]],

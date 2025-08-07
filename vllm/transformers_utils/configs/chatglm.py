@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
-# https://github.com/THUDM/ChatGLM2-6B
+# https://github.com/zai-org/ChatGLM2-6B
 from transformers import PretrainedConfig
 
 

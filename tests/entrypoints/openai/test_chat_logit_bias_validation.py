@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import openai
 import pytest
@@ -14,10 +15,6 @@ MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 def get_vocab_size(model_name):
     config = ModelConfig(
         model=model_name,
-        task="auto",
-        tokenizer=model_name,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
         seed=0,
         dtype="bfloat16",
     )

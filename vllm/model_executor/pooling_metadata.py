@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 import torch
 
@@ -23,9 +24,9 @@ class PoolingMetadata:
 
     def __init__(
         self,
-        seq_groups: List[Tuple[List[int], PoolingParams]],
-        seq_data: Dict[int, Any],  # Specific data related to sequences
-        prompt_lens: List[int],
+        seq_groups: list[tuple[list[int], PoolingParams]],
+        seq_data: dict[int, Any],  # Specific data related to sequences
+        prompt_lens: list[int],
     ) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
@@ -36,6 +37,13 @@ class PoolingMetadata:
                 f"seq_groups={self.seq_groups}, "
                 f"seq_data={self.seq_data}, "
                 f"prompt_lens={self.prompt_lens})")
+
+    def __getitem__(self, indices: slice):
+        return PoolingMetadata(
+            seq_groups=self.seq_groups[indices],
+            seq_data=dict(list(self.seq_data.items())[indices]),
+            prompt_lens=self.prompt_lens[indices],
+        )
 
 
 @dataclass

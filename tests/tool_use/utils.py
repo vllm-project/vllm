@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import deepcopy
 from typing import Any, Optional
@@ -88,13 +89,27 @@ CONFIGS: dict[str, ServerConfig] = {
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
         "arguments": [
             "--enforce-eager", "--no-enable-prefix-caching",
-            "--tool-call-parser", "pythonic", "--chat-template",
+            "--tool-call-parser", "llama4_pythonic", "--chat-template",
             str(VLLM_PATH /
                 "examples/tool_chat_template_llama4_pythonic.jinja"), "-tp",
             "4"
         ],
         "supports_parallel":
         False,
+        "extended":
+        True
+    },
+    "llama4_json": {
+        "model":
+        "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+        "arguments": [
+            "--enforce-eager", "--no-enable-prefix-caching", "-tp", "4",
+            "--distributed-executor-backend", "mp", "--tool-call-parser",
+            "llama4_json", "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_llama4_json.jinja")
+        ],
+        "supports_parallel":
+        True,
         "extended":
         True
     },

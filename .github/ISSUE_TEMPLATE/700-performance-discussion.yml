@@ -35,7 +35,7 @@ body:
     description: |
       Please run the following and paste the output below.
       ```sh
-      wget https://raw.githubusercontent.com/vllm-project/vllm/main/collect_env.py
+      wget https://raw.githubusercontent.com/vllm-project/vllm/main/vllm/collect_env.py
       # For security purposes, please feel free to check the contents of collect_env.py before running it.
       python collect_env.py
       ```

@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import copy
 import math
 import os
-import re
-from dataclasses import dataclass, field
-from typing import (Any, Callable, Dict, List, Optional, Sequence, Set, Type,
-                    Union)
+from collections.abc import Sequence
+from typing import Any, Callable, Optional, Union
 
+import regex as re
 import safetensors.torch
 import torch
 from torch import nn
@@ -19,9 +18,7 @@ from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
                                         remove_adapter, set_adapter_mapping)
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.layers import (BaseLayerWithLoRA,
-                              LinearScalingRotaryEmbeddingWithLoRA,
-                              LoRAMapping)
+from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
@@ -29,10 +26,13 @@ from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              get_supported_lora_modules,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
+from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
+from vllm.model_executor.utils import get_packed_modules_mapping
 from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -40,22 +40,21 @@ logger = init_logger(__name__)
 _GLOBAL_LORA_ID = 0
 
 
-@dataclass
-class LongContextLoRAContext:
-    """Context for lora adapters that support long context."""
-    # The scaling factors to support long context lora fine tuned models.
-    scaling_factors: List[float]
-    # dimension to apply rotary embedding.
-    rot_dim: int
-    # offsets to the sin_cos_cache for each lora_id loaded.
-    # This value is dynamically modified.
-    offsets_by_lora_id: Dict[int, int] = field(default_factory=dict)
-
-
 def get_lora_id():
     global _GLOBAL_LORA_ID
     _GLOBAL_LORA_ID += 1
     return _GLOBAL_LORA_ID
+
+
+def is_moe_model(model: nn.Module) -> bool:
+    """Checks if the model contains FusedMoE layers and warns the user."""
+    if any(isinstance(module, FusedMoE) for module in model.modules()):
+        logger.warning_once(
+            "For MoE models, vLLM currently does not support fused MoE LoRA "
+            "inference. Please ensure that the loaded LoRA model does not "
+            "contain expert weights.")
+        return True
+    return False
 
 
 class LoRAModel(AdapterModel):
@@ -65,26 +64,22 @@ class LoRAModel(AdapterModel):
         self,
         lora_model_id: int,
         rank: int,
-        loras: Dict[str, LoRALayerWeights],
-        scaling_factor: Optional[float] = None,
+        loras: dict[str, LoRALayerWeights],
     ) -> None:
         """
         Args:
             lora_model_id: The integer id for the lora model.
             rank: lora rank.
             loras: module name -> weights for lora-replaced layers.
-            scaling_factor: Scaling factor to support long context lora model.
-                None if the lora is not tuned for long context support.
+
         """
         self.id = lora_model_id
-        # Scaling factor for long context lora model. None if it is not
-        # fine tuned for the long context.
-        self.scaling_factor = scaling_factor
+
         assert (
             lora_model_id
             > 0), f"a valid lora id should be greater than 0, got {self.id}"
         self.rank = rank
-        self.loras: Dict[str, LoRALayerWeights] = loras
+        self.loras: dict[str, LoRALayerWeights] = loras
 
     def clone(self, lora_model_id: int) -> "LoRAModel":
         """Return a copy of the object with different ids.
@@ -113,19 +108,19 @@ class LoRAModel(AdapterModel):
     def from_lora_tensors(
         cls,
         lora_model_id: int,
-        tensors: Dict[str, torch.Tensor],
+        tensors: dict[str, torch.Tensor],
         peft_helper: PEFTHelper,
         device: str = "cuda",
         dtype: Optional[torch.dtype] = None,
-        embeddings: Optional[Dict[str, torch.Tensor]] = None,
+        embeddings: Optional[dict[str, torch.Tensor]] = None,
         target_embedding_padding: Optional[int] = None,
-        embedding_modules: Optional[Dict[str, str]] = None,
-        embedding_padding_modules: Optional[List[str]] = None,
+        embedding_modules: Optional[dict[str, str]] = None,
+        embedding_padding_modules: Optional[list[str]] = None,
         weights_mapper: Optional[WeightsMapper] = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
-        loras: Dict[str, LoRALayerWeights] = {}
+        loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
             module_name, is_lora_a, is_bias = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper)
@@ -178,28 +173,25 @@ class LoRAModel(AdapterModel):
         for lora in loras.values():
             lora.optimize()
 
-        return cls(lora_model_id,
-                   peft_helper.r,
-                   loras,
-                   scaling_factor=peft_helper.vllm_long_context_scaling_factor)
+        return cls(lora_model_id, peft_helper.r, loras)
 
     @classmethod
     def from_local_checkpoint(
-        cls,
-        lora_dir: str,
-        expected_lora_modules: List[str],
-        peft_helper: PEFTHelper,
-        *,
-        lora_model_id: Optional[int] = None,
-        device: str = "cuda",
-        dtype: Optional[torch.dtype] = None,
-        target_embedding_padding: Optional[int] = None,
-        embedding_modules: Optional[Dict[str, str]] = None,
-        embedding_padding_modules: Optional[List[str]] = None,
-        weights_mapper: Optional[WeightsMapper] = None,
-    ) -> "LoRAModel":
+            cls,
+            lora_dir: str,
+            expected_lora_modules: list[str],
+            peft_helper: PEFTHelper,
+            *,
+            lora_model_id: Optional[int] = None,
+            device: str = "cuda",
+            dtype: Optional[torch.dtype] = None,
+            target_embedding_padding: Optional[int] = None,
+            embedding_modules: Optional[dict[str, str]] = None,
+            embedding_padding_modules: Optional[list[str]] = None,
+            weights_mapper: Optional[WeightsMapper] = None,
+            tensorizer_config_dict: Optional[dict] = None) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
-        
+
         Args:
             lora_dir: The local path that has lora data.
             expected_lora_modules: Name of modules that are expected to be
@@ -219,10 +211,37 @@ class LoRAModel(AdapterModel):
             lora_dir, "new_embeddings.safetensors")
         new_embeddings_bin_file_path = os.path.join(lora_dir,
                                                     "new_embeddings.bin")
+        tensors: dict[str, torch.Tensor] = {}
+        unexpected_modules: list[Union[list[str], str]] = []
 
-        unexpected_modules: List[Union[list[str], str]]
-        if os.path.isfile(lora_tensor_path):
-            tensors: Dict[str, torch.Tensor] = {}
+        def check_unexpected_modules(modules: dict):
+            for lora_module in modules.keys():  # noqa
+                module_name, _, _ = parse_fine_tuned_lora_name(
+                    lora_module, weights_mapper)
+                part_name = module_name.split(".")[-1]
+                if part_name not in expected_lora_modules:
+                    unexpected_modules.append(module_name)
+            if unexpected_modules:
+                raise ValueError(
+                    f"While loading {lora_dir}, expected"
+                    f" target modules in {expected_lora_modules}"
+                    f" but received {unexpected_modules}."
+                    f" Please verify that the loaded LoRA module is correct")
+
+        if tensorizer_config_dict:
+            from tensorizer import TensorDeserializer
+
+            tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
+            lora_tensor_path = os.path.join(tensorizer_config.tensorizer_dir,
+                                            "adapter_model.tensors")
+            tensorizer_args = tensorizer_config._construct_tensorizer_args()
+            tensors = TensorDeserializer(
+                lora_tensor_path,
+                dtype=tensorizer_config.dtype,
+                **tensorizer_args.deserialization_kwargs)
+            check_unexpected_modules(tensors)
+
+        elif os.path.isfile(lora_tensor_path):
             # Find unexpected modules.
             # Use safetensor key as a source of truth to find expected modules.
             # in peft if you have target_modules A, B, C and C does not exist
@@ -232,20 +251,8 @@ class LoRAModel(AdapterModel):
             unexpected_modules = []
             with safetensors.safe_open(lora_tensor_path,
                                        framework="pt") as f:  # type: ignore
-                for lora_module in f.keys():  # noqa
-                    module_name, _, _ = parse_fine_tuned_lora_name(
-                        lora_module, weights_mapper)
-                    part_name = module_name.split(".")[-1]
-                    if part_name not in expected_lora_modules:
-                        unexpected_modules.append(module_name)
-                if unexpected_modules:
-                    raise ValueError(
-                        f"While loading {lora_dir}, expected"
-                        f" target modules in {expected_lora_modules}"
-                        f" but received {unexpected_modules}."
-                        f" Please verify that the loaded LoRA module is correct"
-                    )
                 # Load tensors if there are only expected modules.
+                check_unexpected_modules(f)
                 for module in f.keys():  # noqa
                     tensors[module] = f.get_tensor(module)
         elif os.path.isfile(lora_bin_file_path):
@@ -329,28 +336,21 @@ class LoRAModelManager(AdapterModelManager):
         self.max_num_seqs = max_num_seqs
         assert self.capacity >= self.lora_slots
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
-        self.lora_index_to_id: List[Optional[int]] = [None] * self.lora_slots
+        self.lora_index_to_id: list[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
-        self.long_lora_context: Optional[LongContextLoRAContext] = None
         self.punica_wrapper = get_punica_wrapper(
             max_num_batched_tokens,
             max_batches=self.max_num_seqs,
             device=self.device,
             max_loras=self.lora_config.max_loras)
-        # Scaling factor -> offset to the sin_cos_cache to it.
-        # Used for long context lora.
-        self.scaling_factor_to_offset: Dict[float, int] = {}
+
         super().__init__(model)
 
         self.supported_lora_modules = get_supported_lora_modules(self.model)
         assert self.supported_lora_modules, "No supported LoRA modules found in"
-        f"{self.model.__class__.__name__}."
-        if lora_config.long_lora_scaling_factors:
-            # We need to replace rotary emb layer to do batch computation
-            # for long lora.
-            self.supported_lora_modules.append("rotary_emb")
-        self.packed_modules_mapping = copy.deepcopy(
-            self.model.packed_modules_mapping)
+        f" {self.model.__class__.__name__}."
+
+        self.packed_modules_mapping = get_packed_modules_mapping(self.model)
         # Used to indicate whether the model is a multimodal model
         self.supports_mm: bool = (
             supports_multimodal(self.model)
@@ -358,9 +358,10 @@ class LoRAModelManager(AdapterModelManager):
             # text modules (e.g. ChatGLM)
             and hasattr(self.model, "get_mm_mapping"))
         self.is_pooling_model = is_pooling_model(self.model)
-        self.packed_modules: Dict[str, List[str]] = {}
-        self.modules: Dict[str, BaseLayerWithLoRA] = {}
-        # Dict instead of a Set for compatibility with LRUCache.
+        self.is_moe_model = is_moe_model(self.model)
+        self.packed_modules: dict[str, list[str]] = {}
+        self.modules: dict[str, BaseLayerWithLoRA] = {}
+        # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: Optional[LoRAMapping] = None
         self._create_lora_modules()
         self.model.lora_manager = self
@@ -424,25 +425,9 @@ class LoRAModelManager(AdapterModelManager):
         except ValueError:
             pass
 
-    def _set_long_lora_context(self, lora: LoRAModel):
-        if self.long_lora_context is None:
-            return
-
-        if lora.scaling_factor is None:
-            return
-
-        if (lora.scaling_factor not in self.scaling_factor_to_offset):
-            raise ValueError(f"Long LoRA scaling factor {lora.scaling_factor}"
-                             " has not been initialized.")
-
-        offsets = self.scaling_factor_to_offset.get(lora.scaling_factor)
-        if offsets:
-            self.long_lora_context.offsets_by_lora_id[lora.id] = offsets
-
     def _add_adapter(self, lora: LoRAModel):
         self._create_merged_loras_inplace(lora)
         self._registered_adapters[lora.id] = lora
-        self._set_long_lora_context(lora)
 
     def pin_adapter(self, lora_id: int) -> bool:
         """Pin a LoRAModel in the manager cache."""
@@ -458,7 +443,6 @@ class LoRAModelManager(AdapterModelManager):
             self.lora_slots + 1,
             self.vocab_size,
             self.lora_config.lora_extra_vocab_size,
-            self.long_lora_context,
         )
 
     def remove_all_adapters(self):
@@ -468,6 +452,14 @@ class LoRAModelManager(AdapterModelManager):
         self._active_adapters.clear()
 
     def _create_lora_modules(self):
+
+        def _parent_module(module_name: str) -> str:
+            # module name is a dot separated name.
+            # for example:
+            #  - given an input 'x.y.z' return 'x.y'
+            #  - given an input 'x' return ''
+            return module_name.rpartition('.')[0]
+
         for module_name, module in self.model.named_modules(
                 remove_duplicate=False):
             if isinstance(module, PPMissingLayer):
@@ -490,19 +482,19 @@ class LoRAModelManager(AdapterModelManager):
                 from_layer(module, self.lora_slots, self.lora_config,
                            packed_moduled_lst, self.model.config))
 
-            # LinearScalingRotaryEmbeddingWithLoRA is used to handle
-            # long context lora. Register relevant metadata.
-            if isinstance(new_module, LinearScalingRotaryEmbeddingWithLoRA):
-                self.long_lora_context = LongContextLoRAContext(
-                    new_module.scaling_factors, new_module.rotary_dim)
-                self.scaling_factor_to_offset = \
-                    new_module.scaling_factor_to_offset
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
+                logits_processor_module_name = 'logits_processor'
+                parent_module = _parent_module(module_name)
+                if parent_module:
+                    logits_processor_module_name = (
+                        f"{parent_module}.{logits_processor_module_name}")
+
                 logits_processor_module = self.model.get_submodule(
-                    "logits_processor")
+                    logits_processor_module_name)
+
                 new_module = replace_submodule(
-                    self.model, "logits_processor",
+                    self.model, logits_processor_module_name,
                     from_layer_logits_processor(logits_processor_module,
                                                 module, self.lora_slots,
                                                 self.lora_config,
@@ -529,15 +521,13 @@ class LoRAModelManager(AdapterModelManager):
             self,
             lora_id: int,
             rank: int,
-            scaling_factor: Optional[float],
-            embedding_modules: Optional[Dict[str, str]] = None) -> LoRAModel:
+            embedding_modules: Optional[dict[str, str]] = None) -> LoRAModel:
         """Create zero-initialized LoRAModel for warmup."""
-        model = LoRAModel(lora_id, rank, {}, scaling_factor)
+        model = LoRAModel(lora_id, rank, {})
         for module_name, module in self.model.named_modules():
             bias_enabled = self.lora_config.bias_enabled
             if (not self._match_target_modules(module_name)
                     or not isinstance(module, BaseLayerWithLoRA)
-                    or isinstance(module, LinearScalingRotaryEmbeddingWithLoRA)
                     or self._filter_unsupported_mm_module(module_name)):
                 continue
             parts = module_name.split(".")
@@ -578,7 +568,7 @@ class LoRAModelManager(AdapterModelManager):
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
-                subloras: List[Optional[LoRALayerWeights]] = []
+                subloras: list[Optional[LoRALayerWeights]] = []
                 for i, r in enumerate(replacements):
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name + "." + r,
@@ -605,7 +595,7 @@ class LoRAModelManager(AdapterModelManager):
     def _filter_unsupported_mm_module(self, module_name: str) -> bool:
         """
         Regarding multimodal models, vLLM currently only supports adding LoRA to
-        language model. LoRA for other modules, such as the vision tower, will 
+        language model. LoRA for other modules, such as the vision tower, will
         be filtered out.
         """
         if self.supports_mm:
@@ -630,8 +620,8 @@ class LoRAModelManager(AdapterModelManager):
 
     def _create_merged_loras_inplace(self, lora_model: LoRAModel) -> None:
         for module_name, new_module_names in self.packed_modules.items():
-            replacement_loras: List[Optional[LoRALayerWeights]] = []
-            replaced_module: Set[str] = set()
+            replacement_loras: list[Optional[LoRALayerWeights]] = []
+            replaced_module: set[str] = set()
             has_replacement = False
             for r in new_module_names:
                 lora = self._get_lora_layer_weights(lora_model, r)
@@ -678,11 +668,8 @@ class LoRAModelManager(AdapterModelManager):
                                   self._deactivate_adapter)
 
     def add_adapter(self, adapter: LoRAModel) -> bool:
-        logger.debug(
-            "Adding lora. Model id: %d, "
-            "int id: %d, "
-            "scaling factor: %s", adapter.id, adapter.id,
-            adapter.scaling_factor)
+        logger.debug("Adding lora. Model id: %d, "
+                     "int id: %d", adapter.id, adapter.id)
         return add_adapter(adapter, self._registered_adapters, self.capacity,
                            self._add_adapter)
 
@@ -694,7 +681,7 @@ class LoRAModelManager(AdapterModelManager):
         return remove_adapter(adapter_id, self._registered_adapters,
                               self.deactivate_adapter)
 
-    def list_adapters(self) -> Dict[int, Any]:
+    def list_adapters(self) -> dict[int, Any]:
         return list_adapters(self._registered_adapters)
 
     def get_adapter(self, adapter_id: int) -> Optional[Any]:
@@ -721,16 +708,14 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         self._active_adapters: LoRALRUCache = LoRALRUCache(
             self.lora_slots, self._deactivate_adapter)
 
-    def list_adapters(self) -> Dict[int, LoRAModel]:
+    def list_adapters(self) -> dict[int, LoRAModel]:
         """List all registered LoRAModels."""
         return dict(self._registered_adapters.cache)
 
     def add_adapter(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager."""
-        logger.debug(
-            "Adding lora. Model id: %d, "
-            "int id: %d, "
-            "scaling factor: %s", lora.id, lora.id, lora.scaling_factor)
+        logger.debug("Adding lora. Model id: %d, "
+                     "int id: %d", lora.id, lora.id)
         if lora.id not in self._registered_adapters:
             self._add_adapter(lora)
             was_added = True
@@ -786,10 +771,10 @@ def create_lora_manager(
         vocab_size: int,
         lora_config: LoRAConfig,
         device: torch.device,
-        lora_manager_cls: Type[LoRAModelManager] = LoRAModelManager,
+        lora_manager_cls: type[LoRAModelManager] = LoRAModelManager,
         **kwargs) -> LoRAModelManager:
     """Create a LoRA adapter for a given model."""
-    if not hasattr(model, "packed_modules_mapping"):
+    if not isinstance(model, SupportsLoRA):
         raise ValueError(f"Model {type(model)} is not supported for LoRA.")
     lora_manager = lora_manager_cls(
         model=model,

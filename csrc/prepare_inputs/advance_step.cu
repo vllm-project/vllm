@@ -274,7 +274,6 @@ void advance_step_flashinfer(
   cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev);
   cudaDeviceGetAttribute(&threads, cudaDevAttrMaxThreadsPerBlock, dev);
 
-  [[maybe_unused]] int block_tables_stride = block_tables.stride(0);
   TORCH_CHECK((blocks * threads > num_queries),
               "multi-step: not enough threads to map to num_queries = ",
               num_queries, " block_tables.stride(0) = ", block_tables.stride(0),

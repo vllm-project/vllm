@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -9,6 +10,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -22,8 +24,8 @@ class MoeWNA16Config(QuantizationConfig):
 
     def __init__(self, linear_quant_method: str, weight_bits: int,
                  group_size: int, has_zp: bool, lm_head_quantized: bool,
-                 modules_to_not_convert: Optional[List[str]],
-                 full_config: Dict[str, Any]) -> None:
+                 modules_to_not_convert: Optional[list[str]],
+                 full_config: dict[str, Any]) -> None:
         super().__init__()
         self.weight_bits = weight_bits
         self.group_size = group_size
@@ -64,11 +66,11 @@ class MoeWNA16Config(QuantizationConfig):
             self.modules_to_not_convert = modules_to_not_convert
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "moe_wna16"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half]
 
     @classmethod
@@ -76,11 +78,11 @@ class MoeWNA16Config(QuantizationConfig):
         return 70
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "MoeWNA16Config":
+    def from_config(cls, config: dict[str, Any]) -> "MoeWNA16Config":
         linear_quant_method = cls.get_from_keys(config, ["quant_method"])
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
@@ -100,15 +102,15 @@ class MoeWNA16Config(QuantizationConfig):
                    lm_head_quantized, modules_to_not_convert, config)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
         can_convert = cls.is_moe_wna16_compatible(hf_quant_cfg)
         if can_convert and user_quant == "moe_wna16":
             return cls.get_name()
         return None
 
     @classmethod
-    def is_moe_wna16_compatible(cls, quant_config: Dict[str, Any]):
+    def is_moe_wna16_compatible(cls, quant_config: dict[str, Any]):
         # Extract data from quant config.
         quant_method = quant_config.get("quant_method", "").lower()
         num_bits = quant_config.get("bits")
@@ -162,7 +164,7 @@ class MoeWNA16Config(QuantizationConfig):
         return None
 
 
-def is_layer_skipped_quant(prefix: str, modules_to_not_convert: List[str]):
+def is_layer_skipped_quant(prefix: str, modules_to_not_convert: list[str]):
     return any(module_name in prefix for module_name in modules_to_not_convert)
 
 
@@ -295,7 +297,15 @@ class MoeWNA16Method(FusedMoEMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if enable_eplb:
+            raise NotImplementedError(
+                "EPLB not supported for `MoeWNA16Method` yet.")
+
         from vllm.model_executor.layers.fused_moe import fused_experts
         assert activation == "silu", "Only SiLU activation is supported."
         topk_weights, topk_ids = FusedMoE.select_experts(

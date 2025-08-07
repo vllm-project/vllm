@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
 from typing import Final, Generic, Optional, Protocol, TypeVar, Union
@@ -6,9 +7,7 @@ from typing import Final, Generic, Optional, Protocol, TypeVar, Union
 import torch
 from transformers import PretrainedConfig
 
-import vllm.envs as envs
-from vllm.attention.selector import (backend_name_to_enum,
-                                     get_global_forced_attn_backend)
+from vllm.attention.selector import get_env_variable_attn_backend
 from vllm.logger import init_logger
 from vllm.platforms import _Backend, current_platform
 
@@ -19,10 +18,11 @@ _C = TypeVar("_C", bound=PretrainedConfig)
 
 class VisionEncoderInfo(ABC, Generic[_C]):
 
-    def __init__(self, vision_config: _C) -> None:
+    def __init__(self, hf_config: _C) -> None:
         super().__init__()
 
-        self.vision_config = vision_config
+        self.hf_config = hf_config
+        self.vision_config = hf_config.vision_config
 
     @abstractmethod
     def get_num_image_tokens(
@@ -57,18 +57,14 @@ def get_vision_encoder_info(
     from .pixtral import PixtralHFEncoderInfo, PixtralVisionConfig
     from .siglip import SiglipEncoderInfo, SiglipVisionConfig
 
-    vision_config = hf_config.vision_config
-    if isinstance(vision_config, CLIPVisionConfig):
-        return CLIPEncoderInfo(vision_config)
-    if isinstance(vision_config, PixtralVisionConfig):
-        # Need to sneak in spatial_merge_size for Mistral3
-        vision_config.spatial_merge_size = getattr(hf_config,
-                                                   "spatial_merge_size", 1)
-        return PixtralHFEncoderInfo(vision_config)
-    if isinstance(vision_config, SiglipVisionConfig):
-        return SiglipEncoderInfo(vision_config)
+    if isinstance(hf_config.vision_config, CLIPVisionConfig):
+        return CLIPEncoderInfo(hf_config)
+    if isinstance(hf_config.vision_config, PixtralVisionConfig):
+        return PixtralHFEncoderInfo(hf_config)
+    if isinstance(hf_config.vision_config, SiglipVisionConfig):
+        return SiglipEncoderInfo(hf_config)
 
-    msg = f"Unsupported vision config: {type(vision_config)}"
+    msg = f"Unsupported vision config: {type(hf_config.vision_config)}"
     raise NotImplementedError(msg)
 
 
@@ -77,32 +73,12 @@ def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
     Get the available attention backend for Vision Transformer.
     """
     # TODO(Isotr0py): Remove `support_fa` after support FA for all ViTs attn.
-    selected_backend: Optional[_Backend] = get_global_forced_attn_backend()
-    if selected_backend is None:
-        backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
-        if backend_by_env_var is not None:
-            selected_backend = backend_name_to_enum(backend_by_env_var)
-    if selected_backend is None:
-        if current_platform.is_cuda():
-            device_available = current_platform.has_device_capability(80)
-            if device_available and support_fa:
-                from transformers.utils import is_flash_attn_2_available
-                if is_flash_attn_2_available():
-                    selected_backend = _Backend.FLASH_ATTN
-                else:
-                    logger.warning_once(
-                        "Current `vllm-flash-attn` has a bug inside vision "
-                        "module, so we use xformers backend instead. You can "
-                        "run `pip install flash-attn` to use flash-attention "
-                        "backend.")
-                    selected_backend = _Backend.XFORMERS
-            else:
-                # For Volta and Turing GPUs, use xformers instead.
-                selected_backend = _Backend.XFORMERS
-        else:
-            # Default to torch SDPA for other non-GPU platforms.
-            selected_backend = _Backend.TORCH_SDPA
-    return selected_backend
+
+    selected_backend: Optional[_Backend] = get_env_variable_attn_backend()
+    if selected_backend is not None:
+        return selected_backend
+
+    return current_platform.get_vit_attn_backend(support_fa)
 
 
 def resolve_visual_encoder_outputs(

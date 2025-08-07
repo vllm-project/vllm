@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Evaluate Transcription API correctness by computing Word Error Rate (WER)
 on a given ASR dataset. When provided, it will also compare the WER against
@@ -150,6 +151,7 @@ def test_wer_correctness(model_name,
                          expected_wer,
                          n_examples=-1,
                          max_concurrent_request=None):
+    # TODO refactor to use `ASRDataset`
     with RemoteOpenAIServer(model_name, ['--enforce-eager']) as remote_server:
         dataset = load_hf_dataset(dataset_repo)
 

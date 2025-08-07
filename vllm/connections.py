@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping, MutableMapping
 from pathlib import Path
@@ -167,4 +168,7 @@ class HTTPConnection:
 
 
 global_http_connection = HTTPConnection()
-"""The global :class:`HTTPConnection` instance used by vLLM."""
+"""
+The global [`HTTPConnection`][vllm.connections.HTTPConnection] instance used
+by vLLM.
+"""

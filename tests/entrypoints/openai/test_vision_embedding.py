@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import json
 
 import pytest
 import requests
@@ -28,8 +31,8 @@ TEST_IMAGE_URLS = [
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task",
-        "embed",
+        "--runner",
+        "pooling",
         "--max-model-len",
         "2048",
         "--max-num-seqs",
@@ -37,7 +40,7 @@ def server():
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
-        f"image={MAXIMUM_IMAGES}",
+        json.dumps({"image": MAXIMUM_IMAGES}),
         "--chat-template",
         str(vlm2vec_jinja_path),
     ]

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Example Python client for `vllm.entrypoints.api_server`
 Start the demo server:
     python -m vllm.entrypoints.api_server --model <model_name>
@@ -17,16 +18,15 @@ import requests
 
 
 def clear_line(n: int = 1) -> None:
-    LINE_UP = '\033[1A'
-    LINE_CLEAR = '\x1b[2K'
+    LINE_UP = "\033[1A"
+    LINE_CLEAR = "\x1b[2K"
     for _ in range(n):
         print(LINE_UP, end=LINE_CLEAR, flush=True)
 
 
-def post_http_request(prompt: str,
-                      api_url: str,
-                      n: int = 1,
-                      stream: bool = False) -> requests.Response:
+def post_http_request(
+    prompt: str, api_url: str, n: int = 1, stream: bool = False
+) -> requests.Response:
     headers = {"User-Agent": "Test Client"}
     pload = {
         "prompt": prompt,
@@ -35,17 +35,14 @@ def post_http_request(prompt: str,
         "max_tokens": 16,
         "stream": stream,
     }
-    response = requests.post(api_url,
-                             headers=headers,
-                             json=pload,
-                             stream=stream)
+    response = requests.post(api_url, headers=headers, json=pload, stream=stream)
     return response
 
 
 def get_streaming_response(response: requests.Response) -> Iterable[list[str]]:
-    for chunk in response.iter_lines(chunk_size=8192,
-                                     decode_unicode=False,
-                                     delimiter=b"\n"):
+    for chunk in response.iter_lines(
+        chunk_size=8192, decode_unicode=False, delimiter=b"\n"
+    ):
         if chunk:
             data = json.loads(chunk.decode("utf-8"))
             output = data["text"]
@@ -56,6 +53,16 @@ def get_response(response: requests.Response) -> list[str]:
     data = json.loads(response.content)
     output = data["text"]
     return output
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", type=str, default="localhost")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--n", type=int, default=1)
+    parser.add_argument("--prompt", type=str, default="San Francisco is a")
+    parser.add_argument("--stream", action="store_true")
+    return parser.parse_args()
 
 
 def main(args: Namespace):
@@ -82,11 +89,5 @@ def main(args: Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--n", type=int, default=1)
-    parser.add_argument("--prompt", type=str, default="San Francisco is a")
-    parser.add_argument("--stream", action="store_true")
-    args = parser.parse_args()
+    args = parse_args()
     main(args)

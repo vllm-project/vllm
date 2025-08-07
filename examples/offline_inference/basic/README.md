@@ -70,7 +70,7 @@ Try one yourself by passing one of the following models to the `--model` argumen
 
 vLLM supports models that are quantized using GGUF.
 
-Try one yourself by downloading a GUFF quantised model and using the following arguments:
+Try one yourself by downloading a quantized GGUF model and using the following arguments:
 
 ```python
 from huggingface_hub import hf_hub_download

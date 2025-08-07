@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
@@ -47,6 +48,14 @@ def sample_json_schema():
                     "type": "string",
                 }
             },
+            "grade": {
+                "type": "string",
+                "pattern": "^[A-D]$"  # Regex pattern
+            },
+            "email": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+            },
             "work_history": {
                 "type": "array",
                 "items": {
@@ -56,17 +65,24 @@ def sample_json_schema():
                             "type": "string"
                         },
                         "duration": {
-                            "type": "number"
+                            "type": "number",
+                            "minimum": 0.0,
+                            "maximum": 100.0,  # Numeric range
                         },
                         "position": {
                             "type": "string"
                         }
                     },
-                    "required": ["company", "position"]
-                }
+                    "required": ["company", "duration", "position"],
+                    "additionalProperties": False
+                },
+                "minItems": 0,
+                "maxItems": 3
             }
         },
-        "required": ["name", "age", "skills", "work_history"]
+        "required":
+        ["name", "age", "skills", "grade", "email", "work_history"],
+        "additionalProperties": False
     }
 
 
@@ -78,27 +94,19 @@ def unsupported_json_schema():
         "properties": {
             "score": {
                 "type": "integer",
-                "minimum": 0,
-                "maximum": 100  # Numeric range
-            },
-            "grade": {
-                "type": "string",
-                "pattern": "^[A-D]$"  # Regex pattern
-            },
-            "email": {
-                "type": "string",
-                "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+                "multipleOf": 5  # Numeric multiple
             },
             "tags": {
                 "type": "array",
                 "items": {
                     "type": "string",
-                    "pattern":
-                    "^[a-z]{1,10}$"  # Combining length and pattern restrictions
+                    "minLength": 10,
+                    "maxLength": 20
                 }
             }
         },
-        "required": ["score", "grade", "email", "tags"]
+        "required": ["score", "tags"],
+        "additionalProperties": False
     }
 
 
@@ -137,7 +145,8 @@ def sample_definition_json_schema():
         },
         'required': ['steps', 'final_answer'],
         'title': 'MathReasoning',
-        'type': 'object'
+        'type': 'object',
+        "additionalProperties": False
     }
 
 

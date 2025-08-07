@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-4B/blob/main/modeling_intern_vit.py
 # --------------------------------------------------------
@@ -6,8 +7,9 @@
 # Copyright (c) 2023 OpenGVLab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
+from collections.abc import Iterable
 from functools import partial
-from typing import Iterable, Optional, Set, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -190,8 +192,8 @@ class InternParallelAttention(nn.Module):
         if self.tp_size > 1:
             q = tensor_model_parallel_all_gather(q.contiguous())
             k = tensor_model_parallel_all_gather(k.contiguous())
-        q = self.q_norm.forward_native(q)
-        k = self.k_norm.forward_native(k)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
         if self.tp_size > 1:
             splitter = partial(split_tensor_along_last_dim,
                                num_partitions=self.tp_size)
@@ -264,10 +266,8 @@ class InternSdpaAttention(nn.Module):
 
         if self.qk_normalization:
             B_, N_, H_, D_ = q.shape
-            q = self.q_norm.forward_native(q.flatten(-2,
-                                                     -1)).view(B_, N_, H_, D_)
-            k = self.k_norm.forward_native(k.flatten(-2,
-                                                     -1)).view(B_, N_, H_, D_)
+            q = self.q_norm(q.flatten(-2, -1)).view(B_, N_, H_, D_)
+            k = self.k_norm(k.flatten(-2, -1)).view(B_, N_, H_, D_)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
@@ -416,6 +416,10 @@ class InternVisionEncoder(nn.Module):
 
 class InternVisionModel(nn.Module):
 
+    packed_modules_mapping = {
+        "qkv": ["qkv"],
+    }
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -463,10 +467,10 @@ class InternVisionModel(nn.Module):
 
         return encoder_outputs
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",

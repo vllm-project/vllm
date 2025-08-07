@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property, partial
-from typing import List, Optional, Set, Tuple, TypedDict, Union
+from typing import Optional, TypedDict, Union
 
 import numpy as np
 import torch
@@ -35,7 +36,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -91,7 +91,7 @@ class MolmoImageInputs(TypedDict):
 
 @dataclass
 class VisionBackboneConfig:
-    image_default_input_size: Tuple[int, int] = (336, 336)
+    image_default_input_size: tuple[int, int] = (336, 336)
     image_patch_size: int = 14
     image_pos_patch_size: int = 14
     image_emb_dim: int = 1024
@@ -268,7 +268,7 @@ class BlockCollection(nn.Module):
             for _ in range(config.image_num_layers)
         ])
 
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
         hidden_states = []
         for r in self.resblocks:
             x = r(x)
@@ -335,7 +335,7 @@ class VisionTransformer(nn.Module):
 
     def forward(self,
                 x: torch.Tensor,
-                patch_num: Optional[int] = None) -> List[torch.Tensor]:
+                patch_num: Optional[int] = None) -> list[torch.Tensor]:
         """
         : param x: (batch_size, num_patch, n_pixels)
         """
@@ -435,12 +435,12 @@ class MolmoAttention(nn.Module):
         )
 
     def _apply_qk_norm(self, q: torch.Tensor,
-                       k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                       k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self.tp_size > 1:
             q = tensor_model_parallel_all_gather(q.contiguous())
             k = tensor_model_parallel_all_gather(k.contiguous())
-        q = self.q_norm.forward_native(q)
-        k = self.k_norm.forward_native(k)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
         if self.tp_size > 1:
             splitter = partial(split_tensor_along_last_dim,
                                num_partitions=self.tp_size)
@@ -571,7 +571,7 @@ class MolmoDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, torch.Tensor]]]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -597,7 +597,7 @@ class MolmoDecoderNormAfterLayer(MolmoDecoderLayer):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, torch.Tensor]]]:
         # Self Attention
         residual = hidden_states
         hidden_states = self.self_attn(
@@ -741,15 +741,15 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
         # image_features: (batch_size, num_image, num_patch, d_model)
         return image_features
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("merged_linear", "gate_proj", 0),
             ("merged_linear", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
@@ -856,10 +856,10 @@ class MolmoModel(nn.Module, SupportsQuant):
             hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
             if name.endswith(".bias") and name not in params_dict:
@@ -966,7 +966,7 @@ def select_tiling(
 
 class MolmoProcessorWrapper:
     """
-    Wraps :class:`MolmoProcessor` so that it can be called directly.
+    Wraps `MolmoProcessor` so that it can be called directly.
 
     The original definition can be found here:
     https://huggingface.co/allenai/Molmo-7B-D-0924/blob/main/preprocessing_molmo.py
@@ -1366,6 +1366,13 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
         "merged_linear": ["gate_proj", "up_proj"]  # image_projector
     }
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return None
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -1394,7 +1401,6 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
 
         self.logits_processor = LogitsProcessor(config.embedding_size
                                                 or config.vocab_size)
-        self.sampler = get_sampler()
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
@@ -1474,11 +1480,11 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
 
         return self._process_image_input(image_input)
 
@@ -1488,7 +1494,8 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             assert self.img_patch_id is not None
 
             inputs_embeds = merge_multimodal_embeddings(
@@ -1506,7 +1513,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
-    ) -> SamplerOutput:
+    ) -> torch.Tensor:
 
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -1532,15 +1539,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
         loader = AutoWeightsLoader(self)
         weights = _get_weights_with_merged_embedding(weights)
@@ -1558,8 +1557,8 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
 
 
 def _get_weights_with_merged_embedding(
-    weights: Iterable[Tuple[str, torch.Tensor]]
-) -> Iterable[Tuple[str, torch.Tensor]]:
+    weights: Iterable[tuple[str, torch.Tensor]]
+) -> Iterable[tuple[str, torch.Tensor]]:
     embedding_weights = {}
     for name, weight in weights:
         if "wte.embedding" in name:

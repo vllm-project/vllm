@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import json
 
 import openai
 import pytest
@@ -27,7 +30,7 @@ def server():
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
-        f"audio={MAXIMUM_AUDIOS}",
+        json.dumps({"audio": MAXIMUM_AUDIOS}),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -100,6 +103,35 @@ async def test_single_chat_session_audio(client: openai.AsyncOpenAI,
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("audio_url", [TEST_AUDIO_URLS[0]])
+async def test_error_on_invalid_audio_url_type(client: openai.AsyncOpenAI,
+                                               model_name: str,
+                                               audio_url: str):
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "audio_url",
+                "audio_url": audio_url
+            },
+            {
+                "type": "text",
+                "text": "What's happening in this audio?"
+            },
+        ],
+    }]
+
+    # audio_url should be a dict {"url": "some url"}, not directly a string
+    with pytest.raises(openai.BadRequestError):
+        _ = await client.chat.completions.create(model=model_name,
+                                                 messages=messages,
+                                                 max_completion_tokens=10,
+                                                 temperature=0.0)
 
 
 @pytest.mark.asyncio
@@ -241,7 +273,7 @@ async def test_chat_streaming_audio(client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=10,
+        max_completion_tokens=8,
         temperature=0.0,
     )
     output = chat_completion.choices[0].message.content
@@ -251,7 +283,7 @@ async def test_chat_streaming_audio(client: openai.AsyncOpenAI,
     stream = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=10,
+        max_completion_tokens=8,
         temperature=0.0,
         stream=True,
     )
@@ -301,7 +333,7 @@ async def test_chat_streaming_input_audio(client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=10,
+        max_completion_tokens=8,
         temperature=0.0,
     )
     output = chat_completion.choices[0].message.content
@@ -311,7 +343,7 @@ async def test_chat_streaming_input_audio(client: openai.AsyncOpenAI,
     stream = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=10,
+        max_completion_tokens=8,
         temperature=0.0,
         stream=True,
     )

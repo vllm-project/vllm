@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
 from typing import Optional
 
@@ -33,7 +34,10 @@ from vllm.utils import is_list_of
 class MirroredProcessingCache:
 
     def __init__(self, model_config):
-        self.use_cache = not model_config.disable_mm_preprocessor_cache
+        mm_config = model_config.multimodal_config
+        disable_mm_preprocessor_cache = (
+            mm_config is not None and mm_config.disable_mm_preprocessor_cache)
+        self.use_cache = not disable_mm_preprocessor_cache
         self.mm_cache = ProcessingCache.get_lru_cache(VLLM_MM_INPUT_CACHE_GIB,
                                                       MultiModalKwargs)
 
@@ -50,7 +54,7 @@ class MirroredProcessingCache:
 
         full_mm_inputs = list[Optional[MultiModalKwargs]]()
         for mm_input, mm_hash in zip(mm_inputs, mm_hashes):
-            if mm_hash in self.mm_cache:
+            if self.mm_cache.get(mm_hash) is not None:
                 mm_input = None
             else:
                 self.mm_cache[mm_hash] = mm_input
@@ -80,3 +84,8 @@ class MirroredProcessingCache:
             full_mm_inputs.append(mm_input)
 
         return full_mm_inputs
+
+    def reset(self) -> bool:
+        self.mm_cache.clear()
+
+        return True

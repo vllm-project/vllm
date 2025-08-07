@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
 import traceback
 from itertools import chain
 from typing import TYPE_CHECKING, Optional
 
+from vllm import envs
 from vllm.plugins import load_plugins_by_group
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils import resolve_obj_by_qualname, supports_xccl
 
 from .interface import _Backend  # noqa: F401
 from .interface import CpuArchEnum, Platform, PlatformEnum
@@ -30,21 +31,26 @@ def vllm_version_matches_substr(substr: str) -> bool:
 
 
 def tpu_platform_plugin() -> Optional[str]:
-    is_tpu = False
     logger.debug("Checking if TPU platform is available.")
+
+    # Check for Pathways TPU proxy
+    if envs.VLLM_TPU_USING_PATHWAYS:
+        logger.debug("Confirmed TPU platform is available via Pathways proxy.")
+        return "tpu_commons.platforms.tpu_jax.TpuPlatform"
+
+    # Check for libtpu installation
     try:
         # While it's technically possible to install libtpu on a
         # non-TPU machine, this is a very uncommon scenario. Therefore,
-        # we assume that libtpu is installed if and only if the machine
+        # we assume that libtpu is installed only if the machine
         # has TPUs.
+
         import libtpu  # noqa: F401
-        is_tpu = True
         logger.debug("Confirmed TPU platform is available.")
+        return "vllm.platforms.tpu.TpuPlatform"
     except Exception as e:
         logger.debug("TPU platform is not available because: %s", str(e))
-        pass
-
-    return "vllm.platforms.tpu.TpuPlatform" if is_tpu else None
+        return None
 
 
 def cuda_platform_plugin() -> Optional[str]:
@@ -112,27 +118,8 @@ def rocm_platform_plugin() -> Optional[str]:
             amdsmi.amdsmi_shut_down()
     except Exception as e:
         logger.debug("ROCm platform is not available because: %s", str(e))
-        pass
 
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
-
-
-def hpu_platform_plugin() -> Optional[str]:
-    is_hpu = False
-    logger.debug("Checking if HPU platform is available.")
-    try:
-        from importlib import util
-        is_hpu = util.find_spec('habana_frameworks') is not None
-        if is_hpu:
-            logger.debug("Confirmed HPU platform is available.")
-        else:
-            logger.debug("HPU platform is not available because "
-                         "habana_frameworks is not found.")
-    except Exception as e:
-        logger.debug("HPU platform is not available because: %s", str(e))
-        pass
-
-    return "vllm.platforms.hpu.HpuPlatform" if is_hpu else None
 
 
 def xpu_platform_plugin() -> Optional[str]:
@@ -141,14 +128,22 @@ def xpu_platform_plugin() -> Optional[str]:
     try:
         # installed IPEX if the machine has XPUs.
         import intel_extension_for_pytorch  # noqa: F401
-        import oneccl_bindings_for_pytorch  # noqa: F401
         import torch
+        if supports_xccl():
+            dist_backend = "xccl"
+        else:
+            dist_backend = "ccl"
+            import oneccl_bindings_for_pytorch  # noqa: F401
+
         if hasattr(torch, 'xpu') and torch.xpu.is_available():
             is_xpu = True
+            from vllm.platforms.xpu import XPUPlatform
+            XPUPlatform.dist_backend = dist_backend
+            logger.debug("Confirmed %s backend is available.",
+                         XPUPlatform.dist_backend)
             logger.debug("Confirmed XPU platform is available.")
     except Exception as e:
         logger.debug("XPU platform is not available because: %s", str(e))
-        pass
 
     return "vllm.platforms.xpu.XPUPlatform" if is_xpu else None
 
@@ -170,23 +165,31 @@ def cpu_platform_plugin() -> Optional[str]:
 
     except Exception as e:
         logger.debug("CPU platform is not available because: %s", str(e))
-        pass
 
     return "vllm.platforms.cpu.CpuPlatform" if is_cpu else None
 
 
 def neuron_platform_plugin() -> Optional[str]:
-    is_neuron = False
+    tnx_installed = False
+    nxd_installed = False
     logger.debug("Checking if Neuron platform is available.")
     try:
         import transformers_neuronx  # noqa: F401
-        is_neuron = True
+        tnx_installed = True
         logger.debug("Confirmed Neuron platform is available because"
                      " transformers_neuronx is found.")
-    except ImportError as e:
-        logger.debug("Neuron platform is not available because: %s", str(e))
+    except ImportError:
         pass
 
+    try:
+        import neuronx_distributed_inference  # noqa: F401
+        nxd_installed = True
+        logger.debug("Confirmed Neuron platform is available because"
+                     " neuronx_distributed_inference is found.")
+    except ImportError:
+        pass
+
+    is_neuron = tnx_installed or nxd_installed
     return "vllm.platforms.neuron.NeuronPlatform" if is_neuron else None
 
 
@@ -194,7 +197,6 @@ builtin_platform_plugins = {
     'tpu': tpu_platform_plugin,
     'cuda': cuda_platform_plugin,
     'rocm': rocm_platform_plugin,
-    'hpu': hpu_platform_plugin,
     'xpu': xpu_platform_plugin,
     'cpu': cpu_platform_plugin,
     'neuron': neuron_platform_plugin,

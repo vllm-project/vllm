@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from itertools import cycle
 
@@ -195,15 +196,15 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
     ])
 @pytest.mark.parametrize("per_test_common_llm_kwargs",
                          [{
-                             "block_size": 8,
+                             "block_size": 16,
                              "max_num_batched_tokens": 2,
                              "max_num_seqs": 2,
                          }, {
-                             "block_size": 8,
+                             "block_size": 16,
                              "max_num_batched_tokens": 3,
                              "max_num_seqs": 2,
                          }, {
-                             "block_size": 8,
+                             "block_size": 16,
                              "max_num_batched_tokens": 256,
                              "max_num_seqs": 10,
                          }])
@@ -436,8 +437,8 @@ def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
     "enable_prefix_caching": True,
 }])
 @pytest.mark.parametrize("seed", [1])
-def test_auto_prefix_caching_after_evition_start(baseline_llm_generator,
-                                                 test_llm_generator):
+def test_auto_prefix_caching_after_eviction_start(baseline_llm_generator,
+                                                  test_llm_generator):
     """Verify block manager v2 with auto prefix caching could works normal
     even when eviction started.
     With APC enabled, all blocks are held by native block at the beginning.

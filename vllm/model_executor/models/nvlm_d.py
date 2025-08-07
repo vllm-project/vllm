@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://huggingface.co/nvidia/NVLM-D-72B/blob/main/modeling_nvlm_d.py
 # --------------------------------------------------------
@@ -22,9 +23,10 @@ from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
 
 from .intern_vit import InternVisionModel
-from .internvl import (BaseInternVLProcessingInfo, BaseInternVLProcessor,
-                       InternVLChatModel, InternVLDummyInputsBuilder,
-                       InternVLMultiModalProcessor)
+from .internvl import (BaseInternVLDummyInputsBuilder,
+                       BaseInternVLMultiModalProcessor,
+                       BaseInternVLProcessingInfo, BaseInternVLProcessor,
+                       InternVLChatModel)
 
 IMG_PAD = "<|vision_pad|>"
 
@@ -61,21 +63,7 @@ class NVLMProcessor(BaseInternVLProcessor):
 
 class NVLMProcessingInfo(BaseInternVLProcessingInfo):
 
-    def get_hf_processor(
-        self,
-        *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        **kwargs: object,
-    ) -> NVLMProcessor:
-        if min_dynamic_patch is not None:
-            kwargs["min_dynamic_patch"] = min_dynamic_patch
-        if max_dynamic_patch is not None:
-            kwargs["max_dynamic_patch"] = max_dynamic_patch
-        if dynamic_image_size is not None:
-            kwargs["dynamic_image_size"] = dynamic_image_size
-
+    def get_hf_processor(self, **kwargs: object) -> NVLMProcessor:
         return self.ctx.init_processor(
             NVLMProcessor,
             config=self.get_hf_config(),
@@ -84,7 +72,8 @@ class NVLMProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
-class NVLMDummyInputsBuilder(InternVLDummyInputsBuilder[NVLMProcessingInfo]):
+class NVLMDummyInputsBuilder(BaseInternVLDummyInputsBuilder[NVLMProcessingInfo]
+                             ):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -110,7 +99,8 @@ class NVLMDummyInputsBuilder(InternVLDummyInputsBuilder[NVLMProcessingInfo]):
         }
 
 
-class NVLMMultiModalProcessor(InternVLMultiModalProcessor[NVLMProcessingInfo]):
+class NVLMMultiModalProcessor(
+        BaseInternVLMultiModalProcessor[NVLMProcessingInfo]):
 
     def _get_prompt_updates(
         self,
