@@ -448,6 +448,11 @@ def reference_moe_impl(config: Config, weights: WeightTensors,
         a_global_scale = ((FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(
             rank_tensors.hidden_states.flatten(), dim=-1)).to(torch.float32)
 
+        assert w1_gs is not None
+        assert w2_gs is not None
+        assert w1_blockscale is not None
+        assert w2_blockscale is not None
+
         assert w1_blockscale.shape[1] % 128 == 0
         assert w1_blockscale.shape[2] % 4 == 0
         assert w2_blockscale.shape[1] % 128 == 0
@@ -469,11 +474,6 @@ def reference_moe_impl(config: Config, weights: WeightTensors,
 
         w1 = torch.zeros((e, 2 * n, k), device="cuda", dtype=dtype)
         w2 = torch.zeros((e, k, n), device="cuda", dtype=dtype)
-
-        assert w1_gs is not None
-        assert w2_gs is not None
-        assert w1_blockscale is not None
-        assert w2_blockscale is not None
 
         for idx in range(0, e):
             w1[idx] = dequantize_nvfp4_to_dtype(w1_q[idx],
