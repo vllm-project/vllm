@@ -15,8 +15,9 @@ import torch_xla.distributed.spmd as xs
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
+from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.layer import Attention
+from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import (ParallelConfig, VllmConfig,
                          get_layers_from_vllm_config, update_config)
@@ -518,7 +519,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 continue
 
             if attn_module.attn_type == AttentionType.DECODER:
-                if attn_module.use_irope:
+                if isinstance(attn_module, ChunkedLocalAttention):
                     logger.warning_once(
                         "Using irope in Pallas is not supported yet, it "
                         "will fall back to global attention for long context.")
