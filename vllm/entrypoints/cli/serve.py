@@ -144,7 +144,7 @@ def run_multi_api_server(args: argparse.Namespace):
         setup_multiprocess_prometheus()
 
         # Not compatible with API server scale-out
-        args.disable_mm_preprocessor_cache = 0
+        args.disable_mm_preprocessor_cache = True
 
     listen_address, sock = setup_server(args)
 

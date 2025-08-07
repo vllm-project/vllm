@@ -1567,11 +1567,6 @@ def parse_args():
         action="store_true",
         help="If True, disables caching of multi-modal processor.",
     )
-    parser.add_argument(
-        "--disable-mm-ipc-cache",
-        action="store_true",
-        help="If True, disables caching of multi-modal transfer from P0 to P1.",
-    )
 
     parser.add_argument(
         "--time-generate",
