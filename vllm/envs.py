@@ -152,8 +152,7 @@ if TYPE_CHECKING:
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
-    VLLM_USE_TRTLLM_CONTEXT_ATTENTION: bool = False
-    VLLM_USE_TRTLLM_DECODE_ATTENTION: bool = False
+    VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
 
@@ -1043,13 +1042,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_CUDNN_PREFILL":
     lambda: bool(int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))),
 
-    # If set to 1, use the TRTLLM Context Attention backend in flashinfer.
-    "VLLM_USE_TRTLLM_CONTEXT_ATTENTION":
-    lambda: bool(int(os.getenv("VLLM_USE_TRTLLM_CONTEXT_ATTENTION", "0"))),
-
-    # If set to 1, use the TRTLLM Decode Attention backend in flashinfer.
-    "VLLM_USE_TRTLLM_DECODE_ATTENTION":
-    lambda: bool(int(os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", "0"))),
+    # If set to 1, use the TRTLLM attention backend in flashinfer.
+    "VLLM_USE_TRTLLM_ATTENTION":
+    lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
 
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
