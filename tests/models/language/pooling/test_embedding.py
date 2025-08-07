@@ -57,8 +57,7 @@ def test_models(
     monkeypatch,
 ) -> None:
     if model == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
-        check_transformers_version(model,
-                                   max_transformers_version="4.53.2")
+        check_transformers_version(model, max_transformers_version="4.53.2")
 
     if model == "BAAI/bge-multilingual-gemma2" and current_platform.is_rocm():
         # ROCm Triton FA does not currently support sliding window attention
