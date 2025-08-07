@@ -345,6 +345,7 @@ class OpenAIServingResponses(OpenAIServing):
                 )
             except Exception as e:
                 return self.create_error_response(str(e))
+        return self.create_error_response("Should not reach here")
 
     async def _make_request(
         self,
