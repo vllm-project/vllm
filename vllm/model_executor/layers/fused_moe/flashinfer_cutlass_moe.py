@@ -19,7 +19,7 @@ def is_valid_flashinfer_cutlass_fused_moe(hidden_states: torch.Tensor,
                                           w1: torch.Tensor,
                                           w2: torch.Tensor) -> bool:
     """
-    Check if the given problem size is supported by the FlashInfer CUTLASS MoE 
+    Check if the given problem size is supported by the FlashInfer CUTLASS MoE
     kernel.
     """
     if not has_flashinfer_cutlass_fused_moe():

@@ -37,7 +37,6 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import (direct_register_custom_op, has_deep_ep, has_pplx,
                         has_triton_kernels, is_torch_equal_or_newer, round_up)
-from vllm.utils.flashinfer import has_flashinfer
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
@@ -77,7 +76,7 @@ class FusedMoeWeightScaleSupported(Enum):
 
 class FusedMoEMethodBase(QuantizeMethodBase):
 
-    # TODO: also pass quant_config???
+    # TODO(bnell): also pass quant_config?
     def __init__(self, moe: FusedMoEConfig):
         super().__init__()
         self.moe = moe
