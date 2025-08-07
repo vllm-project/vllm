@@ -50,7 +50,8 @@ class Processor:
                                                     self.tokenizer,
                                                     mm_registry)
 
-        self.mm_input_cache_client = MirroredProcessingCache(self.model_config)
+        self.mm_input_cache_client = MirroredProcessingCache(self.vllm_config,
+                                                             is_writer=True)
 
         # Multi-modal hasher (for images)
         self.use_hash = self.mm_input_cache_client.use_cache or \

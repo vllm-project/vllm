@@ -276,6 +276,7 @@ TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal["raw_logprobs", "raw_logits", "processed_logprobs",
                        "processed_logits"]
+MMCacheType = Literal["shm", "lru"]
 
 
 @config
@@ -446,6 +447,9 @@ class ModelConfig:
     disable_mm_preprocessor_cache: bool = False
     """If `True`, disable caching of the multi-modal preprocessor/mapper (not
     recommended)."""
+    mm_preprocessor_cache_type: MMCacheType = "lru"
+    """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
+    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -884,7 +888,19 @@ class ModelConfig:
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 disable_mm_preprocessor_cache=self.
                 disable_mm_preprocessor_cache,
-                interleave_mm_strings=self.interleave_mm_strings)
+                interleave_mm_strings=self.interleave_mm_strings,
+                mm_preprocessor_cache_type=self.mm_preprocessor_cache_type,
+            )
+
+        if self.limit_mm_per_prompt:
+            raise ValueError("`limit_mm_per_prompt` is only supported for "
+                             "multimodal models.")
+        if self.mm_processor_kwargs:
+            raise ValueError("`mm_processor_kwargs` is only supported for "
+                             "multimodal models.")
+        if self.disable_mm_preprocessor_cache:
+            raise ValueError("`disable_mm_preprocessor_cache` is only "
+                             "supported for multimodal models.")
 
         return None
 
@@ -3376,6 +3392,9 @@ class MultiModalConfig:
     """
     Enable fully interleaved support for multimodal prompts.
     """
+    mm_preprocessor_cache_type: MMCacheType = "lru"
+    """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
+    use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
 
     def compute_hash(self) -> str:
         """

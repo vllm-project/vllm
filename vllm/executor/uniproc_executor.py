@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from multiprocessing import Lock
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+from vllm.distributed.device_communicators.shm_object_storage import (
+    MsgpackSerde, SingleWriterShmObjectStorage, SingleWriterShmRingBuffer)
 from vllm.executor.executor_base import ExecutorBase
+from vllm.executor.mm_utils import get_and_update_mm_cache
 from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         run_method)
@@ -47,6 +51,23 @@ class UniProcExecutor(ExecutorBase):
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
+        # Initialize shared memory object store for multimodal inputs if needed
+        if SingleWriterShmObjectStorage.is_enabled(
+                self.model_config.multimodal_config):
+            ring_buffer = SingleWriterShmRingBuffer(
+                data_buffer_size=envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_SIZE_MB *
+                1024 * 1024,
+                name=envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
+                is_free_fn=SingleWriterShmObjectStorage.default_is_free_check,
+            )
+            self.object_storage = SingleWriterShmObjectStorage(
+                max_object_size=envs.VLLM_OBJECT_STORAGE_MAX_OBJECT_SIZE_MB *
+                1024 * 1024,
+                n_readers=1,
+                ring_buffer=ring_buffer,
+                ser_de=MsgpackSerde,
+                reader_lock=Lock(),
+            )
 
     def collective_rpc(self,
                        method: Union[str, Callable],
@@ -55,6 +76,8 @@ class UniProcExecutor(ExecutorBase):
                        kwargs: Optional[Dict] = None) -> List[Any]:
         if kwargs is None:
             kwargs = {}
+        if hasattr(self, 'object_storage'):
+            get_and_update_mm_cache(self.object_storage, args)
         answer = run_method(self.driver_worker, method, args, kwargs)
         return [answer]
 

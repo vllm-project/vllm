@@ -155,6 +155,11 @@ if TYPE_CHECKING:
     VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
+    VLLM_USE_TRTLLM_CONTEXT_ATTENTION: bool = False
+    VLLM_USE_TRTLLM_DECODE_ATTENTION: bool = False
+    VLLM_OBJECT_STORAGE_MAX_OBJECT_SIZE_MB: int = 128
+    VLLM_OBJECT_STORAGE_SHM_BUFFER_SIZE_MB: int = 8192
+    VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
 
 
 def get_default_cache_root():
@@ -1093,6 +1098,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #    never removed from memory until the server terminates.
     "VLLM_ENABLE_RESPONSES_API_STORE":
     lambda: bool(int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))),
+    "VLLM_OBJECT_STORAGE_MAX_OBJECT_SIZE_MB":
+    lambda: int(os.getenv("VLLM_OBJECT_STORAGE_MAX_OBJECT_SIZE_MB", "128")),
+    "VLLM_OBJECT_STORAGE_SHM_BUFFER_SIZE_MB":
+    lambda: int(os.getenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_SIZE_MB", "1024")),
+    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME":
+    lambda: os.getenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
+                      "VLLM_OBJECT_STORAGE_SHM_BUFFER"),
 }
 
 # --8<-- [end:env-vars-definition]

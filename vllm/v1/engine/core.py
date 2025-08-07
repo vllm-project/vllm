@@ -125,8 +125,7 @@ class EngineCore:
         )
 
         # Setup MM Input Mapper.
-        self.mm_input_cache_server = MirroredProcessingCache(
-            vllm_config.model_config)
+        self.mm_input_cache_server = MirroredProcessingCache(vllm_config)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously

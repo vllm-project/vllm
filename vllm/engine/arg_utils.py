@@ -27,12 +27,12 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          DeviceConfig, DistributedExecutorBackend,
                          GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
-                         LoRAConfig, ModelConfig, ModelDType, ModelImpl,
-                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
-                         PoolerConfig, PrefixCachingHashAlgo, RunnerOption,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs,
-                         get_field)
+                         LoRAConfig, MMCacheType, ModelConfig, ModelDType,
+                         ModelImpl, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
+                         RunnerOption, SchedulerConfig, SchedulerPolicy,
+                         SpeculativeConfig, TaskOption, TokenizerMode,
+                         VllmConfig, get_attr_docs, get_field)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -360,6 +360,8 @@ class EngineArgs:
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = \
         MultiModalConfig.disable_mm_preprocessor_cache
+    mm_preprocessor_cache_type: Optional[MMCacheType] = \
+        MultiModalConfig.mm_preprocessor_cache_type
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -725,6 +727,9 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--interleave-mm-strings",
             **multimodal_kwargs["interleave_mm_strings"])
+        multimodal_group.add_argument(
+            "--mm-preprocessor-cache-type",
+            **multimodal_kwargs["mm_preprocessor_cache_type"])
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -923,6 +928,7 @@ class EngineArgs:
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
             disable_mm_preprocessor_cache=self.disable_mm_preprocessor_cache,
+            mm_preprocessor_cache_type=self.mm_preprocessor_cache_type,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
