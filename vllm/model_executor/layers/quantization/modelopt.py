@@ -10,7 +10,8 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm._custom_ops import cutlass_scaled_fp4_mm, flashinfer_scaled_fp4_mm, scaled_fp4_quant
+from vllm._custom_ops import (cutlass_scaled_fp4_mm, flashinfer_scaled_fp4_mm,
+                              scaled_fp4_quant)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -735,11 +736,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         elif is_fp4_marlin_supported():
             self.backend = "marlin"
         else:
-            raise ValueError(
-                "Current platform does not support NVFP4"
-                " quantization. Please use Blackwell and"
-                " above."
-            )
+            raise ValueError("Current platform does not support NVFP4"
+                             " quantization. Please use Blackwell and"
+                             " above.")
 
     def create_weights(
         self,
@@ -824,29 +823,29 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
         if self.backend == "flashinfer-trtllm":
             # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
-            # FlashInfer provides nvfp4_quantize to quantize + shuffle the layout but we use our own quantization
-            # so we have to call shuffles ourselves.
+            # FlashInfer provides nvfp4_quantize to quantize + shuffle the
+            # layout but we use our own quantization so we have to call
+            # shuffles ourselves.
             from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
 
             weight = layer.weight.data
             weight_scale = layer.weight_scale.data
 
             epilogue_tile_m = 128
-            weight = shuffle_matrix_a(weight.view(torch.uint8), epilogue_tile_m)
-            weight_scale = (
-                shuffle_matrix_sf_a(weight_scale.view(torch.uint8), epilogue_tile_m)
-                .reshape(weight_scale.shape)
-                .view(torch.float8_e4m3fn)
-            )
+            weight = shuffle_matrix_a(weight.view(torch.uint8),
+                                      epilogue_tile_m)
+            weight_scale = (shuffle_matrix_sf_a(weight_scale.view(
+                torch.uint8), epilogue_tile_m).reshape(
+                    weight_scale.shape).view(torch.float8_e4m3fn))
 
-            layer.weight_scale_swizzled = Parameter(weight_scale, requires_grad=False)
+            layer.weight_scale_swizzled = Parameter(weight_scale,
+                                                    requires_grad=False)
             layer.weight = Parameter(weight, requires_grad=False)
         else:
             swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
 
-            layer.weight_scale_swizzled = Parameter(
-                swizzled_weight_scale, requires_grad=False
-            )
+            layer.weight_scale_swizzled = Parameter(swizzled_weight_scale,
+                                                    requires_grad=False)
             layer.weight = Parameter(layer.weight.data, requires_grad=False)
 
             if self.backend == "marlin":
