@@ -135,9 +135,19 @@ class RotaryEmbedding(CustomOp):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         # currently only rotary embedding ops from AITER package are
         # supported for HiP forward.
-        if not self.is_rocm_aiter_enabled:
-            return self.forward_native(positions, query, key, offsets)
+        if self.is_rocm_aiter_enabled:
+            self.forward_hip_rocm_aiter(positions, query, key, offsets,
+                                        is_nope_first)
+        return self.forward_native(positions, query, key, offsets)
 
+    def forward_hip_rocm_aiter(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+        offsets: Optional[torch.Tensor] = None,
+        is_nope_first: bool = False,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         if self.cos_sin_cache.device != query.device or \
             self.cos_sin_cache.dtype != query.dtype:
             self.cos_sin_cache = self.cos_sin_cache.to(query.device,
