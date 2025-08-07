@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.qqq import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
     MARLIN_SUPPORTED_GROUP_SIZES, marlin_make_empty_g_idx,
-    marlin_make_workspace_new, marlin_permute_scales,
+    marlin_make_workspace_new, marlin_permute_bias, marlin_permute_scales,
     query_marlin_supported_quant_types)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     FP4_MARLIN_SUPPORTED_GROUP_SIZES, rand_marlin_weight_mxfp4_like,
@@ -33,7 +33,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import (
     marlin_24_quantize)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test_qqq import (  # noqa: E501
     marlin_qqq_quantize)
-from vllm.model_executor.layers.quantization.utils.marlin_utils import marlin_permute_bias
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     awq_pack, gptq_pack, gptq_quantize_weights, quantize_weights, sort_weights)
 from vllm.scalar_type import scalar_types
@@ -205,18 +204,9 @@ def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
 @pytest.mark.parametrize("use_atomic_add", USE_ATOMIC_ADD_OPTS)
 @pytest.mark.parametrize("use_fp32_reduce", USE_FP32_REDUCE_OPTS)
 @pytest.mark.parametrize("dtype", DTYPES)
-def test_gptq_marlin_gemm(
-    k_chunk,
-    n_chunk,
-    quant_type,
-    group_size,
-    mnk_factors,
-    act_order,
-    is_k_full,
-    use_atomic_add,
-    use_fp32_reduce,
-    dtype
-):
+def test_gptq_marlin_gemm(k_chunk, n_chunk, quant_type, group_size,
+                          mnk_factors, act_order, is_k_full, use_atomic_add,
+                          use_fp32_reduce, dtype):
     m_factor, n_factor, k_factor = mnk_factors
     has_zp = quant_type in [scalar_types.uint4, scalar_types.uint8]
 
@@ -578,7 +568,7 @@ def test_marlin_gemm_with_bias():
     size_m, size_k, size_n = 32, 1024, 2048
     a_input = rand_data((size_m, size_k))
     b_weight = rand_data((size_k, size_n))
-    b_bias = rand_data((size_n,)) * 10
+    b_bias = rand_data((size_n, )) * 10
 
     marlin_bias = marlin_permute_bias(b_bias)
 

@@ -24,6 +24,8 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, modular_triton_fused_moe)
 from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
     fused_moe as iterative_moe)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    marlin_permute_bias)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     rand_marlin_weight_mxfp4_like, rand_marlin_weight_nvfp4_like)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
@@ -32,7 +34,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     awq_marlin_quantize, marlin_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     quantize_weights)
-from vllm.model_executor.layers.quantization.utils.marlin_utils import marlin_permute_bias
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
@@ -715,7 +716,6 @@ def test_fused_marlin_moe_with_bias():
     qweight1_l = []
     scales1_l = []
     global_scale1_l = []
-    zeros1_l = []
     g_idx1_l = []
     sort_indices1_l = []
 
@@ -735,9 +735,9 @@ def test_fused_marlin_moe_with_bias():
     w_ref1 = stack_and_dev(w_ref1_l)
     qweight1 = stack_and_dev(qweight1_l).contiguous()
     scales1 = stack_and_dev(scales1_l)
-    global_scale1 = stack_and_dev(global_scale1_l) if global_scale1_l else None
+    global_scale1 = stack_and_dev(global_scale1_l)
     g_idx1 = stack_and_dev(g_idx1_l) if g_idx1_l else None
-    zeros1 = stack_and_dev(zeros1_l) if zeros1_l else None
+    zeros1 = None
     sort_indices1 = stack_and_dev(sort_indices1_l) if sort_indices1_l else None
     marlin_bias1 = stack_and_dev(b_bias1_l) if b_bias1_l else None
 
@@ -746,7 +746,6 @@ def test_fused_marlin_moe_with_bias():
     qweight2_l = []
     scales2_l = []
     global_scale2_l = []
-    zeros2_l = []
     g_idx2_l = []
     sort_indices2_l = []
 
@@ -766,9 +765,9 @@ def test_fused_marlin_moe_with_bias():
     w_ref2 = stack_and_dev(w_ref2_l)
     qweight2 = stack_and_dev(qweight2_l).contiguous()
     scales2 = stack_and_dev(scales2_l)
-    global_scale2 = stack_and_dev(global_scale2_l) if global_scale2_l else None
+    global_scale2 = stack_and_dev(global_scale2_l)
     g_idx2 = stack_and_dev(g_idx2_l) if g_idx2_l else None
-    zeros2 = stack_and_dev(zeros2_l) if zeros2_l else None
+    zeros2 = None
     sort_indices2 = stack_and_dev(sort_indices2_l) if sort_indices2_l else None
     marlin_bias2 = stack_and_dev(b_bias2_l) if b_bias2_l else None
 

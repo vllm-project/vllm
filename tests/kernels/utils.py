@@ -1115,7 +1115,8 @@ def torch_experts(
                 tmp2 = SiluAndMul()(tmp1)
                 out[mask] = tmp2 @ w2[i].transpose(0, 1)
                 if b_bias2 is not None:
-                    out[mask] = out[mask] + b_bias2[i].view(1, -1).to(tmp1.dtype)
+                    out[mask] = out[mask] + b_bias2[i].view(1, -1).to(
+                        tmp1.dtype)
             elif block_shape is not None:
                 # block quantized
                 assert (a_scale is not None and w1_scale is not None
@@ -1134,7 +1135,8 @@ def torch_experts(
                                                      w2_scale[i], block_shape,
                                                      out.dtype)
                 if b_bias2 is not None:
-                    out[mask] = out[mask] + b_bias2[i].view(1, -1).to(tmp1.dtype)
+                    out[mask] = out[mask] + b_bias2[i].view(1, -1).to(
+                        tmp1.dtype)
             else:
                 assert (a_scale is not None and w1_scale is not None
                         and w2_scale is not None)
@@ -1157,7 +1159,8 @@ def torch_experts(
                 w2_dq = (w2[i].to(f32) * w2_scale[i]).transpose(0, 1)
                 out[mask] = (tmp2 @ w2_dq).to(out.dtype)
                 if b_bias2 is not None:
-                    out[mask] = out[mask] + b_bias2[i].view(1, -1).to(out.dtype)
+                    out[mask] = out[mask] + b_bias2[i].view(1, -1).to(
+                        out.dtype)
 
     if apply_router_weights_on_input:
         return out
