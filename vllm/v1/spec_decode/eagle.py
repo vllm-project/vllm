@@ -158,9 +158,9 @@ class EagleProposer:
         assert self.runner is not None
 
         # FIXME: need to consider multiple kv_cache_groups
-        attn_metadata = self.runner.attn_metadata_builders[
-            0].build_for_drafting(common_attn_metadata=common_attn_metadata,
-                                  draft_index=0)
+        attn_metadata = self.runner.attn_groups[0][0].metadata_builder\
+            .build_for_drafting(common_attn_metadata=common_attn_metadata,
+                                draft_index=0)
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -349,7 +349,8 @@ class EagleProposer:
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> list[torch.Tensor]:
-        tree_attn_metadata_builder = self.runner.attn_metadata_builders[0]
+        tree_attn_metadata_builder = \
+            self.runner.attn_groups[0][0].metadata_builder
         assert isinstance(tree_attn_metadata_builder,
                           TreeAttentionMetadataBuilder)
 

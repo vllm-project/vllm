@@ -53,11 +53,11 @@ class CPUModelRunner(GPUModelRunner):
             raise ValueError("Multiple KVCacheGroups is not"
                              "currently supported with CPU model runner.")
 
-        assert type(
-            self.attn_metadata_builders[0]) is TorchSDPAMetadataBuilderV1
+        assert type(self.attn_groups[0]
+                    [0].metadata_builder) is TorchSDPAMetadataBuilderV1
 
-        self.attn_metadata_builders[0].reorder_batch(self.input_batch,
-                                                     scheduler_output)
+        self.attn_groups[0][0].metadata_builder.reorder_batch(
+            self.input_batch, scheduler_output)
 
     def _postprocess_tenosrs(self) -> None:
         # Note: replace device tensors with cpu tensors
