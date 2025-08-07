@@ -1077,7 +1077,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRTLLM_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
 
-    # If set to 1, use the TRTLLM FP4 GEMM backend in flashinfer.
+    # If set to 1, force the use of TRTLLM FP4 GEMM backend in flashinfer.
+    # Otherwise, uses the first available of: flashinfer cutlass GEMM,
+    # vllm cutlass GEMM, marlin GEMM.
     "VLLM_USE_TRTLLM_FP4_GEMM":
     lambda: bool(int(os.getenv("VLLM_USE_TRTLLM_FP4_GEMM", "0"))),
 
