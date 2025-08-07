@@ -228,13 +228,12 @@ class OpenAIServingResponses(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[ConversationContext, None]] = []
 
-        if self.use_harmony:
-            builtin_tool_list: list[str] = []
-            if self.tool_server is not None:
-                if self.tool_server.has_tool("browser"):
-                    builtin_tool_list.append("browser")
-                if self.tool_server.has_tool("python"):
-                    builtin_tool_list.append("python")
+        builtin_tool_list: list[str] = []
+        if self.use_harmony and self.tool_server is not None:
+            if self.tool_server.has_tool("browser"):
+                builtin_tool_list.append("browser")
+            if self.tool_server.has_tool("python"):
+                builtin_tool_list.append("python")
         async with AsyncExitStack() as exit_stack:
             try:
                 if self.tool_server is not None:
