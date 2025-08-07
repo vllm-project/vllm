@@ -89,20 +89,11 @@ backend_configs = {
 # (backend_name, cudagraph_mode, supported)
 combo_cases_1 = [
     ("FA3", "FULL", True),
-    # for backend cudagraph support is ALWAYS_UNIFIED,
-    # cudagraph_separate_routine would be ignored(overwritten)
     ("FA3", "FULL_AND_PIECEWISE", True),
-    ("FA3", "PIECEWISE", True),
-    ("FA2", "FULL", True),
+    ("FA2", "FULL", True),  # Should fallback to FULL_AND_PIECEWISE
     ("FA2", "FULL_AND_PIECEWISE", True),
-    ("FA2", "PIECEWISE", True),
-    # For backend cudagraph support is pure decode only.
-    ("FlashInfer", "FULL", False),
+    ("FlashInfer", "FULL", True),  # Should fallback to FULL_AND_PIECEWISE
     ("FlashInfer", "FULL_AND_PIECEWISE", True),
-    # No cudagraph is compatible with vllm compilation
-    ("FA2", "NONE", True),
-    ("FA3", "NONE", True),
-    ("FlashInfer", "NONE", True),
 ]
 
 

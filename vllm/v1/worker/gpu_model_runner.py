@@ -2208,10 +2208,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
         num_tokens += num_pad
 
-        # If cudagraph_separate_routine is enabled when use full cudagraph,
-        # we need to manually activate the correct routine of attention backend
-        # for mixed prefill-decode batches and uniform decode batches
-        # separately during capturing. Uniform batch means that all
+        # If cudagraph_mode.decode_mode() == FULL and
+        # cudagraph_mode.seperate_routine(). This means that we are using
+        # different graphs and/or modes for mixed prefill-decode batches vs.
+        # uniform decode batches. A uniform decode batch means that all
         # requests have identical query length, except a potential virtual
         # request (shorter) in the batch account for padding.
         # Uniform decode batch could either be common pure decode, where
