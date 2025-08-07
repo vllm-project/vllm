@@ -392,21 +392,7 @@ class H2OVLProcessor(BaseInternVLProcessor):
 
 class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
 
-    def get_hf_processor(
-        self,
-        *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        **kwargs: object,
-    ) -> H2OVLProcessor:
-        if min_dynamic_patch is not None:
-            kwargs["min_dynamic_patch"] = min_dynamic_patch
-        if max_dynamic_patch is not None:
-            kwargs["max_dynamic_patch"] = max_dynamic_patch
-        if dynamic_image_size is not None:
-            kwargs["dynamic_image_size"] = dynamic_image_size
-
+    def get_hf_processor(self, **kwargs: object) -> H2OVLProcessor:
         return self.ctx.init_processor(
             H2OVLProcessor,
             config=self.get_hf_config(),

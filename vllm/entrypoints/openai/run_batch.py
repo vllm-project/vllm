@@ -302,7 +302,7 @@ async def run_request(serving_engine_func: Callable,
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
             response=BatchResponseData(
-                status_code=response.code,
+                status_code=response.error.code,
                 request_id=f"vllm-batch-{random_uuid()}"),
             error=response,
         )
@@ -324,10 +324,10 @@ async def run_batch(
     else:
         served_model_names = [args.model]
 
-    if args.disable_log_requests:
-        request_logger = None
-    else:
+    if args.enable_log_requests:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
+    else:
+        request_logger = None
 
     base_model_paths = [
         BaseModelPath(name=name, model_path=args.model)

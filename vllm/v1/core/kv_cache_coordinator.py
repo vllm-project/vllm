@@ -126,14 +126,17 @@ class KVCacheCoordinator(ABC):
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> list[int]:
         """
-        Get the number of common prefix blocks for a request.
+        Get the number of common prefix blocks for all requests in the RUNNING
+        state for each kv cache group.
 
         Args:
             request_id: The request ID.
-            num_running_requests: The number of requests in the RUNNING state.
+            num_running_requests: The total number of requests in the RUNNING
+                state.
 
         Returns:
-            list[int]: The number of common prefix blocks.
+            list[int]: The number of common prefix blocks for all requests in
+                the RUNNING state for each kv cache group.
         """
         num_blocks_per_group = [
             manager.get_num_common_prefix_blocks(request_id,
