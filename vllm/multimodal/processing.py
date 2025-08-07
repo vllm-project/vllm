@@ -1451,8 +1451,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_hashes=mm_hashes,
         )
 
-        if not return_mm_hashes:
-            mm_hashes = None
+        mm_hashes_to_return = mm_hashes if return_mm_hashes else None
 
         # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
@@ -1486,7 +1485,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for item in cache_items
         ])
 
-        return prompt_ids, mm_kwargs, mm_hashes, is_update_applied
+        return prompt_ids, mm_kwargs, mm_hashes_to_return, is_update_applied
 
     def _bind_and_group_updates(
         self,
