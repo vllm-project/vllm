@@ -37,19 +37,6 @@ from vllm.scalar_type import scalar_types
 logger = init_logger(__name__)
 
 
-def get_moe_quant_method(
-    config: QuantizationConfig,
-    layer: torch.nn.Module,
-    prefix: str,
-    moe_method_cls: type,
-):
-
-    if isinstance(layer, FusedMoE) and is_layer_skipped_awq(
-            prefix, getattr(config, "modules_to_not_convert", [])):
-        return UnquantizedFusedMoEMethod(layer.moe_config)
-    return moe_method_cls(config)
-
-
 class AWQMarlinConfig(QuantizationConfig):
     """Config class for AWQ Marlin"""
 
@@ -164,7 +151,7 @@ class AWQMarlinConfig(QuantizationConfig):
                     "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(
                     self.full_config).get_quant_method(layer, prefix)
-            return get_moe_quant_method(self, layer, prefix, AWQMoEMethod)
+            return AWQMoEMethod(self)
         return None
 
     @classmethod
