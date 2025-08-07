@@ -169,10 +169,10 @@ def use_trtllm_attention(
         # Making the conditional check for zero because
         # the path is automatically enabled if the batch size condition
         # is satisfied.
-        no_use_trtllm = (env_value == "0")
-        if not no_use_trtllm:
+        use_trtllm = (env_value == "1")
+        if use_trtllm:
             logger.info_once("Using TRTLLM attention.")
-        return not no_use_trtllm
+        return use_trtllm
     else:
         # Environment variable not set - use auto-detection
         use_trtllm = (num_tokens <= 256 and max_seq_len < 131072
