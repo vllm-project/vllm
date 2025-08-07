@@ -2515,12 +2515,12 @@ def _swap_out_hpu_blocks(
     cpu_cache[cpu_block_indices] = hpu_cache[hpu_block_indices].cpu()
 
 def copy_kv_blocks(
+    block_size: int,
     src_kv_caches: dict[str, torch.Tensor],
     dst_kv_caches: dict[str, torch.Tensor],
     src_block_ids: list[int],
     dst_block_ids: list[int],
     direction: Literal["h2d", "d2h"],
-    block_size: int
 ) -> None:
     """Copy kv blocks between different buffers."""
     if not src_kv_caches or not dst_kv_caches or \
