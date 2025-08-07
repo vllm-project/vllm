@@ -1780,7 +1780,7 @@ class ResponsesResponse(OpenAIBaseModel):
         created_time: int,
         output: list[ResponseOutputItem],
         status: ResponseStatus,
-        usage: Optional[UsageInfo] = None,
+        usage: Optional[ResponseUsage] = None,
     ) -> "ResponsesResponse":
         return cls(
             id=request.request_id,

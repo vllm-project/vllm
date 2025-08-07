@@ -6,7 +6,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from copy import copy
 from http import HTTPStatus
-from typing import Callable, Final, Optional, Union
+from typing import Any, Callable, Final, Optional, Union
 
 import jinja2
 from fastapi import Request
@@ -228,7 +228,7 @@ class OpenAIServingResponses(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[ConversationContext, None]] = []
         try:
-            tool_sessions = {}
+            tool_sessions: dict[str, Any] = {}
             for i, engine_prompt in enumerate(engine_prompts):
                 default_max_tokens = self.max_model_len - len(
                     engine_prompt["prompt_token_ids"])
@@ -440,7 +440,7 @@ class OpenAIServingResponses(OpenAIServing):
                 reasoning_parser = self.reasoning_parser(tokenizer)
             except RuntimeError as e:
                 logger.exception("Error in reasoning parser creation.")
-                return self.create_error_response(str(e))
+                raise e
 
             reasoning_content, content = (
                 reasoning_parser.extract_reasoning_content(final_output.text,
