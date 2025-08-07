@@ -39,10 +39,8 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse, FunctionCall,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_fc_uuid, random_uuid
