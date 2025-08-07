@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import torch
 
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import ModelConfig, SchedulerConfig
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.registry import MultiModalRegistry
+from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
@@ -122,6 +125,13 @@ class MultiModalBudget:
         return max_items_per_prompt, max_items_per_batch
 
 
+@dataclass
+class AttentionGroup:
+    backend: type[AttentionBackend]
+    metadata_builder: AttentionMetadataBuilder
+    layer_names: list[str]
+
+
 def sanity_check_mm_encoder_outputs(
     mm_embeddings: MultiModalEmbeddings,
     expected_num_items: int,
@@ -196,6 +206,8 @@ def initialize_kv_cache_for_kv_sharing(
     shared_kv_cache_layers: dict[str, str],
     kv_cache_groups: list[KVCacheGroupSpec],
     kv_caches: dict[str, torch.Tensor],
+    # Optional for now to avoid breaking TPU
+    attn_groups: Optional[list[list[AttentionGroup]]] = None,
 ) -> None:
     """
     Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
@@ -224,6 +236,15 @@ def initialize_kv_cache_for_kv_sharing(
         kv_caches[layer_name] = kv_caches[target_layer_name]
         group_idx = layer_to_kv_cache_group_idx[target_layer_name]
         kv_cache_groups[group_idx].layer_names.append(layer_name)
+
+        if attn_groups is not None:
+            assert len(attn_groups[group_idx]) == 1, (
+                "Only one attention group per KV cache group is supported "
+                "for KV-cache sharing for now.")
+            # TODO(lucas): I think in the future the layers that re-use a
+            # KV cache will be in a different attention group so we can
+            # remove this code from here.
+            attn_groups[group_idx][0].layer_names.append(layer_name)
 
 
 def bind_kv_cache(
