@@ -113,6 +113,21 @@ __device__ __forceinline__ floatx4 gcn_mfma16x16x16_instr(const _B16x4& inpA,
   }
 }
 
+template <typename T, int absz, int cbid, int blgp>
+__device__ __forceinline__ floatx4 gcn_mfma16x16x32_instr(const long& inpA,
+                                                          const long& inpB,
+                                                          const floatx4& inpC) {
+  if constexpr (std::is_same<T, __hip_fp8_e4m3>::value) {
+    return __builtin_amdgcn_mfma_f32_16x16x32_fp8_fp8(inpA, inpB, inpC, absz, cbid,
+                                                 blgp);
+  } else if constexpr (std::is_same<T, __hip_fp8_e5m2>::value) {
+    return __builtin_amdgcn_mfma_f32_16x16x32_bf8_bf8(inpA, inpB, inpC, absz,
+                                                     cbid, blgp);
+  } else {
+    static_assert(false, "unsupported 8b dtype");
+  }
+}
+
 template <typename T>
 __device__ __forceinline__ float to_float(const T& inp) {
   if constexpr (std::is_same<T, _Float16>::value) {
@@ -282,7 +297,7 @@ __device__ __forceinline__ _B8x8 convert_b16x8(const _B16x8& input, _T8x8& Mtemp
 }
 
 __device__ float warpReduceMax(float val) {
-  for (int offset = hipWarpSize / 2; offset > 0; offset /= 2) {
+  for (int offset = warpSize / 2; offset > 0; offset /= 2) {
     val = max(val, __shfl_down(val, offset, WARP_SIZE)); // Using max() for reduction
   }
   return val;
@@ -791,9 +806,9 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
           _B16x8 Vtmp = Vlocal[vtoken_depth][vhe_depth][vfetch_depth];
           // reinterpret V format as 16 elements of 8bits
           _B8x16 Vtmp8x16 = *reinterpret_cast<_B8x16*>(&Vtmp);
-#ifndef __FP8__PA__
           for (int j = 0; j < ELEMS16_ELEMS8_RATIO; j++) {
             _B8x8 Vtmp8x8 = Vtmp8x16.xy[j];
+#ifndef __FP8__PA__
             _B16x8 Vlocaltmp = convert_b8x8_custom<scalar_t>(Vtmp8x8);
             for (int i = 0; i < ELEMS8_ELEMS4_RATIO; i++) {
               const int offset =
@@ -808,7 +823,6 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
                   shared_logits[vtoken_depth][offset2][lane16id][offset1],
                   tmp_out);
             }
-          }
 #else
             for (int i = 0; i < ELEMS8_ELEMS4_RATIO/2; i++) {
                const int offset =
@@ -824,6 +838,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
                    tmp_out);
              }
  #endif
+          }
         }
       }
     }
