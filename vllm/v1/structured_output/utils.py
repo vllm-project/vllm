@@ -56,7 +56,7 @@ def apply_grammar_bitmask(
     # We receive the structured output bitmask from the scheduler,
     # compacted to contain bitmasks only for structured output requests.
     # The order of the requests in the bitmask is not guaranteed to be the
-    # same as the order of the requests in the model runner's batch. We need
+    # same as the order of the requests in the gpu runner's batch. We need
     # to sort the bitmask to match the order of the requests used here.
 
     # Get the batch indices of the structured output requests.
@@ -92,9 +92,14 @@ def apply_grammar_bitmask(
         cumulative_index += 1 + num_spec_tokens
     grammar_bitmask = sorted_bitmask
 
+    # If the grammar bitmask and the logits have the same shape
+    # we don't need to pass indices to the kernel,
+    # since the bitmask is already aligned with the logits.
+    skip_out_indices = grammar_bitmask.shape[0] == logits.shape[0]
+
     # Serialization of np.ndarray is much more efficient than a tensor,
     # so we receive it in that format.
-    grammar_bitmask = torch.from_numpy(grammar_bitmask)
+    grammar_bitmask = torch.from_numpy(grammar_bitmask).contiguous()
 
     # Force use of the torch.compile implementation from xgrammar to work
     # around issues with the Triton kernel in concurrent structured output
@@ -102,7 +107,7 @@ def apply_grammar_bitmask(
     xgr_torch_compile.apply_token_bitmask_inplace_torch_compile(
         logits,
         grammar_bitmask.to(device, non_blocking=True),
-        indices=out_indices,
+        indices=out_indices if not skip_out_indices else None,
     )
 
 
