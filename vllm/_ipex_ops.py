@@ -287,25 +287,73 @@ class ipex_ops:
         else:
             assert len(window_size) == 2
             real_window_size = (window_size[0], window_size[1])
-        return ipex.llm.modules.PagedAttention.flash_attn_varlen_func(
-            out,
-            q.contiguous(),
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            softmax_scale,
-            causal,
-            block_table,
-            alibi_slopes,
-            softcap=softcap,
-            window_size_left=real_window_size[0],
-            window_size_right=real_window_size[1],
-            k_scale=1.0,
-            v_scale=1.0,
-        )
+
+        # Check for XMX support and fallback to basic attention if not available
+        try:
+            return ipex.llm.modules.PagedAttention.flash_attn_varlen_func(
+                out,
+                q.contiguous(),
+                k,
+                v,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                softmax_scale,
+                causal,
+                block_table,
+                alibi_slopes,
+                softcap=softcap,
+                window_size_left=real_window_size[0],
+                window_size_right=real_window_size[1],
+                k_scale=1.0,
+                v_scale=1.0,
+            )
+        except RuntimeError as e:
+            if "XMX" in str(e) or "chunked_prefill" in str(e):
+                # Fallback to basic attention implementation without XMX
+                from vllm.platforms import current_platform
+                import torch.nn.functional as F
+                import warnings
+                warnings.warn(
+                    f"XMX acceleration not available ({e}). "
+                    "Falling back to basic attention implementation. "
+                    "Performance will be reduced on Intel integrated GPUs.",
+                    UserWarning
+                )
+                
+                # Basic scaled dot product attention fallback
+                q = q.contiguous()
+                k = k.contiguous() 
+                v = v.contiguous()
+                
+                # Reshape for batch processing
+                batch_size = cu_seqlens_q.shape[0] - 1
+                outputs = []
+                
+                for i in range(batch_size):
+                    start_q = cu_seqlens_q[i].item()
+                    end_q = cu_seqlens_q[i + 1].item()
+                    start_k = cu_seqlens_k[i].item()
+                    end_k = cu_seqlens_k[i + 1].item()
+                    
+                    q_seq = q[start_q:end_q].unsqueeze(0)
+                    k_seq = k[start_k:end_k].unsqueeze(0)
+                    v_seq = v[start_k:end_k].unsqueeze(0)
+                    
+                    # Use PyTorch's scaled dot product attention as fallback
+                    attn_out = F.scaled_dot_product_attention(
+                        q_seq, k_seq, v_seq,
+                        scale=softmax_scale,
+                        is_causal=causal
+                    )
+                    outputs.append(attn_out.squeeze(0))
+                
+                result = torch.cat(outputs, dim=0)
+                out.copy_(result)
+                return out
+            else:
+                raise
 
     @staticmethod
     def get_scheduler_metadata(

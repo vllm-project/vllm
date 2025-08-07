@@ -184,6 +184,23 @@ class XPUPlatform(Platform):
         return device_name.count("a770") > 0
 
     @classmethod
+    def has_xmx_support(cls) -> bool:
+        """Check if the current Intel XPU device supports XMX (Matrix Extensions)."""
+        try:
+            # Data center GPUs typically have XMX support
+            if cls.is_data_center_gpu():
+                return True
+            # Integrated GPUs typically don't have XMX support
+            device_name = cls.get_device_name().lower()
+            if "integrated" in device_name or "iris" in device_name:
+                return False
+            # Arc discrete GPUs have XMX support
+            return "arc" in device_name
+        except Exception:
+            # Conservative default - assume no XMX support
+            return False
+
+    @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
 
