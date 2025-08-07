@@ -101,9 +101,7 @@ class MultiModalRegistry:
     def enable_mm_input_cache(self, model_config: "ModelConfig") -> bool:
         """Whether the multi-modal input cache should be enabled."""
 
-        if not model_config.is_multimodal_model or \
-            not self.supports_multimodal_inputs(
-                model_config):
+        if self.supports_multimodal_inputs(model_config):
             return False
 
         mm_config = model_config.get_multimodal_config()
