@@ -234,6 +234,9 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                 "python") or message.recipient.startswith("browser"):
             for content in message.content:
                 reasoning_item = ResponseReasoningItem(
+                    id=f"rs_{random_uuid()}",
+                    summary=[],
+                    type="reasoning",
                     text=content.text,
                     status=None,
                 )
