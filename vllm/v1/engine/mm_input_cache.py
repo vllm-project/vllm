@@ -34,11 +34,7 @@ from vllm.utils import is_list_of
 class MirroredProcessingCache:
 
     def __init__(self, model_config, mm_registry: MultiModalRegistry):
-        mm_config = model_config.multimodal_config
-        disable_mm_preprocessor_cache = (
-            mm_config is not None and mm_config.disable_mm_preprocessor_cache) \
-                or not mm_registry.supports_multimodal_inputs(model_config)
-        self.use_cache = not disable_mm_preprocessor_cache
+        self.use_cache = mm_registry.enable_mm_input_cache(model_config)
         self.mm_cache = ProcessingCache.get_lru_cache(VLLM_MM_INPUT_CACHE_GIB,
                                                       MultiModalKwargs)
 
