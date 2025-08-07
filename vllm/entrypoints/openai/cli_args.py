@@ -279,6 +279,14 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help=
         "If set to True, enable tracking server_load_metrics in the app state."
     )
+    
+    # Tool server arguments for GPT-OSS
+    parser.add_argument(
+        "--tool-server",
+        type=str,
+        default=None,
+        help="Tool server type for GPT-OSS model. Options: 'demo', 'mcp', or MCP server URLs separated by commas."
+    )
 
     return parser
 

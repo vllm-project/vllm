@@ -63,6 +63,7 @@ _TEXT_GENERATION_MODELS = {
     "GPTBigCodeForCausalLM": ("gpt_bigcode", "GPTBigCodeForCausalLM"),
     "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
     "GPTNeoXForCausalLM": ("gpt_neox", "GPTNeoXForCausalLM"),
+    "GptOssForCausalLM": ("gpt_oss", "GptOssForCausalLM"),
     "GraniteForCausalLM": ("granite", "GraniteForCausalLM"),
     "GraniteMoeForCausalLM": ("granitemoe", "GraniteMoeForCausalLM"),
     "GraniteMoeHybridForCausalLM": ("granitemoehybrid", "GraniteMoeHybridForCausalLM"),   # noqa: E501

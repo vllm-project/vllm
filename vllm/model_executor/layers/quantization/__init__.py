@@ -38,6 +38,7 @@ QuantizationMethods = Literal[
     "moe_wna16",
     "torchao",
     "auto-round",
+    "mxfp4",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -114,6 +115,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .marlin import MarlinConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
+    from .mxfp4 import Mxfp4Config
     from .neuron_quant import NeuronQuantConfig
     from .ptpc_fp8 import PTPCFp8Config
     from .qqq import QQQConfig
@@ -150,6 +152,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "inc": INCConfig,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
+        "mxfp4": Mxfp4Config,
         "torchao": TorchAOConfig,
         "auto-round": AutoRoundConfig,
     }
