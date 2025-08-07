@@ -55,7 +55,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         super().__init__(
             FusedMoEQuantConfig(
-                quant_dtype=torch.uint8,
+                quant_dtype=torch.uint8
+                if not use_fp8_w8a8 else torch.float8_e4m3fn,
                 per_act_token_quant=False,
                 block_shape=None,
             ))
@@ -117,11 +118,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         - Note: in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens.
         """
-        assert self.use_nvfp4_w4a4 is True, ("Only nvfp4 quantization is "
-                                             "currently supported.")
         aq_m, aq_n = aq.shape
         workspace2 = ()
-        output_shape = (aq_m, aq_n * 2)
+        output_shape = (aq_m, aq_n * 2) if self.use_fp8_w8a8 else (aq_m, aq_n)
         workspace_dtype = a.dtype
         workspace1 = output_shape
         # The workspace is determined by `aq`, since it comes after any
@@ -160,8 +159,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if hidden_states.dtype == torch.float8_e4m3fn:
             required_keys = ['out_dtype']
 
-            out_dtype = (extract_required_args(extra_expert_args,
-                                               required_keys))
+            out_dtype = extract_required_args(extra_expert_args,
+                                              required_keys)[0]
             assert a1q_scale is not None
             assert a2_scale is not None
 
