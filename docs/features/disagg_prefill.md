@@ -67,11 +67,11 @@ Now every process in vLLM will have a corresponding connector. Specifically, we 
 
 Here is a figure illustrating how the above 2 connectors are organized:
 
-![Disaggregated prefilling abstractions v1](../assets/features/disagg_prefill/abstraction_v1.png)
+![Disaggregated prefilling high level design](../assets/features/disagg_prefill/high_level_design.png)
 
 The figure below shows how the worker connector works with the attention module to achieve layer-by-layer KV cache store and load:
 
-![Disaggregated prefilling workflow v1](../assets/features/disagg_prefill/workflow_v1.png)
+![Disaggregated prefilling workflow](../assets/features/disagg_prefill/workflow.png)
 
 ## Third-party contributions
 
