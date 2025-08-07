@@ -202,12 +202,9 @@ def gather_mm_placeholders(
     return placeholders[is_embed]
 
 
-def initialize_kv_cache_for_kv_sharing(
+def add_kv_sharing_layers_to_kv_cache_groups(
     shared_kv_cache_layers: dict[str, str],
     kv_cache_groups: list[KVCacheGroupSpec],
-    kv_caches: dict[str, torch.Tensor],
-    # Optional for now to avoid breaking TPU
-    attn_groups: Optional[list[list[AttentionGroup]]] = None,
 ) -> None:
     """
     Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
@@ -221,30 +218,15 @@ def initialize_kv_cache_for_kv_sharing(
             means this layer will perform attention using the keys and values
             from the KV cache of `shared_kv_cache_layers[layer_name]`.
         kv_cache_groups: The KV cache groups of the model.
-        kv_caches: The allocated kv_caches with layer names as keys.
-            Note that layers in shared_kv_cache_layers.keys() are not
-            originally included as it only contains layers which have its own
-            KV cache allocation.
     """
-    # Record index of KV cache group for each layer that allocates a KV cache.
-    layer_to_kv_cache_group_idx: dict[str, int] = {}
-    for i, kv_cache_group in enumerate(kv_cache_groups):
+    layer_to_kv_cache_group: dict[str, KVCacheGroupSpec] = {}
+    for kv_cache_group in kv_cache_groups:
         for layer_name in kv_cache_group.layer_names:
-            layer_to_kv_cache_group_idx[layer_name] = i
+            layer_to_kv_cache_group[layer_name] = kv_cache_group
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
-        kv_caches[layer_name] = kv_caches[target_layer_name]
-        group_idx = layer_to_kv_cache_group_idx[target_layer_name]
-        kv_cache_groups[group_idx].layer_names.append(layer_name)
-
-        if attn_groups is not None:
-            assert len(attn_groups[group_idx]) == 1, (
-                "Only one attention group per KV cache group is supported "
-                "for KV-cache sharing for now.")
-            # TODO(lucas): I think in the future the layers that re-use a
-            # KV cache will be in a different attention group so we can
-            # remove this code from here.
-            attn_groups[group_idx][0].layer_names.append(layer_name)
+        tgt_kv_cache_group = layer_to_kv_cache_group[target_layer_name]
+        tgt_kv_cache_group.layer_names.append(layer_name)
 
 
 def bind_kv_cache(

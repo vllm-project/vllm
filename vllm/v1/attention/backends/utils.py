@@ -4,12 +4,14 @@ import abc
 import enum
 import functools
 from abc import abstractmethod
-from dataclasses import dataclass, make_dataclass
+from collections.abc import Hashable
+from dataclasses import dataclass, fields, make_dataclass
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Generic, Optional,
-                    TypeVar)
+                    Protocol, TypeVar)
 
 import numpy as np
 import torch
+from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.utils import cdiv
@@ -61,6 +63,8 @@ class CommonAttentionMetadata:
 
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
+
+    logits_indices: Optional[torch.Tensor] = None
 
     causal: bool = True
 
@@ -530,8 +534,73 @@ def make_local_attention_virtual_batches(
         max_query_len=seqlens_q_local.max(),
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
+        logits_indices=common_attn_metadata.logits_indices,
         causal=True,
     )
+
+
+def make_kv_sharing_fast_prefill_common_attn_metadata(
+    common_attn_metadata: CommonAttentionMetadata,
+) -> CommonAttentionMetadata:
+    if common_attn_metadata.max_query_len == 1:
+        # All requests are decode (assume 1 token for now)
+        # Skip computing fast prefill path
+        return common_attn_metadata
+
+    if common_attn_metadata.logits_indices is None:
+        # Logits_indices can be None if prompt_logprobs is
+        # set for at least one request in the current iteration
+        # fast prefill is not compatible with prompt_logprobs
+        # so skip computing fast prefill path
+        return common_attn_metadata
+
+    logits_indices = common_attn_metadata.logits_indices
+    num_reqs = common_attn_metadata.num_reqs
+    query_start_loc = common_attn_metadata.query_start_loc
+    seq_lens = common_attn_metadata.seq_lens
+    # Example inputs
+    # num_reqs: 3
+    # generation_indices:  [14, 18, 19, 27]
+    # query_start_loc: [0, 15, 20, 28]
+    # seq_lens:        [41, 31, 40]
+
+    # Find how many decode indices belong to each request
+    # request_ids: [0, 1, 1, 2]
+    request_ids = torch.bucketize(logits_indices,
+                                  query_start_loc[1:],
+                                  right=True)
+
+    # Figure out how many tokens are in each request
+    # num_decode_tokens: [1, 2, 1]
+    num_decode_tokens = torch.bincount(request_ids, minlength=num_reqs)
+
+    # Calculate new query_start_loc with tokens in generation_indices
+    # decode_query_start_loc: [0, 1, 3, 4]
+    decode_query_start_loc = torch.empty(num_reqs + 1,
+                                         device=query_start_loc.device,
+                                         dtype=query_start_loc.dtype)
+
+    decode_query_start_loc[0] = 0
+    decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
+    decode_max_query_len = int(num_decode_tokens.max().item())
+    total_num_decode_tokens = int(num_decode_tokens.sum().item())
+
+    common_attn_metadata = CommonAttentionMetadata(
+        query_start_loc=decode_query_start_loc,
+        # TODO: optimize
+        query_start_loc_cpu=decode_query_start_loc.cpu(),
+        seq_lens=seq_lens,
+        seq_lens_cpu=seq_lens.cpu(),
+        num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
+        num_reqs=num_reqs,
+        num_actual_tokens=total_num_decode_tokens,
+        max_query_len=decode_max_query_len,
+        block_table_tensor=common_attn_metadata.block_table_tensor,
+        slot_mapping=common_attn_metadata.slot_mapping,
+        logits_indices=logits_indices,
+        causal=True,
+    )
+    return common_attn_metadata
 
 
 def subclass_attention_metadata_builder(
@@ -700,13 +769,77 @@ def subclass_attention_metadata(
     return Wrapped
 
 
+@functools.lru_cache
 def make_kv_sharing_fast_prefill_attention_metadata(
-    metadata_cls: Any, ) -> Any:
+    metadata_cls: Hashable, ) -> Any:
     """
     Return a new subclass of `metadata_cls` for fast prefill
     """
-    return subclass_attention_metadata(
+    attn_metadata_dataclass = subclass_attention_metadata(
         name_prefix="KVSharingFastPrefill",
         metadata_cls=metadata_cls,
         fields=KV_SHARING_FAST_PREFILL_METADATA_FIELDS,
     )
+    # Make attention metadata type inherit
+    # KVSharingFastPrefillAttentionMetadata type
+    fast_prefill_metadata_type = type(
+        attn_metadata_dataclass.__name__,
+        (
+            attn_metadata_dataclass,
+            KVSharingFastPrefillAttentionMetadata,
+        ),
+        {},
+    )
+    return fast_prefill_metadata_type
+
+
+@runtime_checkable
+class KVSharingFastPrefillAttentionMetadata(Protocol):
+    logits_indices_padded: torch.Tensor
+    num_logits_indices: int
+
+
+def create_kv_sharing_fast_prefill_attn_metadata_subclass(
+    attn_metadata_i: Any,
+    logits_indices_padded: torch.Tensor,
+    num_logits_indices: int,
+):
+    # Dynamically create a a dataclass type that inherits
+    # from attention metadata type but includes additional
+    # fields logits_indices_padded and num_logits_indices
+    # which are required for prefill truncation
+    fast_prefill_metadata_type = (
+        make_kv_sharing_fast_prefill_attention_metadata(
+            metadata_cls=type(attn_metadata_i), ))  # type: ignore
+    # Avoid deepcopy caused by dict.asdict
+    attn_metadata_fields = {}
+    for field in fields(attn_metadata_i.__class__):
+        attn_metadata_fields[field.name] = getattr(attn_metadata_i, field.name)
+    attn_metadata_i = fast_prefill_metadata_type(
+        **attn_metadata_fields,
+        logits_indices_padded=logits_indices_padded,
+        num_logits_indices=num_logits_indices,
+    )
+    return attn_metadata_i
+
+
+@functools.lru_cache
+def create_custom_attention_backend(
+    prefix: str,
+    underlying_attn_backend: AttentionBackend,
+    build_preprocess_fn: Callable[[CommonAttentionMetadata],
+                                  CommonAttentionMetadata],
+) -> type[AttentionBackend]:
+    # Dynamically create a new attention backend that wraps the
+    # underlying attention backend but applies
+    # `build_preproces_fn` before calling `build(...)`
+    builder_cls = subclass_attention_metadata_builder(
+        name_prefix=prefix,
+        builder_cls=underlying_attn_backend.get_builder_cls(),
+        build_preprocess_fn=build_preprocess_fn)
+    attn_backend = subclass_attention_backend(
+        name_prefix=prefix,
+        attention_backend_cls=underlying_attn_backend,
+        builder_cls=builder_cls)
+
+    return attn_backend
