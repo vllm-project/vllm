@@ -9,7 +9,7 @@ import pytest
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-from ..utils import build_model_context
+from ..models.utils import build_model_context
 
 
 @pytest.mark.parametrize(
