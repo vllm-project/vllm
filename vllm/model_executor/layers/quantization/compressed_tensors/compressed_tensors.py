@@ -31,8 +31,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    find_matched_target, is_activation_quantization_format,
-    should_ignore_layer)
+    find_matched_target, should_ignore_layer)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported)
@@ -192,7 +191,9 @@ class CompressedTensorsConfig(QuantizationConfig):
                         quant_config.get("weights"))
 
                 target_scheme_map[target]["input_activations"] = None
-                if is_activation_quantization_format(quant_format):
+
+                #if is_activation_quantization_format(quant_format):
+                if True:  # we just check for one format, we need to check otherwise
                     input_activations = quant_config.get("input_activations")
                     # The only case where we have activation quant supported
                     # but no input_activations provided in the config
@@ -412,7 +413,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                     group_size=weight_quant.group_size,
                     actorder=weight_quant.actorder)
 
-        if is_activation_quantization_format(self.quant_format):
+        #if is_activation_quantization_format(self.quant_format):
+        if True:
             if self._is_fp4a4_nvfp4(weight_quant, input_quant):
                 if cutlass_fp4_supported(
                 ) or envs.VLLM_USE_NVFP4_CT_EMULATIONS:
@@ -548,6 +550,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 weight_quant=weight_quant,
                 input_quant=input_quant,
             )
+            print(scheme)
 
         # Raise error if device does not support the scheme
         # (e.g. fp8 needs ada lovelace)
