@@ -98,6 +98,17 @@ class MultiModalRegistry:
 
         self._processing_cache = ProcessingCache(VLLM_MM_INPUT_CACHE_GIB)
 
+    def enable_mm_input_cache(self, model_config: "ModelConfig") -> bool:
+        """Whether the multi-modal input cache should be enabled."""
+
+        if not model_config.is_multimodal_model or \
+            not self.supports_multimodal_inputs(
+                model_config):
+            return False
+
+        mm_config = model_config.get_multimodal_config()
+        return not mm_config.disable_mm_preprocessor_cache
+
     def reset_processor_cache(self) -> bool:
         """Reset the multi-modal processing cache."""
         self._processing_cache.reset()
