@@ -84,10 +84,12 @@ class Config:
 
     @property
     def quant_dtype(self) -> Union[torch.dtype, str, None]:
+        assert self.quant_config is not None
         return self.quant_config.quant_dtype
 
     @property
     def is_per_act_token_quant(self) -> bool:
+        assert self.quant_config is not None
         return self.quant_config.per_act_token_quant
 
     @property
@@ -97,10 +99,12 @@ class Config:
 
     @property
     def is_per_out_ch_quant(self) -> bool:
+        assert self.quant_config is not None
         return self.quant_config.per_out_ch_quant
 
     @property
     def quant_block_shape(self) -> Optional[list[int]]:
+        assert self.quant_config is not None
         return self.quant_config.block_shape
 
     @property
@@ -465,6 +469,11 @@ def reference_moe_impl(config: Config, weights: WeightTensors,
 
         w1 = torch.zeros((e, 2 * n, k), device="cuda", dtype=dtype)
         w2 = torch.zeros((e, k, n), device="cuda", dtype=dtype)
+
+        assert w1_gs is not None
+        assert w2_gs is not None
+        assert w1_blockscale is not None
+        assert w2_blockscale is not None
 
         for idx in range(0, e):
             w1[idx] = dequantize_nvfp4_to_dtype(w1_q[idx],

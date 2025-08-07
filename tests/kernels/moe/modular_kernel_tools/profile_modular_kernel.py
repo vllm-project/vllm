@@ -52,7 +52,7 @@ def profile_modular_kernel(
     rank_weights = weights.slice_weights(pgi.rank, config.num_local_experts)
 
     # make modular kernel
-    mk = make_modular_kernel(config, vllm_config)
+    mk = make_modular_kernel(config, vllm_config, weights)
 
     mk_kwargs = {
         "hidden_states": rank_tensors.hidden_states,

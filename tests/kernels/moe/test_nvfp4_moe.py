@@ -68,6 +68,11 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
         a1_gs = torch.ones((e, ), device="cuda", dtype=torch.float32)
         a2_gs = torch.ones((e, ), device="cuda", dtype=torch.float32)
 
+        assert w1_gs is not None
+        assert w2_gs is not None
+        assert w1_blockscale is not None
+        assert w2_blockscale is not None
+
         cutlass_output = cutlass_moe_fp4(
             a=a,
             a1_gscale=a1_gs,
