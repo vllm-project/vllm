@@ -108,7 +108,7 @@ def rocm_aiter_rotary_emb_without_key_forward_hip_fake(
     pass
 
 
-if current_platform.is_rocm():
+if is_rocm_rotatry_embedding_enabled():
 
     direct_register_custom_op(
         op_name="rocm_aiter_rotary_emb_with_key_forward_hip",

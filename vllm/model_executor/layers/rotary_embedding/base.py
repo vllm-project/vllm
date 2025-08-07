@@ -124,10 +124,6 @@ class RotaryEmbedding(CustomOp):
     def forward_hip(
         self,
         positions: torch.Tensor,
-        # if     is_nope_first
-        # [[batch_size, seq_len, num_heads, nope_size+rope_size]
-        # if NOT is_nope_first
-        # [[batch_size, seq_len, num_heads, rope_size+nope_size],
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
@@ -143,6 +139,10 @@ class RotaryEmbedding(CustomOp):
     def forward_hip_rocm_aiter(
         self,
         positions: torch.Tensor,
+        # if     is_nope_first
+        # [[batch_size, seq_len, num_heads, nope_size+rope_size]
+        # if NOT is_nope_first
+        # [[batch_size, seq_len, num_heads, rope_size+nope_size],
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
