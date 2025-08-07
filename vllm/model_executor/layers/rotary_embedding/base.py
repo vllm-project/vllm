@@ -136,8 +136,8 @@ class RotaryEmbedding(CustomOp):
         # currently only rotary embedding ops from AITER package are
         # supported for HiP forward.
         if self.is_rocm_aiter_enabled:
-            self.forward_hip_rocm_aiter(positions, query, key, offsets,
-                                        is_nope_first)
+            return self.forward_hip_rocm_aiter(positions, query, key, offsets,
+                                               is_nope_first)
         return self.forward_native(positions, query, key, offsets)
 
     def forward_hip_rocm_aiter(
