@@ -1597,8 +1597,9 @@ class EngineArgs:
 
             pooling_type = model_config.pooler_config.pooling_type
             is_causal = getattr(model_config.hf_config, "is_causal", True)
-            incremental_prefill_supported = (pooling_type is not None and
-                                             pooling_type.lower() == "last" and is_causal)
+            incremental_prefill_supported = (pooling_type is not None
+                                             and pooling_type.lower() == "last"
+                                             and is_causal)
 
             action = "Enabling" if \
                 incremental_prefill_supported else "Disabling"
