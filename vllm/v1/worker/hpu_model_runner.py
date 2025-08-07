@@ -2430,6 +2430,8 @@ class HPUModelRunner:
         self._PAD_SLOT_ID = num_blocks * self.block_size
 
         if has_kv_transfer_group():
+            #import remote_pdb; remote_pdb.set_trace()
+            kv_caches = { layer: torch.stack((tup[0], tup[1])) for layer,tup in kv_caches.items()}
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
         htorch.hpu.synchronize()

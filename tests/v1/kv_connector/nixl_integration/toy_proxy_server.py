@@ -3,6 +3,7 @@
 
 import argparse
 import itertools
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -11,9 +12,8 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 @asynccontextmanager
@@ -162,6 +162,8 @@ async def send_request_to_service(client_info: dict, endpoint: str,
     }
     req_data["stream"] = False
     req_data["max_tokens"] = 1
+    if "max_completion_tokens" in req_data:
+        req_data["max_completion_tokens"] = 1
     if "stream_options" in req_data:
         del req_data["stream_options"]
     headers = {
@@ -196,8 +198,7 @@ async def stream_service_response(client_info: dict, endpoint: str,
             yield chunk
 
 
-@app.post("/v1/completions")
-async def handle_completions(request: Request):
+async def _handle_completions(api: str, request: Request):
     try:
         req_data = await request.json()
         request_id = str(uuid.uuid4())
@@ -206,9 +207,8 @@ async def handle_completions(request: Request):
         prefill_client_info = get_next_client(request.app, 'prefill')
 
         # Send request to prefill service
-        response = await send_request_to_service(prefill_client_info,
-                                                 "/completions", req_data,
-                                                 request_id)
+        response = await send_request_to_service(prefill_client_info, api,
+                                                 req_data, request_id)
 
         # Extract the needed fields
         response_json = response.json()
@@ -224,7 +224,7 @@ async def handle_completions(request: Request):
         # Stream response from decode service
         async def generate_stream():
             async for chunk in stream_service_response(decode_client_info,
-                                                       "/completions",
+                                                       api,
                                                        req_data,
                                                        request_id=request_id):
                 yield chunk
@@ -237,10 +237,20 @@ async def handle_completions(request: Request):
         import traceback
         exc_info = sys.exc_info()
         print("Error occurred in disagg prefill proxy server"
-              " - completions endpoint")
+              f" - {api} endpoint")
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
         raise
+
+
+@app.post("/v1/completions")
+async def handle_completions(request: Request):
+    return await _handle_completions("/completions", request)
+
+
+@app.post("/v1/chat/completions")
+async def handle_chat_completions(request: Request):
+    return await _handle_completions("/chat/completions", request)
 
 
 @app.get("/healthcheck")

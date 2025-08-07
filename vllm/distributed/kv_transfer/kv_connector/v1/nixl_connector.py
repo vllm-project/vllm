@@ -59,6 +59,7 @@ except ImportError:
 _NIXL_SUPPORTED_XPUS = {
     "cuda": ("cuda", ),
     "tpu": ("cpu", ),
+    "hpu": ("cpu", )
 }
 
 
@@ -467,7 +468,7 @@ class NixlConnectorWorker:
         elif self.kv_buffer_device not in _NIXL_SUPPORTED_XPUS[
                 self.device_type]:
             raise RuntimeError(
-                f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
+                f"kvconf{vllm_config.kv_transfer_config} {self.device_type} with {self.kv_buffer_device} kv_buffer "
                 "is not supported.")
         self.device_kv_caches: dict[str, torch.Tensor] = {}
 
@@ -689,9 +690,11 @@ class NixlConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
-
         _, first_kv_cache = next(iter(kv_caches.items()))
-        kv_elem_size = first_kv_cache.element_size()
+        if self.device_type == "hpu":
+            kv_elem_size = first_kv_cache[0].dtype.itemsize
+        else:
+            kv_elem_size = first_kv_cache.element_size()
 
         if self.use_host_buffer:
             self.initialize_host_xfer_buffer(kv_caches=kv_caches)
@@ -735,35 +738,30 @@ class NixlConnectorWorker:
                 self.slot_size_bytes = kv_elem_size * kv_latent_dim
             else:
                 # [2 (k and v), num_blocks, ...]
-                #if self._use_flashinfer:
-                #    # FlashInfer swaps 2<->num_blocks dimensions.
-                #    self.num_blocks = first_kv_cache.shape[0]
-                #    block_rank = 4  # [2, block_size, kv_heads, head_dim]
-                #else:
-                #    self.num_blocks = first_kv_cache.shape[1]
-                #    block_rank = 3  # [block_size, kv_heads, head_dim]
-                #block_shape = first_kv_cache.shape[-block_rank:]
-                #block_size, n_kv_heads, head_dim = block_shape[-3:]
-
-                # TODO see if below is necessary, else uncomment above
-                # [2 (k and v), num_blocks, ...]
                 if self._use_flashinfer:
                     # FlashInfer swaps 2<->num_blocks dimensions.
                     self.num_blocks = first_kv_cache.shape[0]
                     block_rank = 4  # [2, block_size, kv_heads, head_dim]
                 else:
-                    # habana kv_cache: [2, num_blocks*block_size, kv_heads, head_dim]
-                    self.num_blocks = first_kv_cache.shape[1] // self.block_size
+                    self.num_blocks = first_kv_cache.shape[1]
                     block_rank = 3  # [block_size, kv_heads, head_dim]
                 block_shape = first_kv_cache.shape[-block_rank:]
-                block_shape = list(block_shape)
-                block_shape[0] = block_shape[0] // self.num_blocks
-                block_shape = torch.Size(block_shape)
                 block_size, n_kv_heads, head_dim = block_shape[-3:]
 
                 # head size in bytes.
                 self.slot_size_bytes = kv_elem_size * n_kv_heads * head_dim
             assert block_size == self.block_size
+        elif self.device_type == "hpu":
+            # habana kv_cache: [2, num_blocks*block_size, kv_heads, head_dim]
+            self.num_blocks = first_kv_cache.shape[1] // self.block_size
+            block_rank = 3  # [block_size, kv_heads, head_dim]
+            block_shape = first_kv_cache.shape[-block_rank:]
+            block_shape = list(block_shape)
+            block_shape[0] = block_shape[0] // self.num_blocks
+            block_shape = torch.Size(block_shape)
+            block_size, n_kv_heads, head_dim = block_shape[-3:]
+            # head size in bytes.
+            self.slot_size_bytes = kv_elem_size * n_kv_heads * head_dim
         else:
             raise RuntimeError(
                 f"{self.device_type} ({self.backend_name}) is not supported.")
