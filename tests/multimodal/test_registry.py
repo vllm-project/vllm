@@ -26,6 +26,7 @@ from ..utils import build_model_context
         }, True),
     ],
 )
+@pytest.mark.core_model
 def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
     """Test supports_multimodal_inputs returns correct boolean for various 
     configs."""
