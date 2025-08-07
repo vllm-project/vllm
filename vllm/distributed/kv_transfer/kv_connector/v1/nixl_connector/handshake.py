@@ -196,7 +196,7 @@ class HttpHandshakeStrategy(HandshakeStrategy):
         super().__init__(nixl_wrapper, tp_rank, tp_size, side_channel_port,
                          engine_id)
         self.add_remote_agent_func = add_remote_agent_func
-        self._tp_size_mapping: dict[str, int] = {engine_id: tp_size}
+        self._tp_size: dict[str, int] = {engine_id: tp_size}
 
     def initiate_handshake(self, host: str, port: int, remote_tp_size: int,
                            expected_engine_id: str) -> dict[int, str]:
@@ -229,7 +229,7 @@ class HttpHandshakeStrategy(HandshakeStrategy):
 
         # Handshake only with the remote TP rank that current local rank will
         # pull from. With homogeneous TP it happens to be the same rank_i.
-        tp_ratio = self._tp_size_mapping[self.engine_id] // remote_tp_size
+        tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
         p_remote_rank = self.tp_rank // tp_ratio
 
         # Get data for the specific rank we need to connect to
