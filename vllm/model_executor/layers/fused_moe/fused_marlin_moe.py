@@ -164,8 +164,14 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         use_fp32_reduce=True,
         is_zp_float=False)
 
-    torch.ops._C.silu_and_mul(intermediate_cache2,
-                              intermediate_cache1.view(-1, 2 * N))
+    if True:
+        torch.ops._C.silu_and_mul(intermediate_cache2,
+                                intermediate_cache1.view(-1, 2 * N))
+    else:
+        gate_up = intermediate_cache1.view(-1, 2 * N)
+        gate, up = gate_up[..., :N], gate_up[..., N:]
+        glu = gate * torch.sigmoid(gate * 1.702)
+        intermediate_cache2 = (up + 1) * glu
 
     if expert_map is not None:
         intermediate_cache3.zero_()
