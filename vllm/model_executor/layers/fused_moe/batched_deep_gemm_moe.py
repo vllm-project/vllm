@@ -286,12 +286,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
@@ -317,11 +312,11 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # for the M expectation of each batch, correctly setting this value
         # may lead to better performance.
         expected_m = max_num_tokens
-        fp8_m_grouped_gemm_nt_masked((a1q, a1q_scale), (w1, w1_scale),
+        fp8_m_grouped_gemm_nt_masked((a1q, a1q_scale), (w1, self.w1_scale),
                                      workspace1, expert_num_tokens, expected_m)
 
         a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm_cuda(
             workspace1, expert_num_tokens)
 
-        fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, w2_scale), output,
-                                     expert_num_tokens, expected_m)
+        fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, self.w2_scale),
+                                     output, expert_num_tokens, expected_m)

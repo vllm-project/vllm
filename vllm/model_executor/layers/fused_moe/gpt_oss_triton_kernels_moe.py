@@ -5,10 +5,11 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.utils import has_triton_kernels
+from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -35,20 +36,10 @@ def triton_kernel_moe_forward(
     topk: int,
     renormalize: bool,
     activation: str = "silu",
+    quant_config: Optional[FusedMoEQuantConfig] = None,
     apply_router_weight_on_input: bool = False,
-    use_fp8_w8a8: bool = False,
-    per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    w1_bias: Optional[torch.Tensor] = None,
-    w2_bias: Optional[torch.Tensor] = None,
-    w1_precision: Optional["PrecisionConfig"] = None,
-    w2_precision: Optional["PrecisionConfig"] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[list[int]] = None,
 ) -> torch.Tensor:
 
     routing_data, gather_idx, scatter_idx = routing(gating_output,
@@ -64,20 +55,10 @@ def triton_kernel_moe_forward(
         gather_idx,
         scatter_idx,
         activation=activation,
+        quant_config=quant_config,
         apply_router_weight_on_input=apply_router_weight_on_input,
-        use_fp8_w8a8=use_fp8_w8a8,
-        per_channel_quant=per_channel_quant,
         global_num_experts=global_num_experts,
-        expert_map=expert_map,
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
-        w1_bias=w1_bias,
-        w2_bias=w2_bias,
-        w1_precision=w1_precision,
-        w2_precision=w2_precision,
-        a1_scale=a1_scale,
-        a2_scale=a2_scale,
-        block_shape=block_shape)
+        expert_map=expert_map)
 
 
 # This is a triton implementation of the fused_experts function
@@ -90,28 +71,21 @@ def triton_kernel_fused_experts(
     gather_indx,  # GatherIndx
     scatter_indx,  # ScatterIndx
     activation: str = "silu",
+    quant_config: Optional[FusedMoEQuantConfig] = None,
     swiglu_alpha: float = 1.702,
     swiglu_limit: float = 7.0,
     apply_router_weight_on_input: bool = False,
-    use_fp8_w8a8: bool = False,
-    per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    w1_bias: Optional[torch.Tensor] = None,
-    w2_bias: Optional[torch.Tensor] = None,
-    w1_precision: Optional["PrecisionConfig"] = None,
-    w2_precision: Optional["PrecisionConfig"] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[list[int]] = None,
+    a1q_scale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
 
     # type check, uint8 means mxfp4
     assert hidden_states.dtype == torch.bfloat16
-    assert w1_bias is None or w1_bias.dtype == torch.float32
-    assert w2_bias is None or w2_bias.dtype == torch.float32
+    assert (quant_config.w1_zp is None
+            or quant_config.w1_zp.dtype == torch.float32)
+    assert (quant_config.w2_zp is None
+            or quant_config.w2_zp.dtype == torch.float32)
 
     # Shape check, only check non-mxfp4
     assert hidden_states.shape[-1] == w1.shape[-2]
@@ -130,20 +104,20 @@ def triton_kernel_fused_experts(
     intermediate_cache1 = matmul_ogs(
         hidden_states,
         w1,
-        w1_bias,
+        quant_config.w1_zp,
         routing_data,
         gather_indx=gather_indx,
-        precision_config=w1_precision,
+        precision_config=quant_config.w1_precision,
         gammas=gammas if apply_router_weight_on_input else None,
         fused_activation=act)
 
     intermediate_cache3 = matmul_ogs(
         intermediate_cache1,
         w2,
-        w2_bias,
+        quant_config.w2_zp,
         routing_data,
         scatter_indx=scatter_indx,
-        precision_config=w2_precision,
+        precision_config=quant_config.w2_precision,
         gammas=None if apply_router_weight_on_input else gammas,
         y=output_tensor,
     )
@@ -157,18 +131,11 @@ class BatchedOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_config,
         max_num_tokens: int,
         num_dispatchers: int,
-        w1_precision: "PrecisionConfig",
-        w2_precision: "PrecisionConfig",
-        w1_bias: Optional[torch.Tensor],
-        w2_bias: Optional[torch.Tensor],
+        quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(quant_config)
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
-        self.w1_precision = w1_precision
-        self.w2_precision = w2_precision
-        self.w1_bias = w1_bias
-        self.w2_bias = w2_bias
 
     @property
     def activation_formats(
@@ -212,12 +179,7 @@ class BatchedOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
@@ -228,20 +190,12 @@ class BatchedOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             hidden_states,
             w1,
             w2,
-            None,
-            None,
-            None,
+            routing_data=None,
+            gather_indx=None,
+            scatter_indx=None,
             activation=activation,
+            quant_config=self.quant_config,
             apply_router_weight_on_input=False,
-            use_fp8_w8a8=False,
-            per_channel_quant=False,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            w1_bias=self.w1_bias,
-            w2_bias=self.w2_bias,
-            w1_precision=self.w1_precision,
-            w2_precision=self.w2_precision,
-            a1_scale=a1q_scale,
-            a2_scale=a2_scale)
+            a1q_scale=a1q_scale)
