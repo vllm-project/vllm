@@ -90,7 +90,7 @@ def test_models(
         print(f"Skipping transformers comparison because: {hf_version_check}")
 
     with hf_runner(model) as hf_model:
-        if model not in HF_UNSUPPORTED_MODELS and hf_version_check is not None:
+        if model not in HF_UNSUPPORTED_MODELS and hf_version_check is None:
             hf_outputs = hf_model.generate_greedy_logprobs_limit(
                 example_prompts, max_tokens, num_logprobs)
         else:
