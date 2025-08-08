@@ -1600,12 +1600,7 @@ async def init_app_state(
     state.log_stats = not args.disable_log_stats
     state.vllm_config = vllm_config
     model_config = vllm_config.model_config
-
-    if envs.VLLM_USE_V1:
-        supported_tasks = await engine_client \
-            .get_supported_tasks()  # type: ignore
-    else:
-        supported_tasks = model_config.supported_tasks
+    supported_tasks = model_config.supported_tasks
 
     logger.info("Supported_tasks: %s", supported_tasks)
 
@@ -1710,8 +1705,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if ("encode" in supported_tasks and
-          not vllm_config.scheduler_config.chunked_prefill_enabled) else None
+    ) if "encode" in supported_tasks else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,

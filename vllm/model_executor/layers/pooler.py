@@ -67,7 +67,7 @@ class Pooler(nn.Module, ABC):
     """The interface required for all poolers used in pooling models in vLLM."""
 
     @staticmethod
-    def for_encode(pooler_config: PoolerConfig, ):
+    def for_encode(pooler_config: PoolerConfig):
         if pooler_config.pooling_type == "STEP":
             return StepPooler()
 
@@ -77,7 +77,7 @@ class Pooler(nn.Module, ABC):
         return SimplePooler.from_config(resolved_config)
 
     @staticmethod
-    def for_embed(pooler_config: PoolerConfig, ):
+    def for_embed(pooler_config: PoolerConfig):
         resolved_config = ResolvedPoolingConfig.from_config(
             task="embed",
             pooler_config=pooler_config,

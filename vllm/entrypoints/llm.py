@@ -281,12 +281,7 @@ class LLM:
         self.request_counter = Counter()
         self.default_sampling_params: Union[dict[str, Any], None] = None
 
-        if envs.VLLM_USE_V1:
-            supported_tasks = self.llm_engine \
-                .get_supported_tasks()  # type: ignore
-        else:
-            supported_tasks = self.llm_engine.model_config.supported_tasks
-
+        supported_tasks = self.llm_engine.model_config.supported_tasks
         logger.info("Supported_tasks: %s", supported_tasks)
 
         self.supported_tasks = supported_tasks
@@ -1096,12 +1091,8 @@ class LLM:
                 "Try passing `--runner pooling` to use the model as a "
                 "pooling model.")
 
-        if (pooling_task == "encode" and self.llm_engine.vllm_config.
-                scheduler_config.chunked_prefill_enabled):
-            raise ValueError("LLM.encode() uses ALL pooling, which does "
-                             "not support chunked prefill. "
-                             "Please turn off chunked prefill by "
-                             "`--no-enable-chunked-prefill` before using it.")
+        if pooling_task not in self.supported_tasks:
+            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(

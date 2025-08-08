@@ -4883,6 +4883,15 @@ class VllmConfig:
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False
 
+        if (self.scheduler_config.chunked_prefill_enabled
+                and "encode" in self.model_config.supported_tasks):
+            self.model_config.supported_tasks.remove("encode")
+
+            logger.info("Chunked prefill is not supported with "
+                        "encode task which using ALL pooling. "
+                        "Please turn off chunked prefill by "
+                        "`--no-enable-chunked-prefill` before using it.")
+
         if (self.kv_events_config is not None
                 and self.kv_events_config.enable_kv_cache_events
                 and not self.cache_config.enable_prefix_caching):
@@ -5105,6 +5114,7 @@ class VllmConfig:
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
+            f"supported_tasks ={self.model_config.supported_tasks !r}, "
             f"compilation_config={self.compilation_config!r}")
 
 
