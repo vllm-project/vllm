@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
 
-from vllm.envs import VLLM_MM_INPUT_CACHE_GIB
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
@@ -87,6 +87,13 @@ class _ProcessorFactories(Generic[_I]):
         return self.processor(info, dummy_inputs_builder, cache=cache)
 
 
+# Make sure a different cache is used for each model config
+# NOTE: ModelConfig is not hashable so it cannot be passed directly
+@lru_cache(maxsize=1)
+def _get_processor_cache(model_id: str, capacity_gb: int):
+    return ProcessingCache(capacity_gb) if capacity_gb > 0 else None
+
+
 class MultiModalRegistry:
     """
     A registry that dispatches data processing according to the model.
@@ -96,11 +103,15 @@ class MultiModalRegistry:
         self._processor_factories = ClassRegistry[nn.Module,
                                                   _ProcessorFactories]()
 
-        self._processing_cache = ProcessingCache(VLLM_MM_INPUT_CACHE_GIB)
+    def _get_processor_cache(self, model_config: "ModelConfig"):
+        model_id = model_config.model
+        capacity_gb = model_config.mm_processor_cache_gb
+        return _get_processor_cache(model_id, capacity_gb)
 
-    def reset_processor_cache(self) -> bool:
+    def reset_processor_cache(self, model_config: "ModelConfig") -> bool:
         """Reset the multi-modal processing cache."""
-        self._processing_cache.reset()
+        if processor_cache := self._get_processor_cache(model_config):
+            processor_cache.reset()
 
         return True  # Success
 
@@ -244,14 +255,14 @@ class MultiModalRegistry:
         if tokenizer is None and not model_config.skip_tokenizer_init:
             tokenizer = cached_tokenizer_from_config(model_config)
         if disable_cache is None:
-            mm_config = model_config.get_multimodal_config()
-            disable_cache = mm_config.disable_mm_preprocessor_cache
+            disable_cache = not model_config.enable_mm_processor_cache
 
         model_cls = self._get_model_cls(model_config)
         factories = self._processor_factories[model_cls]
 
         ctx = InputProcessingContext(model_config, tokenizer)
-        cache = None if disable_cache else self._processing_cache
+        cache = None if disable_cache else self._get_processor_cache(
+            model_config)
 
         return factories.build_processor(ctx, cache=cache)
 
