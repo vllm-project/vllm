@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -15,18 +16,27 @@ class MambaCacheParams:
     conv_state: torch.Tensor = torch.Tensor()
     ssm_state: torch.Tensor = torch.Tensor()
     state_indices_tensor: torch.Tensor = torch.Tensor()
+    mamba_ssm_cache_dtype: Optional[torch.dtype] = None
 
     def at_layer_idx(self, layer_idx):
         return MambaCacheParams(self.conv_state[layer_idx],
                                 self.ssm_state[layer_idx],
-                                self.state_indices_tensor)
+                                self.state_indices_tensor,
+                                self.mamba_ssm_cache_dtype)
 
 
 class MambaCacheManager(ConstantSizeCache):
 
-    def __init__(self, vllm_config: VllmConfig, dtype: torch.dtype,
-                 num_mamba_layers: int, conv_state_shape: tuple[int, int],
-                 temporal_state_shape: tuple[int, int]):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 dtype: torch.dtype,
+                 num_mamba_layers: int,
+                 conv_state_shape: tuple[int, int],
+                 temporal_state_shape: tuple[int, int],
+                 mamba_ssm_cache_dtype: Optional[torch.dtype] = None):
+
+        self.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype if \
+            mamba_ssm_cache_dtype is not None else dtype
 
         # Determine max batch size to set size of MambaCache
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
@@ -44,7 +54,7 @@ class MambaCacheManager(ConstantSizeCache):
                                  device="cuda").transpose(-1, -2)
         temporal_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
                                      temporal_state_shape,
-                                     dtype=dtype,
+                                     dtype=self.mamba_ssm_cache_dtype,
                                      device="cuda")
 
         self._mamba_cache = (conv_state, temporal_state)
@@ -58,14 +68,15 @@ class MambaCacheManager(ConstantSizeCache):
             cache_t[:, to_index].copy_(cache_t[:, from_index],
                                        non_blocking=True)
 
-    def current_run_tensors(self, **kwargs) -> MambaCacheParams:
+    def current_run_tensors(self, mamba_ssm_cache_dtype: Optional[torch.dtype],
+                            **kwargs) -> MambaCacheParams:
         """
         Return the tensors for the current run's conv and ssm state.
         """
         cache_tensors, state_indices_tensor = super().current_run_tensors(
             **kwargs)
         return MambaCacheParams(cache_tensors[0], cache_tensors[1],
-                                state_indices_tensor)
+                                state_indices_tensor, mamba_ssm_cache_dtype)
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         """
