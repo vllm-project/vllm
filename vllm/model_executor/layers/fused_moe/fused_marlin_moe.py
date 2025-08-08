@@ -91,6 +91,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
     assert hidden_states.dtype in [torch.float16, torch.bfloat16]
     assert num_bits in [4, 8]
+    assert topk_weights.dtype == torch.float32
 
     M, K = hidden_states.shape
     E = w1.shape[0]
