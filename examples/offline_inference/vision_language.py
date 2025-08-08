@@ -221,7 +221,7 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
 # GLM-4v
 def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
-    model_name = "THUDM/glm-4v-9b"
+    model_name = "zai-org/glm-4v-9b"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -250,7 +250,7 @@ def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
 
 # GLM-4.1V
 def run_glm4_1v(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "THUDM/GLM-4.1V-9B-Thinking"
+    model_name = "zai-org/GLM-4.1V-9B-Thinking"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -1563,9 +1563,9 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--disable-mm-preprocessor-cache",
+        "--disable-mm-processor-cache",
         action="store_true",
-        help="If True, disables caching of multi-modal preprocessor/mapper.",
+        help="If True, disables caching of multi-modal processor.",
     )
 
     parser.add_argument(
@@ -1603,7 +1603,7 @@ def main(args):
 
     engine_args = asdict(req_data.engine_args) | {
         "seed": args.seed,
-        "disable_mm_preprocessor_cache": args.disable_mm_preprocessor_cache,
+        "mm_processor_cache_gb": 0 if args.disable_mm_processor_cache else 4,
     }
     llm = LLM(**engine_args)
 

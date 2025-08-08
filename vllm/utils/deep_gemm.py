@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import os
 from typing import Any, Callable, NoReturn
 
 import torch
@@ -22,10 +23,10 @@ def is_deep_gemm_supported() -> bool:
     """Return ``True`` if DeepGEMM is supported on the current platform.
     Currently, only Hopper and Blackwell GPUs are supported.
     """
-    supported_arch = current_platform.is_cuda() and (
+    is_supported_arch = current_platform.is_cuda() and (
         current_platform.is_device_capability(90)
         or current_platform.is_device_capability(100))
-    return has_deep_gemm() and supported_arch
+    return has_deep_gemm() and is_supported_arch
 
 
 @functools.cache
@@ -76,6 +77,12 @@ def _lazy_init() -> None:
 
     if not has_deep_gemm():
         return
+
+    # Set up deep_gemm cache path
+    DEEP_GEMM_JIT_CACHE_ENV_NAME = 'DG_JIT_CACHE_DIR'
+    if not os.environ.get(DEEP_GEMM_JIT_CACHE_ENV_NAME, None):
+        os.environ[DEEP_GEMM_JIT_CACHE_ENV_NAME] = os.path.join(
+            envs.VLLM_CACHE_ROOT, "deep_gemm")
 
     _dg = importlib.import_module("deep_gemm")
 

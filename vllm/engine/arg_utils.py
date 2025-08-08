@@ -36,6 +36,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
+from vllm.ray.lazy_utils import is_ray_initialized
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
@@ -357,8 +358,8 @@ class EngineArgs:
                                                       "media_io_kwargs")
     mm_processor_kwargs: Optional[Dict[str, Any]] = \
         MultiModalConfig.mm_processor_kwargs
-    disable_mm_preprocessor_cache: bool = \
-        MultiModalConfig.disable_mm_preprocessor_cache
+    disable_mm_preprocessor_cache: bool = False  # DEPRECATED
+    mm_processor_cache_gb: int = MultiModalConfig.mm_processor_cache_gb
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -719,8 +720,11 @@ class EngineArgs:
             "--mm-processor-kwargs",
             **multimodal_kwargs["mm_processor_kwargs"])
         multimodal_group.add_argument(
-            "--disable-mm-preprocessor-cache",
-            **multimodal_kwargs["disable_mm_preprocessor_cache"])
+            "--mm-processor-cache-gb",
+            **multimodal_kwargs["mm_processor_cache_gb"])
+        multimodal_group.add_argument("--disable-mm-preprocessor-cache",
+                                      type=bool,
+                                      deprecated=True)
         multimodal_group.add_argument(
             "--interleave-mm-strings",
             **multimodal_kwargs["interleave_mm_strings"])
@@ -752,18 +756,6 @@ class EngineArgs:
                                 **lora_kwargs["fully_sharded_loras"])
         lora_group.add_argument("--default-mm-loras",
                                 **lora_kwargs["default_mm_loras"])
-
-        # Speculative arguments
-        speculative_group = parser.add_argument_group(
-            title="SpeculativeConfig",
-            description=SpeculativeConfig.__doc__,
-        )
-        speculative_group.add_argument(
-            "--speculative-config",
-            type=json.loads,
-            default=None,
-            help="The configurations for speculative decoding. Should be a "
-            "JSON string.")
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -844,6 +836,8 @@ class EngineArgs:
             title="VllmConfig",
             description=VllmConfig.__doc__,
         )
+        vllm_group.add_argument("--speculative-config",
+                                **vllm_kwargs["speculative_config"])
         vllm_group.add_argument("--kv-transfer-config",
                                 **vllm_kwargs["kv_transfer_config"])
         vllm_group.add_argument('--kv-events-config',
@@ -885,6 +879,23 @@ class EngineArgs:
             self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
             self.load_format = "runai_streamer"
 
+        if self.disable_mm_preprocessor_cache:
+            logger.warning(
+                "`--disable-mm-preprocessor-cache` is deprecated "
+                "and will be removed in v0.13. "
+                "Please use `--mm-processor-cache-gb 0` instead.", )
+
+            self.mm_processor_cache_gb = 0
+        elif envs.VLLM_MM_INPUT_CACHE_GIB != 4:
+            logger.warning(
+                "VLLM_MM_INPUT_CACHE_GIB` is deprecated "
+                "and will be removed in v0.13. "
+                "Please use `--mm-processor-cache-gb %d` instead.",
+                envs.VLLM_MM_INPUT_CACHE_GIB,
+            )
+
+            self.mm_processor_cache_gb = envs.VLLM_MM_INPUT_CACHE_GIB
+
         return ModelConfig(
             model=self.model,
             hf_config_path=self.hf_config_path,
@@ -921,7 +932,7 @@ class EngineArgs:
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
-            disable_mm_preprocessor_cache=self.disable_mm_preprocessor_cache,
+            mm_processor_cache_gb=self.mm_processor_cache_gb,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
@@ -1012,10 +1023,7 @@ class EngineArgs:
             "enable_chunked_prefill": enable_chunked_prefill,
             "disable_log_stats": disable_log_stats,
         })
-        speculative_config = SpeculativeConfig.from_dict(
-            self.speculative_config)
-
-        return speculative_config
+        return SpeculativeConfig(**self.speculative_config)
 
     def create_engine_config(
         self,
@@ -1098,6 +1106,15 @@ class EngineArgs:
             calculate_kv_scales=self.calculate_kv_scales,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
         )
+
+        ray_runtime_env = None
+        if is_ray_initialized():
+            # Ray Serve LLM calls `create_engine_config` in the context
+            # of a Ray task, therefore we check is_ray_initialized()
+            # as opposed to is_in_ray_actor().
+            import ray
+            ray_runtime_env = ray.get_runtime_context().runtime_env
+            logger.info("Using ray runtime env: %s", ray_runtime_env)
 
         # Get the current placement group if Ray is initialized and
         # we are in a Ray actor. If so, then the placement group will be
@@ -1211,6 +1228,7 @@ class EngineArgs:
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
+            ray_runtime_env=ray_runtime_env,
             placement_group=placement_group,
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
@@ -1219,17 +1237,17 @@ class EngineArgs:
             enable_multimodal_encoder_data_parallel,
         )
 
-        supports_mm_preprocessor_cache = (self.data_parallel_size == 1
-                                          or data_parallel_external_lb)
-        if (not supports_mm_preprocessor_cache
-                and model_config.is_multimodal_model
-                and not model_config.disable_mm_preprocessor_cache):
-            logger.warning(
-                "Multi-modal preprocessor cache is not compatible "
-                "with data parallelism when there does not exist a "
-                "one-to-one correspondance between API process and "
-                "EngineCore process, so the cache will be disabled.")
-            model_config.set_disable_mm_preprocessor_cache(True)
+        if model_config.is_multimodal_model:
+            dp_supports_mm_processor_cache = (self.data_parallel_size == 1
+                                              or data_parallel_external_lb)
+            if (not dp_supports_mm_processor_cache
+                    and model_config.mm_processor_cache_gb > 0):
+                logger.warning(
+                    "Multi-modal processor cache is disabled because "
+                    "it is not compatible with data parallelism when "
+                    "there does not exist a one-to-one correspondance "
+                    "between API and engine core processes.")
+                model_config.set_mm_processor_cache_gb(0)
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
@@ -1443,7 +1461,6 @@ class EngineArgs:
                 "Please consider using other speculative decoding methods "
                 "such as ngram, medusa, eagle, or deepseek_mtp.")
 
-        # No XFormers so far.
         V1_BACKENDS = [
             "FLASH_ATTN_VLLM_V1",
             "FLASH_ATTN",
@@ -1458,6 +1475,8 @@ class EngineArgs:
             "ROCM_AITER_MLA",
             "TORCH_SDPA_VLLM_V1",
             "FLEX_ATTENTION",
+            "TREE_ATTN",
+            "XFORMERS_VLLM_V1",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
@@ -1479,14 +1498,18 @@ class EngineArgs:
                 and _warn_or_fallback("Engine in background thread")):
             return False
 
-        if (self.pipeline_parallel_size > 1
-                and self.distributed_executor_backend
-                not in (ParallelConfig.distributed_executor_backend, "ray",
-                        "mp", "external_launcher")):
-            name = "Pipeline Parallelism without Ray distributed executor " \
-                    "or multiprocessing executor or external launcher"
-            _raise_or_fallback(feature_name=name, recommend_to_remove=False)
-            return False
+        if self.pipeline_parallel_size > 1:
+            supports_pp = getattr(self.distributed_executor_backend,
+                                  'supports_pp', False)
+            if not supports_pp and self.distributed_executor_backend not in (
+                    ParallelConfig.distributed_executor_backend, "ray", "mp",
+                    "external_launcher"):
+                name = "Pipeline Parallelism without Ray distributed " \
+                        "executor or multiprocessing executor or external " \
+                        "launcher"
+                _raise_or_fallback(feature_name=name,
+                                   recommend_to_remove=False)
+                return False
 
         # The platform may be supported on V1, but off by default for now.
         if not current_platform.default_v1(  # noqa: SIM103
