@@ -237,7 +237,10 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                     id=f"rs_{random_uuid()}",
                     summary=[],
                     type="reasoning",
-                    text=content.text,
+                    content=[
+                        ResponseReasoningTextContent(text=content.text,
+                                                     type="reasoning_text")
+                    ],
                     status=None,
                 )
                 output_items.append(reasoning_item)

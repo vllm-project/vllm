@@ -94,7 +94,8 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription, OpenAIServingTranslation)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.entrypoints.tool_server import DemoToolServer, ToolServer
+from vllm.entrypoints.tool_server import (DemoToolServer, MCPToolServer,
+                                          ToolServer)
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     log_non_default_args, with_cancellation)
 from vllm.logger import init_logger
@@ -1635,6 +1636,9 @@ async def init_app_state(
 
     if args.tool_server == "demo":
         tool_server: Optional[ToolServer] = DemoToolServer()
+    elif args.tool_server:
+        tool_server = MCPToolServer()
+        await tool_server.add_tool_server(args.tool_server)
     else:
         tool_server = None
 
