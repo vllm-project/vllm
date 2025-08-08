@@ -41,7 +41,7 @@ def test_gpu_memory_profiling():
         mock_total_bytes = 10 * 1024**3
         free = mock_total_bytes - current_usage
 
-        return (free, mock_total_bytes)
+        return free, mock_total_bytes
 
     from unittest.mock import patch
     with patch("torch.cuda.mem_get_info", side_effect=mock_mem_info):

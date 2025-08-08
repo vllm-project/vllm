@@ -138,7 +138,7 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
             unpadded_features = height_factor * width_factor
             newline_features = height_factor
 
-        return (unpadded_features, newline_features)
+        return unpadded_features, newline_features
 
     def get_image_size_with_most_features(self) -> ImageSize:
         # NOTE: This hardcoded value is found via processor tests

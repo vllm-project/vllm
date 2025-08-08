@@ -253,10 +253,10 @@ class OpType(Enum):
         b_shape = (num_loras, n, k)  # col-major
         if self in [OpType.LORA_SHRINK]:
             # LoRA shrink kernels support num_slices inherently in the kernel.
-            return ((m, k), b_shape, (num_slices, m, n))
+            return (m, k), b_shape, (num_slices, m, n)
         if self in [OpType.LORA_EXPAND]:
             # LoRA expand kernels support num_slices inherently in the kernel
-            return ((num_slices, m, k), b_shape, (m, n * num_slices))
+            return (num_slices, m, k), b_shape, (m, n * num_slices)
         raise ValueError(f"Unrecognized op_type {self}")
 
     def bench_fn(self) -> Callable:

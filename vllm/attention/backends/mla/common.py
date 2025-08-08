@@ -265,7 +265,7 @@ class MLACommonBackend(AttentionBackend):
         num_kv_heads: int,  # assumed to be 1 for MLA
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
+        return num_blocks, block_size, head_size
 
     @staticmethod
     def swap_blocks(
