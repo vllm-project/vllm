@@ -126,7 +126,7 @@ def flashinfer_fp4_cutlass_moe_forward(
 
 
 def select_nvfp4_gemm_impl(
-        allow_flashinfer_cutlass: bool,
+        allow_flashinfer: bool,
         moe,  # FusedMoEConfig
         logger):
     """Return a GEMM *experts* implementation for NV-FP4 fused-MoE layers"""
@@ -137,8 +137,14 @@ def select_nvfp4_gemm_impl(
     all2all_manager = get_ep_group().device_communicator.all2all_manager
     assert all2all_manager is not None
 
-    if allow_flashinfer_cutlass:
-        logger.debug_once("Using FlashInferExperts")
+    if allow_flashinfer:
+        flashinfer_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
+        if flashinfer_backend != "throughput":
+            raise ValueError(
+                f"Only throughput backend is supported for FlashInferExperts, "
+                f"but got {flashinfer_backend}.")
+        logger.debug_once(
+            "Initializing FlashInferExperts with throughput backend.")
         return FlashInferExperts(
             use_nvfp4_w4a4=True,
             use_dp=moe.moe_parallel_config.dp_size > 1,
