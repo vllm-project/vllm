@@ -12,13 +12,14 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
-                                                              update_metadata)
+from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.mamba2_metadata import update_metadata
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
-from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionMetadata
+from vllm.v1.attention.backends.short_conv_attn import (
+    ShortConvAttentionMetadata)
 
 
 @CustomOp.register("short_conv")
@@ -76,7 +77,7 @@ class ShortConv(CustomOp):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        conv_metadata: Mamba2Metadata,
+        conv_metadata: ShortConvAttentionMetadata,
     ):
         return
 
@@ -84,7 +85,7 @@ class ShortConv(CustomOp):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        conv_metadata: Mamba2Metadata,
+        conv_metadata: ShortConvAttentionMetadata,
     ):
         torch.ops.vllm.short_conv(
             hidden_states,
@@ -96,19 +97,20 @@ class ShortConv(CustomOp):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        conv_metadata: Mamba2Metadata,
+        conv_metadata: ShortConvAttentionMetadata,
     ):
         forward_context = get_forward_context()
-        # Mamba2Metadata contains metadata necessary for the mamba2 triton
-        # kernels to operate in continuous batching and in chunked prefill
-        # modes; they are computed at top-level model forward since they
-        # stay the same and reused for all mamba layers in the same iteration
+        # ShortConvAttentionMetadata contains metadata necessary for the
+        # short_conv triton kernels to operate in continuous batching and in
+        # chunked prefill modes; they are computed at top-level model forward
+        # since they stay the same and reused for all mamba layers in the same
+        # iteration.
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
             conv_metadata = attn_metadata
-            assert isinstance(attn_metadata, Mamba2AttentionMetadata)
+            assert isinstance(attn_metadata, ShortConvAttentionMetadata)
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
             conv_state = self_kv_cache[0].transpose(-1, -2)
             state_indices_tensor = attn_metadata.state_indices_tensor
