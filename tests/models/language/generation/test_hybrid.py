@@ -83,12 +83,13 @@ def test_models(
     try:
         model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
         model_info.check_available_online(on_fail="skip")
-        model_info.check_transformers_version(on_fail="skip")
+        hf_version_check = model_info.check_transformers_version(
+            on_fail="return")
     except ValueError:
-        pass
+        hf_version_check = True
 
     with hf_runner(model) as hf_model:
-        if model not in HF_UNSUPPORTED_MODELS:
+        if model not in HF_UNSUPPORTED_MODELS and hf_version_check:
             hf_outputs = hf_model.generate_greedy_logprobs_limit(
                 example_prompts, max_tokens, num_logprobs)
         else:
