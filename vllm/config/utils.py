@@ -18,11 +18,10 @@ def config(cls: ConfigT) -> ConfigT:
     A decorator that ensures all fields in a dataclass have default values
     and that each field has a docstring.
 
-    If a `ConfigT` is used as a CLI argument itself, the default value provided
-    by `get_kwargs` will be the result parsing a JSON string as the kwargs
-    (i.e. `ConfigT(**json.loads(cli_arg))`). However, if a particular `ConfigT`
-    requires custom construction from CLI (i.e. `CompilationConfig`), it can
-    have a `from_cli` method, which will be called instead.
+    If a `ConfigT` is used as a CLI argument itself, the `type` keyword argument
+    provided by `get_kwargs` will be
+    `pydantic.TypeAdapter(ConfigT).validate_json(cli_arg)` which treats the
+    `cli_arg` as a JSON string which gets validated by `pydantic`.
 
     Config validation is performed by the tools/validate_config.py
     script, which is invoked during the pre-commit checks.
