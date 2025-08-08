@@ -986,3 +986,19 @@ def has_module_attribute(module_name, attribute_name):
         return hasattr(module, attribute_name)
     except ImportError:
         return False
+
+
+def get_attn_backend_list_based_on_platform() -> list[str]:
+    if current_platform.is_cuda():
+        return ["FLASH_ATTN_VLLM_V1", "TRITON_ATTN_VLLM_V1", "TREE_ATTN"]
+    elif current_platform.is_rocm():
+        attn_backend_list = ["TRITON_ATTN_VLLM_V1"]
+        try:
+            import aiter  # noqa: F401
+            attn_backend_list.append("FLASH_ATTN_VLLM_V1")
+        except Exception:
+            print("Skip FLASH_ATTN_VLLM_V1 on ROCm as aiter is not installed")
+
+        return attn_backend_list
+    else:
+        raise ValueError("Unsupported platform")
