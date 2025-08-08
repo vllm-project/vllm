@@ -456,7 +456,8 @@ class Qwen3MoeModel(nn.Module):
                 if weight_name not in name:
                     continue
                 if name.endswith("scale"):
-                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    remapped_name = maybe_remap_kv_scale_name(
+                        name, params_dict)
                     if remapped_name is None:
                         continue
                     name = remapped_name
@@ -479,7 +480,8 @@ class Qwen3MoeModel(nn.Module):
                     continue
                 if name.endswith("scale"):
                     # Remapping the name of FP8 kv-scale.
-                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    remapped_name = maybe_remap_kv_scale_name(
+                        name, params_dict)
                     if remapped_name is None:
                         continue
                     name = remapped_name
