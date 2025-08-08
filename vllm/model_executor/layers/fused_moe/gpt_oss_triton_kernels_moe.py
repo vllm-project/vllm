@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
@@ -12,13 +12,11 @@ from vllm.utils import has_triton_kernels
 
 if has_triton_kernels():
     import triton_kernels.swiglu
-    from triton_kernels.matmul_ogs import (FnSpecs, FusedActivation,
-                                           PrecisionConfig, matmul_ogs)
+    from triton_kernels.matmul_ogs import FnSpecs, FusedActivation, matmul_ogs
     from triton_kernels.routing import routing
-else:
-    FnSpecs = None
-    PrecisionConfig = None
-    FusedActivation = None
+
+if TYPE_CHECKING:
+    from triton_kernels.matmul_ogs import PrecisionConfig
 
 
 def triton_kernel_moe_forward(
@@ -38,8 +36,8 @@ def triton_kernel_moe_forward(
     w2_scale: Optional[torch.Tensor] = None,
     w1_bias: Optional[torch.Tensor] = None,
     w2_bias: Optional[torch.Tensor] = None,
-    w1_precision=None,  # PrecisionConfig or None
-    w2_precision=None,  # PrecisionConfig or None
+    w1_precision: Optional["PrecisionConfig"] = None,
+    w2_precision: Optional["PrecisionConfig"] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[list[int]] = None,
