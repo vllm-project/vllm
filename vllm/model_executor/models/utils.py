@@ -401,7 +401,7 @@ def merge_multimodal_embeddings_from_map(
     """
     flattened_embeddings = _flatten_embeddings(multimodal_embeddings)
     inputs_embeds[placeholder_map.dest] = flattened_embeddings[
-        placeholder_map.src].to(dtype=inputs_embeds.dtype)
+        placeholder_map.src]
     return inputs_embeds
 
 
@@ -421,8 +421,7 @@ def _merge_multimodal_embeddings(
     flattened = _flatten_embeddings(multimodal_embeddings)
     try:
         # This is equivalent to: inputs_embeds[is_multimodal] = flattened.
-        inputs_embeds.masked_scatter_(is_multimodal.unsqueeze(-1),
-                                      flattened.to(dtype=inputs_embeds.dtype))
+        inputs_embeds.masked_scatter_(is_multimodal.unsqueeze(-1), flattened)
     except RuntimeError as e:
         num_expected_tokens = is_multimodal.sum().item()
         assert isinstance(num_expected_tokens, int)
