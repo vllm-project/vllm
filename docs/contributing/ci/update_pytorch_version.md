@@ -131,7 +131,6 @@ MAX_JOBS=16 uv pip install --system \
     --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.30"
 ```
 
-
 ## Update all the different vLLM platforms
 
 Rather than attempting to update all vLLM platforms in a single pull request, it's more manageable
