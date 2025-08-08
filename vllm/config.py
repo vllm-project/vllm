@@ -4887,6 +4887,15 @@ class VllmConfig:
                     "Only models using causal attention supports chunked "
                     "prefill and prefix caching; disabling both.")
 
+        if (self.scheduler_config.chunked_prefill_enabled
+                and "encode" in self.model_config.supported_tasks):
+            self.model_config.supported_tasks.remove("encode")
+
+            logger.info("Chunked prefill is not supported with "
+                        "encode task which using ALL pooling. "
+                        "Please turn off chunked prefill by "
+                        "`--no-enable-chunked-prefill` before using it.")
+
         if disable_chunked_prefill_reasons:
             for reason in disable_chunked_prefill_reasons:
                 logger.info(reason)

@@ -1600,7 +1600,12 @@ async def init_app_state(
     state.log_stats = not args.disable_log_stats
     state.vllm_config = vllm_config
     model_config = vllm_config.model_config
-    supported_tasks = model_config.supported_tasks
+
+    if envs.VLLM_USE_V1:
+        supported_tasks = await engine_client \
+            .get_supported_tasks()  # type: ignore
+    else:
+        supported_tasks = model_config.supported_tasks
 
     logger.info("Supported_tasks: %s", supported_tasks)
 
