@@ -1484,7 +1484,7 @@ __global__ void Marlin(
                     (has_zp && dequant_skip_flop || !has_zp)) {
         scalar_t2 tmp_scale = s[0];
         if constexpr (m_block_size_8) {
-          tmp_scale = Dtype::num2num2(reinterpret_cast<scalar_t*>(&s[0])[(threadIdx.x % 8) / 4;]);
+          tmp_scale = Dtype::num2num2(reinterpret_cast<scalar_t*>(&s[0])[(threadIdx.x % 8) / 4]);
         }
         res = __hmul2(res, tmp_scale);
       }
@@ -1495,7 +1495,7 @@ __global__ void Marlin(
       if (has_bias && last) {
         scalar_t2 tmp_bias = b_bias[0];
         if constexpr (m_block_size_8) {
-          tmp_bias = Dtype::num2num2(reinterpret_cast<scalar_t*>(&b_bias[0])[(threadIdx.x % 8) / 4;]);
+          tmp_bias = Dtype::num2num2(reinterpret_cast<scalar_t*>(&b_bias[0])[(threadIdx.x % 8) / 4]);
         }
         res = __hadd2(res, tmp_bias);
       }
