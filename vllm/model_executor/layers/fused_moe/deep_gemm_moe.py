@@ -163,13 +163,12 @@ def warmup_deepgemm_gg_contiguous_kernels(w1: torch.Tensor, w2: torch.Tensor,
 
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
-    def __init__(self):
-        super().__init__(
-            FusedMoEQuantConfig(
-                quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=False,
-                block_shape=deep_gemm_block_shape(),
-            ))
+    def __init__(
+        self,
+        quant_config: FusedMoEQuantConfig
+    ):
+        super().__init__(quant_config)
+        # assert deep_gemm_block_shape etc?
 
     @property
     def activation_formats(
@@ -348,10 +347,19 @@ def deep_gemm_moe_fp8(
     Returns:
     - torch.Tensor: The bfloat16 output tensor after applying the MoE layer.
     """
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        block_shape=deep_gemm_block_shape()
+    )
+
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        DeepGemmExperts(),
+        DeepGemmExperts(quant_config),
     )
+
     return fn(
         hidden_states,
         w1,
@@ -362,9 +370,5 @@ def deep_gemm_moe_fp8(
         activation,
         global_num_experts,
         expert_map,
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
-        a1_scale=a1_scale,
-        a2_scale=a2_scale,
         apply_router_weight_on_input=apply_router_weight_on_input,
     )

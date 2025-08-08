@@ -312,13 +312,7 @@ def rocm_aiter_fused_experts(
         topk_ids: torch.Tensor,
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
-        use_fp8_w8a8: bool = False,
-        per_channel_quant: bool = False,
-        w1_scale: Optional[torch.Tensor] = None,
-        w2_scale: Optional[torch.Tensor] = None,
-        a1_scale: Optional[torch.Tensor] = None,
-        a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[list[int]] = None,
+        quant_config: Optional[FusedMoEQuantConfig] = None,
         expert_map: Optional[torch.Tensor] = None) -> torch.Tensor:
 
     activation_method = (ActivationMethod.SILU
