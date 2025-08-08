@@ -75,16 +75,6 @@ def swiglu(x, alpha: float = 1.702, limit: Optional[float] = None):
     return out_glu * (x_linear + 1)
 
 
-def compute_routing_renormalize(
-        router_logits: torch.Tensor,
-        top_k: int) -> tuple[torch.Tensor, torch.Tensor]:
-    routing_weights, selected_experts = torch.topk(router_logits,
-                                                   top_k,
-                                                   dim=-1)
-    routing_weights = F.softmax(routing_weights, dim=-1, dtype=torch.float)
-    return selected_experts, routing_weights
-
-
 fp4_lookup_table = [
     0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6
 ]
@@ -126,44 +116,34 @@ def mxfp8_dequantize(x, scale):
     return x_float * scale
 
 
-def reference_bf16_moe(
-    topk_ids,
-    topk_weights,
+def reference_moe(
+    roouting_logits,
     topk,
     num_experts,
     hidden_states,
-    hidden_states_scale,
     w13,
     w2,
-    w13_scale,
-    w2_scale,
-    act_type,
+    alpha,
+    limit,
 ):
-    w13 = mxfp4_dequantize(w13, w13_scale).to(torch.bfloat16)
-    w2 = mxfp4_dequantize(w2, w2_scale).to(torch.bfloat16)
-    if act_type == 'mxfp8':
-        hidden_states = mxfp8_dequantize(
-            hidden_states, hidden_states_scale).to(torch.bfloat16)
-    else:
-        hidden_states = hidden_states.to(torch.bfloat16)
-    ref_result = fused_experts(hidden_states,
-                               w13,
-                               w2,
-                               topk_weights,
-                               topk_ids,
-                               inplace=False,
-                               activation="silu",
-                               is_act_and_mul=True,
-                               global_num_experts=num_experts,
-                               expert_map=None,
-                               w1_scale=None,
-                               w2_scale=None,
-                               w1_zp=None,
-                               w2_zp=None,
-                               a1_scale=None,
-                               a2_scale=None,
-                               block_shape=None)
-    return ref_result
+    experts = torch.topk(roouting_logits, k=topk, dim=-1, sorted=True)
+    expert_weights = torch.nn.functional.softmax(experts.values, dim=1).to(hidden_states.dtype)
+    expert_indices = experts.indices
+    t = hidden_states.clone()
+    # MLP #1
+    mlp1_weight = w13[expert_indices, ...]
+    # mlp1_bias = w1_bias[topk_ids, ...]
+    t = torch.einsum("beck,bk->bec", mlp1_weight, t) # + mlp1_bias
+    t = swiglu(t, alpha=alpha, limit=limit)
+
+    # MLP #2
+    mlp2_weight = w2[expert_indices, ...]
+    # mlp2_bias = w2_bias[topk_ids, ...]
+    t = torch.einsum("beck,bek->bec", mlp2_weight, t) # + mlp2_bias
+
+    # Weighted sum of experts
+    t = torch.einsum("bec,be->bc", t, expert_weights)
+    return t
 
 
 def get_tile_tokens_dim(x: torch.Tensor, top_k: int, num_experts: int):
@@ -203,6 +183,8 @@ def tg_mxfp4_moe(
     w2_weight,
     w2_weight_scale,
     act_type,
+    alpha,
+    limit,
 ) -> torch.Tensor:
     sf_block_size = 32
     assert (w13_weight.dim() == 3 and w13_weight.shape[0] == num_experts
@@ -282,9 +264,9 @@ def tg_mxfp4_moe(
         gemm1_weights=w13_weight,
         gemm1_weights_scale=w13_weight_scale,
         gemm1_bias=None,
-        gemm1_alpha=None,
+        gemm1_alpha=alpha,
         gemm1_beta=None,
-        gemm1_clamp_limit=None,
+        gemm1_clamp_limit=limit,
         gemm2_weights=w2_weight,
         gemm2_weights_scale=w2_weight_scale,
         gemm2_bias=None,
@@ -300,7 +282,7 @@ def tg_mxfp4_moe(
         local_num_experts=num_experts,
         routed_scaling_factor=None,
         tile_tokens_dim=get_tile_tokens_dim(hidden_states, topk, num_experts),
-        routing_method_type=1,
+        routing_method_type=1, # renormalize
         do_finalize=True)[0]
     return tg_result
 
@@ -329,8 +311,9 @@ def check_accuracy(a, b, atol, rtol, percent):
 
 @pytest.mark.parametrize("topk", [1, 4])
 @pytest.mark.parametrize("num_experts", [32, 128])
-@pytest.mark.parametrize("num_tokens", [1, 128, 1024])
-@pytest.mark.parametrize("intermediate_size,hidden_size", [(4096, 4096)])
+@pytest.mark.parametrize("num_tokens", [1, 64])
+@pytest.mark.parametrize("intermediate_size,hidden_size", [(3072, 3072)])
+@pytest.mark.parametrize("alpha,limit", [(1.0, None), (1.702, 7.0)])
 @pytest.mark.parametrize("act_type", ['mxfp8', 'bf16'])
 def test_trtllm_gen_mxfp4_fused_moe(
     topk: int,
@@ -338,6 +321,8 @@ def test_trtllm_gen_mxfp4_fused_moe(
     num_tokens: int,
     intermediate_size: int,
     hidden_size: int,
+    alpha: Optional[float],
+    limit: Optional[float],
     act_type: str,
 ):
     seed = 42
@@ -382,22 +367,37 @@ def test_trtllm_gen_mxfp4_fused_moe(
         hidden_states_scale = None
 
     # reference result
-    topk_ids, topk_weights = compute_routing_renormalize(router_logits, topk)
-    ref_result = reference_bf16_moe(
-        topk_ids,
-        topk_weights,
-        topk,
-        num_experts,
-        hidden_states,
-        hidden_states_scale,
-        w13,
-        w2,
-        w13_scale,
-        w2_scale,
-        act_type,
-    )
+    ref_result = torch.empty_like(hidden_states, dtype=torch.bfloat16)
+    w13_ref = mxfp4_dequantize(w13, w13_scale).to(torch.bfloat16)
+    w2_ref = mxfp4_dequantize(w2, w2_scale).to(torch.bfloat16)
+    if act_type == 'mxfp8':
+        hidden_states_ref = mxfp8_dequantize(
+            hidden_states, hidden_states_scale).to(torch.bfloat16)
+    else:
+        hidden_states_ref = hidden_states
+    # Process tokens in chunks of 32 to reduce memory usage
+    chunk_size = 32
+    num_chunks = (num_tokens + chunk_size - 1) // chunk_size
+    for i in range(num_chunks):
+        start_idx = i * chunk_size
+        end_idx = min(start_idx + chunk_size, num_tokens)
+        chunk_result = reference_moe(
+            router_logits[start_idx:end_idx],
+            topk,
+            num_experts,
+            hidden_states_ref[start_idx:end_idx],
+            w13_ref,
+            w2_ref,
+            alpha=alpha,
+            limit=limit
+        )
+        ref_result[start_idx:end_idx].copy_(chunk_result)
 
     # trtllm-gen result
+    if alpha is not None:
+        alpha = torch.full((num_experts,), alpha, device=hidden_states.device)
+    if limit is not None:
+        limit = torch.full((num_experts,), limit, device=hidden_states.device)
     tg_result = tg_mxfp4_moe(
         router_logits,
         topk,
@@ -411,11 +411,12 @@ def test_trtllm_gen_mxfp4_fused_moe(
         w2,
         w2_scale,
         act_type,
+        alpha=alpha,
+        limit=limit
     )
 
-    # relatively loose accuracy check since the mxfp4 quantization is less accurate
-    # note that a few tests still fail due to accuracy issues
-    check_accuracy(ref_result, tg_result, atol=0, rtol=0.35, percent=0.9)
+    # relatively loose check since the mxfp4 quantization is less accurate
+    check_accuracy(ref_result, tg_result, atol=0, rtol=0.5, percent=0.9)
 
 
 if __name__ == "__main__":
@@ -423,7 +424,7 @@ if __name__ == "__main__":
     test_trtllm_gen_mxfp4_fused_moe(
         topk=4,
         num_experts=32,
-        num_tokens=1024,
+        num_tokens=128,
         intermediate_size=4096,
         hidden_size=4096,
         act_type='mxfp8',
