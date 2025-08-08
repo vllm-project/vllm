@@ -239,19 +239,14 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
-        assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
-        assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
+        assert self.w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
+        assert self.w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
 
         expert_num_tokens = None
         if expert_tokens_meta is not None:
@@ -265,9 +260,10 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
         in_dtype = hidden_states.dtype
         run_cutlass_moe_fp8(
             output, hidden_states, w1, w2, topk_ids, activation_callable,
-            global_num_experts, expert_map, w1_scale, w2_scale, a1q_scale,
-            a2_scale, self.ab_strides1, self.ab_strides2, self.c_strides1,
-            self.c_strides2, workspace13, workspace2, expert_num_tokens,
+            global_num_experts, expert_map, self.w1_scale, self.w2_scale,
+            a1q_scale, self.a2_scale, self.ab_strides1, self.ab_strides2,
+            self.c_strides1, self.c_strides2, workspace13, workspace2,
+            expert_num_tokens,
             self.out_dtype if self.out_dtype is not None else in_dtype,
             self.per_act_token_quant, self.per_out_ch_quant,
             use_batched_format, topk_weights)
@@ -343,6 +339,7 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(
+            out_dtype,
             ab_strides1,
             ab_strides2,
             c_strides1,
@@ -397,17 +394,13 @@ def cutlass_moe_fp8(
     w2_q: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
     ab_strides1: torch.Tensor,
     ab_strides2: torch.Tensor,
     c_strides1: torch.Tensor,
     c_strides2: torch.Tensor,
-    per_act_token: Optional[bool] = None,
     activation: str = "silu",
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
     expert_map: Optional[torch.Tensor] = None,
+    quant_config: Optional[FusedMoEQuantConfig] = None,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
 ) -> torch.Tensor:
@@ -458,10 +451,14 @@ def cutlass_moe_fp8(
     Returns:
     - torch.Tensor: The fp16 output tensor after applying the MoE layer.
     """
-    if per_act_token is None:
-        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
-            a2_scale.numel() != 1 if a2_scale is not None else False)
-    per_out_ch = w1_scale.numel() != w1_q.size(0)
+    assert quant_config is not None
+
+    assert quant_config.per_act_token_quant == (
+        quant_config.a1_scale.numel() != 1 if quant_config.a1_scale is not None
+        else (quant_config.a2_scale.numel() != 1
+              if quant_config.a2_scale is not None else False))
+    assert quant_config.per_out_ch_quant == (quant_config.w1_scale.numel()
+                                             != w1_q.size(0))
 
     num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(
         0)
@@ -470,12 +467,11 @@ def cutlass_moe_fp8(
         MoEPrepareAndFinalizeNoEP(),
         CutlassExpertsFp8(
             out_dtype=a.dtype,
-            per_act_token_quant=per_act_token,
-            per_out_ch_quant=per_out_ch,
             ab_strides1=ab_strides1,
             ab_strides2=ab_strides2,
             c_strides1=c_strides1,
             c_strides2=c_strides2,
+            quant_config=quant_config,
         ),
     )
 
@@ -485,14 +481,9 @@ def cutlass_moe_fp8(
         w2_q,
         topk_weights,
         topk_ids,
-        False,
         activation,
         num_experts,
         expert_map,
-        w1_scale,
-        w2_scale,
-        a1_scale=a1_scale,
-        a2_scale=a2_scale,
         apply_router_weight_on_input=apply_router_weight_on_input,
     )
 
@@ -642,10 +633,11 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         max_experts_per_worker: int,
         out_dtype: torch.dtype,
         per_act_token_quant: bool,
-        use_batched_format: bool = False, # TODO: split/remove?
+        per_out_ch_quant: bool,
+        block_shape: Optional[list[int]] = None,
+        use_batched_format: bool = False,  # TODO: split/remove?
         #quant_config: Optional[FusedMoEQuantConfig] = None,
     ):
-        raise NotImpelementedError
         # XXXXXXXXXXXX skip quantization
         super().__init__(
             # NVFP4 requires two levels of quantization, which involves
@@ -661,12 +653,6 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         self.max_experts_per_worker = max_experts_per_worker
         self.out_dtype = out_dtype
         self.use_batched_format = use_batched_format
-
-        # TODO(bnell): put this stuff into quant config?
-        self.g1_alphas = g1_alphas
-        self.g2_alphas = g2_alphas
-        self.a1_gscale = a1_gscale
-        self.a2_gscale = a2_gscale
 
     @property
     def activation_formats(
@@ -726,12 +712,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: torch.Tensor,
-        w2_scale: torch.Tensor,
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: torch.Tensor,
+        a1q_scale: Optional[torch.Tensor],  # unused
         workspace13: Optional[torch.Tensor],
         workspace2: Optional[torch.Tensor],
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
@@ -745,11 +726,11 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
             a=hidden_states,
             a1_gscale=self.a1_gscale,
             w1_fp4=w1,
-            w1_blockscale=w1_scale,
+            w1_blockscale=self.w1_scale,
             w1_alphas=self.g1_alphas,
             a2_gscale=self.a2_gscale,
             w2_fp4=w2,
-            w2_blockscale=w2_scale,
+            w2_blockscale=self.w2_scale,
             w2_alphas=self.g2_alphas,
             topk_weights=topk_weights,
             topk_ids=topk_ids,

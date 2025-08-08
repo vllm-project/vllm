@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
@@ -9,30 +9,52 @@ import vllm.envs as envs
 from vllm.config import ParallelConfig
 from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
-from vllm.utils import cdiv
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
+from vllm.utils import cdiv, has_triton_kernels
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+if TYPE_CHECKING and has_triton_kernels:
+    from triton_kernels.matmul_ogs import PrecisionConfig
 
 logger = init_logger(__name__)
 
 
-# Get rid of this/replace
-def get_config_quant_dtype(
+def _get_config_dtype_str(
+    dtype: torch.dtype,
+    use_fp8_w8a8: bool = False,
+    use_int8_w8a16: bool = False,
+    use_int4_w4a16: bool = False,
+    use_mxfp4_w4a4: bool = False,
+) -> Optional[str]:
+    if use_fp8_w8a8:
+        return "fp8_w8a8"
+    elif use_int8_w8a16:
+        return "int8_w8a16"
+    elif use_int4_w4a16:
+        return "int4_w4a16"
+    elif use_mxfp4_w4a4:
+        return "mxfp4_w4a4"
+    elif dtype == torch.float:
+        # avoiding cases where kernel fails when float32 MoE
+        # use fp16/bfloat16 configs
+        return "float32"
+    return None
+
+
+def _get_config_quant_dtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
     use_int4_w4a16: bool,
     use_mxfp4_w4a4: bool,
-    use_nvfp4_w4a4: bool,
-) -> Union[torch.dtype, str, None]:
+) -> Union[None, torch.dtype, str]:
     if use_fp8_w8a8:
         return torch.float8_e4m3fn
     elif use_int8_w8a8:
         return torch.int8
     elif use_mxfp4_w4a4:
         return "mxfp4"
-    elif use_nvfp4_w4a4:
-        return "nvfp4"
     return None
 
 
@@ -52,6 +74,8 @@ class FusedMoEQuantDesc:
     scale: Optional[torch.Tensor] = None
     alpha_or_gscale: Optional[torch.Tensor] = None
     zp: Optional[torch.Tensor] = None
+    # TODO: should be in union with other stuff?
+    precision: Optional["PrecisionConfig"] = None
 
 
 @dataclass
@@ -67,6 +91,16 @@ class FusedMoEQuantConfig:
     def __post_init__(self):
         assert (not self.per_act_token_quant
                 or self.block_shape is None), "illegal quantization"
+
+    # TODO: add rest
+    # - w1_scale (Optional[torch.Tensor]): Optional scale to be used for w1.
+    # - w2_scale (Optional[torch.Tensor]): Optional scale to be used for w2.
+    # - w1_zp (Optional[torch.Tensor]): Optional zero points to be used for
+    #   w1.
+    # - w2_zp (Optional[torch.Tensor]): Optional zero points to be used for
+    #   w2.
+    # - a1_scale (Optional[torch.Tensor]): Optional scale to be used for a1.
+    # - a2_scale (Optional[torch.Tensor]): Optional scale to be used for a2.
 
     @property
     def quant_dtype(self) -> Union[torch.dtype, str, None]:
@@ -86,19 +120,15 @@ class FusedMoEQuantConfig:
 
     @property
     def block_shape(self) -> Optional[list[int]]:
-        if (a1.shape != GroupShape.PER_TENSOR and
-            a1.shape != GroupShape.PER_TOKEN):
-            return [a1.shape.row, a1.shape.col]
+        if (self.a1.shape != GroupShape.PER_TENSOR
+                and self.a1.shape != GroupShape.PER_TOKEN):
+            return [self.a1.shape.row, self.a1.shape.col]
         else:
             return None
 
     @property
     def is_block_quantized(self) -> bool:
         return self.block_shape is not None
-
-    @property
-    def is_per_tensor(self) -> bool:
-        return not self.per_act_token_quant and self.block_shape is None
 
     @property
     def a1_scale(self) -> Optional[torch.Tensor]:
@@ -133,12 +163,54 @@ class FusedMoEQuantConfig:
         return self.w2.zp
 
     @property
+    def w1_precision(self) -> Optional["PrecisionConfig"]:
+        return self.w1.precision
+
+    @property
+    def w2_precision(self) -> Optional["PrecisionConfig"]:
+        return self.w2.precision
+
+    @property
     def g1_alphas(self) -> Optional[torch.Tensor]:
         return self.w1.alpha_or_gscale
 
     @property
     def g2_alphas(self) -> Optional[torch.Tensor]:
         return self.w2.alpha_or_gscale
+
+    @property
+    def use_fp8_w8a8(self) -> bool:
+        return self.quant_dtype == torch.float8_e4m3fn
+
+    @property
+    def use_int8_w8a8(self) -> bool:
+        return self.quant_dtype == torch.int8
+
+    @property
+    def use_int8_w8a16(self) -> bool:
+        return (self.a1.dtype is None and self.w1.dtype == torch.int8)
+
+    @property
+    def use_int4_w4a16(self) -> bool:
+        return (self.a1.dtype is None and self.w1.dtype == "int4")
+
+    @property
+    def use_mxfp4_w4a4(self) -> bool:
+        return self.quant_dtype == "mxfp4"
+
+    @property
+    def use_nvfp4_w4a4(self) -> bool:
+        return self.quant_dtype == "nvfp4"
+
+    @property
+    def config_name(self, dtype: torch.dtype) -> Optional[str]:
+        return _get_config_dtype_str(
+            use_fp8_w8a8=self.use_fp8_w8a8,
+            use_int8_w8a16=self.use_int8_w8a16,
+            use_int4_w4a16=self.use_int4_w4a16,
+            use_mxfp4_w4a4=self.use_mxfp4_w4a4,
+            dtype=dtype,
+        )
 
     def scale_shape(
         self,
@@ -171,72 +243,6 @@ class FusedMoEQuantConfig:
         else:
             return None
 
-    # only used by fused_moe function
-    @staticmethod
-    def make(
-        use_fp8_w8a8: bool = False,
-        use_int8_w8a8: bool = False,
-        use_int8_w8a16: bool = False,
-        use_int4_w4a16: bool = False,
-        use_mxfp4_w4a4: bool = False,
-        use_nvfp4_w4a4: bool = False,
-        per_act_token_quant: bool = False,
-        per_out_ch_quant: bool = False,
-        block_shape: Optional[list[int]] = None,
-    ) -> "FusedMoEQuantConfig":
-        """
-        - w1_scale (Optional[torch.Tensor]): Optional scale to be used for w1.
-        - w2_scale (Optional[torch.Tensor]): Optional scale to be used for w2.
-        - w1_zp (Optional[torch.Tensor]): Optional zero points to be used for
-          w1.
-        - w2_zp (Optional[torch.Tensor]): Optional zero points to be used for
-          w2.
-        - a1q_scale (Optional[torch.Tensor]): Optional quantized scale to be
-          used for a1.
-        - a2_scale (Optional[torch.Tensor]): Optional scale to be used for a2.
-        """
-        assert False, "GET RID OF THIS"
-        assert sum([
-            int(flag) for flag in [
-                use_fp8_w8a8,
-                use_int8_w8a8,
-                use_int8_w8a16,
-                use_int4_w4a16,
-                use_mxfp4_w4a4,
-                use_nvfp4_w4a4,
-            ]
-        ]) <= 1, "Quantization flags are mutually exclusive."
-
-        # TODO: check validity of per_ + block_shape.
-
-        quant_dtype = get_config_quant_dtype(
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a8=use_int8_w8a8,
-            use_int8_w8a16=use_int8_w8a16,
-            use_int4_w4a16=use_int4_w4a16,
-            use_mxfp4_w4a4=use_mxfp4_w4a4,
-            use_nvfp4_w4a4=use_nvfp4_w4a4,
-        )
-
-        if use_fp8_w8a8:
-            pass
-        elif use_int8_w8a8:
-            pass
-        elif use_int8_w8a16:
-            pass
-        elif use_int4_w4a16:
-            pass
-        elif use_mxfp4_w4a4:
-            pass
-        else:
-            raise RuntimeError("must choose")
-
-        return FusedMoEQuantConfig(
-            quant_dtype,
-            per_act_token_quant,
-            per_out_ch_quant,
-            block_shape,
-        )
 
 def _quant_flags_to_group_shape(
     per_act_token_quant: bool,
@@ -268,15 +274,13 @@ def fp8_w8a8_moe_quant_config(
     w2_scale: torch.Tensor,
     a1_scale: Optional[torch.Tensor],
     a2_scale: Optional[torch.Tensor],
-    per_act_token_quant: bool=False,
-    per_out_ch_quant: bool=False,
+    per_act_token_quant: bool = False,
+    per_out_ch_quant: bool = False,
     block_shape: Optional[list[int]] = None,
 ) -> FusedMoEQuantConfig:
-    a1_shape, a2_shape = _quant_flags_to_group_shape(
-        per_act_token_quant,
-        per_out_ch_quant,
-        block_shape
-    )
+    a1_shape, a2_shape = _quant_flags_to_group_shape(per_act_token_quant,
+                                                     per_out_ch_quant,
+                                                     block_shape)
     return FusedMoEQuantConfig(
         a1=FusedMoEQuantDesc(torch.float8_e4m3fn, a1_shape, a1_scale),
         a2=FusedMoEQuantDesc(torch.float8_e4m3fn, a2_shape, a2_scale),
@@ -290,13 +294,10 @@ def int8_w8a8_moe_quant_config(
     w2_scale: torch.Tensor,
     a1_scale: Optional[torch.Tensor],
     a2_scale: Optional[torch.Tensor],
-    per_act_token_quant: bool=False,
+    per_act_token_quant: bool = False,
 ) -> FusedMoEQuantConfig:
-    a1_shape, a2_shape = _quant_flags_to_group_shape(
-        per_act_token_quant,
-        per_out_ch_quant,
-        block_shape
-    )
+    a1_shape, a2_shape = _quant_flags_to_group_shape(per_act_token_quant,
+                                                     False, None)
     return FusedMoEQuantConfig(
         a1=FusedMoEQuantDesc(torch.int8, a1_shape, a1_scale),
         a2=FusedMoEQuantDesc(torch.int8, a2_shape, a2_scale),
@@ -313,10 +314,9 @@ def mxfp4_w4a4_moe_quant_config(
     block_shape: Optional[list[int]] = None,
 ) -> FusedMoEQuantConfig:
     a1_shape, a2_shape = _quant_flags_to_group_shape(
-        per_act_token_quant,
-        per_out_ch_quant,
-        block_shape
-    )
+        False,  #?
+        False,  #?
+        block_shape)
     return FusedMoEQuantConfig(
         a1=FusedMoEQuantDesc("mxfp4", a1_shape, a1_scale),
         a2=FusedMoEQuantDesc("mxfp4", a2_shape, a2_scale),
@@ -333,11 +333,7 @@ def nvfp4_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
 ) -> FusedMoEQuantConfig:
-    a1_shape, a2_shape = _quant_flags_to_group_shape(
-        per_act_token_quant,
-        per_out_ch_quant,
-        block_shape
-    )
+    a1_shape, a2_shape = _quant_flags_to_group_shape(False, False, None)
     return FusedMoEQuantConfig(
         a1=FusedMoEQuantDesc("nvfp4", a1_shape, None, a1_gscale),
         a2=FusedMoEQuantDesc("nvfp4", a2_shape, None, a2_gscale),
