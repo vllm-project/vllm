@@ -727,6 +727,9 @@ def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     Returns:
         True if all layers have the same type, False otherwise.
     """
+    # Empty spec is considered uniform
+    if not kv_cache_spec:
+        return True
 
     try:
         kv_cache_spec_values = list(kv_cache_spec.values())
