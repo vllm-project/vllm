@@ -468,7 +468,14 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
             architectures=["Gemma3nForCausalLM"],
         )
         self.language_model = cast(Gemma3nForCausalLM, self.language_model)
-        self.per_layer_inputs = None
+        # NOTE (NickLucche) In order to be compatible with cudagraph, the
+        # buffer needs to be consistent, so we pre-allocate here.
+        self.per_layer_embeddings = torch.zeros(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.config.text_config.num_hidden_layers,
+            self.config.text_config.hidden_size_per_layer_input,
+            device=self.language_model.model.embed_tokens.weight.device,
+            dtype=self.language_model.model.embed_tokens.weight.dtype)
 
     @property
     def dtype(self):
@@ -620,9 +627,11 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         if input_ids is not None:
             per_layer_inputs = self.language_model.model.get_per_layer_input_embeddings(
                 input_ids)
-            self.per_layer_inputs = per_layer_inputs.reshape(
+            per_layer_inputs = per_layer_inputs.reshape(
                 -1, self.config.text_config.num_hidden_layers,
                 self.config.text_config.hidden_size_per_layer_input)
+            self.per_layer_embeddings[:per_layer_inputs.shape[0]].copy_(
+                per_layer_inputs)
 
         if multimodal_embeddings is not None \
             and len(multimodal_embeddings) != 0:
@@ -644,31 +653,20 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
             inputs_embeds = None
 
         # NOTE (NickLucche) During profiling, `get_input_embeddings` is not
-        # called, hence we don't have input_ids to compute PLEs. We create a
-        # zero PLE tensor here to keep inner model compilation stable.
-        # Mind that the assumption here is that `get_input_embeddings` is
-        # *NOT* called until the model starts processing requests.
-        is_profiling = self.per_layer_inputs is None and input_ids is None
-        if is_profiling:
-            assert inputs_embeds is not None
-            self.per_layer_inputs = torch.zeros(
-                inputs_embeds.shape[0],
-                self.config.text_config.num_hidden_layers,
-                self.config.text_config.hidden_size_per_layer_input,
-                device=inputs_embeds.device,
-                dtype=inputs_embeds.dtype)
+        # called, hence we don't have input_ids to compute PLEs. We simply
+        # select a chunk of pre-allocated PLEs. During normal execution,
+        # `get_input_embeddings` is called before forward, hence this slice
+        # will contain PLEs computed from the actual input_ids.
+        per_layer_inputs = self.per_layer_embeddings[:inputs_embeds.shape[0]]
 
         hidden_states = self.language_model.model(
             input_ids,
             positions,
-            per_layer_inputs=self.per_layer_inputs,
+            per_layer_inputs=per_layer_inputs,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
             **kwargs)
 
-        if is_profiling:
-            # Reset for subsequent _dummy_runs.
-            self.per_layer_inputs = None
         return hidden_states
 
     def compute_logits(
