@@ -38,11 +38,14 @@ class CudagraphDispatcher:
             CUDAGraphMode.FULL: set(),
         }
 
-        # Verify if correctly piecewise compilation for attention.
-        piecewise_compilation = self.compilation_config.level ==\
-             CompilationLevel.PIECEWISE
-        self.piecewise_attn_compilation = piecewise_compilation and\
-            self.compilation_config.is_attention_splitting
+        assert not self.cudagraph_mode.has_piecewise_cudagraphs() or \
+            (self.compilation_config.level == CompilationLevel.PIECEWISE and
+             self.compilation_config.splitting_ops_contain_attention()), \
+            "Compilation level should be CompilationLevel.PIECEWISE when "\
+            "cudagraph_mode piecewise cudagraphs is used, "\
+            f"cudagraph_mode={self.cudagraph_mode}, "\
+            f"compilation_level={self.compilation_config.level}, "\
+            f"splitting_ops={self.compilation_config.splitting_ops}"
 
         self.keys_initialized = False
 

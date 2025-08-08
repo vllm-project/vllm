@@ -4191,6 +4191,10 @@ class CUDAGraphMode(enum.Enum):
     def has_full_cudagraphs(self) -> bool:
         return self.max_cudagraph_mode() == CUDAGraphMode.FULL
 
+    def has_piecewise_cudagraphs(self) -> bool:
+        return (self.decode_mode() == CUDAGraphMode.PIECEWISE
+                or self.mixed_mode() == CUDAGraphMode.PIECEWISE)
+
     def separate_routine(self) -> bool:
         return isinstance(self.value, tuple)
 
@@ -4327,8 +4331,6 @@ class CompilationConfig:
     splitting_ops: Optional[list[str]] = None
     """A list of ops to split the full graph into subgraphs, used in piecewise
     compilation."""
-    is_attention_splitting: bool = False
-    """A flag to indicate if the splitting_ops contains all attention ops."""
 
     # Inductor capture
     use_inductor: bool = True
@@ -4408,6 +4410,8 @@ class CompilationConfig:
         "Use cudagraph_mode instead. To be removed in the next major or"
         " minor release, i.e. v0.11.0 or v1.0.0")
     def use_cudagraph(self) -> bool:  # noqa: F811
+        if self.cudagraph_mode is None:
+            return True
         return self.cudagraph_mode.value >= CUDAGraphMode.PIECEWISE.value
 
     @use_cudagraph.setter
@@ -4493,6 +4497,13 @@ class CompilationConfig:
     """Per-model forward context
     Map from layer name to layer objects that need to be accessed outside
     model code, e.g., Attention, FusedMOE when dp_size>1."""
+
+    # Attention ops; used for piecewise cudagraphs
+    _attention_ops: ClassVar[list[str]] = [
+        "vllm.unified_attention",
+        "vllm.unified_attention_with_output",
+        "vllm.mamba_mixer2",
+    ]
 
     def compute_hash(self) -> str:
         """
@@ -4612,6 +4623,10 @@ class CompilationConfig:
         if isinstance(self.pass_config, dict):
             self.pass_config = PassConfig(**self.pass_config)
 
+        # splitting ops is only set for piecewise compilation
+        if self.level == CompilationLevel.PIECEWISE:
+            self.set_splitting_ops_for_v1()
+
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
@@ -4698,11 +4713,7 @@ class CompilationConfig:
             # full cudagraph outside the fx graph. This reduces some cpu
             # overhead when the runtime batch_size is not cudagraph captured.
             # see https://github.com/vllm-project/vllm/pull/20059 for details.
-            self.splitting_ops = [
-                "vllm.unified_attention",
-                "vllm.unified_attention_with_output",
-                "vllm.mamba_mixer2",
-            ]
+            self.splitting_ops = self._attention_ops
         elif len(self.splitting_ops) == 0:
             logger.warning_once("Using piecewise compilation with empty "
                                 "splitting_ops.")
@@ -4716,9 +4727,10 @@ class CompilationConfig:
                     "any problems.")
                 self.cudagraph_mode = CUDAGraphMode.FULL
             self.splitting_ops = []
-        self.is_attention_splitting = all(
-            op in self.splitting_ops for op in
-            ["vllm.unified_attention", "vllm.unified_attention_with_output"])
+
+    def splitting_ops_contain_attention(self) -> bool:
+        return False if self.splitting_ops is None else all(
+            op in self.splitting_ops for op in self._attention_ops)
 
 
 @config
@@ -5015,10 +5027,6 @@ class VllmConfig:
             not self.model_config.enforce_eager:
             self.compilation_config.cudagraph_num_of_warmups = 1
 
-        # splitting ops is only set for piecewise compilation
-        if self.compilation_config.level == CompilationLevel.PIECEWISE:
-            self.compilation_config.set_splitting_ops_for_v1()
-
         # disable cudagraph when enforce eager execution
         if self.model_config is not None and self.model_config.enforce_eager:
             logger.info("Cudagraph is disabled under eager mode")
@@ -5089,7 +5097,7 @@ class VllmConfig:
                 self.model_config.disable_cascade_attn = True
 
             if self.compilation_config.cudagraph_mode\
-                .requires_piecewise_compilation():
+                .has_piecewise_cudagraphs():
                 assert self.compilation_config.level == \
                     CompilationLevel.PIECEWISE, \
                     "Compilation level should be CompilationLevel.PIECEWISE "\

@@ -46,37 +46,33 @@ class TestCudagraphDispatcher:
             {
                 "case_id": 0,
                 "cudagraph_mode": "FULL",
-                "piecewise_attn_compilation": False,
+                "compilation_level": CompilationLevel.NO_COMPILATION,
             },
             # Test case 1: Full CG for uniform batches, piecewise for mixed
             {
                 "case_id": 1,
                 "cudagraph_mode": "FULL_AND_PIECEWISE",
-                "piecewise_attn_compilation": True,
+                "compilation_level": CompilationLevel.PIECEWISE,
             },
             # Test case 2: Full CG for uniform batches, no CG for mixed
             {
                 "case_id": 2,
                 "cudagraph_mode": "FULL_DECODE_ONLY",
-                "piecewise_attn_compilation": False,
+                "compilation_level": CompilationLevel.NO_COMPILATION,
             },
             # Test case 3: Piecewise for all
             {
                 "case_id": 3,
                 "cudagraph_mode": "PIECEWISE",
-                "piecewise_attn_compilation": True,
+                "compilation_level": CompilationLevel.PIECEWISE,
             },
         ])
     def test_dispatcher(self, params):
         # Setup dispatcher
         comp_config = CompilationConfig(
             cudagraph_mode=params["cudagraph_mode"],
-            cudagraph_capture_sizes=[1, 8],
-            is_attention_splitting=params["piecewise_attn_compilation"])
-        if params["piecewise_attn_compilation"]:
-            comp_config.level = CompilationLevel.PIECEWISE
-        else:
-            comp_config.level = CompilationLevel.NO_COMPILATION
+            level=params["compilation_level"],
+            cudagraph_capture_sizes=[1, 8])
 
         config = _create_vllm_config(comp_config, max_num_seqs=8)
         dispatcher = CudagraphDispatcher(config)
