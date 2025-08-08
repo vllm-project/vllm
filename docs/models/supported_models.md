@@ -320,7 +320,7 @@ th {
 }
 </style>
 
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `AquilaForCausalLM` | Aquila, Aquila2 | `BAAI/Aquila-7B`, `BAAI/AquilaChat-7B`, etc. | ✅︎ | ✅︎ | ✅︎ |
 | `ArceeForCausalLM` | Arcee (AFM) | `arcee-ai/AFM-4.5B-Base`, etc. | ✅︎ | ✅︎ | ✅︎ |
@@ -427,7 +427,7 @@ See [this page](./pooling_models.md) for more information on how to use pooling 
 
 These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) API.
 
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `BertModel`<sup>C</sup> | BERT-based | `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc. | | | |
 | `Gemma2Model`<sup>C</sup> | Gemma 2-based | `BAAI/bge-multilingual-gemma2`, etc. | ✅︎ | | ✅︎ |
@@ -467,7 +467,7 @@ of the whole prompt are extracted from the normalized hidden state corresponding
 
 These models primarily support the [`LLM.classify`](./pooling_models.md#llmclassify) API.
 
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `JambaForSequenceClassification` | Jamba | `ai21labs/Jamba-tiny-reward-dev`, etc. | ✅︎ | ✅︎ | |
 | `GPT2ForSequenceClassification` | GPT2 | `nie3e/sentiment-polish-gpt2-small` | | | ✅︎ |
@@ -484,7 +484,7 @@ If your model is not in the above list, we will try to automatically convert the
 Cross-encoder and reranker models are a subset of classification models that accept two prompts as input.
 These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) API.
 
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `BertForSequenceClassification` | BERT-based | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc. | | | |
 | `GemmaForSequenceClassification` | Gemma-based | `BAAI/bge-reranker-v2-gemma` (see note), etc. | ✅︎ | ✅︎ | ✅︎ |
@@ -522,7 +522,7 @@ These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) A
 
 These models primarily support the [`LLM.reward`](./pooling_models.md#llmreward) API.
 
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `InternLM2ForRewardModel` | InternLM2-based | `internlm/internlm2-1_8b-reward`, `internlm/internlm2-7b-reward`, etc. | ✅︎ | ✅︎ | ✅︎ |
 | `LlamaForCausalLM`<sup>C</sup> | Llama-based | `peiyi9979/math-shepherd-mistral-7b-prm`, etc. | ✅︎ | ✅︎ | ✅︎ |
@@ -595,7 +595,7 @@ See [this page](generative_models.md) for more information on how to use generat
 
 These models primarily accept the [`LLM.generate`](./generative_models.md#llmgenerate) API. Chat/Instruct models additionally support the [`LLM.chat`](./generative_models.md#llmchat) API.
 
-| Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
+| Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) | [V1](gh-issue:8779) |
 |--------------|--------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | | | ✅︎ |
 | `AyaVisionForConditionalGeneration` | Aya Vision | T + I<sup>+</sup> | `CohereForAI/aya-vision-8b`, `CohereForAI/aya-vision-32b`, etc. | | ✅︎ | ✅︎ |
@@ -648,7 +648,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 
 Some models are supported only via the [Transformers backend](#transformers). The purpose of the table below is to acknowledge models which we officially support in this way. The logs will say that the Transformers backend is being used, and you will see no warning that this is fallback behaviour. This means that, if you have issues with any of the models listed below, please [make an issue](https://github.com/vllm-project/vllm/issues/new/choose) and we'll do our best to fix it!
 
-| Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
+| Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) | [V1](gh-issue:8779) |
 |--------------|--------|--------|-------------------|-----------------------------|-----------------------------------------|---------------------|
 | `Emu3ForConditionalGeneration` | Emu3 | T + I | `BAAI/Emu3-Chat-hf` | ✅︎ | ✅︎ | ✅︎ |
 
@@ -727,7 +727,7 @@ Some models are supported only via the [Transformers backend](#transformers). Th
 
 Speech2Text models trained specifically for Automatic Speech Recognition.
 
-| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `WhisperForConditionalGeneration` | Whisper | `openai/whisper-small`, `openai/whisper-large-v3-turbo`, etc. | | | |
 | `VoxtralForConditionalGeneration` | Voxtral (Mistral format) | `mistralai/Voxtral-Mini-3B-2507`, `mistralai/Voxtral-Small-24B-2507`, etc. | | ✅︎ | ✅︎ |
@@ -745,7 +745,7 @@ These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) A
 
 The following table lists those that are tested in vLLM.
 
-| Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
+| Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) | [V1](gh-issue:8779) |
 |--------------|--------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `LlavaNextForConditionalGeneration`<sup>C</sup> | LLaVA-NeXT-based | T / I | `royokong/e5-v` | | | |
 | `Phi3VForCausalLM`<sup>C</sup> | Phi-3-Vision-based | T + I | `TIGER-Lab/VLM2Vec-Full` | 🚧 | ✅︎ | |
@@ -761,7 +761,7 @@ The following table lists those that are tested in vLLM.
 Cross-encoder and reranker models are a subset of classification models that accept two prompts as input.
 These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) API.
 
-| Architecture                        | Models             | Inputs   | Example HF Models        | [LoRA][lora-adapter]   | [PP][distributed-serving]   | [V1](gh-issue:8779)   |
+| Architecture                        | Models             | Inputs   | Example HF Models        | [LoRA][lora-adapter]   | [PP][parallelism-scaling]   | [V1](gh-issue:8779)   |
 |-------------------------------------|--------------------|----------|--------------------------|------------------------|-----------------------------|-----------------------|
 | `JinaVLForSequenceClassification` | JinaVL-based | T + I<sup>E+</sup> | `jinaai/jina-reranker-m0`, etc. | | | ✅︎ |
 
