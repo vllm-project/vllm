@@ -50,8 +50,8 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         POOLING_MODEL_MAX_NUM_BATCHED_TOKENS, GiB_bytes,
                         LayerBlockType, LazyLoader, common_broadcastable_dtype,
                         cuda_device_count_stateless, get_cpu_memory,
-                        get_open_port, is_torch_equal_or_newer, random_uuid,
-                        resolve_obj_by_qualname)
+                        get_open_ports_list, is_torch_equal_or_newer,
+                        random_uuid, resolve_obj_by_qualname)
 
 # yapf: enable
 
@@ -2099,6 +2099,8 @@ class ParallelConfig:
     data_parallel_rpc_port: int = 29550
     """Port for data parallel messaging."""
     data_parallel_master_port: int = 29500
+    """List of port for data parallel messaging"""
+    data_parallel_master_port_list: list[int] = field(default_factory=list)
     """Port of the data parallel master."""
     data_parallel_backend: str = "mp"
     """Backend to use for data parallel, either "mp" or "ray"."""
@@ -2199,8 +2201,12 @@ class ParallelConfig:
         increment the port number each time we need to initialize a
         new process group related to data parallelism.
         """
-        answer = self.data_parallel_master_port
-        self.data_parallel_master_port += 1
+        if len(self.data_parallel_master_port_list) > 0:
+            answer = self.data_parallel_master_port_list.pop()
+        else:
+            answer = self.data_parallel_master_port
+
+        self.data_parallel_master_port = answer + 1
         return answer
 
     def stateless_init_dp_group(self) -> "ProcessGroup":
@@ -2294,7 +2300,10 @@ class ParallelConfig:
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
-            self.data_parallel_master_port = get_open_port()
+            self.data_parallel_master_port_list = get_open_ports_list(5)
+            assert len(self.data_parallel_master_port_list) > 0
+            self.data_parallel_master_port = \
+                self.data_parallel_master_port_list.pop()
 
             if not (0 <= self.data_parallel_rank < self.data_parallel_size):
                 raise ValueError(
