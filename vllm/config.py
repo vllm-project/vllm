@@ -1792,6 +1792,13 @@ class CacheConfig:
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
     fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc)."""
+    # TODO: via config or via envs?
+    # cache_dtype_attention: Optional[CacheDType] = None
+    # """Data type for kv cache storage for attention layers in hybrid models.
+    # If none, `cache_dtype` will be used."""
+    # cache_dtype_mamba: Optional[CacheDType] = None
+    # """Data type for state storage for mamba layers in hybrid models.
+    # If none, `cache_dtype` will be used."""
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
@@ -1862,6 +1869,8 @@ class CacheConfig:
         """
         factors: list[Any] = []
         factors.append(self.cache_dtype)
+        factors.append(self.cache_dtype_attention)
+        factors.append(self.cache_dtype_mamba)
         # `cpu_offload_gb` does not use `torch.compile` yet.
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()

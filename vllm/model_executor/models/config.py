@@ -245,10 +245,20 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         else:
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
         kv_cache_dtype_attn = kv_cache_dtype
-        import os
-        if os.getenv("NGL_ATTN_KV_CACHE", "auto") != "auto":
+        if envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION is not None:
             kv_cache_dtype_attn = STR_DTYPE_TO_TORCH_DTYPE[
-                os.environ["NGL_ATTN_KV_CACHE"]]
+                envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION]
+            logger.info("Setting kv cache dtype for attention layers to %s",
+                        kv_cache_dtype_attn)
+            vllm_config.cache_config.cache_dtype_attention = kv_cache_dtype_attn
+        
+        kv_cache_dtype_mamba = kv_cache_dtype
+        if envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_MAMBA is not None:
+            kv_cache_dtype_mamba = STR_DTYPE_TO_TORCH_DTYPE[
+                envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_MAMBA]
+            logger.info("Setting state cache dtype for mamba layers to %s",
+                        kv_cache_dtype_mamba)
+            vllm_config.cache_config.cache_dtype_mamba = kv_cache_dtype_mamba
 
         # get attention page size (for 1 token)
         attn_page_size_1_token = FullAttentionSpec(
@@ -266,7 +276,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         # get mamba page size
         mamba_page_size = MambaSpec(
             shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
-            dtype=kv_cache_dtype,
+            dtype=kv_cache_dtype_mamba,
             block_size=model_config.max_model_len,
         ).page_size_bytes
 

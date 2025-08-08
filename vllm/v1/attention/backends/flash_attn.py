@@ -23,6 +23,7 @@ if is_flash_attn_varlen_func_available():
                                                reshape_and_cache_flash)
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
@@ -35,9 +36,6 @@ logger = init_logger(__name__)
 
 # NOTE(woosuk): This is an arbitrary number. Tune it if needed.
 _DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH = 16
-
-import os
-kv_cache_dtype_attn = os.getenv("NGL_ATTN_KV_CACHE", "auto")
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -167,6 +165,10 @@ class FlashAttentionMetadataBuilder(
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
         self.cache_config = vllm_config.cache_config
+        self.cache_dtype = self.cache_config.cache_dtype
+        if envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION is not None:
+            # Override the kv cache dtype for attention layers.
+            self.cache_dtype = envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION
         self.compilation_config = vllm_config.compilation_config
         self.device = device
 
@@ -253,12 +255,9 @@ class FlashAttentionMetadataBuilder(
 
         def schedule(batch_size, cu_query_lens, max_query_len, seqlens,
                      max_seq_len, causal):
-            cache_dtype = self.cache_config.cache_dtype
-            if cache_dtype != kv_cache_dtype_attn:
-                cache_dtype = kv_cache_dtype_attn
-            if cache_dtype.startswith("fp8"):
+            if self.cache_dtype.startswith("fp8"):
                 qkv_dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
-                    cache_dtype)
+                    self.cache_dtype)
             else:
                 qkv_dtype = self.kv_cache_dtype
             if aot_schedule:
