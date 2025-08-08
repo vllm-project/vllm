@@ -695,7 +695,7 @@ def test_fused_marlin_moe(
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 @pytest.mark.parametrize("m", [1, 256])
-def test_fused_marlin_moe_with_bias():
+def test_fused_marlin_moe_with_bias(m):
     torch.cuda.manual_seed(0)
 
     e, topk = 32, 4
