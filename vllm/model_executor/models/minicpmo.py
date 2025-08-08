@@ -589,7 +589,7 @@ class MiniCPMO(MiniCPMV2_6):
         ret = torch.zeros(size, size, device=device, dtype=torch.bool)
         # Vectorized computation of row indices and chunk boundaries
         row_indices = torch.arange(size, device=device)
-        chunk_indices = row_indices // chunk_size  
+        chunk_indices = row_indices // chunk_size
         if num_left_chunks < 0:
             # If num_left_chunks < 0, start is always 0 for all rows
             start_indices = torch.zeros_like(row_indices)
@@ -597,7 +597,7 @@ class MiniCPMO(MiniCPMV2_6):
             # Compute start indices vectorially
             start_chunk_indices = torch.clamp(chunk_indices - num_left_chunks,
                                               min=0)
-            start_indices = start_chunk_indices * chunk_size    
+            start_indices = start_chunk_indices * chunk_size
         # Compute ending indices vectorially
         end_chunk_indices = chunk_indices + 1
         end_indices = torch.clamp(end_chunk_indices * chunk_size +
