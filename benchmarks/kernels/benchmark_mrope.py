@@ -37,10 +37,6 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.rotary_embedding.mrope import (
-    mrope_forward_native,
-    triton_mrope,
-)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 from vllm.utils import FlexibleArgumentParser
@@ -110,8 +106,7 @@ def benchmark_mrope(
         is_neox_style=is_neox_style,
         rope_scaling=rope_scaling,
         dtype=dtype,
-    )
-    mrope_helper_class.cos_sin_cache = mrope_helper_class.cos_sin_cache.to(device)
+    ).to(device=device)
 
     print(80 * "=")
     print(
@@ -126,29 +121,19 @@ def benchmark_mrope(
     positions, query, key = generate_test_data(
         num_tokens, num_heads, num_kv_heads, head_dim, max_position, dtype, device
     )
-    cos_sin = mrope_helper_class.cos_sin_cache[positions]
-    cos, sin = cos_sin.chunk(2, dim=-1)
 
     # Warm up
     for _ in range(warmup_iter):
-        mrope_forward_native(
+        mrope_helper_class.forward_native(
             positions,
             query.clone(),
             key.clone(),
-            cos,
-            sin,
-            rope_scaling["mrope_section"],
-            is_neox_style,
-            head_dim,
-            head_dim,
         )
-        triton_mrope(
+
+        mrope_helper_class.forward_cuda(
+            positions,
             query.clone(),
             key.clone(),
-            cos,
-            sin,
-            rope_scaling["mrope_section"],
-            head_dim,
         )
 
     torch.cuda.synchronize()
@@ -160,17 +145,13 @@ def benchmark_mrope(
         key_clone = key.clone()
         torch.cuda.synchronize()
         start_time = time.time()
-        mrope_forward_native(
+
+        mrope_helper_class.forward_native(
             positions,
             query_clone,
             key_clone,
-            cos,
-            sin,
-            rope_scaling["mrope_section"],
-            is_neox_style,
-            head_dim,
-            head_dim,
         )
+
         torch.cuda.synchronize()
         torch_times.append(time.time() - start_time)
 
@@ -181,8 +162,10 @@ def benchmark_mrope(
         key_clone = key.clone()
         torch.cuda.synchronize()
         start_time = time.time()
-        triton_mrope(
-            query_clone, key_clone, cos, sin, rope_scaling["mrope_section"], head_dim
+        mrope_helper_class.forward_cuda(
+            positions,
+            query_clone,
+            key_clone,
         )
         torch.cuda.synchronize()
         triton_times.append(time.time() - start_time)

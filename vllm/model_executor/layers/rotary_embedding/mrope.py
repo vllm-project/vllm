@@ -15,57 +15,6 @@ from .base import RotaryEmbedding
 from .common import apply_rotary_emb_dispatch
 
 
-# vLLM Native implementation of mrope forward pass
-# used for benchmarking and unit testing
-def mrope_forward_native(
-        positions: torch.Tensor, query: torch.Tensor, key: torch.Tensor,
-        cos: torch.Tensor, sin: torch.Tensor, mrope_section: list[int],
-        is_neox_style: bool, head_size: int,
-        rotary_dim: int) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    """PyTorch-native implementation equivalent to forward().
-
-    Args:
-        positions:
-            [num_tokens,] (text only) or
-            [3, num_tokens] (T/H/W positions with multimodal inputs)
-        query: [num_tokens, num_heads * head_size]
-        key: [num_tokens, num_kv_heads * head_size]
-        cos: [3, num_tokens, head_dim // 2]
-        sin: [3, num_tokens, head_dim // 2]
-    """
-
-    assert positions.ndim == 1 or positions.ndim == 2
-    assert key is not None
-
-    num_tokens = positions.shape[-1]
-    query_shape = query.shape
-    key_shape = key.shape
-
-    if positions.ndim == 2:
-        # the mrope path
-        assert mrope_section
-
-        cos = torch.cat(
-            [m[i] for i, m in enumerate(cos.split(mrope_section, dim=-1))],
-            dim=-1)
-        sin = torch.cat(
-            [m[i] for i, m in enumerate(sin.split(mrope_section, dim=-1))],
-            dim=-1)
-
-    query = query.view(num_tokens, -1, head_size)
-    query_rot = query[..., :rotary_dim]
-    query_pass = query[..., rotary_dim:]
-    query_rot = apply_rotary_emb_dispatch(query_rot, cos, sin, is_neox_style)
-    query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
-
-    key = key.view(num_tokens, -1, head_size)
-    key_rot = key[..., :rotary_dim]
-    key_pass = key[..., rotary_dim:]
-    key_rot = apply_rotary_emb_dispatch(key_rot, cos, sin, is_neox_style)
-    key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
-    return query, key
-
-
 @triton.jit
 def _triton_qwen2vl_mrope_forward(
     q_ptr,
@@ -278,15 +227,51 @@ class MRotaryEmbedding(RotaryEmbedding):
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """PyTorch-native implementation equivalent to forward().
+
+        Args:
+            positions:
+                [num_tokens,] (text only) or
+                [3, num_tokens] (T/H/W positions with multimodal inputs)
+            query: [num_tokens, num_heads * head_size]
+            key: [num_tokens, num_kv_heads * head_size]
+        """
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
 
+        num_tokens = positions.shape[-1]
         cos_sin = self.cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
+        if positions.ndim == 2:
+            assert self.mrope_section
 
-        return mrope_forward_native(positions, query, key, cos, sin,
-                                    self.mrope_section, self.is_neox_style,
-                                    self.head_size, self.rotary_dim)
+            cos = torch.cat([
+                m[i]
+                for i, m in enumerate(cos.split(self.mrope_section, dim=-1))
+            ],
+                            dim=-1)
+            sin = torch.cat([
+                m[i]
+                for i, m in enumerate(sin.split(self.mrope_section, dim=-1))
+            ],
+                            dim=-1)
+
+        query_shape = query.shape
+        query = query.view(num_tokens, -1, self.head_size)
+        query_rot = query[..., :self.rotary_dim]
+        query_pass = query[..., self.rotary_dim:]
+        query_rot = apply_rotary_emb_dispatch(query_rot, cos, sin,
+                                              self.is_neox_style)
+        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+
+        key_shape = key.shape
+        key = key.view(num_tokens, -1, self.head_size)
+        key_rot = key[..., :self.rotary_dim]
+        key_pass = key[..., self.rotary_dim:]
+        key_rot = apply_rotary_emb_dispatch(key_rot, cos, sin,
+                                            self.is_neox_style)
+        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        return query, key
 
     def forward_cuda(
         self,
