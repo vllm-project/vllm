@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkLinearMethod, QuarkW8A8Fp8, QuarkW8A8Int8)
 from vllm.platforms import current_platform
 
+from ..utils import create_new_process_for_each_test
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
@@ -96,6 +97,7 @@ def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
         assert output
 
 
+@create_new_process_for_each_test()
 def test_quark_fp8_parity(vllm_runner):
     quark_model_id = "amd-quark/llama-tiny-fp8-quark-quant-method"
     fp8_model_id = "amd-quark/llama-tiny-fp8-quant-method"
