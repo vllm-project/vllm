@@ -252,6 +252,7 @@ class GroupCoordinator:
         else:
             self.device = torch.device("cpu")
 
+        self.use_device_communicator = use_device_communicator
         self.device_communicator = None
         if use_device_communicator and self.world_size > 1:
             device_comm_cls = resolve_obj_by_qualname(
