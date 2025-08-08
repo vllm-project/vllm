@@ -8,8 +8,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import extract_required_args
+from vllm.utils import has_triton_kernels
 
-if True:
+if has_triton_kernels():
     import triton_kernels.swiglu
     from triton_kernels.matmul_ogs import (FnSpecs, FusedActivation,
                                            PrecisionConfig, matmul_ogs)
