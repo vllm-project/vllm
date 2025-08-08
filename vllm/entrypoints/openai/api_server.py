@@ -598,7 +598,8 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
     handler = responses(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Responses API")
+            message="The model does not support Responses API"
+        ).to_json_response()
 
     generator = await handler.create_responses(request, raw_request)
 
@@ -615,7 +616,8 @@ async def retrieve_responses(response_id: str, raw_request: Request):
     handler = responses(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Responses API")
+            message="The model does not support Responses API"
+        ).to_json_response()
 
     response = await handler.retrieve_responses(response_id)
 
@@ -630,7 +632,8 @@ async def cancel_responses(response_id: str, raw_request: Request):
     handler = responses(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Responses API")
+            message="The model does not support Responses API"
+        ).to_json_response()
 
     response = await handler.cancel_responses(response_id)
 
@@ -665,7 +668,8 @@ async def create_chat_completion(request: ChatCompletionRequest,
     handler = chat(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Chat Completions API")
+            message="The model does not support Chat Completions API"
+        ).to_json_response()
 
     generator = await handler.create_chat_completion(request, raw_request)
 
@@ -703,7 +707,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     handler = completion(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Completions API")
+            message="The model does not support Completions API"
+        ).to_json_response()
 
     try:
         generator = await handler.create_completion(request, raw_request)
@@ -739,7 +744,8 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     handler = embedding(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Embeddings API")
+            message="The model does not support Embeddings API"
+        ).to_json_response()
 
     generator = await handler.create_embedding(request, raw_request)
 
@@ -768,7 +774,8 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
     handler = pooling(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Pooling API")
+            message="The model does not support Pooling API").to_json_response(
+            )
 
     generator = await handler.create_pooling(request, raw_request)
     if isinstance(generator, ErrorResponse):
@@ -788,7 +795,8 @@ async def create_classify(request: ClassificationRequest,
     handler = classify(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Classification API")
+            message="The model does not support Classification API"
+        ).to_json_response()
 
     generator = await handler.create_classify(request, raw_request)
     if isinstance(generator, ErrorResponse):
@@ -817,7 +825,7 @@ async def create_score(request: ScoreRequest, raw_request: Request):
     handler = score(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Score API")
+            message="The model does not support Score API").to_json_response()
 
     generator = await handler.create_score(request, raw_request)
     if isinstance(generator, ErrorResponse):
@@ -874,7 +882,8 @@ async def create_transcriptions(raw_request: Request,
     handler = transcription(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Transcriptions API")
+            message="The model does not support Transcriptions API"
+        ).to_json_response()
 
     audio_data = await request.file.read()
     generator = await handler.create_transcription(audio_data, request,
@@ -915,7 +924,8 @@ async def create_translations(request: Annotated[TranslationRequest,
     handler = translation(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Translations API")
+            message="The model does not support Translations API"
+        ).to_json_response()
 
     audio_data = await request.file.read()
     generator = await handler.create_translation(audio_data, request,
@@ -947,7 +957,8 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
     handler = rerank(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Rerank (Score) API")
+            message="The model does not support Rerank (Score) API"
+        ).to_json_response()
     generator = await handler.do_rerank(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
