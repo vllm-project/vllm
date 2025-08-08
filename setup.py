@@ -40,9 +40,11 @@ envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm", "envs.py"))
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
 if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
-    logger.warning("VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
-    VLLM_TARGET_DEVICE = "cpu"
-elif not (sys.platform.startswith("linux") or sys.platform.startswith("darwin")):
+    logger.warning(
+        "VLLM_TARGET_DEVICE set to `mps` for macOS")
+    VLLM_TARGET_DEVICE = "mps"
+elif not (sys.platform.startswith("linux")
+          or sys.platform.startswith("darwin")):
     logger.warning(
         "vLLM only supports Linux platform (including WSL) and MacOS."
         "Building on %s, "
@@ -593,6 +595,10 @@ def _is_xpu() -> bool:
     return VLLM_TARGET_DEVICE == "xpu"
 
 
+def _is_mps() -> bool:
+    return VLLM_TARGET_DEVICE == "mps"
+
+
 def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip() or _is_cpu()
 
@@ -680,6 +686,8 @@ def get_vllm_version() -> str:
             version += f"{sep}cpu"
     elif _is_xpu():
         version += f"{sep}xpu"
+    elif _is_mps():
+        version += f"{sep}mps"
     else:
         raise RuntimeError("Unknown runtime environment")
 
@@ -726,8 +734,11 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("cpu.txt")
     elif _is_xpu():
         requirements = _read_requirements("xpu.txt")
+    elif _is_mps():
+        requirements = _read_requirements("cpu.txt")  # Use CPU requirements for MPS
     else:
-        raise ValueError("Unsupported platform, please use CUDA, ROCm, or CPU.")
+        raise ValueError(
+            "Unsupported platform, please use CUDA, ROCm, Neuron, CPU, or MPS.")
     return requirements
 
 
