@@ -54,6 +54,7 @@ __all__ = [
     "MLPSpeculatorConfig",
     "MoonViTConfig",
     "KimiVLConfig",
+    "KimiAudioConfig",
     "WhisperVQConfig",
     "NemotronConfig",
     "NemotronHConfig",
