@@ -623,6 +623,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         replace_parameter(layer, "w2_scales", marlin_w2_scales)
 
+    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+        return None
+
     def apply(
         self,
         layer: torch.nn.Module,

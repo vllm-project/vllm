@@ -509,6 +509,9 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_qweight_type, extra_weight_attrs)
         layer.register_parameter("w2_qweight_type", w2_qweight_type)
 
+    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+        return None
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -555,6 +558,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
+
         return fused_moe_gguf(x, layer.w13_qweight, layer.w2_qweight,
                               topk_weights, topk_ids,
                               layer.w13_qweight_type.weight_type,

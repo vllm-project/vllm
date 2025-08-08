@@ -470,6 +470,9 @@ class AWQMoEMethod(FusedMoEMethodBase):
             num_bits=self.quant_config.weight_bits)
         replace_parameter(layer, "w2_qzeros", marlin_w2_zp)
 
+    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+        return None
+
     def apply(
         self,
         layer: torch.nn.Module,

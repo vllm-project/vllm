@@ -291,8 +291,8 @@ class NomicMoE(nn.Module):
                                         self.top_k,
                                         renormalize=False,
                                         inplace=False,
-                                        activation=self.hidden_act,
-                                        is_act_and_mul=False)
+                                        # TODO: make utility for this?
+                                        activation=self.hidden_act = "_no_mul")
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
