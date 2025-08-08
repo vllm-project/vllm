@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional, Dict, Any
 
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
-from vllm.v1.metrics.sliding_window_metrics import update_sliding_window_metrics
 
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
@@ -101,7 +100,6 @@ class IterationStats:
         self.time_per_output_tokens_iter: list[float] = []
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
-        self.sliding_window_stats = SlidingWindowStats()
 
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
@@ -186,12 +184,6 @@ class IterationStats:
                                  inference_time=inference_time,
                                  decode_time=decode_time)
         self.finished_requests.append(finished_req)
-        
-        # Update sliding window stats
-        self.sliding_window_stats.add_finished_request(finished_req)
-        
-        # Update Prometheus metrics
-        update_sliding_window_metrics(self.sliding_window_stats)
 
 
 @dataclass

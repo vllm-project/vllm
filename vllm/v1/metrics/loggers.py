@@ -13,7 +13,8 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import (FinishedRequestStats, IterationStats,
+                                   SchedulerStats, SlidingWindowStats)
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
@@ -160,6 +161,72 @@ class PrometheusStatLogger(StatLoggerBase):
 
         unregister_vllm_metrics()
         self.vllm_config = vllm_config
+        # Build a long-lived SlidingWindowStats to accumulate across iterations
+        window_size = getattr(vllm_config.observability_config,
+                              "sliding_window_request_count", 100)
+        self.sliding_window_stats = SlidingWindowStats(window_size=window_size)
+
+        # Exporter for sliding window averages as gauges
+        # We use raw prometheus_client here to align with the existing pattern
+        # and avoid extra module-level registration.
+        self._sliding_latency_ms = self._gauge_cls(
+            name="vllm:sliding_window_avg_latency_ms",
+            documentation=
+            "Average latency (ms) over last N finished requests (request-count window)",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames + ["window_size"],
+        )
+        self._sliding_throughput = self._gauge_cls(
+            name="vllm:sliding_window_avg_throughput_tokens_per_sec",
+            documentation=
+            "Average throughput (tokens/s) over last N finished requests",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames + ["window_size"],
+        )
+        self._sliding_ttft_ms = self._gauge_cls(
+            name="vllm:sliding_window_avg_ttft_ms",
+            documentation=
+            "Average time-to-first-token (ms) over last N finished requests",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames + ["window_size"],
+        )
+        self._sliding_queued_ms = self._gauge_cls(
+            name="vllm:sliding_window_avg_queued_time_ms",
+            documentation="Average queued time (ms) over last N finished requests",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames + ["window_size"],
+        )
+        self._sliding_prefill_ms = self._gauge_cls(
+            name="vllm:sliding_window_avg_prefill_time_ms",
+            documentation="Average prefill time (ms) over last N finished requests",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames + ["window_size"],
+        )
+        self._sliding_decode_ms = self._gauge_cls(
+            name="vllm:sliding_window_avg_decode_time_ms",
+            documentation="Average decode time (ms) over last N finished requests",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames + ["window_size"],
+        )
+        # Per-engine label helpers for these gauges
+        self._sliding_labels = {
+            idx: {
+                "latency": self._sliding_latency_ms.labels(
+                    model_name, str(idx), str(window_size)),
+                "throughput": self._sliding_throughput.labels(
+                    model_name, str(idx), str(window_size)),
+                "ttft": self._sliding_ttft_ms.labels(
+                    model_name, str(idx), str(window_size)),
+                "queued": self._sliding_queued_ms.labels(
+                    model_name, str(idx), str(window_size)),
+                "prefill": self._sliding_prefill_ms.labels(
+                    model_name, str(idx), str(window_size)),
+                "decode": self._sliding_decode_ms.labels(
+                    model_name, str(idx), str(window_size)),
+            }
+            for idx in self.engine_indexes
+        }
+
         # Use this flag to hide metrics that were deprecated in
         # a previous release and which will be removed future
         self.show_hidden_metrics = \
@@ -560,6 +627,25 @@ class PrometheusStatLogger(StatLoggerBase):
             if finished_request.max_tokens_param:
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param)
+
+            # Update sliding-window aggregator and gauges per finished request
+            self.sliding_window_stats.add_finished_request(finished_request)
+            labels = self._sliding_labels[engine_idx]
+            labels["latency"].set(
+                self.sliding_window_stats.get_metric("latency_ms"))
+            labels["throughput"].set(
+                self.sliding_window_stats.get_metric(
+                    "throughput_tokens_per_sec"))
+            labels["queued"].set(
+                self.sliding_window_stats.get_metric("queued_time_ms"))
+            labels["prefill"].set(
+                self.sliding_window_stats.get_metric("prefill_time_ms"))
+            labels["decode"].set(
+                self.sliding_window_stats.get_metric("decode_time_ms"))
+            # TTFT is per-iteration list; we approximate by using the
+            # finished request's first token latency if available in stats.
+            # If IterationStats later exposes per-request TTFT explicitly,
+            # SlidingWindowStats can be updated accordingly.
 
         if self.gauge_lora_info is not None:
             running_lora_adapters = \

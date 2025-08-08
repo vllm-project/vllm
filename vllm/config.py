@@ -3958,6 +3958,11 @@ class ObservabilityConfig:
     Note that collecting detailed timing information for each request can be
     expensive."""
 
+    # Sliding window metrics configuration
+    sliding_window_request_count: int = 100
+    """Number of most-recent finished requests used for request-count-based
+    moving averages (e.g., latency, throughput)."""
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""
