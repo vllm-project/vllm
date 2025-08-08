@@ -66,7 +66,6 @@ def select_nvfp4_gemm_impl(
     """Return a GEMM *experts* implementation for NV-FP4 fused-MoE layers"""
 
     if allow_flashinfer:
-        # TODO(bnell): put scales in FusedMoEQuantConfig?
         return FlashInferExperts(
             g1_alphas=g1_alphas,
             g2_alphas=g2_alphas,

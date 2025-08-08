@@ -707,12 +707,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
         elif isinstance(layer, Attention):
             return ModelOptFp8KVCacheMethod(self)
         elif isinstance(layer, FusedMoE):
-            return ModelOptNvFp4FusedMoE(
-                self,
-                layer.moe_config,
-                layer,
-            )
-
+            return ModelOptNvFp4FusedMoE(self, layer.moe_config, layer)
         return None
 
 
@@ -1399,9 +1394,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         else:
-            # TP or DP case
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
-                is_valid_flashinfer_cutlass_fused_moe)
             assert self.allow_flashinfer and \
                self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
 

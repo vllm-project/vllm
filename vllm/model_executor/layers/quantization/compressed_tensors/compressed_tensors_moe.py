@@ -875,9 +875,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
     def __init__(
-            self,
-            quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
-            moe: FusedMoEConfig):
+        self,
+        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
+        moe: FusedMoEConfig,
+    ):
         super().__init__(moe)
         self.quant_config = quant_config
         self.weight_quant = self.quant_config.target_scheme_map["Linear"].get(
