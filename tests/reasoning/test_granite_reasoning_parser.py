@@ -336,6 +336,7 @@ def test_streaming_subcases(param_dict):
         previous_token_ids=previous_token_ids,
         current_token_ids=current_token_ids,
         delta_token_ids=delta_token_ids,
+        request=None,
     )
     # Streaming currently expects at least one of reasoning content / content,
     # so the response should return None in that case.

@@ -51,6 +51,7 @@ class GptOssReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
         raise RuntimeError(
             "GptOss model uses harmony to extract reasoning content. This "
