@@ -1243,10 +1243,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # which using ALL pooling.
             supported_tasks.remove("encode")
 
-            logger.info("Chunked prefill is not supported with "
-                        "encode task which using ALL pooling. "
-                        "Please turn off chunked prefill by "
-                        "`--no-enable-chunked-prefill` before using it.")
+            logger.info_once("Chunked prefill is not supported with "
+                             "encode task which using ALL pooling. "
+                             "Please turn off chunked prefill by "
+                             "`--no-enable-chunked-prefill` before using it.")
 
         return supported_tasks
 
