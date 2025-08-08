@@ -76,6 +76,12 @@ def parse_args():
         help=("Maximum number of tokens to be processed in a single iteration."),
     )
     parser.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        help=("Number of seconds before unresponsive process is killed."),
+    )
+    parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
         default=0.8,
@@ -220,7 +226,7 @@ if __name__ == "__main__":
         procs.append(proc)
     exit_code = 0
     for proc in procs:
-        proc.join(timeout=300)
+        proc.join(timeout=args.timeout)
         if proc.exitcode is None:
             print(f"Killing process {proc.pid} that didn't stop within 5 minutes.")
             proc.kill()
