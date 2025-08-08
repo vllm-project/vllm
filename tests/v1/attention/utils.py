@@ -11,7 +11,7 @@ import torch
 from vllm.config import (CacheConfig, CompilationConfig, DeviceConfig,
                          LoadConfig, ModelConfig, ModelDType, ParallelConfig,
                          SchedulerConfig, VllmConfig)
-from vllm.platforms import _Backend
+from vllm.platforms import _Backend, current_platform
 from vllm.utils import resolve_obj_by_qualname
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -119,7 +119,10 @@ def get_attention_backend(backend_name: _Backend):
     """
     backend_map = {
         _Backend.FLASH_ATTN_VLLM_V1:
-        "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend",
+        ("vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+         if current_platform.is_cuda() else
+         "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend"
+         ),
         _Backend.FLASHINFER_VLLM_V1:
         "vllm.v1.attention.backends.flashinfer.FlashInferBackend",
         _Backend.FLEX_ATTENTION:
