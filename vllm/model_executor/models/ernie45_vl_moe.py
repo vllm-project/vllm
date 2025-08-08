@@ -125,9 +125,9 @@ class Ernie4_5_VLAttention(nn.Module):
                                         quant_config=quant_config,
                                         prefix=f"{prefix}.o_proj")
 
-        t_repo = freq_allocation
-        h_repo = (self.head_dim // 2 - freq_allocation) // 2
-        w_repo = (self.head_dim // 2 - freq_allocation) // 2
+        t_rope = freq_allocation
+        h_rope = (self.head_dim // 2 - freq_allocation) // 2
+        w_rope = (self.head_dim // 2 - freq_allocation) // 2
 
         self.rotary_emb = Ernie4_5_VLRotaryEmbedding(
             head_size=self.head_dim,
@@ -136,7 +136,7 @@ class Ernie4_5_VLAttention(nn.Module):
             base=rope_theta,
             is_neox_style=False,
             dtype = torch.get_default_dtype(),
-            mrope_section=[h_repo, w_repo , t_repo]
+            mrope_section=[h_rope, w_rope , t_rope]
             )
 
 

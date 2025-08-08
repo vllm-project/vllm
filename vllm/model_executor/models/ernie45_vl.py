@@ -615,7 +615,15 @@ Ernie4_5_VLVideoInputs = Ernie4_5_VLImagePixelInputs
 
 class VariableResolutionResamplerModel(nn.Module):
 
-    def __init__(self, in_dim, out_dim, spatial_conv_size, temporal_conv_size, config, prefix: str = "",):
+    def __init__(
+        self,
+        in_dim,
+        out_dim,
+        spatial_conv_size,
+        temporal_conv_size,
+        config,
+        prefix: str = ""
+    ) -> None:
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
@@ -1219,7 +1227,11 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             return "<|VIDEO_START|><|video@placeholder|><|VIDEO_END|>"
 
         raise ValueError("Only image or video modality is supported")
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = ""
+    ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -1249,7 +1261,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             self.config.spatial_conv_size,
             self.config.temporal_conv_size,
             config=self.config,
-            prefix=maybe_prefix(prefix, "language_model")
+            prefix=maybe_prefix(prefix, "resampler_model")
         )
         
         self.visual_token_mask = None
