@@ -231,7 +231,6 @@ class Ernie4_5_VLMoE(nn.Module):
                                                       quant_config=quant_config,
                                                       prefix=f"{prefix}.text_experts_gate")
 
-            # TODO 检查这里的入参
             self.text_experts = FusedMoE(num_experts=config.moe_num_experts[0],
                                 top_k=config.moe_k,
                                 hidden_size=config.hidden_size,
@@ -354,7 +353,7 @@ class Ernie4_5_VLDecoderLayer(nn.Module):
         freq_allocation = getattr(config, "freq_allocation", 20)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           131072)
-        # TODO 检查attention
+
         self.self_attn = Ernie4_5_VLAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -653,12 +652,11 @@ class  Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
                     continue
 
                 param = params_dict[name]
-                # print(f"name:{name} loaded_weight shape:{loaded_weight.shape}")
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # TODO 文本专家 和 视觉专家
+                # Distinguish between image experts and text experts
                 if "mlp.experts" in name:
                     moe_offset = int(name.split(".")[-3])
                     image_expert_start_idx = self.config.moe_num_experts[0]
@@ -674,12 +672,11 @@ class  Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
                     if weight_name not in name:
                         continue
                     
-                    # TODO 判断是 文本专家 还是 视觉专家
+                    # Distinguish between image experts and text experts
                     moe_offset = int(name.split(".")[-3])
                     is_text_expert = True if moe_offset <= self.config.moe_num_experts[0] - 1 else False
 
                     name = name.replace(weight_name, param_name)
-                    # 把name中的experts换为text_experts或者image_experts
                     if is_text_expert:
                         name = name.replace(".experts.", ".text_experts.")
                     else:
@@ -695,7 +692,6 @@ class  Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
                         continue
                     param = params_dict[name]
 
-                    # print(f"name:{name} loaded_weight shape:{loaded_weight.shape}")
                     weight_loader = param.weight_loader
                     weight_loader(param,
                                   loaded_weight,
@@ -704,7 +700,7 @@ class  Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
                                   expert_id=expert_id)
                     break
                 else:
-                    # TODO 文本gate和视觉gate
+                    # Distinguish between image expert gate and text expert gate
                     if name.endswith("mlp.gate.weight"):
                         name = name.replace("gate.weight", "text_experts_gate.weight")
                         loaded_weight = loaded_weight.T
@@ -729,7 +725,6 @@ class  Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
                     
                     param = params_dict[name]
 
-                    # print(f"name:{name} loaded_weight shape:{loaded_weight.shape}")
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)

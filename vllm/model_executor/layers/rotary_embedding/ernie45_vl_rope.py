@@ -39,7 +39,7 @@ class Ernie4_5_VLRotaryEmbedding(MRotaryEmbedding):
             section_w = self.mrope_section[1] # 22
             section_t = self.mrope_section[2] # 20
             assert section_h == section_w
-            # 按照 [h w h w h w h w... t t t...] 拆分
+            # Split according to [h w h w h w h w... t t t...]
             section_cos_t, section_cos_h, section_cos_w = cos[..., -section_t :], \
                                                             cos[..., : section_h + section_w : 2], \
                                                             cos[..., 1 : section_h + section_w : 2], 

@@ -417,7 +417,6 @@ class Ernie4_5_VisionTransformer(nn.Module):
 
         super().__init__()
         patch_size = vision_config.patch_size
-        # temporal_patch_size = vision_config.temporal_patch_size
         spatial_merge_size = vision_config.spatial_merge_size
         in_channels = vision_config.in_channels
         hidden_size = vision_config.hidden_size
@@ -425,7 +424,6 @@ class Ernie4_5_VisionTransformer(nn.Module):
         depth = vision_config.depth
         num_heads = vision_config.num_heads
         mlp_ratio = vision_config.mlp_ratio
-        hidden_act = vision_config.hidden_act
 
         self.spatial_merge_size = spatial_merge_size
         self.num_heads = num_heads
@@ -1536,7 +1534,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         if self.visual_token_mask is not None:
 
             if self.visual_token_mask.shape[0] != inputs_embeds.shape[0]:
-                logger.warning(f"  self.visual_token_mask.shape[0] != inputs_embeds.shape[0] {self.visual_token_mask.shape}, {inputs_embeds.shape}")
                 padding_len = inputs_embeds.shape[0] - self.visual_token_mask.shape[0]
                 # right pad False
                 pad = torch.zeros((padding_len, self.visual_token_mask.shape[1]), dtype=self.visual_token_mask.dtype, device=self.visual_token_mask.device)
