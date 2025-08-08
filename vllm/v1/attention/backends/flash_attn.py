@@ -22,7 +22,7 @@ if is_flash_attn_varlen_func_available():
                                                get_scheduler_metadata,
                                                reshape_and_cache_flash)
 
-from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
@@ -185,8 +185,8 @@ class FlashAttentionMetadataBuilder(
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = (get_flash_attn_version() == 3)
 
-        self.use_full_cuda_graph = (
-            self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL)
+        self.use_full_cuda_graph = \
+            self.compilation_config.cudagraph_mode.has_full_cudagraphs()
 
         if self.use_full_cuda_graph and self.aot_schedule:
             self.max_cudagraph_size = self.compilation_config.max_capture_size

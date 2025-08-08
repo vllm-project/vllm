@@ -79,7 +79,10 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             1, # MQA for the decode path
         )
 
-        if self.compilation_config.full_cuda_graph:
+        # TODO: we can disambiguate between decode and mixed-prefill decode here
+        # so we can only use the persistent buffer if a cudagraph is actually
+        # being used.
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             # First time around (CUDAGraph capture), allocate the static buffer
             if self.cg_buf_tile_scheduler_metadata is None:
                 self.cg_buf_tile_scheduler_metadata = tile_scheduler_metadata

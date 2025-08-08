@@ -27,7 +27,7 @@ from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.distributed import ProcessGroup, ReduceOp
-from typing_extensions import Self, assert_never, runtime_checkable
+from typing_extensions import Self, assert_never, deprecated, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
@@ -4188,6 +4188,9 @@ class CUDAGraphMode(enum.Enum):
     def max_cudagraph_mode(self) -> 'CUDAGraphMode':
         return max(self.value) if self.separate_routine() else self
 
+    def has_full_cudagraphs(self) -> bool:
+        return self.max_cudagraph_mode() == CUDAGraphMode.FULL
+
     def separate_routine(self) -> bool:
         return isinstance(self.value, tuple)
 
@@ -4386,7 +4389,24 @@ class CompilationConfig:
     compilation (level=PIECEWISE and non-empty splitting_ops), full
     cudagraphs are supported with and without compilation.
     """
-    use_cudagraph: Optional[bool] = None
+
+    @property
+    @deprecated(
+        "Use cudagraph_mode instead. To be removed in the next major or"
+        " minor release, i.e. v0.11.0 or v1.0.0")
+    def use_cudagraph(self) -> bool:
+        return self.cudagraph_mode.value >= CUDAGraphMode.PIECEWISE.value
+
+    @use_cudagraph.setter
+    @deprecated(
+        "Use cudagraph_mode instead. To be removed in the next major or"
+        " minor release, i.e. v0.11.0 or v1.0.0")
+    def use_cudagraph(self, value: bool):
+        if value:
+            self.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        else:
+            self.cudagraph_mode = CUDAGraphMode.NONE
+
     """Whether to use cudagraph inside compilation.
     - False: cudagraph inside compilation is not used.
     - True: cudagraph inside compilation is used. It requires
@@ -4396,8 +4416,8 @@ class CompilationConfig:
     CompilationLevel.PIECEWISE (aka -O3).
     Note that this is orthogonal to the cudagraph capture logic
     outside of compilation.
-    Warning: This flag is deprecated and will be removed in future releases.
-    Please use cudagraph_mode instead.
+    Warning: This flag is deprecated and will be removed in the next major or
+    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode instead.
     """
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.
@@ -4416,13 +4436,27 @@ class CompilationConfig:
     internally managed buffer. Default is False. 
     Note that this flag is only effective when cudagraph_mode is PIECEWISE.
     """
-    full_cuda_graph: Optional[bool] = None
+
+    @property
+    @deprecated("Use cudagraph_mode instead. To be removed in next major or "
+                "minor release, i.e. v0.11.0 or v1.0.0")
+    def full_cuda_graph(self) -> Optional[bool]:
+        return self.cudagraph_mode.max_cudagraph_mode() == CUDAGraphMode.FULL
+
+    @full_cuda_graph.setter
+    @deprecated(
+        "Use cudagraph_mode instead. To be removed in the next major or"
+        " minor release, i.e. v0.11.0 or v1.0.0")
+    def full_cuda_graph(self, value: bool):
+        if value:
+            self.cudagraph_mode = CUDAGraphMode.FULL
+
     """whether to use a full cuda graph for the entire forward pass rather than
     splitting certain operations such as attention into subgraphs. Thus this
     flag cannot be used together with splitting_ops. This may provide
     performance benefits for smaller models.
-    Warning: This flag is deprecated and will be removed in future releases.
-    Please use cudagraph_mode instead.
+    Warning: This flag is deprecated and will be removed in the next major or
+    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode instead.
     """
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
@@ -4971,46 +5005,6 @@ class VllmConfig:
         # splitting ops is only set for piecewise compilation
         if self.compilation_config.level == CompilationLevel.PIECEWISE:
             self.compilation_config.set_splitting_ops_for_v1()
-
-        if self.compilation_config.use_cudagraph is not None:
-            logger.warning(
-                "`use_cudagraph` is deprecated and will be removed in the "
-                "future release. Switch to use `cudagraph_mode` instead.")
-            if self.compilation_config.use_cudagraph:
-                if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-                    if self.compilation_config.level == \
-                        CompilationLevel.PIECEWISE:
-                        self.compilation_config.cudagraph_mode = \
-                            CUDAGraphMode.PIECEWISE
-                    else:
-                        logger.warning(
-                            " When compilation_config.level is not "
-                            "`CompilationLevel.PIECEWISE`, "
-                            " and `use_cudagraph` is set to True, "
-                            "`cudagraph_mode` will be set as `FULL`. "
-                            "Please ensure you are using attention backends "
-                            "that support cudagraph.")
-                        self.compilation_config.cudagraph_mode = \
-                            CUDAGraphMode.FULL
-                # otherwise, keep the cudagraph_mode as is
-            else:
-                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
-        if self.compilation_config.full_cuda_graph is not None:
-            logger.warning(
-                "`full_cuda_graph` is deprecated and will be removed in the "
-                "future release. Switch to use `cudagraph_mode` instead.")
-            if self.compilation_config.use_cudagraph is not None and \
-                self.compilation_config.full_cuda_graph:
-                assert self.compilation_config.use_cudagraph, (
-                    "`use_cudagraph` must be True when `full_cuda_graph` "
-                    "is True.")
-                self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
-                self.compilation_config.use_cudagraph = True
-            elif self.compilation_config.full_cuda_graph:
-                self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
-                self.compilation_config.use_cudagraph = True
-            # other cases, keep the cudagraph_mode as is
 
         # disable cudagraph when enforce eager execution
         if self.model_config is not None and self.model_config.enforce_eager:
