@@ -81,6 +81,7 @@ def _fwd_kernel(Q,
                 num_unroll_cache: tl.constexpr,
                 num_unroll_request: tl.constexpr,
                 SKIP_DECODE: tl.constexpr,
+                USE_SINKS: tl.constexpr,
                 MAX_Q_LEN: tl.constexpr = 0,
                 MAX_CTX_LEN: tl.constexpr = 0):
 
@@ -127,7 +128,7 @@ def _fwd_kernel(Q,
                 other=0.0)  # [M,D]
 
     # initialize pointer to m and l
-    if sink_ptr is None:
+    if not USE_SINKS:
         m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     else:
         m_i = tl.load(
@@ -910,5 +911,6 @@ def context_attention_fwd(q,
         num_unroll_request=1,
         num_warps=4,
         num_stages=1,
+        USE_SINKS=sinks is not None,
         **extra_kargs)
     return
