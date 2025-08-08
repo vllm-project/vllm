@@ -192,8 +192,7 @@ class FusedMoEParallelConfig:
     @property
     def use_flashinfer_cutlass_kernels(self):
         return (envs.VLLM_USE_FLASHINFER_MOE_FP4
-                and has_flashinfer_cutlass_fused_moe()
-                and envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput")
+                and has_flashinfer_cutlass_fused_moe())
 
     @staticmethod
     def make(tp_size_: int, dp_size_: int,
