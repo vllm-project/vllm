@@ -4,6 +4,7 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
 from typing import Any, Callable, Final, Optional, Union
@@ -226,65 +227,114 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[ConversationContext, None]] = []
-        try:
-            tool_sessions: dict[str, Any] = {}
-            for i, engine_prompt in enumerate(engine_prompts):
-                default_max_tokens = self.max_model_len - len(
-                    engine_prompt["prompt_token_ids"])
-                sampling_params = request.to_sampling_params(
-                    default_max_tokens, self.default_sampling_params)
 
-                trace_headers = (None if raw_request is None else await
-                                 self._get_trace_headers(raw_request.headers))
-
-                context: ConversationContext
-                if self.use_harmony:
-                    if request.stream:
-                        context = StreamingHarmonyContext(
-                            messages, tool_sessions)
-                    else:
-                        context = HarmonyContext(messages, tool_sessions)
+        builtin_tool_list: list[str] = []
+        if self.use_harmony and self.tool_server is not None:
+            if self.tool_server.has_tool("browser"):
+                builtin_tool_list.append("browser")
+            if self.tool_server.has_tool("python"):
+                builtin_tool_list.append("python")
+        async with AsyncExitStack() as exit_stack:
+            try:
+                if self.tool_server is not None:
+                    # TODO: initialize tool sessions lazily when the session
+                    # is actually used.
+                    tool_session_ctxs: dict[str, Any] = {
+                        tool_name:
+                        exit_stack.enter_async_context(
+                            self.tool_server.new_session(tool_name))
+                        for tool_name in builtin_tool_list
+                    }
+                    tool_sessions = {}
+                    for tool_name in builtin_tool_list:
+                        tool_sessions[tool_name] = (
+                            await tool_session_ctxs[tool_name])
                 else:
-                    context = SimpleContext()
-                generator = self._generate_with_builtin_tools(
-                    request_id=request.request_id,
-                    request_prompt=request_prompts[i],
-                    engine_prompt=engine_prompt,
-                    sampling_params=sampling_params,
-                    context=context,
-                    lora_request=lora_request,
-                    priority=request.priority,
-                    trace_headers=trace_headers,
+                    assert len(builtin_tool_list) == 0
+                    tool_sessions = {}
+                for i, engine_prompt in enumerate(engine_prompts):
+                    default_max_tokens = self.max_model_len - len(
+                        engine_prompt["prompt_token_ids"])
+                    sampling_params = request.to_sampling_params(
+                        default_max_tokens, self.default_sampling_params)
+
+                    trace_headers = (None if raw_request is None else await
+                                     self._get_trace_headers(
+                                         raw_request.headers))
+
+                    context: ConversationContext
+                    if self.use_harmony:
+                        if request.stream:
+                            context = StreamingHarmonyContext(
+                                messages, tool_sessions)
+                        else:
+                            context = HarmonyContext(messages, tool_sessions)
+                    else:
+                        context = SimpleContext()
+                    generator = self._generate_with_builtin_tools(
+                        request_id=request.request_id,
+                        request_prompt=request_prompts[i],
+                        engine_prompt=engine_prompt,
+                        sampling_params=sampling_params,
+                        context=context,
+                        lora_request=lora_request,
+                        priority=request.priority,
+                        trace_headers=trace_headers,
+                    )
+                    generators.append(generator)
+            except ValueError as e:
+                # TODO: Use a vllm-specific Validation Error
+                return self.create_error_response(str(e))
+
+            assert len(generators) == 1
+            result_generator, = generators
+
+            # Store the input messages.
+            if request.store:
+                self.msg_store[request.request_id] = messages
+
+            if request.background:
+                created_time = int(time.time())
+                response = ResponsesResponse.from_request(
+                    request,
+                    sampling_params,
+                    model_name=model_name,
+                    created_time=created_time,
+                    output=[],
+                    status="queued",
+                    usage=None,
                 )
-                generators.append(generator)
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+                async with self.response_store_lock:
+                    self.response_store[response.id] = response
 
-        assert len(generators) == 1
-        result_generator, = generators
+                # Run the request in the background.
+                task = asyncio.create_task(
+                    self._run_background_request(
+                        request,
+                        sampling_params,
+                        result_generator,
+                        context,
+                        model_name,
+                        tokenizer,
+                        request_metadata,
+                        created_time,
+                    ),
+                    name=f"create_{response.id}",
+                )
 
-        # Store the input messages.
-        if request.store:
-            self.msg_store[request.request_id] = messages
+                # For cleanup.
+                response_id = response.id
+                self.background_tasks[response_id] = task
+                task.add_done_callback(
+                    lambda _: self.background_tasks.pop(response_id, None))
+                return response
 
-        if request.background:
-            created_time = int(time.time())
-            response = ResponsesResponse.from_request(
-                request,
-                sampling_params,
-                model_name=model_name,
-                created_time=created_time,
-                output=[],
-                status="queued",
-                usage=None,
-            )
-            async with self.response_store_lock:
-                self.response_store[response.id] = response
+            if request.stream:
+                raise NotImplementedError(
+                    "Streaming responses are not supported")
 
-            # Run the request in the background.
-            task = asyncio.create_task(
-                self._run_background_request(
+            try:
+                return await self.responses_full_generator(
                     request,
                     sampling_params,
                     result_generator,
@@ -292,33 +342,10 @@ class OpenAIServingResponses(OpenAIServing):
                     model_name,
                     tokenizer,
                     request_metadata,
-                    created_time,
-                ),
-                name=f"create_{response.id}",
-            )
-
-            # For cleanup.
-            response_id = response.id
-            self.background_tasks[response_id] = task
-            task.add_done_callback(
-                lambda _: self.background_tasks.pop(response_id, None))
-            return response
-
-        if request.stream:
-            raise NotImplementedError("Streaming responses are not supported")
-
-        try:
-            return await self.responses_full_generator(
-                request,
-                sampling_params,
-                result_generator,
-                context,
-                model_name,
-                tokenizer,
-                request_metadata,
-            )
-        except Exception as e:
-            return self.create_error_response(str(e))
+                )
+            except Exception as e:
+                return self.create_error_response(str(e))
+        return self.create_error_response("Should not reach here")
 
     async def _make_request(
         self,
