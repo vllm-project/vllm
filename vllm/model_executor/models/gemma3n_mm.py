@@ -201,10 +201,9 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
 
-        return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
-            input_features=MultiModalFieldConfig.batched("audio"),
-        )
+        return dict(pixel_values=MultiModalFieldConfig.batched("image"),
+                    input_features=MultiModalFieldConfig.batched("audio"),
+                    input_features_mask=MultiModalFieldConfig.batched("audio"))
 
     def _get_prompt_updates(
         self,
