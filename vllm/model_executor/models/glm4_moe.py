@@ -601,8 +601,6 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
                                           quant_config=quant_config)
         else:
             self.lm_head = PPMissingLayer()
-        if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
