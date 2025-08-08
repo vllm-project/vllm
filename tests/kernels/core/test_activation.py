@@ -11,7 +11,7 @@ from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.activation import (FastGELU, FatreluAndMul,
                                                    GeluAndMul, MulAndSilu,
                                                    NewGELU, QuickGELU,
-                                                   SiluAndMul)
+                                                   SiluAndMul, SwiGLUOAI)
 from vllm.platforms import current_platform
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -25,7 +25,15 @@ CUDA_DEVICES = [
 
 @pytest.mark.parametrize(
     "activation",
-    ["silu_and_mul", "mul_and_silu", "gelu", "gelu_tanh", "fatrelu"])
+    [
+        "silu_and_mul",
+        "mul_and_silu",
+        "gelu",
+        "gelu_tanh",
+        "fatrelu",
+        "swiglu_oai",
+    ],
+)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("d", D)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -59,6 +67,11 @@ def test_act_and_mul(
         threshold = random.uniform(0, 1)
         layer = FatreluAndMul(threshold)
         fn = torch.ops._C.fatrelu_and_mul
+    elif activation == "swiglu_oai":
+        alpha = random.uniform(0, 1)
+        limit = random.uniform(0, 1)
+        layer = SwiGLUOAI(alpha=alpha, limit=limit)
+        fn = torch.ops._C.swiglu_oai
     out = layer(x)
     ref_out = layer.forward_native(x)
     # The SiluAndMul, MulAndSilu, GELU and FatReLU implementations are
@@ -71,6 +84,8 @@ def test_act_and_mul(
     out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
     if activation == "fatrelu":
         opcheck(fn, (out, x, threshold))
+    if activation == "swiglu_oai":
+        opcheck(fn, (out, x, layer.alpha, layer.limit))
     else:
         opcheck(fn, (out, x))
 
