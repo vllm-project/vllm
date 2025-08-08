@@ -1,3 +1,5 @@
+# tests/models/multimodal/pooling/test_siglip_so400m.py
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
@@ -9,6 +11,9 @@ from ....conftest import HfRunner, VllmRunner
 from ...utils import check_embeddings_close
 
 MODEL = "HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit"
+# This is the designated tokenizer for the model, specified by the user
+# (the test script) rather than hardcoded in the model implementation.
+TOKENIZER_ID = "google/siglip-base-patch16-224"
 
 IMAGE_URL = "http://images.cocodataset.org/val2017/000000039769.jpg"
 TEXTS = ["a photo of a dog", "a photo of a cat", "a person riding a bike"]
@@ -28,17 +33,28 @@ def test_siglip_so400m_model(
     """
     image = Image.open(requests.get(IMAGE_URL, stream=True).raw).convert("RGB")
 
+    # Correctly initialize the vLLM engine by:
+    # 1. Skipping the tokenizer init from the main model repo.
+    # 2. Providing the correct tokenizer from an external repo.
     with vllm_runner(model,
                      runner="pooling",
                      dtype=dtype,
                      enforce_eager=True,
-                     trust_remote_code=True) as vllm_model:
+                     trust_remote_code=True,
+                     max_model_len=64,
+                     skip_tokenizer_init=True,
+                     tokenizer_name=TOKENIZER_ID) as vllm_model:
         vllm_outputs = vllm_model.embed(TEXTS, images=[image] * len(TEXTS))
 
     vllm_image_embeds = [o['image_embeds'] for o in vllm_outputs]
     vllm_text_embeds = [o['text_embeds'] for o in vllm_outputs]
 
-    with hf_runner(model, dtype=dtype, trust_remote_code=True) as hf_model:
+    # The HfRunner also needs to know where to get the full processor from.
+    # The 'processor_id' argument handles this.
+    with hf_runner(model,
+                   dtype=dtype,
+                   trust_remote_code=True,
+                   processor_id=TOKENIZER_ID) as hf_model:
         hf_processor = hf_model.processor
         hf_model = hf_model.model
 
