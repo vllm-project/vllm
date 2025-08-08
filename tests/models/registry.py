@@ -114,8 +114,8 @@ class _HfExamplesInfo:
             raise RuntimeError(msg)
         elif on_fail == "skip":
             pytest.skip(msg)
-        else:
-            return False
+
+        return False
 
     def check_available_online(
         self,
