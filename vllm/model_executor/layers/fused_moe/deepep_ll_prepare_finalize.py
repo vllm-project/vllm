@@ -53,6 +53,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         super().__init__()
 
         self.buffers = buffers
+        for buffer in self.buffers:
+            buffer.set_num_sms(4)
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
         # The dispatch function returns a handle that the combine function

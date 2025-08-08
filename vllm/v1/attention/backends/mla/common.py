@@ -444,6 +444,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 #   2*(192*128)*(64*1024) = 3gb
                 # (assuming 192 QK head dim, 128 heads, and fp16)
                 128 * 1024)
+            self.chunked_prefill_workspace_size = scheduler_config.max_num_seqs * cache_config.block_size
             assert self.chunked_prefill_workspace_size >= \
                 scheduler_config.max_num_seqs * cache_config.block_size
             self.chunked_prefill_workspace = torch.empty(
@@ -566,8 +567,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                                                           decode_threshold=1)
 
     def _build_decode(self, block_table_tensor: torch.Tensor,
-                      seq_lens: torch.Tensor,
-                      ubatch_id: Optional[int] = None):
+                      seq_lens: torch.Tensor):
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens,
@@ -600,8 +600,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False,
-              ubatch_id: Optional[int] = None) -> M:
+              fast_build: bool = False) -> M:
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -724,7 +723,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
                 seq_lens=seq_lens[:num_decodes],
-                ubatch_id=ubatch_id
             )
 
         attn_metadata = self.metadata_cls(
