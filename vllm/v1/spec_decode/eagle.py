@@ -17,10 +17,14 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.rocm_aiter_fa import (
+    AiterFlashAttentionMetadata)
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
                                                   TreeAttentionMetadataBuilder)
+from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -158,9 +162,9 @@ class EagleProposer:
         assert self.runner is not None
 
         # FIXME: need to consider multiple kv_cache_groups
-        attn_metadata = self.runner.attn_metadata_builders[
-            0].build_for_drafting(common_attn_metadata=common_attn_metadata,
-                                  draft_index=0)
+        attn_metadata = self.runner.attn_groups[0][0].metadata_builder\
+            .build_for_drafting(common_attn_metadata=common_attn_metadata,
+                                draft_index=0)
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -230,11 +234,19 @@ class EagleProposer:
         # one layer. Adapt this code to support multiple layers once
         # there's a multi-layer MTP module.
 
-        # Currently, only FlashAttention and TreeAttention support multi-token
-        # eagle spec decode. This is because the code below
-        # makes assumptions about attn_metadata attributes available.
-        assert isinstance(attn_metadata,
-                          (FlashAttentionMetadata, TreeAttentionMetadata))
+        # On ROCm, both AiterFlashAttention and TritonAttention
+        # support multi-token eagle spec decode.
+        if current_platform.is_rocm():
+            assert isinstance(
+                attn_metadata,
+                (TritonAttentionMetadata, AiterFlashAttentionMetadata,
+                 FlashAttentionMetadata))
+        else:
+            # Currently, only FlashAttention and TreeAttention support
+            # multi-token eagle spec decode. This is because the code below
+            # makes assumptions about attn_metadata attributes available.
+            assert isinstance(attn_metadata,
+                              (FlashAttentionMetadata, TreeAttentionMetadata))
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
@@ -349,7 +361,8 @@ class EagleProposer:
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> list[torch.Tensor]:
-        tree_attn_metadata_builder = self.runner.attn_metadata_builders[0]
+        tree_attn_metadata_builder = \
+            self.runner.attn_groups[0][0].metadata_builder
         assert isinstance(tree_attn_metadata_builder,
                           TreeAttentionMetadataBuilder)
 
