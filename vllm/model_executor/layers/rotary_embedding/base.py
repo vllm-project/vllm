@@ -8,7 +8,7 @@ import torch
 from vllm.model_executor.custom_op import CustomOp
 
 from .common import apply_rotary_emb_dispatch, apply_rotary_emb_torch
-from .rocm_aiter_rope_ops import is_rocm_rotatry_embedding_enabled
+from .rocm_aiter_rope_ops import is_rocm_rotary_embedding_enabled
 
 
 @CustomOp.register("rotary_embedding")
@@ -36,7 +36,7 @@ class RotaryEmbedding(CustomOp):
         cache = cache.to(dtype)
         self.cos_sin_cache: torch.Tensor
         self.register_buffer("cos_sin_cache", cache, persistent=False)
-        self.is_rocm_aiter_enabled = is_rocm_rotatry_embedding_enabled()
+        self.is_rocm_aiter_enabled = is_rocm_rotary_embedding_enabled()
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
         """Compute the inverse frequency."""
