@@ -1320,20 +1320,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         input_features = input_features.to(device=self.device,
                                            dtype=self.model_config.dtype)
 
-        # Create encoder positions
-        encoder_positions = torch.arange(total_encoder_tokens,
-                                         dtype=torch.long,
-                                         device=self.device)
-
-        # Create encoder input_ids (dummy tokens for encoder)
-        encoder_input_ids = torch.zeros(total_encoder_tokens,
-                                        dtype=torch.long,
-                                        device=self.device)
-
         return {
             "input_features": input_features,
-            "encoder_input_ids": encoder_input_ids,
-            "encoder_positions": encoder_positions,
         }
 
     def _process_input_features(self,
