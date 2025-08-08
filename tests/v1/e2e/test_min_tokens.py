@@ -92,39 +92,51 @@ MIN_TOKENS_TEST_CASES = [
         expected_exact_len=15
     ),
     
-    # === STOP STRINGS WITH MIN_TOKENS (Calvin's bug scenario) ===
+    # === STOP STRINGS WITH MIN_TOKENS ===
     # These tests expose the detokenizer bug where stop strings bypass min_tokens
     # Using mathematically guaranteed approach with wide stop nets
-    MinTokensTestCase(
-        name="min_tokens_with_comprehensive_stops",
-        min_tokens=5,  # Lower min_tokens for higher confidence
-        max_tokens=20,  # Lower max_tokens to focus the test
-        stop=["a", "e", "i", "o", "u", "t", "n", "s", "r", "l", " "],  # Comprehensive coverage
-        expected_min_len=5,
-        should_pass=False,
-        xfail_reason="Known bug #21987: Stop strings bypass min_tokens (fixed by PR #22014)"
+    pytest.param(
+        MinTokensTestCase(
+            name="min_tokens_with_comprehensive_stops",
+            min_tokens=5,  # Lower min_tokens for higher confidence
+            max_tokens=20,  # Lower max_tokens to focus the test
+            stop=["a", "e", "i", "o", "u", "t", "n", "s", "r", "l", " "],  # Comprehensive coverage
+            expected_min_len=5,
+            should_pass=False,
+            xfail_reason="Known bug #21987: Stop strings bypass min_tokens (fixed by PR #22014)"
+        ),
+        marks=pytest.mark.xfail(reason="Known bug #21987: Stop strings bypass min_tokens (fixed by PR #22014)", strict=False),
+        id="min_tokens_with_comprehensive_stops",
     ),
     
-    MinTokensTestCase(
-        name="min_tokens_with_simple_char_stop", 
-        min_tokens=3,  # Very low threshold
-        max_tokens=15,
-        stop=["e", "a", " "],  # Multiple common patterns
-        expected_min_len=3,
-        should_pass=False,
-        xfail_reason="Known bug #21987: Stop strings bypass min_tokens (fixed by PR #22014)"
+    pytest.param(
+        MinTokensTestCase(
+            name="min_tokens_with_simple_char_stop", 
+            min_tokens=3,  # Very low threshold
+            max_tokens=15,
+            stop=["e", "a", " "],  # Multiple common patterns
+            expected_min_len=3,
+            should_pass=False,
+            xfail_reason="Known bug #21987: Stop strings bypass min_tokens (fixed by PR #22014)"
+        ),
+        marks=pytest.mark.xfail(reason="Known bug #21987: Stop strings bypass min_tokens (fixed by PR #22014)", strict=False),
+        id="min_tokens_with_simple_char_stop",
     ),
     
     # === EOS TOKEN WITH MIN_TOKENS (potential LogitsProcessor bug) ===
     # These test the MinTokensLogitsProcessor handling of EOS tokens
-    MinTokensTestCase(
-        name="min_equals_max_eos_only",
-        min_tokens=20,
-        max_tokens=20,
-        stop=None,  # Relies on default EOS token behavior
-        expected_exact_len=20,
-        should_pass=False,
-        xfail_reason="Potential LogitsProcessor bug: EOS tokens may bypass min_tokens"
+    pytest.param(
+        MinTokensTestCase(
+            name="min_equals_max_eos_only",
+            min_tokens=20,
+            max_tokens=20,
+            stop=None,  # Relies on default EOS token behavior
+            expected_exact_len=20,
+            should_pass=False,
+            xfail_reason="Potential LogitsProcessor bug: EOS tokens may bypass min_tokens"
+        ),
+        marks=pytest.mark.xfail(reason="Potential LogitsProcessor bug: EOS tokens may bypass min_tokens", strict=False),
+        id="min_equals_max_eos_only",
     ),
     
     # === EDGE CASES ===
@@ -206,9 +218,7 @@ def test_min_tokens_comprehensive(llm_v1: LLM, test_case: MinTokensTestCase):
         llm_v1: V1 LLM instance
         test_case: Test scenario parameters
     """
-    # Apply xfail marker for known failing cases
-    if not test_case.should_pass and test_case.xfail_reason:
-        pytest.xfail(test_case.xfail_reason)
+    # Known failing cases are handled via param-level xfail marks above.
     
     # Create sampling parameters
     sampling_params = SamplingParams(
@@ -268,6 +278,7 @@ def test_min_tokens_basic_functionality(llm_v1: LLM):
     assert token_count <= 20, f"Expected at most 20 tokens, got {token_count}"
 
 
+@pytest.mark.xfail(reason="Known bug #21987: Stop strings bypass min_tokens (fixed by PR #22014)", strict=False)
 def test_min_tokens_stop_strings_bug(llm_v1: LLM):
     """
     Test the specific bug where stop strings bypass min_tokens.
@@ -277,7 +288,7 @@ def test_min_tokens_stop_strings_bug(llm_v1: LLM):
     
     Strategy: Use guaranteed stop characters that will appear in ANY generated text.
     """
-    pytest.xfail("Known bug #21987: Stop strings bypass min_tokens (fixed by PR #22014)")
+    # If the bug is fixed upstream, this test will XPASS
     
     sampling_params = SamplingParams(
         min_tokens=15,
@@ -309,6 +320,7 @@ def test_min_tokens_stop_strings_bug(llm_v1: LLM):
     )
 
 
+@pytest.mark.xfail(reason="Known bug #21987: Stop strings bypass min_tokens (fixed by PR #22014)", strict=False)
 def test_min_tokens_stop_strings_guaranteed_early_trigger(llm_v1: LLM):
     """
     Guaranteed test for stop strings bypassing min_tokens bug.
@@ -317,7 +329,7 @@ def test_min_tokens_stop_strings_guaranteed_early_trigger(llm_v1: LLM):
     to virtually guarantee early detection, combined with long min_tokens
     to ensure the bug is exposed regardless of model behavior.
     """
-    pytest.xfail("Known bug #21987: Stop strings bypass min_tokens (fixed by PR #22014)")
+    # If the bug is fixed upstream, this test will XPASS
     
     sampling_params = SamplingParams(
         min_tokens=50,  # Set high min_tokens to ensure bug detection
@@ -355,6 +367,7 @@ def test_min_tokens_stop_strings_guaranteed_early_trigger(llm_v1: LLM):
 
 
 
+@pytest.mark.xfail(reason="Potential LogitsProcessor bug: EOS tokens may bypass min_tokens", strict=False)
 def test_min_tokens_eos_behavior(llm_v1: LLM):
     """
     Test min_tokens behavior with EOS tokens (no explicit stop strings).
@@ -363,7 +376,7 @@ def test_min_tokens_eos_behavior(llm_v1: LLM):
     If this fails, it indicates the LogitsProcessor bug because the MinTokensLogitsProcessor 
     may have failed to block an EOS when the token count is less than min_tokens
     """
-    pytest.xfail("Potential LogitsProcessor bug: EOS tokens may bypass min_tokens")
+    # If the bug is fixed upstream, this test will XPASS
     
     sampling_params = SamplingParams(
         min_tokens=25,
