@@ -12,12 +12,12 @@ from typing import Any
 
 import torch
 import tqdm
-import triton
 
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     _w8a8_block_fp8_matmul,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 from vllm.utils import FlexibleArgumentParser
 
 mp.set_start_method("spawn", force=True)
