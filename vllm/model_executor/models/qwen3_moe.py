@@ -52,6 +52,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+from vllm.model_executor.layers.quantization.bitsandbytes import BitsAndBytesConfig
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
@@ -149,8 +150,13 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.num_experts,
                                      bias=False,
-                                     quant_config=None,
+                                     quant_config=self._maybe_ignore_quant_config(quant_config), # Some quantization methods do not quantize the gate
                                      prefix=f"{prefix}.gate")
+        
+    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
+        if not isinstance(quant_config, (BitsAndBytesConfig)):
+            return None
+        return quant_config
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
