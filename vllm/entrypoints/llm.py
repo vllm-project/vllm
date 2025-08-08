@@ -13,7 +13,6 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar, deprecated
 
-import vllm.envs as envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence,
                               create_sort_beams_key_function)
@@ -1092,7 +1091,8 @@ class LLM:
                 "pooling model.")
 
         if pooling_task not in self.supported_tasks:
-            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
+            raise ValueError(
+                f"pooling_task must be one of {self.supported_tasks}.")
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
