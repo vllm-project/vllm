@@ -703,23 +703,45 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         if expert_map is not None:
             selected_experts = expert_map[selected_experts]
 
-        final_hidden_states = None
+
+        # Prepare tensors for batch processing
+        batch_size = hidden_states.shape[0]
+        
+        # Repeat hidden states for all experts
+        print("moeinput")
+        print(hidden_states)
+        repeated_hidden_states = hidden_states.unsqueeze(0).repeat(num_experts, 1, 1)
+        
+        # Batch matrix multiply for gate_up projection
+
+        
+        # Split gate and up projections
+        gate_up = torch.bmm(repeated_hidden_states, w1.transpose(-2, -1)) + w1_bias.unsqueeze(1)
+        print(gate_up)
+        #gate = gate_up[:, :, :intermediate_size]
+        #up = gate_up[:, :, intermediate_size:] 
+        gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+        print(gate)
+        print(up)
+        # Apply SiLU activation to gate
+        #gate = F.silu(gate)
+        gate = gate.clamp(min=None, max=7.0)
+        up = up.clamp(min=-7.0, max=7.0)
+        glu = gate * torch.sigmoid(gate * 1.702)
+        gated = (up + 1) * glu 
+        # Element-wise multiplication (gating)
+        #gated = up * gate
+        print(glu)
+        
+        # Batch matrix multiply for down projection
+        expert_outputs = torch.bmm(gated,w2.transpose(-2, -1)) + w2_bias.unsqueeze(1)
+        print(expert_outputs)
+        # Apply expert weights based on routing
+        final_hidden_states = torch.zeros_like(hidden_states)
         for expert_idx in range(num_experts):
-            expert_w1 = w1[expert_idx]
-            expert_w2 = w2[expert_idx]
-            bias_w1 = w1_bias[expert_idx]
-            bias_w2 = w2_bias[expert_idx]
             expert_mask = (selected_experts == expert_idx)
             expert_weights = (topk_weights * expert_mask).sum(dim=-1, keepdim=True)
-            x = F.linear(hidden_states, expert_w1, bias_w1)
-            gate = F.silu(x[:, :intermediate_size])
-            x = x[:, intermediate_size:] * gate
-            x = F.linear(x, expert_w2, bias_w2)
-            current_hidden_states = x * expert_weights
-            if final_hidden_states is None:
-                final_hidden_states = current_hidden_states
-            else:
-                final_hidden_states = final_hidden_states + current_hidden_states
+            final_hidden_states += expert_outputs[expert_idx] * expert_weights
 
         return final_hidden_states.view(orig_shape)  # type: ignore
 
