@@ -206,7 +206,7 @@ class ShortConv(CustomOp):
         # Final linear projection
         output[:num_actual_tokens], _ = self.out_proj(hidden_states)
 
-    def get_state_shape(self) -> tuple[tuple[int, ...]]:
+    def get_state_shape(self) -> tuple[tuple[int, int], ...]:
         return MambaStateShapeCalculator.short_conv_state_shape(
             tp_world_size=get_tensor_model_parallel_world_size(),
             intermediate_size=self.conv_dim,
