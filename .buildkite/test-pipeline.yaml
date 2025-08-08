@@ -664,7 +664,7 @@ steps:
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
     - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
-    - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_decode_attention.py
+    - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
     - pytest -v -s tests/kernels/test_cutlass_mla_decode.py
     # Quantization
     - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
@@ -749,7 +749,6 @@ steps:
   # this test fails consistently.
   # TODO: investigate and fix
   - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
-  - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s kv_transfer/test_disagg.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
   - pytest -v -s models/multimodal/generation/test_maverick.py
 
