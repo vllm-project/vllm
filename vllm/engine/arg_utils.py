@@ -311,7 +311,7 @@ class EngineArgs:
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_eplb: bool = ParallelConfig.enable_eplb
-    eplb_async: bool = ParallelConfig..eplb_async
+    eplb_async: bool = ParallelConfig.eplb_async
     num_redundant_experts: int = ParallelConfig.num_redundant_experts
     eplb_window_size: int = ParallelConfig.eplb_window_size
     eplb_step_interval: int = ParallelConfig.eplb_step_interval
