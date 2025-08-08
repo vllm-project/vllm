@@ -6,6 +6,8 @@ from typing import Optional
 
 import torch
 
+from vllm.platforms import current_platform
+
 __all__ = ["CompressedTensorsScheme"]
 
 
@@ -53,3 +55,32 @@ class CompressedTensorsScheme(ABC):
         needs to occur.
         """
         raise NotImplementedError
+
+    # TODO: make this call on init
+    @classmethod
+    def check_scheme_supported(cls,
+                               min_capability: Optional[int] = None,
+                               error: bool = True,
+                               match_exact: bool = False) -> bool:
+        min_capability = min_capability or cls.get_min_capability()
+        capability_tuple = current_platform.get_device_capability()
+
+        if capability_tuple is not None:
+            capability = capability_tuple.to_int()
+            if match_exact:
+                supported = capability == min_capability
+                if error and not supported:
+                    raise RuntimeError(
+                        "Quantization scheme is not supported for ",
+                        "the current GPU. Required capability: ",
+                        f"{min_capability}. Current capability: {capability}.")
+            else:
+                supported = capability >= min_capability
+                if error and not supported:
+                    raise RuntimeError(
+                        "Quantization scheme is not supported for ",
+                        f"the current GPU. Min capability: {min_capability}. ",
+                        f"Current capability: {capability}.")
+            return supported
+        else:
+            return False

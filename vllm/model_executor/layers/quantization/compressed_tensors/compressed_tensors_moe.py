@@ -656,14 +656,18 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
                 use_fp8_w8a8=True,
-                block_shape=self.quant_config.weight_block_size,
+                # TODO (@ksayers): `self.weight_quant.block_structure`
+                block_shape=self.quant_config.
+                weight_block_size,  # type: ignore # noqa E501
                 per_act_token_quant=(
                     self.input_quant.strategy == QuantizationStrategy.TOKEN),
             )
         else:
             return TritonExperts(
                 use_fp8_w8a8=True,
-                block_shape=self.quant_config.weight_block_size,
+                # TODO (@ksayers): `self.weight_quant.block_structure`
+                block_shape=self.quant_config.
+                weight_block_size,  # type: ignore # noqa E501
                 per_act_token_quant=(
                     self.input_quant.strategy == QuantizationStrategy.TOKEN),
             )
