@@ -258,7 +258,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """PyTorch-native implementation equivalent to forward().
+        """MRope forward.
 
         Args:
             positions:
@@ -267,6 +267,33 @@ class MRotaryEmbedding(RotaryEmbedding):
             query: [num_tokens, num_heads * head_size]
             key: [num_tokens, num_kv_heads * head_size]
         """
+        if self.use_triton:
+            return self.forward_cuda(positions, query, key)
+        else:
+            return self.forward_native(positions, query, key)
+
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        assert positions.ndim == 1 or positions.ndim == 2
+        assert key is not None
+
+        cos_sin = self.cos_sin_cache[positions]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+
+        return mrope_forward_native(positions, query, key, cos, sin,
+                                    self.mrope_section, self.is_neox_style,
+                                    self.head_size, self.rotary_dim)
+
+    def forward_cuda(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
 
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
@@ -274,12 +301,6 @@ class MRotaryEmbedding(RotaryEmbedding):
         num_tokens = positions.shape[-1]
         cos_sin = self.cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
-
-        if not self.use_triton:
-            return mrope_forward_native(positions, query, key, cos, sin,
-                                        self.mrope_section, self.is_neox_style,
-                                        self.head_size, self.rotary_dim)
-
         query_shape = query.shape
         key_shape = key.shape
         if positions.ndim == 2:
