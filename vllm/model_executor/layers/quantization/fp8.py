@@ -931,7 +931,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
-        moe: FusedMoEConfig,
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         from vllm.model_executor.layers.fused_moe import (
@@ -976,6 +975,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 allow_deep_gemm=self.allow_deep_gemm,
             )
 
+    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+        if self.use_marlin or self.flashinfer_moe_enabled:
+            return None
+
+        return fp8_w8a8_moe_quant_config(
+            w1_scale=(layer.w13_weight_scale_inv
+                      if self.block_quant else layer.w13_weight_scale),
+            w2_scale=(layer.w2_weight_scale_inv
+                      if self.block_quant else layer.w2_weight_scale),
+            a1_scale=layer.w13_input_scale,
+            a2_scale=layer.w2_input_scale,
+            block_shape=self.quant_config.weight_block_size,
+        )
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -1005,11 +1018,96 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert logical_replica_count is not None
             assert isinstance(layer, FusedMoE)
 
-        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
-            assert activation == 'silu', (
-                f"Expected 'silu' activation but got {activation}")
-            assert scoring_func == 'sigmoid', (
-                f"Expected 'sigmoid' scoring func but got {scoring_func}")
+        assert False
+        if self.fused_experts:
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+                indices_type=self.topk_indices_dtype,
+                enable_eplb=enable_eplb,
+                expert_map=expert_map,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
+
+            return self.fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                quant_config=self.moe_quant_config,
+                expert_map=expert_map,
+            )
+
+        elif not self.flashinfer_moe_enabled:
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+                indices_type=self.topk_indices_dtype,
+                enable_eplb=enable_eplb,
+                expert_map=expert_map,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
+
+        if self.rocm_aiter_moe_enabled:
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
+                rocm_aiter_fused_experts)
+            return rocm_aiter_fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                expert_map=expert_map,
+                quant_config=self.moe_quant_config,
+
+        elif self.use_marlin:
+            assert activation == "silu", (
+                f"{activation} not supported for Marlin MoE.")
+            return torch.ops.vllm.fused_marlin_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                None,
+                None,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                quant_type_id=scalar_types.float8_e4m3fn.id,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map)
+        elif self.flashinfer_moe_enabled:
+            assert activation == 'silu'
+            assert scoring_func == 'sigmoid'
             if self.block_quant:
                 assert (renormalize and use_grouped_topk
                         and custom_routing_function is None)
@@ -1103,42 +1201,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float8_e4m3fn.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
+                apply_router_weight_on_input=apply_router_weight_on_input,
                 expert_map=expert_map,
-                workspace=layer.workspace)
-        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert self.block_quant is None
-            assert (not renormalize and custom_routing_function is not None)
-            assert activation == 'silu', (
-                f"Expected 'silu' activation but got {activation}")
-            assert scoring_func == 'sigmoid', (
-                f"Expected 'sigmoid' scoring func but got {scoring_func}")
-            if self.fused_experts is not None:
-                return self.fused_experts(
-                    x,
-                    layer.w13_weight,
-                    layer.w2_weight,
-                    topk_weights,
-                    topk_ids,
-                    inplace=False,
-                    activation=activation,
-                    global_num_experts=global_num_experts,
-                    expert_map=expert_map,
-                    apply_router_weight_on_input=apply_router_weight_on_input,
-                )
-            else:
-                return flashinfer_cutlass_moe_fp8(
-                    x,
-                    layer,
-                    topk_weights,
-                    topk_ids,
-                    inplace=False,
-                    activation=activation,
-                    global_num_experts=global_num_experts,
-                    expert_map=expert_map,
-                    apply_router_weight_on_input=apply_router_weight_on_input,
-                )
+            )
         else:
-            common_kwargs = dict(
+            from vllm.model_executor.layers.fused_moe import fused_experts
+            return fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
@@ -1148,27 +1216,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 activation=activation,
                 global_num_experts=global_num_experts,
                 apply_router_weight_on_input=apply_router_weight_on_input,
+                quant_config=self.moe_quant_config,
                 expert_map=expert_map,
-                w1_scale=(layer.w13_weight_scale_inv
-                          if self.block_quant else layer.w13_weight_scale),
-                w2_scale=(layer.w2_weight_scale_inv
-                          if self.block_quant else layer.w2_weight_scale),
-                a1_scale=layer.w13_input_scale,
-                a2_scale=layer.w2_input_scale,
+                allow_deep_gemm=self.allow_deep_gemm,
+                allow_cutlass_block_scaled_grouped_gemm=(
+                    self.allow_cutlass_block_scaled_grouped_gemm),
             )
-
-            if self.fused_experts is not None:
-                return self.fused_experts(**common_kwargs)
-            else:
-                from vllm.model_executor.layers.fused_moe import fused_experts
-                return fused_experts(
-                    **common_kwargs,
-                    use_fp8_w8a8=True,
-                    block_shape=self.quant_config.weight_block_size,
-                    allow_deep_gemm=self.allow_deep_gemm,
-                    allow_cutlass_block_scaled_grouped_gemm=(
-                        self.allow_cutlass_block_scaled_grouped_gemm),
-                )
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):

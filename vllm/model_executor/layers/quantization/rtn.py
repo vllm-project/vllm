@@ -269,6 +269,24 @@ class RTNMoEMethod(FusedMoEMethodBase):
         fix_weights(layer, "w13_weight", weight_bits == 4)
         fix_weights(layer, "w2_weight", weight_bits == 4)
 
+    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+        weight_bits = self.quant_config.weight_bits
+        group_size = self.quant_config.group_size
+
+        if weight_bits == 4:
+            return int4_w4a16_moe_quant_config(
+                w1_scale=layer.w13_scale,
+                w2_scale=layer.w2_scale,
+                block_shape=[0, group_size],
+            )
+        else:
+            assert weight_bits == 8
+            return int8_w8a16_moe_quant_confg(
+                w1_scale=layer.w13_scale,
+                w2_scale=layer.w2_scale,
+                block_shape=[0, group_size],
+            )
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -314,10 +332,7 @@ class RTNMoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
 
-        weight_bits = self.quant_config.weight_bits
-        group_size = self.quant_config.group_size
-
-        ret = fused_experts(
+        return fused_experts(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -325,16 +340,11 @@ class RTNMoEMethod(FusedMoEMethodBase):
             topk_ids=topk_ids,
             inplace=True,
             activation=activation,
-            use_int4_w4a16=weight_bits == 4,
-            use_int8_w8a16=weight_bits == 8,
             global_num_experts=global_num_experts,
-            w1_scale=layer.w13_scale,
-            w2_scale=layer.w2_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
-            block_shape=[0, group_size])
-
-        return ret
+            quant_config=self.moe_quant_config,
+        )
 
 
 def rtn_quantize(tensor: torch.Tensor, num_bits: int,

@@ -316,6 +316,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         raise NotImplementedError
 
 
+# TODO: add supported activations method (return string)
 class FusedMoEPermuteExpertsUnpermute(ABC):
     """
     An abstract base class for the [Permute-Experts-Unpermute] step described
@@ -433,12 +434,6 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[ExpertTokensMetadata],
@@ -455,7 +450,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         - w1 (torch.Tensor): The first set of expert weights.
         - w2 (torch.Tensor): The second set of expert weights.
         - topk_weights: A map of row to expert weights. Some implementations
-          choose to do weight application. 
+          choose to do weight application.
         - topk_ids (torch.Tensor): A map of row to expert id.
         - activation (str): The activation function to apply after the first
           MoE layer.
@@ -464,15 +459,6 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
           from the global expert space to the local expert space of the expert
           parallel shard.
-        - w1_scale (Optional[torch.Tensor]): Optional scale to be used for w1.
-        - w2_scale (Optional[torch.Tensor]): Optional scale to be used for w2.
-        - w1_zp (Optional[torch.Tensor]): Optional zero points to be used for
-          w1.
-        - w2_zp (Optional[torch.Tensor]): Optional zero points to be used for
-          w2.
-        - a1q_scale (Optional[torch.Tensor]): Optional quantized scale to be
-          used for a1.
-        - a2_scale (Optional[torch.Tensor]): Optional scale to be used for a2.
         - workspace13 (torch.Tensor): A scratch tensor used for gemm outputs
           must be large enough to hold output of either MoE gemm.
         - workspace2 (torch.Tensor): A scratch tensor used for the activation

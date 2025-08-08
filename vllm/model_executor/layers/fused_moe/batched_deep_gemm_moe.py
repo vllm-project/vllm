@@ -215,23 +215,19 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     # The Deep Gemm kernels only support block size of 128
     DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
 
-    def __init__(self,
-                 max_num_tokens: int,
-                 num_dispatchers: int,
-                 block_shape: list[int],
-                 per_act_token_quant=False):
+    def __init__(
+        self,
+        max_num_tokens: int,
+        num_dispatchers: int,
+        quant_config: Optional[FusedMoEQuantConfig] = None,
+    ):
         """
         max_num_tokens: Maximum number of tokens from a DP Rank
         num_dispatchers: The number of DP dispatchers.
         block_shape: Block quantization block shape.
         per_act_token_quant: Per activation token quantization flag.
         """
-        super().__init__(
-            FusedMoEQuantConfig(
-                quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=per_act_token_quant,
-                block_shape=block_shape,
-            ))
+        super().__init__(quant_config)
         assert self.block_shape == self.DEEPGEMM_BLOCK_SHAPE
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers

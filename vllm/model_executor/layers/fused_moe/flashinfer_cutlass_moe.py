@@ -44,33 +44,20 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
-        g1_alphas: torch.Tensor,
-        g2_alphas: torch.Tensor,
-        a1_gscale: torch.Tensor,
-        a2_gscale: torch.Tensor,
         out_dtype: torch.dtype,
-        quant_dtype: Union[torch.dtype, str, None],
+        quant_config: FuseMoEQuantConfig,
         ep_rank: int = 0,
         ep_size: int = 1,
         tp_rank: int = 0,
         tp_size: int = 1,
     ):
-        super().__init__(
-            FusedMoEQuantConfig(
-                quant_dtype=quant_dtype,
-                per_act_token_quant=False,
-                block_shape=None,
-            ))
-        assert quant_dtype in ("nvfp4", torch.float8_e4m3fn), (
+        super().__init__(quant_config)
+        assert quant_config.quant_dtype in ("nvfp4", torch.float8_e4m3fn), (
             "Only nvfp4,fp8 quantization are currently supported.")
         self.ep_rank = ep_rank
         self.ep_size = ep_size
         self.tp_rank = tp_rank
         self.tp_size = tp_size
-        self.g1_alphas = g1_alphas
-        self.g2_alphas = g2_alphas
-        self.a1_gscale = a1_gscale
-        self.a2_gscale = a2_gscale
         self.out_dtype = out_dtype
 
     @property

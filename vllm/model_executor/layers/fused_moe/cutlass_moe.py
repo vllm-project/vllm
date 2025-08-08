@@ -211,21 +211,13 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
         out_dtype: Optional[torch.dtype],
-        per_act_token_quant: bool,
-        per_out_ch_quant: bool,
         ab_strides1: torch.Tensor,
         ab_strides2: torch.Tensor,
         c_strides1: torch.Tensor,
         c_strides2: torch.Tensor,
-        block_shape: Optional[list[int]] = None,
+        quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(
-            FusedMoEQuantConfig(
-                quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=per_act_token_quant,
-                per_out_ch_quant=per_out_ch_quant,
-                block_shape=block_shape,
-            ))
+        super().__init__(quant_config)
         self.out_dtype = out_dtype
         self.ab_strides1 = ab_strides1
         self.ab_strides2 = ab_strides2
@@ -286,23 +278,19 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
     def __init__(
         self,
         out_dtype: Optional[torch.dtype],
-        per_act_token_quant: bool,
-        per_out_ch_quant: bool,
         ab_strides1: torch.Tensor,
         ab_strides2: torch.Tensor,
         c_strides1: torch.Tensor,
         c_strides2: torch.Tensor,
-        block_shape: Optional[list[int]] = None,
+        quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(
             out_dtype,
-            per_act_token_quant,
-            per_out_ch_quant,
             ab_strides1,
             ab_strides2,
             c_strides1,
             c_strides2,
-            block_shape,
+            quant_config,
         )
 
     @property
@@ -348,23 +336,18 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
         max_experts_per_worker: int,
         num_dispatchers: int,
         out_dtype: Optional[torch.dtype],
-        per_act_token_quant: bool,
-        per_out_ch_quant: bool,
         ab_strides1: torch.Tensor,
         ab_strides2: torch.Tensor,
         c_strides1: torch.Tensor,
         c_strides2: torch.Tensor,
-        block_shape: Optional[list[int]] = None,
+        quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(
-            out_dtype,
-            per_act_token_quant,
-            per_out_ch_quant,
             ab_strides1,
             ab_strides2,
             c_strides1,
             c_strides2,
-            block_shape,
+            quant_config,
         )
         assert max_experts_per_worker > 0
         self.max_experts_per_worker = max_experts_per_worker
@@ -656,17 +639,14 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
-        g1_alphas: torch.Tensor,
-        g2_alphas: torch.Tensor,
-        a1_gscale: torch.Tensor,
-        a2_gscale: torch.Tensor,
         max_experts_per_worker: int,
         out_dtype: torch.dtype,
         per_act_token_quant: bool,
-        per_out_ch_quant: bool,
-        block_shape: Optional[list[int]] = None,
-        use_batched_format: bool = False,
+        use_batched_format: bool = False, # TODO: split/remove?
+        #quant_config: Optional[FusedMoEQuantConfig] = None,
     ):
+        raise NotImpelementedError
+        # XXXXXXXXXXXX skip quantization
         super().__init__(
             # NVFP4 requires two levels of quantization, which involves
             # computing some scaling factors dynamically. This makes it

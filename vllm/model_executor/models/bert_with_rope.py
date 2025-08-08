@@ -303,8 +303,7 @@ class NomicMoE(nn.Module):
             w2=self.w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            activation=self.hidden_act,
-            is_act_and_mul=False,
+            activation=self.hidden_act + "_no_mul",
         )
 
         if self.tp_size > 1:

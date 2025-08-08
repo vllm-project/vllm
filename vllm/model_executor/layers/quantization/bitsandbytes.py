@@ -452,6 +452,9 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             **extra_weight_attrs,
         )
 
+    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+        return None
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -494,10 +497,12 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
+
         if self.quant_config.load_in_8bit:
             w13, w2 = self._apply_8bit_dequant(layer)
         else:
             w13, w2 = self._apply_4bit_dequnt(layer)
+
         return fused_experts(
             hidden_states=x,
             w1=w13,
@@ -509,6 +514,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
+            quant_config=self.moe_quant_config,
         )
 
     def _create_weights_4bit(
