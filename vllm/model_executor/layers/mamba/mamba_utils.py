@@ -66,7 +66,7 @@ class MambaStateShapeCalculator:
         intermediate_size: int,
         conv_kernel: int,
         use_v1: bool = True,
-    ) -> tuple[tuple[int, int], ...]:
+    ) -> tuple[tuple[int, int]]:
         conv_dim = divide(intermediate_size, tp_world_size)
         conv_state_shape = (conv_kernel - 1, conv_dim)
         if not use_v1:
