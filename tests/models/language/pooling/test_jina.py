@@ -33,8 +33,7 @@ def test_embed_models_mteb(hf_runner, vllm_runner,
     mteb_test_embed_models(hf_runner,
                            vllm_runner,
                            model_info,
-                           hf_model_callback=hf_model_callback,
-                           atol=2e-4)
+                           hf_model_callback=hf_model_callback)
 
 
 @pytest.mark.parametrize("model_info", EMBEDDING_MODELS)
