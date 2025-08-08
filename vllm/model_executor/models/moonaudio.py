@@ -262,38 +262,51 @@ def get_pp_indices_kimia(num_hidden_layers: int, num_all_layers: int,
         tuple[int, int]: (start_layer, end_layer) - Half-open interval [start, end)
                         of layer indices to instantiate on this rank for the current stream.
     """
-    layers_per_partition = num_all_layers // pp_size
-    partitions = [layers_per_partition for _ in range(pp_size)]
-    assert num_all_layers >= pp_size
-    start = pp_rank * layers_per_partition
-    end = (pp_rank + 1) * layers_per_partition
-
     num_remaining = num_all_layers - num_hidden_layers
     is_creating_mimo = (num_remaining > num_hidden_layers)
-
-    # mixture ranker
-    if start < mimo_layer_idx and end > mimo_layer_idx:
-        if not is_creating_mimo:
-            partitions[pp_rank] = num_hidden_layers - start
-    # pure mimo ranker
-    elif start >= mimo_layer_idx or (start < mimo_layer_idx
-                                     and end <= mimo_layer_idx):
-        if not is_creating_mimo:
-            idx = num_hidden_layers // layers_per_partition
-            partitions[idx+1:] = [0] * (pp_size - idx)
-        elif is_creating_mimo and pp_rank == 0:
-            partitions[0] = num_hidden_layers - (pp_size - 1) * layers_per_partition
-
-    if (remaining_layers := num_hidden_layers % pp_size) and \
-                                            is_creating_mimo:
-        for i in range(2, remaining_layers + 2):
-            partitions[-i] += 1
-        logger.info(
-            "Hidden layers were unevenly partitioned: [%s]. "
-            ",".join(str(p) for p in partitions))
+    
+    if is_creating_mimo:
+        mimo_layers = num_hidden_layers
+        text_layers = num_remaining
+    else:
+        text_layers = num_hidden_layers
+        mimo_layers = num_remaining
+    layers_per_rank = num_all_layers // pp_size
+    remainder = num_all_layers % pp_size
+    
+    if pp_rank < pp_size - remainder:
+        global_start = pp_rank * layers_per_rank
+        global_end = global_start + layers_per_rank
+    else:
+        global_start = pp_rank * layers_per_rank + (pp_rank - (pp_size - remainder))
+        global_end = global_start + layers_per_rank + 1
+    
+    if is_creating_mimo:
+        mimo_global_start = text_layers
+        if global_end <= mimo_global_start:
+            return (0, 0)
+        elif global_start >= mimo_global_start:
+            start_layer = global_start - mimo_global_start
+            end_layer = global_end - mimo_global_start
+        else:
+            start_layer = 0
+            end_layer = global_end - mimo_global_start
         
-    start_layer = sum(partitions[:pp_rank])
-    end_layer = start_layer + partitions[pp_rank]
+        start_layer = max(0, min(start_layer, mimo_layers))
+        end_layer = max(0, min(end_layer, mimo_layers))
+    else:
+        if global_start >= text_layers:
+            return (0, 0)
+        elif global_end <= text_layers:
+            start_layer = global_start
+            end_layer = global_end
+        else:
+            start_layer = global_start
+            end_layer = text_layers
+        
+        start_layer = max(0, min(start_layer, text_layers))
+        end_layer = max(0, min(end_layer, text_layers))
+    
     return (start_layer, end_layer)
 
 
@@ -378,25 +391,19 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
             mimo_hidden_states = intermediate_tensors.get("mimo_hidden_states")
             mimo_residual = intermediate_tensors.get("mimo_residual")
         
-        idx = self.start_layer
         for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
             )
-            if idx == self.kimia_mimo_transformer_from_layer_index:
-                mimo_hidden_states = hidden_states.clone()
-                mimo_residual = residual.clone()
-            idx += 1
 
-        if mimo_hidden_states and mimo_residual:
-            for layer in self.mimo_layers[self.mimo_start_layer:self.mimo_end_layer]:
-                mimo_hidden_states, residual = layer(
-                    positions,
-                    mimo_hidden_states,
-                    mimo_residual,
-                )
+        for layer in self.mimo_layers[self.mimo_start_layer:self.mimo_end_layer]:
+            mimo_hidden_states, mimo_residual = layer(
+                positions,
+                mimo_hidden_states,
+                mimo_residual,
+            )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
