@@ -4389,24 +4389,7 @@ class CompilationConfig:
     compilation (level=PIECEWISE and non-empty splitting_ops), full
     cudagraphs are supported with and without compilation.
     """
-
-    @property
-    @deprecated(
-        "Use cudagraph_mode instead. To be removed in the next major or"
-        " minor release, i.e. v0.11.0 or v1.0.0")
-    def use_cudagraph(self) -> bool:
-        return self.cudagraph_mode.value >= CUDAGraphMode.PIECEWISE.value
-
-    @use_cudagraph.setter
-    @deprecated(
-        "Use cudagraph_mode instead. To be removed in the next major or"
-        " minor release, i.e. v0.11.0 or v1.0.0")
-    def use_cudagraph(self, value: bool):
-        if value:
-            self.cudagraph_mode = CUDAGraphMode.PIECEWISE
-        else:
-            self.cudagraph_mode = CUDAGraphMode.NONE
-
+    use_cudagraph: bool = True
     """Whether to use cudagraph inside compilation.
     - False: cudagraph inside compilation is not used.
     - True: cudagraph inside compilation is used. It requires
@@ -4419,6 +4402,24 @@ class CompilationConfig:
     Warning: This flag is deprecated and will be removed in the next major or
     minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode instead.
     """
+
+    @property
+    @deprecated(
+        "Use cudagraph_mode instead. To be removed in the next major or"
+        " minor release, i.e. v0.11.0 or v1.0.0")
+    def use_cudagraph(self) -> bool:  # noqa: F811
+        return self.cudagraph_mode.value >= CUDAGraphMode.PIECEWISE.value
+
+    @use_cudagraph.setter
+    @deprecated(
+        "Use cudagraph_mode instead. To be removed in the next major or"
+        " minor release, i.e. v0.11.0 or v1.0.0")
+    def use_cudagraph(self, value: bool):
+        if value:
+            self.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        else:
+            self.cudagraph_mode = CUDAGraphMode.NONE
+
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.
     It means the first several runs will be treated as warmup runs.
@@ -4436,12 +4437,21 @@ class CompilationConfig:
     internally managed buffer. Default is False. 
     Note that this flag is only effective when cudagraph_mode is PIECEWISE.
     """
+    full_cuda_graph: Optional[bool] = False
+    """whether to use a full cuda graph for the entire forward pass rather than
+    splitting certain operations such as attention into subgraphs. Thus this
+    flag cannot be used together with splitting_ops. This may provide
+    performance benefits for smaller models.
+    Warning: This flag is deprecated and will be removed in the next major or
+    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode instead.
+    """
 
     @property
     @deprecated("Use cudagraph_mode instead. To be removed in next major or "
                 "minor release, i.e. v0.11.0 or v1.0.0")
-    def full_cuda_graph(self) -> Optional[bool]:
-        return self.cudagraph_mode.max_cudagraph_mode() == CUDAGraphMode.FULL
+    def full_cuda_graph(self) -> Optional[bool]:  # noqa: F811
+        return None if self.cudagraph_mode is None else \
+            self.cudagraph_mode.max_cudagraph_mode() == CUDAGraphMode.FULL
 
     @full_cuda_graph.setter
     @deprecated(
@@ -4451,13 +4461,6 @@ class CompilationConfig:
         if value:
             self.cudagraph_mode = CUDAGraphMode.FULL
 
-    """whether to use a full cuda graph for the entire forward pass rather than
-    splitting certain operations such as attention into subgraphs. Thus this
-    flag cannot be used together with splitting_ops. This may provide
-    performance benefits for smaller models.
-    Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode instead.
-    """
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
@@ -4550,7 +4553,17 @@ class CompilationConfig:
         """Parse the CLI value for the compilation config.
         -O1, -O2, -O3, etc. is handled in FlexibleArgumentParser.
         """
-        return TypeAdapter(CompilationConfig).validate_json(cli_value)
+        cli_dict = json.loads(cli_value)
+        # migrate the deprecated flags
+        if not cli_dict.get("use_cudagraph", True):
+            logger.warning("use_cudagraph is deprecated, use "
+                           "cudagraph_mode=NONE instead.")
+            cli_dict["cudagraph_mode"] = CUDAGraphMode.NONE
+        if cli_dict.get("full_cuda_graph"):
+            logger.warning("full_cuda_graph is deprecated, use "
+                           "cudagraph_mode=FULL instead.")
+            cli_dict["cudagraph_mode"] = CUDAGraphMode.FULL
+        return TypeAdapter(CompilationConfig).validate_python(cli_dict)
 
     @field_validator("cudagraph_mode", mode="before")
     @classmethod
