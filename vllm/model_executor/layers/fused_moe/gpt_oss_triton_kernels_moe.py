@@ -93,8 +93,8 @@ def triton_kernel_fused_experts(
     w2_scale: Optional[torch.Tensor] = None,
     w1_bias: Optional[torch.Tensor] = None,
     w2_bias: Optional[torch.Tensor] = None,
-    w1_precision: Optional[PrecisionConfig] = None,
-    w2_precision: Optional[PrecisionConfig] = None,
+    w1_precision: Optional["PrecisionConfig"] = None,
+    w2_precision: Optional["PrecisionConfig"] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[list[int]] = None,
@@ -149,8 +149,8 @@ class BatchedOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_config,
         max_num_tokens: int,
         num_dispatchers: int,
-        w1_precision: PrecisionConfig,
-        w2_precision: PrecisionConfig,
+        w1_precision: "PrecisionConfig",
+        w2_precision: "PrecisionConfig",
     ):
         super().__init__(quant_config)
         self.max_num_tokens = max_num_tokens
