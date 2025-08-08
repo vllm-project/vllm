@@ -31,7 +31,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    find_matched_target, should_ignore_layer)
+    find_matched_target, is_activation_quantization_format,
+    should_ignore_layer)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported)
@@ -191,9 +192,15 @@ class CompressedTensorsConfig(QuantizationConfig):
                         quant_config.get("weights"))
 
                 target_scheme_map[target]["input_activations"] = None
-
-                #if is_activation_quantization_format(quant_format):
-                if True:  # we just check for one format, we need to check otherwise
+                target_scheme_map[target]["format"] = quant_config.get(
+                    "format")
+                format = target_scheme_map[target].get("format")
+                # If no per-config format defined, use global format in config
+                act_quant_format = is_activation_quantization_format(
+                    format
+                ) if format is not None else is_activation_quantization_format(
+                    quant_format)
+                if act_quant_format:
                     input_activations = quant_config.get("input_activations")
                     # The only case where we have activation quant supported
                     # but no input_activations provided in the config
@@ -390,8 +397,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         return (is_channel_group and input_quant_none and is_static)
 
     def _get_scheme_from_parts(
-            self, weight_quant: BaseModel,
-            input_quant: BaseModel) -> "CompressedTensorsScheme":
+            self,
+            weight_quant: BaseModel,
+            input_quant: BaseModel,
+            format: Optional[str] = None) -> "CompressedTensorsScheme":
         # Detect If Mixed Precision
         if self._is_fp4a16_nvfp4(weight_quant, input_quant):
             return CompressedTensorsW4A16Fp4()
@@ -413,8 +422,11 @@ class CompressedTensorsConfig(QuantizationConfig):
                     group_size=weight_quant.group_size,
                     actorder=weight_quant.actorder)
 
-        #if is_activation_quantization_format(self.quant_format):
-        if True:
+        act_quant_format = is_activation_quantization_format(
+            format
+        ) if format is not None else is_activation_quantization_format(
+            self.quant_format)
+        if act_quant_format:
             if self._is_fp4a4_nvfp4(weight_quant, input_quant):
                 if cutlass_fp4_supported(
                 ) or envs.VLLM_USE_NVFP4_CT_EMULATIONS:
@@ -509,6 +521,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             scheme_dict = self.target_scheme_map[matched_target]
             weight_quant = scheme_dict.get("weights")
             input_quant = scheme_dict.get("input_activations")
+            format = scheme_dict.get("format")
 
         # Find the sparsity scheme of the layer
         # assume that fused layers inerhit first component's sparsity scheme
@@ -549,8 +562,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             scheme = self._get_scheme_from_parts(  # type: ignore
                 weight_quant=weight_quant,
                 input_quant=input_quant,
-            )
-            print(scheme)
+                format=format)
 
         # Raise error if device does not support the scheme
         # (e.g. fp8 needs ada lovelace)
