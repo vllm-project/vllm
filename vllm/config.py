@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
                          replace)
-from functools import cached_property
+from functools import cached_property, lru_cache
 from importlib.util import find_spec
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args)
@@ -443,9 +443,15 @@ class ModelConfig:
     from `AutoProcessor.from_pretrained`. The available overrides depend on the
     model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
     """
-    disable_mm_preprocessor_cache: bool = False
-    """If `True`, disable caching of the multi-modal preprocessor/mapper (not
-    recommended)."""
+    mm_processor_cache_gb: int = 4
+    """The size (in GiB) of the multi-modal processor cache, which is used to
+    avoid re-processing past multi-modal inputs.
+
+    This cache is duplicated for each API process and engine core process,
+    resulting in a total memory usage of
+    `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
+
+    Set to `0` to disable this cache completely (not recommended)."""
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -882,17 +888,16 @@ class ModelConfig:
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
-                disable_mm_preprocessor_cache=self.
-                disable_mm_preprocessor_cache,
+                mm_processor_cache_gb=self.mm_processor_cache_gb,
                 interleave_mm_strings=self.interleave_mm_strings)
 
         return None
 
-    def set_disable_mm_preprocessor_cache(self, value: bool) -> None:
+    def set_mm_processor_cache_gb(self, value: int) -> None:
         mm_config = self.get_multimodal_config()
 
-        self.disable_mm_preprocessor_cache = value
-        mm_config.disable_mm_preprocessor_cache = value
+        self.mm_processor_cache_gb = value
+        mm_config.mm_processor_cache_gb = value
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -912,15 +917,6 @@ class ModelConfig:
                 for k, v in base_config.items():
                     if getattr(pooler_config, k) is None:
                         setattr(pooler_config, k, v)
-
-            if self.is_matryoshka:
-                if pooler_config.normalize is None:
-                    pooler_config.normalize = True
-                elif not pooler_config.normalize:
-                    raise ValueError(
-                        "`normalize` must be enabled (set to True) "
-                        "for models that are compatible with "
-                        "Matryoshka Representation.")
 
             return pooler_config
 
@@ -1108,6 +1104,21 @@ class ModelConfig:
         if quant_cfg is None:
             # compressed-tensors uses a "compression_config" key
             quant_cfg = getattr(self.hf_config, "compression_config", None)
+
+        else:
+            # Set quant_method for ModelOpt models.
+            producer_name = quant_cfg.get("producer", {}).get("name")
+            if producer_name == "modelopt":
+                quant_algo = quant_cfg.get("quantization",
+                                           {}).get("quant_algo")
+                if quant_algo == "FP8":
+                    quant_cfg["quant_method"] = "modelopt"
+                elif quant_algo == "NVFP4":
+                    quant_cfg["quant_method"] = "modelopt_fp4"
+                elif quant_algo is not None:
+                    raise ValueError(
+                        f"Unknown ModelOpt quant algo: {quant_algo}")
+
         return quant_cfg
 
     def _verify_quantization(self) -> None:
@@ -1685,6 +1696,40 @@ class ModelConfig:
     @property
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
+
+    @property
+    def processor_return_mm_hashes(self) -> bool:
+        """Whether the multi-modal processor should output hashes."""
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            return False
+
+        return mm_config.mm_processor_cache_gb > 0
+
+    @property
+    def enable_mm_processor_cache(self) -> bool:
+        """Whether the multi-modal processor cache should be enabled."""
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            return False
+
+        return mm_config.mm_processor_cache_gb > 0
+
+    @property
+    def enable_mm_input_cache(self) -> bool:
+        """Whether the multi-modal input cache should be enabled."""
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            return False
+
+        return mm_config.mm_processor_cache_gb > 0
+
+    def get_mm_input_cache_gb(self) -> int:
+        mm_config = self.multimodal_config
+        if mm_config is None:
+            return 0
+
+        return envs.VLLM_MM_INPUT_CACHE_GIB
 
     @property
     def is_cross_encoder(self) -> bool:
@@ -2850,11 +2895,6 @@ class SpeculativeConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
-    @classmethod
-    def from_dict(cls, dict_value: dict) -> "SpeculativeConfig":
-        """Parse the CLI value for the speculative config."""
-        return cls(**dict_value)
-
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         if hf_config.model_type == "deepseek_v3":
@@ -3361,9 +3401,15 @@ class MultiModalConfig:
     `{"num_crops": 4}`.
     """
 
-    disable_mm_preprocessor_cache: bool = False
+    mm_processor_cache_gb: int = 4
     """
-    If `True`, disable caching of the processed multi-modal inputs.
+    The size (in GiB) of the multi-modal processor cache, which is used to
+
+    This cache is duplicated for each API process and engine core process,
+    resulting in a total memory usage of
+    `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
+
+    Set to `0` to disable this cache completely (not recommended).
     """
 
     interleave_mm_strings: bool = False
@@ -3423,25 +3469,34 @@ class PoolerConfig:
     [`vllm.model_executor.layers.pooler.PoolingType`][].
     """
 
+    ## for embeddings models
     normalize: Optional[bool] = None
     """
-    Whether to normalize the pooled outputs. Usually, this should be set to
-    ``True`` for embedding outputs.
+    Whether to normalize the embeddings outputs. 
+    """
+    dimensions: Optional[int] = None
+    """
+    Reduce the dimensions of embeddings if model 
+    support matryoshka representation.
     """
 
+    ## for classification models
+    activation: Optional[bool] = None
+    """
+    Whether to apply activation function to the classification outputs. 
+    """
+
+    ## for reward models
     softmax: Optional[bool] = None
     """
-    Whether to apply softmax to the pooled outputs. Usually, this should be set
-    to ``True`` for classification outputs.
+    Whether to apply softmax to the reward outputs. 
     """
-
     step_tag_id: Optional[int] = None
     """
     If set, only the score corresponding to the ``step_tag_id`` in the
     generated sentence should be returned. Otherwise, the scores for all tokens
     are returned.
     """
-
     returned_token_ids: Optional[list[int]] = None
     """
     A list of indices for the vocabulary dimensions to be extracted,
@@ -4359,12 +4414,20 @@ class CompilationConfig:
             "disabled_custom_ops": True,
             "compilation_time": True,
             "bs_to_padded_graph_size": True,
-            "pass_config": True,
             "traced_files": True,
             "inductor_compile_config": {
                 "post_grad_custom_post_pass": True,
             },
         }
+
+        # exclude default attr in pass_config
+        pass_config_exclude = {}
+        for attr, default_val in vars(PassConfig()).items():
+            if getattr(self.pass_config, attr) == default_val:
+                pass_config_exclude[attr] = True
+        if pass_config_exclude:
+            exclude["pass_config"] = pass_config_exclude
+
         # The cast to string is necessary because Pydantic is mocked in docs
         # builds and sphinx-argparse doesn't know the return type of decode()
         return str(
@@ -5100,6 +5163,14 @@ def set_current_vllm_config(vllm_config: VllmConfig,
     finally:
         _current_vllm_config = old_vllm_config
         _current_prefix = old_prefix
+        # Clear the compilation config cache when context changes
+        get_cached_compilation_config.cache_clear()
+
+
+@lru_cache(maxsize=1)
+def get_cached_compilation_config():
+    """Cache config to avoid repeated calls to get_current_vllm_config()"""
+    return get_current_vllm_config().compilation_config
 
 
 def get_current_vllm_config() -> VllmConfig:
