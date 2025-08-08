@@ -20,6 +20,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MultiModalInputCacheClient
+from vllm.v1.request import length_from_prompt_token_ids_or_prompt_embeds
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
 from vllm.v1.structured_output.backend_outlines import (
@@ -272,6 +273,16 @@ class Processor:
         self._validate_model_inputs(processed_inputs, lora_request)
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
+        # Mypy does not always properly infer the types of some elements of
+        # discriminated unions of TypedDicts, because of how it handles
+        # inheritance of TypedDict. If we explicitly extract the items we want
+        # we can avoid type errors from using `dict.get` later in the method.
+        prompt_str: Optional[str] = None if decoder_inputs[
+            "type"] == "embeds" else decoder_inputs.get("prompt")
+        prompt_token_ids = decoder_inputs[
+            "prompt_token_ids"] if decoder_inputs["type"] != "embeds" else None
+        prompt_embeds = decoder_inputs["prompt_embeds"] if decoder_inputs[
+            "type"] == "embeds" else None
 
         # TODO: Impl encoder-decoder
         if encoder_inputs is not None:
@@ -284,9 +295,10 @@ class Processor:
             sampling_params = params.clone()
             # If unset max tokens, then generate up to the max_model_len.
             if sampling_params.max_tokens is None:
-                sampling_params.max_tokens = (
-                    self.model_config.max_model_len -
-                    len(decoder_inputs["prompt_token_ids"]))
+                seq_len = length_from_prompt_token_ids_or_prompt_embeds(
+                    prompt_token_ids, prompt_embeds)
+                sampling_params.max_tokens = \
+                    self.model_config.max_model_len - seq_len
             sampling_params.update_from_generation_config(
                 self.generation_config_fields, eos_token_id)
             if self.tokenizer is not None:
@@ -343,9 +355,10 @@ class Processor:
             else:
                 sorted_mm_inputs = orig_sorted_mm_inputs
 
-        return decoder_inputs.get("prompt"), EngineCoreRequest(
+        return prompt_str, EngineCoreRequest(
             request_id=request_id,
-            prompt_token_ids=decoder_inputs["prompt_token_ids"],
+            prompt_token_ids=prompt_token_ids,
+            prompt_embeds=prompt_embeds,
             mm_inputs=sorted_mm_inputs,
             mm_hashes=sorted_mm_hashes,
             mm_placeholders=sorted_mm_positions,
@@ -382,10 +395,17 @@ class Processor:
     ):
         model_config = self.model_config
 
-        prompt_ids = prompt_inputs["prompt_token_ids"]
+        prompt_ids = None if prompt_inputs[
+            "type"] == "embeds" else prompt_inputs["prompt_token_ids"]
+        prompt_embeds = prompt_inputs["prompt_embeds"] if prompt_inputs[
+            "type"] == "embeds" else None
+        prompt_len = length_from_prompt_token_ids_or_prompt_embeds(
+            prompt_ids, prompt_embeds)
         if not prompt_ids:
             if prompt_type == "encoder" and model_config.is_multimodal_model:
                 pass  # Mllama may have empty encoder inputs for text-only data
+            elif prompt_inputs["type"] == "embeds":
+                pass  # Prompt embeds should not have prompt_ids.
             else:
                 raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
@@ -393,13 +413,13 @@ class Processor:
             tokenizer = None
         else:
             tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
-            max_input_id = max(prompt_ids, default=0)
+            max_input_id = max(prompt_ids or [], default=0)
             if max_input_id > tokenizer.max_token_id:
                 raise ValueError(
                     f"Token id {max_input_id} is out of vocabulary")
 
         max_prompt_len = self.model_config.max_model_len
-        if len(prompt_ids) > max_prompt_len:
+        if prompt_len > max_prompt_len:
             if prompt_type == "encoder" and model_config.is_multimodal_model:
                 mm_registry = self.input_preprocessor.mm_registry
                 mm_processor = mm_registry.create_processor(
@@ -423,7 +443,7 @@ class Processor:
                     "number of text tokens.")
 
             raise ValueError(
-                f"The {prompt_type} prompt (length {len(prompt_ids)}) is "
+                f"The {prompt_type} prompt (length {prompt_len}) is "
                 f"longer than the maximum model length of {max_prompt_len}. "
                 f"{suggestion}")
 

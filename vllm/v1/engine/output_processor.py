@@ -19,6 +19,7 @@ from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
                                    RequestStateStats)
+from vllm.v1.request import length_from_prompt_token_ids_or_prompt_embeds
 
 
 class RequestOutputCollector:
@@ -86,7 +87,8 @@ class RequestState:
         lora_name: Optional[str],
         output_kind: RequestOutputKind,
         prompt: Optional[str],
-        prompt_token_ids: list[int],
+        prompt_token_ids: Optional[list[int]],
+        prompt_embeds: Optional[torch.Tensor],
         logprobs_processor: Optional[LogprobsProcessor],
         detokenizer: Optional[IncrementalDetokenizer],
         max_tokens_param: Optional[int],
@@ -101,7 +103,9 @@ class RequestState:
         self.output_kind = output_kind
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
-        self.prompt_len = len(prompt_token_ids)
+        self.prompt_embeds = prompt_embeds
+        self.prompt_len = length_from_prompt_token_ids_or_prompt_embeds(
+            self.prompt_token_ids, self.prompt_embeds)
         self.logprobs_processor = logprobs_processor
         self.detokenizer = detokenizer
         self.max_tokens_param = max_tokens_param
@@ -152,6 +156,7 @@ class RequestState:
             output_kind=output_kind,
             prompt=prompt,
             prompt_token_ids=request.prompt_token_ids,
+            prompt_embeds=request.prompt_embeds,
             logprobs_processor=logprobs_processor,
             detokenizer=detokenizer,
             max_tokens_param=max_tokens_param,
@@ -208,6 +213,8 @@ class RequestState:
 
         if isinstance(outputs[0], PoolingOutput):
             assert len(outputs) == 1
+            # Prompt embeddings are currently not supported by pooling requests.
+            assert self.prompt_token_ids is not None
             return PoolingRequestOutput(
                 request_id=request_id,
                 outputs=outputs[0],
@@ -469,7 +476,8 @@ class OutputProcessor:
         assert req_state.stats is not None
         iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
-            num_prompt_tokens=len(req_state.prompt_token_ids),
+            num_prompt_tokens=length_from_prompt_token_ids_or_prompt_embeds(
+                req_state.prompt_token_ids, req_state.prompt_embeds),
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats)
         self.lora_states.finish_request(req_state)

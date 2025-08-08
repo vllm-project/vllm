@@ -15,6 +15,7 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.request import length_from_prompt_token_ids_or_prompt_embeds
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
                                              MoveDirectionality,
                                              init_builtin_logitsprocs)
@@ -28,7 +29,8 @@ from vllm.v1.worker.block_table import MultiGroupBlockTable
 class CachedRequestState:
 
     req_id: str
-    prompt_token_ids: list[int]
+    prompt_token_ids: Optional[list[int]]
+    prompt_embeds: Optional[torch.Tensor]
     mm_inputs: list[MultiModalKwargs]
     mm_positions: list[PlaceholderRange]
     sampling_params: Optional[SamplingParams]
@@ -45,7 +47,8 @@ class CachedRequestState:
     lora_request: Optional[LoRARequest] = None
 
     def __post_init__(self):
-        self.num_prompt_tokens = len(self.prompt_token_ids)
+        self.num_prompt_tokens = length_from_prompt_token_ids_or_prompt_embeds(
+            self.prompt_token_ids, self.prompt_embeds)
 
     @property
     def num_tokens(self) -> int:
@@ -53,6 +56,10 @@ class CachedRequestState:
 
     def get_token_id(self, idx: int) -> int:
         if idx < self.num_prompt_tokens:
+            if self.prompt_token_ids is None:
+                raise ValueError(
+                    f"Tried to access token index {idx}, but that token was "
+                    "provided via prompt_embeds, and its ID is unknown.")
             return self.prompt_token_ids[idx]
         else:
             return self.output_token_ids[idx - self.num_prompt_tokens]
@@ -280,7 +287,9 @@ class InputBatch:
         self.req_id_to_index[req_id] = req_index
 
         # Copy the prompt token ids and output token ids.
-        num_prompt_tokens = len(request.prompt_token_ids)
+        num_prompt_tokens = length_from_prompt_token_ids_or_prompt_embeds(
+            request.prompt_token_ids, request.prompt_embeds)
+        # TODO: copy the prompt embeds
         self.num_prompt_tokens[req_index] = num_prompt_tokens
         self.token_ids_cpu[
             req_index, :num_prompt_tokens] = request.prompt_token_ids
