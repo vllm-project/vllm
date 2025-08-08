@@ -96,7 +96,6 @@ run_tests_for_model() {
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
-    --disable-log-requests \
     --gpu-memory-utilization 0.3 \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}'"
@@ -118,7 +117,6 @@ run_tests_for_model() {
   for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     # Calculate GPU ID - we'll distribute across available GPUs, starting from after prefill GPUs
     #GPU_ID=$(((i + NUM_PREFILL_INSTANCES) % $(get_num_gpus)))
-    GPU_ID=6
     # Calculate port number (base port + instance number)
     PORT=$((8400 + i))
     # Calculate side channel port
@@ -130,7 +128,6 @@ run_tests_for_model() {
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
-    --disable-log-requests \
     --gpu-memory-utilization 0.3 \
     --tensor-parallel-size $DECODER_TP_SIZE \
     --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}'"
