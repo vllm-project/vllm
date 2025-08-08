@@ -121,11 +121,11 @@ class EplbState:
 
     Shape: (window_size, num_moe_layers, num_local_physical_experts)
     """
-    new_physical_to_logical_map: torch.Tensor = None
+    new_physical_to_logical_map: Optional[torch.Tensor] = None
 
-    new_logical_to_physical_map: torch.Tensor = None
+    new_logical_to_physical_map: Optional[torch.Tensor] = None
 
-    new_logical_replica_count: torch.Tensor = None
+    new_logical_replica_count: Optional[torch.Tensor] = None
 
     expert_load_window_step: int = 0
     """
