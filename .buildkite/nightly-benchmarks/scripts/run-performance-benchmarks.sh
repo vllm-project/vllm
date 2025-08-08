@@ -15,6 +15,8 @@ check_gpus() {
     declare -g gpu_count=$(nvidia-smi --list-gpus | wc -l)
   elif command -v amd-smi; then
     declare -g gpu_count=$(amd-smi list | grep 'GPU' | wc -l)
+  elif command -v hl-smi; then
+    declare -g gpu_count=$(hl-smi --list | grep -i "Module ID" | wc -l)
   fi
 
   if [[ $gpu_count -gt 0 ]]; then
@@ -25,8 +27,13 @@ check_gpus() {
   fi
   if command -v nvidia-smi; then
     declare -g gpu_type=$(nvidia-smi --query-gpu=name --format=csv,noheader | awk '{print $2}')
+    declare -g architect=''
   elif command -v amd-smi; then
     declare -g gpu_type=$(amd-smi static -g 0 -a | grep 'MARKET_NAME' | awk '{print $2}')
+    declare -g architect=''
+  elif command -v hl-smi; then
+    declare -g gpu_type=$(hl-smi -q | grep "Product Name" | head -n 1 | awk -F ':' '{print $2}' | sed 's/^ *//')
+    declare -g architect='-hpu'
   fi
   echo "GPU type is $gpu_type"
 }
@@ -136,6 +143,10 @@ kill_gpu_processes() {
     done
   elif command -v amd-smi; then
     while [ "$(amd-smi metric -g 0 | grep 'USED_VRAM' | awk '{print $2}')" -ge 1000 ]; do
+      sleep 1
+    done
+  elif command -v hl-smi; then
+    while [ "$(hl-smi -q  | grep "Used" |  head -n 1 | awk -F ' ' '{print $3}')"  ge 1000 ]; do
       sleep 1
     done
   fi
@@ -452,6 +463,7 @@ main() {
      ARCH='-cpu'
   else
      check_gpus
+     ARCH="$architect"
   fi
   check_hf_token
 
