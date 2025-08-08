@@ -193,8 +193,6 @@ Additionally, list elements can be passed individually using `+`:
 
             def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
                 try:
-                    if hasattr(cls, "from_cli"):
-                        return cls.from_cli(val)
                     return TypeAdapter(cls).validate_json(val)
                 except ValidationError as e:
                     raise argparse.ArgumentTypeError(repr(e)) from e
