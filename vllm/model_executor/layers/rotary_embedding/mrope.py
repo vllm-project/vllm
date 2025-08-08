@@ -297,7 +297,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         context_len: int = 0,
         seq_len: Optional[int] = None,
     ) -> tuple[torch.Tensor, int]:
-        """Get mrope input positions and delta value for GLM4V."""
+        """Get mrope input positions and delta value for Ernie VL."""
 
         image_token_id = hf_config.im_patch_id
         video_start_token_id = hf_config.video_start_token_id
