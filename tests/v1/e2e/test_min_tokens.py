@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Comprehensive end-to-end tests for `min_tokens` in the V1 engine.
 
@@ -37,8 +35,8 @@ class MinTokensTestCase:
         min_tokens: int,
         max_tokens: int,
         stop: Optional[Union[str, list[str]]] = None,
-        expected_min_len: int = None,
-        expected_exact_len: int = None,
+        expected_min_len: Optional[int] = None,
+        expected_exact_len: Optional[int] = None,
     ):
         self.name = name
         self.min_tokens = min_tokens
@@ -134,8 +132,6 @@ MIN_TOKENS_TEST_CASES = [
             max_tokens=20,
             stop=None,  # Relies on default EOS token behavior
             expected_exact_len=20,
-            should_pass=False,
-            xfail_reason="Potential LogitsProcessor bug: EOS tokens may bypass min_tokens"
         ),
         marks=pytest.mark.xfail(reason="Potential LogitsProcessor bug: EOS tokens may bypass min_tokens", strict=False),
         id="min_equals_max_eos_only",
@@ -188,20 +184,20 @@ def assert_min_tokens_satisfied(
 ) -> None:
     """Assert that min_tokens requirement is satisfied"""
     token_count = get_token_count(output)
-    
+    stop_reason = output.outputs[0].stop_reason if output.outputs else "no output"
     if test_case.expected_exact_len is not None:
         # Exact length requirement
         assert token_count == test_case.expected_exact_len, (
             f"Expected exactly {test_case.expected_exact_len} tokens, "
             f"got {token_count} tokens. "
-            f"Stop reason: {output.outputs[0].stop_reason}"
+            f"Stop reason: {stop_reason}"
         )
     else:
         # Minimum length requirement
-        assert token_count >= test_case.expected_min_len, (
+        assert token_count >= (test_case.expected_min_len or 0), (
             f"Expected at least {test_case.expected_min_len} tokens, "
             f"got {token_count} tokens. "
-            f"Stop reason: {output.outputs[0].stop_reason}"
+            f"Stop reason: {stop_reason}"
         )
 
 
@@ -228,10 +224,10 @@ def test_min_tokens_comprehensive(llm_v1: LLM, test_case: MinTokensTestCase):
         max_tokens=test_case.max_tokens,
         stop=test_case.stop,
         temperature=TEMPERATURE,
-        include_stop_str_in_output=True  # Include stop strings in output for debugging
+        include_stop_str_in_output=True  # Include stop strings for debugging
     )
     
-    # Use simple prompt - the comprehensive stop lists should catch any generation
+    # Use simple prompt. Comprehensive stop lists should catch any generation
     prompt = "Hello"
     
     # Generate output
@@ -317,7 +313,7 @@ def test_min_tokens_stop_strings_bug(llm_v1: LLM):
     # the model should still continue generating until min_tokens is reached
     assert token_count >= 15, (
         f"Bug confirmed: Generated only {token_count} tokens despite min_tokens=15. "
-        f"Stop reason: {outputs[0].outputs[0].stop_reason}. "
+        f"Stop reason: {outputs[0].outputs[0].stop_reason if outputs[0].outputs else 'no output'}. "
         f"Generated text: {repr(generated_text)}"
     )
 
@@ -395,7 +391,7 @@ def test_min_tokens_eos_behavior(llm_v1: LLM):
     # This should generate exactly 25 tokens
     assert token_count == 25, (
         f"Expected exactly 25 tokens, got {token_count}. "
-        f"Stop reason: {outputs[0].outputs[0].stop_reason}"
+        f"Stop reason: {outputs[0].outputs[0].stop_reason if outputs[0].outputs else 'no output'}"
     )
 
 
@@ -424,6 +420,6 @@ if __name__ == "__main__":
     
     Usage:
         cd vllm/
-        VLLM_USE_V1=1 python -m pytest tests/v1/test_min_tokens.py -v
+        VLLM_USE_V1=1 python -m pytest tests/v1/e2e/test_min_tokens.py -v
     """
     pytest.main([__file__, "-v"])
