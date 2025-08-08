@@ -116,8 +116,10 @@ async def test_non_asr_model(winning_call):
                                                        file=winning_call,
                                                        language="en",
                                                        temperature=0.0)
-        assert res.code == 400 and not res.text
-        assert res.message == "The model does not support Transcriptions API"
+        err = res.error
+        assert err["code"] == 400 and not res.text
+        assert err[
+            "message"] == "The model does not support Transcriptions API"
 
 
 @pytest.mark.asyncio
@@ -133,12 +135,15 @@ async def test_completion_endpoints():
                 "role": "system",
                 "content": "You are a helpful assistant."
             }])
-        assert res.code == 400
-        assert res.message == "The model does not support Chat Completions API"
+        err = res.error
+        assert err["code"] == 400
+        assert err[
+            "message"] == "The model does not support Chat Completions API"
 
         res = await client.completions.create(model=model_name, prompt="Hello")
-        assert res.code == 400
-        assert res.message == "The model does not support Completions API"
+        err = res.error
+        assert err["code"] == 400
+        assert err["message"] == "The model does not support Completions API"
 
 
 @pytest.mark.asyncio
