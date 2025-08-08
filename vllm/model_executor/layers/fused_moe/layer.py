@@ -80,7 +80,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__()
         self.moe = moe
-        self.fused_experts: Optional[Callable] = None
+        self.moe_quant_config: Optional[FusedMoEQuantConfig] = None
+        self.fused_experts: Optional[FusedMoEModularKernel] = None
         self.topk_indices_dtype = None
 
     @abstractmethod
@@ -100,8 +101,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         return False
 
     @staticmethod
-    def _maybe_make_prepare_finalize(
-        moe: FusedMoEConfig, ) -> Optional[FusedMoEPrepareAndFinalize]:
+    def _maybe_make_prepare_finalize(moe: FusedMoEConfig) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
@@ -189,18 +189,16 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
         return prepare_finalize
 
-    def maybe_make_prepare_finalize(
-        self,
-        moe: FusedMoEConfig,
-    ) -> Optional[FusedMoEPrepareAndFinalize]:
+    def maybe_make_prepare_finalize(self) -> Optional[FusedMoEPrepareAndFinalize]:
         if moe.moe_parallel_config.use_all2all_kernels:
-            return FusedMoEMethodBase._maybe_make_prepare_finalize(moe)
+            return FusedMoEMethodBase._maybe_make_prepare_finalize(self.moe)
         else:
             return None
 
     def init_prepare_finalize(self):
         assert self.moe is not None
-        prepare_finalize = self.maybe_make_prepare_finalize(self.moe)
+        assert self.moe_quant_config is not None
+        prepare_finalize = self.maybe_make_prepare_finalize()
 
         if prepare_finalize is not None:
             logger.debug("%s for %s(%s)", prepare_finalize.__class__.__name__,
@@ -209,7 +207,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             assert self.fused_experts is None, \
                 f"Attempt to override experts for {id(self)}!"
             self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
-            experts = self.select_gemm_impl(prepare_finalize, self.moe)
+            experts = self.select_gemm_impl(prepare_finalize)
             self.fused_experts = FusedMoEModularKernel(
                 prepare_finalize,
                 experts,
@@ -218,13 +216,16 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
-        moe: FusedMoEConfig,
     ) -> FusedMoEPermuteExpertsUnpermute:
         # based on the all2all implementation, select the appropriate
         # gemm implementation
         raise NotImplementedError(
             f"{self.__class__.__name__} must select appropriate gemm "
             "implementation based on the prepare_finalize")
+
+    @abstractmethod
+    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+        raise NotImplementedError
 
     @abstractmethod
     def apply(
@@ -269,8 +270,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
-        # TODO(bnell): Remove. Every layer should have an moe config object.
-        moe: FusedMoEConfig,
     ) -> FusedMoEPermuteExpertsUnpermute:
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
@@ -426,6 +425,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
         )
+
+    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+        return None
 
     def forward_cuda(
         self,
@@ -826,15 +828,15 @@ class FusedMoE(CustomOp):
             # since model_config is not set in the pytest test.
             model_dtype = params_dtype
 
-        moe = FusedMoEConfig.make(num_experts=self.global_num_experts,
-                                  experts_per_token=top_k,
-                                  hidden_dim=hidden_size,
-                                  num_local_experts=self.local_num_experts,
-                                  moe_parallel_config=self.moe_parallel_config,
-                                  in_dtype=model_dtype,
-                                  max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
-                                  quant_config=quant_config,
-                                  has_bias=has_bias)
+        moe = FusedMoEConfig(
+            num_experts=self.global_num_experts,
+            experts_per_token=top_k,
+            hidden_dim=hidden_size,
+            num_local_experts=self.local_num_experts,
+            moe_parallel_config=self.moe_parallel_config,
+            in_dtype=model_dtype,
+            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
+        )
         self.moe_config = moe
         self.quant_config = quant_config
 
@@ -844,9 +846,11 @@ class FusedMoE(CustomOp):
         quant_method = (UnquantizedFusedMoEMethod(moe) if quant_config is None
                         else quant_config.get_quant_method(self, prefix))
 
+
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
+        self.moe_quant_config = quant_method.get_fused_moe_quant_config()
 
         if self.enable_eplb:
             from vllm.model_executor.layers.quantization.fp8 import (
