@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, get_dtype_size
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 if TYPE_CHECKING:
@@ -244,13 +244,18 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             kv_cache_dtype = model_config.dtype
         else:
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+        kv_cache_dtype_attn = kv_cache_dtype
+        import os
+        if os.getenv("NGL_ATTN_KV_CACHE", "auto") != "auto":
+            kv_cache_dtype_attn = STR_DTYPE_TO_TORCH_DTYPE[
+                os.environ["NGL_ATTN_KV_CACHE"]]
 
         # get attention page size (for 1 token)
         attn_page_size_1_token = FullAttentionSpec(
             block_size=1,
             num_kv_heads=model_config.get_num_kv_heads(parallel_config),
             head_size=model_config.get_head_size(),
-            dtype=kv_cache_dtype,
+            dtype=kv_cache_dtype_attn,
             use_mla=model_config.use_mla).page_size_bytes
 
         model_cls, _ = ModelRegistry.resolve_model_cls(

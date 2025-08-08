@@ -36,6 +36,9 @@ logger = init_logger(__name__)
 # NOTE(woosuk): This is an arbitrary number. Tune it if needed.
 _DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH = 16
 
+import os
+kv_cache_dtype_attn = os.getenv("NGL_ATTN_KV_CACHE", "auto")
+
 
 class FlashAttentionBackend(AttentionBackend):
 
@@ -251,6 +254,8 @@ class FlashAttentionMetadataBuilder(
         def schedule(batch_size, cu_query_lens, max_query_len, seqlens,
                      max_seq_len, causal):
             cache_dtype = self.cache_config.cache_dtype
+            if cache_dtype != kv_cache_dtype_attn:
+                cache_dtype = kv_cache_dtype_attn
             if cache_dtype.startswith("fp8"):
                 qkv_dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
                     cache_dtype)
@@ -386,6 +391,8 @@ class FlashAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        if kv_cache_dtype != kv_cache_dtype_attn:
+            self.kv_cache_dtype = kv_cache_dtype_attn
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
