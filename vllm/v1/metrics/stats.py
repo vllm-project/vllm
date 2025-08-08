@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Dict, Any
 
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -183,6 +184,99 @@ class IterationStats:
                                  inference_time=inference_time,
                                  decode_time=decode_time)
         self.finished_requests.append(finished_req)
+
+
+@dataclass
+class SlidingWindowMetric:
+    """Represents a single sliding window metric."""
+    window_size: int
+    values: deque = field(init=False)
+
+    def __post_init__(self):
+        # Ensure the deque respects the configured window_size
+        self.values = deque(maxlen=self.window_size)
+
+    def add_value(self, value: float) -> None:
+        """Add a new value to the sliding window."""
+        self.values.append(value)
+
+    @property
+    def average(self) -> float:
+        """Calculate the average of values in the window."""
+        if not self.values:
+            return 0.0
+        return sum(self.values) / len(self.values)
+
+    @property
+    def count(self) -> int:
+        """Return the number of values in the window."""
+        return len(self.values)
+
+
+class SlidingWindowStats:
+    """Maintains sliding window statistics for key performance metrics."""
+    
+    def __init__(self, window_size: int = 100):
+        """Initialize sliding window stats.
+        
+        Args:
+            window_size: Number of requests to maintain in the sliding window.
+        """
+        self.window_size = window_size
+        self._metrics: Dict[str, SlidingWindowMetric] = {
+            "latency_ms": SlidingWindowMetric(window_size),
+            "throughput_tokens_per_sec": SlidingWindowMetric(window_size),
+            "time_to_first_token_ms": SlidingWindowMetric(window_size),
+            "prompt_tokens": SlidingWindowMetric(window_size),
+            "generation_tokens": SlidingWindowMetric(window_size),
+            "queued_time_ms": SlidingWindowMetric(window_size),
+            "prefill_time_ms": SlidingWindowMetric(window_size),
+            "decode_time_ms": SlidingWindowMetric(window_size),
+        }
+    
+    def add_finished_request(self, stats: FinishedRequestStats) -> None:
+        """Add metrics from a finished request to the sliding windows.
+        
+        Args:
+            stats: Statistics from a finished request.
+        """
+        # Convert seconds to milliseconds for latency metrics
+        self._metrics["latency_ms"].add_value(stats.e2e_latency * 1000)
+        self._metrics["queued_time_ms"].add_value(stats.queued_time * 1000)
+        self._metrics["prefill_time_ms"].add_value(stats.prefill_time * 1000)
+        self._metrics["decode_time_ms"].add_value(stats.decode_time * 1000)
+        
+        # Calculate and add throughput
+        total_time = stats.prefill_time + stats.decode_time
+        if total_time > 0:
+            tokens_per_sec = (stats.num_prompt_tokens + stats.num_generation_tokens) / total_time
+            self._metrics["throughput_tokens_per_sec"].add_value(tokens_per_sec)
+        
+        # Add token counts
+        self._metrics["prompt_tokens"].add_value(stats.num_prompt_tokens)
+        self._metrics["generation_tokens"].add_value(stats.num_generation_tokens)
+    
+    def get_metric(self, name: str) -> float:
+        """Get the current average value of a metric.
+        
+        Args:
+            name: Name of the metric to retrieve.
+            
+        Returns:
+            Current average value of the metric.
+        """
+        return self._metrics[name].average
+    
+    def get_metric_count(self, name: str) -> int:
+        """Get the number of samples in a metric's window.
+        
+        Args:
+            name: Name of the metric to check.
+            
+        Returns:
+            Number of samples currently in the metric's window.
+        """
+        return self._metrics[name].count
 
 
 class LoRARequestStates:
