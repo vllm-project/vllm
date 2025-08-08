@@ -16,7 +16,9 @@ if has_triton_kernels():
                                            PrecisionConfig, matmul_ogs)
     from triton_kernels.routing import routing
 else:
+    FnSpecs = None
     PrecisionConfig = None
+    FusedActivation = None
 
 
 def triton_kernel_moe_forward(
