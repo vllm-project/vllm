@@ -4899,13 +4899,6 @@ class VllmConfig:
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False
 
-        if (self.scheduler_config.chunked_prefill_enabled
-                and "encode" in self.model_config.supported_tasks):
-            logger.info("Chunked prefill is not supported with "
-                        "encode task which using ALL pooling. "
-                        "Please turn off chunked prefill by "
-                        "`--no-enable-chunked-prefill` before using it.")
-
         if (self.kv_events_config is not None
                 and self.kv_events_config.enable_kv_cache_events
                 and not self.cache_config.enable_prefix_caching):
