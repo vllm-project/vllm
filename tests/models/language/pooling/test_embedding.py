@@ -43,10 +43,9 @@ def v1(run_with_both_engines):
         pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
         pytest.param("intfloat/multilingual-e5-small"),
         pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct",
-                     marks=[pytest.mark.skip_v1]),
+                     marks=[pytest.mark.skip_v0]),
         # [Cross-Encoder]
-        pytest.param("sentence-transformers/stsb-roberta-base-v2",
-                     marks=[pytest.mark.skip_v1]),
+        pytest.param("sentence-transformers/stsb-roberta-base-v2"),
     ],
 )
 def test_models(

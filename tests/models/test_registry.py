@@ -49,9 +49,9 @@ def test_registry_imports(model_arch):
     ("LlamaForCausalLM", False, False, False),
     ("MllamaForConditionalGeneration", True, False, False),
     ("LlavaForConditionalGeneration", True, True, False),
-    ("BertForSequenceClassification", False, False, True),
-    ("RobertaForSequenceClassification", False, False, True),
-    ("XLMRobertaForSequenceClassification", False, False, True),
+    ("BertForSequenceClassification", True, False, True),
+    ("RobertaForSequenceClassification", True, False, True),
+    ("XLMRobertaForSequenceClassification", True, False, True),
 ])
 def test_registry_model_property(model_arch, is_mm, init_cuda, is_ce):
     model_info = ModelRegistry._try_inspect_model_cls(model_arch)
