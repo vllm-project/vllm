@@ -1903,27 +1903,27 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 is_dummy_run=is_dummy_run)
             if num_scheduled_tokens not in self.cudagraphs \
                 and not skip_cuda_graphs and build_cuda_graph:
-                if is_global_first_rank():
-                    logger.info(f"CAPTURING {num_scheduled_tokens}")
+                # if is_global_first_rank():
+                #     logger.info(f"CAPTURING {num_scheduled_tokens}")
                 return self._capture_ubatches(ubatch_metadata, self.model)
             elif num_scheduled_tokens in self.cudagraphs and not skip_cuda_graphs:
                 # assert False
                 cudagraph_metadata = self.cudagraphs[num_scheduled_tokens]
-                if is_global_first_rank():
-                    logger.info(f"UBATCH REPLAY {num_scheduled_tokens}")
+                # if is_global_first_rank():
+                #     logger.info(f"UBATCH REPLAY {num_scheduled_tokens}")
                 cudagraph_metadata.cudagraph.replay()
                 return cudagraph_metadata.outputs
             else:
-                if is_global_first_rank():
-                    logger.info(f"RUNNING NORMALLY {num_scheduled_tokens}")
+                # if is_global_first_rank():
+                #     logger.info(f"RUNNING NORMALLY {num_scheduled_tokens}")
                 return self._run_ubatches(ubatch_metadata, self.model)
         # run normal batch
         else:
             input_ids, positions, inputs_embeds, intermediate_tensors = \
                 self.model_inputs(slice(0, num_scheduled_tokens), 
                                        scheduler_output, is_dummy_run)
-            if is_global_first_rank():
-                logger.info(f"RUNNING FULL BATCH {num_scheduled_tokens}")
+            # if is_global_first_rank():
+            #     logger.info(f"RUNNING FULL BATCH {num_scheduled_tokens}")
             skip_cuda_graphs = self.parallel_config.enable_microbatching
             with set_forward_context(attn_metadata,
                                      vllm_config=self.vllm_config,
