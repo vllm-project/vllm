@@ -7,14 +7,17 @@ import copy
 import dataclasses
 import functools
 import json
+import os
 import sys
 import threading
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
+from pathlib import Path
 from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
                     Literal, Optional, Type, TypeVar, Union, cast, get_args,
                     get_origin)
 
+import huggingface_hub
 import regex as re
 import torch
 from pydantic import TypeAdapter, ValidationError
@@ -461,6 +464,13 @@ class EngineArgs:
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
+        # when use hf offline,replace model id to local model path
+        if huggingface_hub.constants.HF_HUB_OFFLINE:
+            model_id = self.model
+            self.model = get_model_path(self.model, self.revision)
+            logger.info(
+                "HF_HUB_OFFLINE is True, replace model_id [%s] " \
+                "to model_path [%s]",model_id, self.model)
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -1843,3 +1853,20 @@ def _engine_args_parser():
 def _async_engine_args_parser():
     return AsyncEngineArgs.add_cli_args(FlexibleArgumentParser(),
                                         async_args_only=True)
+
+
+def get_model_path(model: Union[str, Path], revision: Optional[str] = None):
+    if os.path.exists(model):
+        return model
+
+    common_kwargs = {
+        "local_files_only": huggingface_hub.constants.HF_HUB_OFFLINE,
+        "revision": revision,
+    }
+
+    if envs.VLLM_USE_MODELSCOPE:
+        from modelscope.hub.snapshot_download import snapshot_download
+        return snapshot_download(model_id=model, **common_kwargs)
+
+    from huggingface_hub import snapshot_download
+    return snapshot_download(repo_id=model, **common_kwargs)
