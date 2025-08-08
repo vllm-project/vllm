@@ -3,6 +3,7 @@
 
 from typing import List
 
+import vllm.envs as envs
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.interfaces import (
@@ -129,7 +130,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         if not is_async:
             seq.append_token_id(sample.output_token, sample.logprobs,
                                 sample.output_embed)
-        if sampling_params.detokenize and self.detokenizer:
+        if not envs.VLLM_DETOKENIZE_ON_OPENAI_SERVER and \
+            sampling_params.detokenize and self.detokenizer:
             new_char_count = self.detokenizer.decode_sequence_inplace(
                 seq, sampling_params)
         else:

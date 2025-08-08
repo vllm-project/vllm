@@ -11,6 +11,7 @@ import jinja2
 from fastapi import Request
 from typing_extensions import assert_never
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
@@ -347,6 +348,9 @@ class OpenAIServingCompletion(OpenAIServing):
                         delta_text = output.text
                         delta_token_ids = output.token_ids
                         out_logprobs = output.logprobs
+                        if envs.VLLM_DETOKENIZE_ON_OPENAI_SERVER:
+                            delta_text = tokenizer.decode(
+                                [output.token_ids[-1]])
 
                         if not delta_text and not delta_token_ids \
                             and not previous_num_tokens[i]:
