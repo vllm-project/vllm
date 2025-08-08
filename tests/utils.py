@@ -4,6 +4,7 @@
 import asyncio
 import copy
 import functools
+import importlib
 import os
 import signal
 import subprocess
@@ -974,3 +975,30 @@ def get_client_text_logprob_generations(
     return [(text_generations, text,
              (None if x.logprobs is None else x.logprobs.top_logprobs))
             for completion in completions for x in completion.choices]
+
+
+def has_module_attribute(module_name, attribute_name):
+    """
+    Helper function to check if a module has a specific attribute.
+    """
+    try:
+        module = importlib.import_module(module_name)
+        return hasattr(module, attribute_name)
+    except ImportError:
+        return False
+
+
+def get_attn_backend_list_based_on_platform() -> list[str]:
+    if current_platform.is_cuda():
+        return ["FLASH_ATTN_VLLM_V1", "TRITON_ATTN_VLLM_V1", "TREE_ATTN"]
+    elif current_platform.is_rocm():
+        attn_backend_list = ["TRITON_ATTN_VLLM_V1"]
+        try:
+            import aiter  # noqa: F401
+            attn_backend_list.append("FLASH_ATTN_VLLM_V1")
+        except Exception:
+            print("Skip FLASH_ATTN_VLLM_V1 on ROCm as aiter is not installed")
+
+        return attn_backend_list
+    else:
+        raise ValueError("Unsupported platform")

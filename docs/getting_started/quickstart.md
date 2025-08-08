@@ -98,6 +98,43 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
+!!! note
+    The `llm.generate` method does not automatically apply the model's chat template to the input prompt. Therefore, if you are using an Instruct model or Chat model, you should manually apply the corresponding chat template to ensure the expected behavior. Alternatively, you can use the `llm.chat` method and pass a list of messages which have the same format as those passed to OpenAI's `client.chat.completions`:
+
+    ??? code
+    
+        ```python
+        # Using tokenizer to apply chat template
+        from transformers import AutoTokenizer
+    
+        tokenizer = AutoTokenizer.from_pretrained("/path/to/chat_model")
+        messages_list = [
+            [{"role": "user", "content": prompt}]
+            for prompt in prompts
+        ]
+        texts = tokenizer.apply_chat_template(
+            messages_list,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        
+        # Generate outputs
+        outputs = llm.generate(texts, sampling_params)
+        
+        # Print the outputs.
+        for output in outputs:
+            prompt = output.prompt
+            generated_text = output.outputs[0].text
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    
+        # Using chat interface.
+        outputs = llm.chat(messages_list, sampling_params)
+        for idx, output in enumerate(outputs):
+            prompt = prompts[idx]
+            generated_text = output.outputs[0].text
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        ```
+
 [](){ #quickstart-online }
 
 ## OpenAI-Compatible Server
@@ -126,6 +163,7 @@ curl http://localhost:8000/v1/models
 ```
 
 You can pass in the argument `--api-key` or environment variable `VLLM_API_KEY` to enable the server to check for API key in the header.
+You can pass multiple keys after `--api-key`, and the server will accept any of the keys passed, this can be useful for key rotation.
 
 ### OpenAI Completions API with vLLM
 

@@ -19,7 +19,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
+from vllm.v1.engine.mm_input_cache import MultiModalInputCacheClient
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
 from vllm.v1.structured_output.backend_outlines import (
@@ -50,11 +50,8 @@ class Processor:
                                                     self.tokenizer,
                                                     mm_registry)
 
-        self.mm_input_cache_client = MirroredProcessingCache(self.model_config)
-
-        # Multi-modal hasher (for images)
-        self.use_hash = self.mm_input_cache_client.use_cache or \
-            self.cache_config.enable_prefix_caching
+        self.mm_input_cache_client = MultiModalInputCacheClient(
+            self.model_config)
 
     @property
     def mm_registry(self):
@@ -65,8 +62,11 @@ class Processor:
         params: SamplingParams,
     ) -> None:
         max_logprobs = self.model_config.max_logprobs
+        if max_logprobs == -1:
+            return
         # Validate sample logprobs.
-        if params.logprobs and params.logprobs > max_logprobs:
+        if params.logprobs and (params.logprobs == -1
+                                or params.logprobs > max_logprobs):
             raise ValueError(
                 f"Requested sample logprobs of {params.logprobs}, "
                 f"which is greater than max allowed: {max_logprobs}")
@@ -89,6 +89,10 @@ class Processor:
             return
         if not params.allowed_token_ids:
             raise ValueError("allowed_token_ids is not None and empty!")
+        if self.tokenizer is None:
+            # When skip_tokenizer_init=True, we can't validate token IDs
+            # Skip validation and let the model handle invalid tokens
+            return
         tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
         vocab_size = len(tokenizer)
         if not all(0 <= tid < vocab_size for tid in params.allowed_token_ids):
@@ -249,11 +253,13 @@ class Processor:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
+        return_mm_hashes = (self.model_config.processor_return_mm_hashes
+                            or bool(self.cache_config.enable_prefix_caching))
         processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            return_mm_hashes=self.use_hash,
+            return_mm_hashes=return_mm_hashes,
         )
         from vllm.platforms import current_platform
         current_platform.validate_request(
@@ -283,8 +289,9 @@ class Processor:
                     len(decoder_inputs["prompt_token_ids"]))
             sampling_params.update_from_generation_config(
                 self.generation_config_fields, eos_token_id)
-            sampling_params.update_from_tokenizer(
-                self.tokenizer.get_lora_tokenizer(lora_request))
+            if self.tokenizer is not None:
+                sampling_params.update_from_tokenizer(
+                    self.tokenizer.get_lora_tokenizer(lora_request))
         else:
             pooling_params = params.clone()
 
@@ -304,7 +311,7 @@ class Processor:
                 sorted_mm_hashes,
             ) = merge_and_sort_multimodal_metadata(
                 decoder_inputs["mm_placeholders"],
-                decoder_inputs["mm_hashes"] if self.use_hash else None,
+                decoder_inputs["mm_hashes"] if return_mm_hashes else None,
             )
 
             # The output of merged multi-modal processor (`decoder_mm_inputs`)
@@ -331,7 +338,7 @@ class Processor:
                 ]
 
             if sorted_mm_hashes is not None:
-                sorted_mm_inputs = self.mm_input_cache_client.get_and_update_p0(
+                sorted_mm_inputs = self.mm_input_cache_client.get_and_update(
                     orig_sorted_mm_inputs, sorted_mm_hashes)
             else:
                 sorted_mm_inputs = orig_sorted_mm_inputs
