@@ -96,7 +96,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
         swizzled_scale = swizzled_scale.contiguous().cuda()
         return (swizzled_scale.reshape(M_padded, K_padded)
-                if scale_ndim == 2 else swizzled_scale.reshape(B, M, K))
+                if scale_ndim == 2 else swizzled_scale.reshape(B, M_padded, K_padded))
 
     def process_weights_after_loading(self, layer) -> None:
 
