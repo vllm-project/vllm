@@ -23,8 +23,7 @@ class AsyncScheduler(Scheduler):
             if (request.num_computed_tokens == request.num_tokens_with_spec +
                     request.num_output_placeholders):
                 # The request will generate a new token in this scheduling step.
-                request.num_output_placeholders = 1 + len(
-                    request.spec_token_ids)
+                request.num_output_placeholders = 1 + self.num_spec_tokens
 
     def _update_request_with_output(
         self,
@@ -37,7 +36,5 @@ class AsyncScheduler(Scheduler):
 
         # Cache the new tokens. Preempted requests should be skipped.
         if status_before_update == RequestStatus.RUNNING:
-            self.kv_cache_manager.cache_blocks(
-                request,
-                request.num_computed_tokens - request.num_output_placeholders)
+            self.kv_cache_manager.cache_blocks(request, request.num_tokens)
         return new_token_ids, stopped

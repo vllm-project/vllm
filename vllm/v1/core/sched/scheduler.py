@@ -204,9 +204,12 @@ class Scheduler(SchedulerInterface):
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
-            num_new_tokens = (request.num_tokens_with_spec +
-                              request.num_output_placeholders -
-                              request.num_computed_tokens)
+            if request.num_output_placeholders:
+                num_new_tokens = request.num_output_placeholders
+            else:
+                num_new_tokens = (request.num_tokens_with_spec -
+                                  request.num_computed_tokens)
+
             if (0 < self.scheduler_config.long_prefill_token_threshold <
                     num_new_tokens):
                 num_new_tokens = (
