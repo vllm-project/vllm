@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.scalar_type import scalar_types
 from vllm.utils import next_power_of_2, round_up
+from vllm.platforms import current_platform
 
 if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
         or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
@@ -81,7 +82,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         super().__init__()
         self.topk_indices_dtype = None
         self.moe = moe
-        self.use_marlin = torch.cuda.get_device_capability()[0] in [8, 9]
+        self.use_marlin = current_platform.is_cuda(
+        ) and not current_platform.has_device_capability(100)
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -381,7 +383,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float4_e2m1f.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
-                swiglu_config=(1.702, 0, 1, 1, 7),
+                # hardcoded for gpt-oss
+                swiglu_config=[1.702, 0.0, 1.0, 1.0, 7.0],
                 expert_map=expert_map)
 
         assert _can_support_mxfp4(
@@ -390,7 +393,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input, scoring_func, activation,
             expert_load_view, logical_to_physical_map,
             logical_replica_count), ("MXFP4 are not supported\
-                                      with this configuration.")
+                                      with this configuration."                                                                                                                              )
 
         if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
                 or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):

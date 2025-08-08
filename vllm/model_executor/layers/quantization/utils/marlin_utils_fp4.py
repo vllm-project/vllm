@@ -162,7 +162,7 @@ def prepare_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
     weight_scale = layer.weight_scale.T.contiguous()
 
     if not is_nvfp4:
-        scales = scales.view(torch.float8_e8m0fnu)
+        weight_scale = weight_scale.view(torch.float8_e8m0fnu)
 
     weight_scale = weight_scale.to(param_dtype)
     weight_scale = marlin_permute_scales(s=weight_scale,
