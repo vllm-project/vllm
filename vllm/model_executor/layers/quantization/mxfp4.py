@@ -85,7 +85,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.topk_indices_dtype = None
         self.moe = moe
         self.use_marlin = current_platform.is_cuda(
-        ) and not current_platform.has_device_capability(100)
+        ) and not current_platform.has_device_capability(90)
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
