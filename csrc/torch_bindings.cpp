@@ -317,6 +317,28 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
       "SymInt size_n, int num_bits) -> Tensor");
   // conditionally compiled so impl registrations are in source file
+
+  // CUTLASS w4a8 GEMM
+  ops.def(
+      "cutlass_w4a8_mm("
+      "   Tensor A,"
+      "   Tensor B,"
+      "   Tensor B_packed,"
+      "   int b_type,"
+      "   ScalarType? out_type,"
+      "   Tensor group_scales,"
+      "   Tensor group_scales_unpacked,"
+      "   int?    group_size,"
+      "   Tensor? channel_scales,"
+      "   Tensor? token_scales"
+      ") -> Tensor",
+      {stride_tag});
+  // pack scales
+  ops.def("cutlass_pack_scale_fp8(Tensor scales) -> Tensor");
+  // encode and reorder weight matrix
+  ops.def("cutlass_encode_and_reorder_int4b(Tensor B) -> Tensor");
+  // conditionally compiled so impl registration is in source file
+
 #endif
 
   // Dequantization for GGML.

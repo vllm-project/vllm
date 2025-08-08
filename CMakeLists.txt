@@ -426,7 +426,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
-
   # The cutlass_scaled_mm kernels for Geforce Blackwell SM120 (c3x, i.e. CUTLASS 3.x) require
   # CUDA 12.8 or later
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "12.0;12.0a" "${CUDA_ARCHS}")
@@ -752,6 +751,34 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                      "found in CUDA target architectures")
     endif()
   endif()
+
+  # czhu: The w4a8 kernels only work on hopper and require CUDA 12.0 or later.
+  # Only build W4A8 kernels if we are building for something compatible with sm90a
+  cuda_archs_loose_intersection(W4A8_ARCHS "9.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND W4A8_ARCHS)
+    set(SRCS
+       "csrc/quantization/cutlass_w4a8/w4a8_mm_entry.cu")
+
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${W4A8_ARCHS}")
+
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+
+    message(STATUS "Building W4A8 kernels for archs: ${W4A8_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0
+        AND W4A8_ARCHS)
+      message(STATUS "Not building W4A8 kernels as CUDA Compiler version is "
+                     "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
+                     "later if you intend on running w4a16 quantized models on "
+                     "Hopper.")
+    else()
+      message(STATUS "Not building W4A8 kernels as no compatible archs "
+                     "found in CUDA target architectures")
+    endif()
+  endif()
+
 # if CUDA endif
 endif()
 

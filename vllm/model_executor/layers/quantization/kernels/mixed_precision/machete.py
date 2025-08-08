@@ -131,6 +131,9 @@ class MacheteLinearKernel(MPLinearKernel):
         else:
             w_zp = None
 
+        # czhu: temporarily do the activation fake quantization to fp8
+        orig_dtype = x_2d.dtype
+        x_2d = x_2d.to(torch.float8_e4m3fn).to(orig_dtype)
         output = ops.machete_mm(a=x_2d,
                                 b_q=w_q,
                                 b_type=c.weight_type,
