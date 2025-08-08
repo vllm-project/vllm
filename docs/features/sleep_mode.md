@@ -7,7 +7,7 @@ Key benefits:
 - **Frees GPU memory**: Offloads model weights to CPU RAM and discards KV cache, releasing up to 90%+ of GPU memory for other tasks.
 - **Fast resume**: Quickly wake up the engine and resume inference without full model reload.
 - **API endpoints**: Control sleep/wake_up state via HTTP endpoints or Python API.
-- **Supports distributed workloads**: Works with tensor parallelism.
+- **Supports distributed workloads**: Works with tensor parallelism, pipeline parallelism, etc.
 - **Fine-grained control**: Optionally wake up only model weights or KV cache to avoid OOM during weight updates.
 
 !!! note
