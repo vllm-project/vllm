@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import base64
 import io
 import json
 import sys
@@ -11,7 +12,6 @@ from http import HTTPStatus
 from typing import (Annotated, Any, Callable, ClassVar, Generic, Optional,
                     TypeVar, Union, cast, overload)
 
-import pybase64
 import torch
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -1008,8 +1008,7 @@ class OpenAIServing:
     ) -> list[EmbedsPrompt]:
 
         def _load_and_validate_embed(embed: bytes) -> EmbedsPrompt:
-            tensor = torch.load(io.BytesIO(
-                pybase64.b64decode(embed, validate=True)),
+            tensor = torch.load(io.BytesIO(base64.b64decode(embed)),
                                 weights_only=True)
             assert isinstance(tensor, torch.Tensor) and tensor.dtype in (
                 torch.float32,
