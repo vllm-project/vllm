@@ -108,6 +108,8 @@ class LLMEngine:
             executor_class=executor_class,
             log_stats=self.log_stats,
         )
+        # TODO, remove this when commiting
+        print(f"[llm-engine] engineCoreClient type: {type(self.engine_core)}")
 
         if not multiprocess_mode:
             # for v0 compatibility
@@ -186,17 +188,16 @@ class LLMEngine:
         request_ids = self.output_processor.abort_requests(request_ids)
         self.engine_core.abort_requests(request_ids)
 
-    def add_request(
-        self,
-        request_id: str,
-        prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
-        arrival_time: Optional[float] = None,
-        lora_request: Optional[LoRARequest] = None,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        priority: int = 0,
-    ) -> None:
+    def add_request(self,
+                    request_id: str,
+                    prompt: PromptType,
+                    params: Union[SamplingParams, PoolingParams],
+                    arrival_time: Optional[float] = None,
+                    lora_request: Optional[LoRARequest] = None,
+                    tokenization_kwargs: Optional[dict[str, Any]] = None,
+                    trace_headers: Optional[Mapping[str, str]] = None,
+                    priority: int = 0,
+                    type_info: str = "") -> None:
         # Validate the request_id type.
         if not isinstance(request_id, str):
             raise TypeError(
@@ -204,8 +205,15 @@ class LLMEngine:
 
         # Process raw inputs into the request.
         prompt_str, request = self.processor.process_inputs(
-            request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, priority)
+            request_id,
+            prompt,
+            params,
+            arrival_time,
+            lora_request,
+            tokenization_kwargs,
+            trace_headers,
+            priority,
+            type_info=type_info)
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
