@@ -920,11 +920,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         builder,
                     )
 
-                attn_metadata_i = (encoder_attn_metadata
-                                   if is_enc_dec else builder.build(
-                                       common_prefix_len=common_prefix_len,
-                                       common_attn_metadata=common_attn_metadata,
-                                   ))
+                attn_metadata_i = (
+                    encoder_attn_metadata if is_enc_dec else builder.build(
+                        common_prefix_len=common_prefix_len,
+                        common_attn_metadata=common_attn_metadata,
+                    ))
 
                 fast_prefill_metadata = attn_metadata_i
                 if (self.cache_config.kv_sharing_fast_prefill
