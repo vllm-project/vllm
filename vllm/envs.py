@@ -129,6 +129,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
+    VLLM_FLASHINFER_MOE_BACKEND: str = "throughput"
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -981,6 +982,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "deepep_low_latency", use deepep low-latency kernels
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
+
+    # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support. Both
+    # require compute capability 10.0 or above.
+    # Available options:
+    # - "throughput":  [default]
+    #     Uses CUTLASS kernels optimized for high-throughput batch inference.
+    # - "latency":
+    #     Uses TensorRT-LLM kernels optimized for low-latency inference.
+    # To set this backend, define the environment variable:
+    #     export VLLM_FLASHINFER_MOE_BACKEND=latency.
+    # If not set, defaults to "throughput".
+    "VLLM_FLASHINFER_MOE_BACKEND": lambda: os.getenv(
+    "VLLM_FLASHINFER_MOE_BACKEND", "throughput"
+    ),
 
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
