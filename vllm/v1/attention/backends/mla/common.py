@@ -1234,10 +1234,15 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
             # Convert from (B, N, P) to (N, B, P)
             decode_q_nope = decode_q_nope.transpose(0, 1)
-            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-            decode_ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
-            # Convert from (N, B, L) to (B, N, L)
-            decode_ql_nope = decode_ql_nope.transpose(0, 1)
+
+            if envs.VLLM_AITER_TRITON_FP8_BMM:
+                # Multiply + Transpose (N, B, P) x (N, P, L) -> (N, B, L) -> (B, N, L)
+                decode_ql_nope = aiter_triton_fp8_bmm_wrapper(decode_q_nope, self.W_K, self.W_K_scale, group_size = 128, transpose_bm = True)
+            else:
+                # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+                decode_ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
+                # Convert from (N, B, L) to (B, N, L)
+                decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
             output[:num_decode_tokens] = self._forward_decode(
                 decode_ql_nope, decode_q_pe, kv_cache, attn_metadata)
