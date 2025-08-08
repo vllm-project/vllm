@@ -34,6 +34,7 @@ from vllm import version
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
@@ -4872,22 +4873,40 @@ class VllmConfig:
 
         disable_chunked_prefill_reasons: list[str] = []
 
-        if self.model_config and self.model_config.pooler_config:
-            pooling_type = self.model_config.pooler_config.pooling_type
-            if pooling_type is None or pooling_type.lower() != "last":
+        if self.model_config:
+            if self.model_config.pooler_config:
+                pooling_type = self.model_config.pooler_config.pooling_type
+                if pooling_type is None or pooling_type.lower() != "last":
+                    disable_chunked_prefill_reasons.append(
+                        "Only \"last\" pooling supports chunked "
+                        "prefill and prefix caching; disabling both.")
+            elif self.model_config.is_encoder_decoder:
+                self.scheduler_config.max_num_encoder_input_tokens = \
+                    MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.model_config)
+                logger.debug(
+                    "Encoder-decoder model detected: setting "
+                    "`max_num_encoder_input_tokens` to encoder length (%s)",
+                    self.scheduler_config.max_num_encoder_input_tokens)
+                self.scheduler_config.disable_chunked_mm_input = True
                 disable_chunked_prefill_reasons.append(
-                    "Only \"last\" pooling supports chunked "
-                    "prefill and prefix caching; disabling both.")
+                    "Encoder-decoder models do not support chunked prefill nor"
+                    " prefix caching; disabling both.")
 
         if disable_chunked_prefill_reasons:
             for reason in disable_chunked_prefill_reasons:
                 logger.info(reason)
             self.scheduler_config.chunked_prefill_enabled = False
             self.scheduler_config.long_prefill_token_threshold = 0
-            self.scheduler_config.max_num_batched_tokens = max(
+            new_max_num_batched_tokens = max(
                 self.scheduler_config.max_model_len,
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
-
+            if (new_max_num_batched_tokens
+                    != self.scheduler_config.max_num_batched_tokens):
+                logger.info("Updating max_num_batched_tokens from %d to %d",
+                            self.scheduler_config.max_num_batched_tokens,
+                            new_max_num_batched_tokens)
+                self.scheduler_config.max_num_batched_tokens = \
+                    new_max_num_batched_tokens
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False
 

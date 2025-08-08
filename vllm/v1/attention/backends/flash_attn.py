@@ -139,6 +139,15 @@ class FlashAttentionMetadata:
     max_num_splits: int = 0
 
     causal: bool = True
+    # Begin encoder attn & enc/dec cross-attn fields...
+
+    # (batch_size + 1,). The cumulative sequence lengths of the encoder
+    # sequences in the batch, used to index into sequence. E.g., if the sequence
+    # length is [4, 6], it is [0, 4, 10].
+    encoder_seq_start_loc: Optional[torch.Tensor] = None
+    # Maximum sequence length among encoder sequences
+    max_encoder_seq_len: Optional[int] = None
+    cross_slot_mapping: Optional[torch.Tensor] = None
 
 
 def _get_sliding_window_configs(
@@ -220,7 +229,13 @@ class FlashAttentionMetadataBuilder(
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
-        max_seq_len = int(common_attn_metadata.seq_lens_cpu.max())
+
+        if (common_attn_metadata.cross_slot_mapping is not None
+                and common_attn_metadata.max_encoder_seq_len is not None):
+            # ENCODER_DECODER cross-attention
+            max_seq_len = common_attn_metadata.max_encoder_seq_len
+        else:
+            max_seq_len = int(common_attn_metadata.seq_lens_cpu.max())
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
@@ -347,7 +362,12 @@ class FlashAttentionMetadataBuilder(
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
-            causal=causal)
+            causal=causal,
+            # Encoder/cross-attention fields
+            encoder_seq_start_loc=common_attn_metadata.encoder_seq_start_loc,
+            max_encoder_seq_len=common_attn_metadata.max_encoder_seq_len,
+            cross_slot_mapping=common_attn_metadata.cross_slot_mapping,
+        )
         return attn_metadata
 
     def can_run_in_cudagraph(
@@ -396,13 +416,6 @@ class FlashAttentionImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         FlashAttentionBackend.validate_head_size(head_size)
-
-        if attn_type not in [
-                AttentionType.DECODER, AttentionType.ENCODER_ONLY
-        ]:
-            raise NotImplementedError("Encoder/decoder cross-attention "
-                                      "is not implemented for "
-                                      "FlashAttentionImpl")
 
         self.attn_type = attn_type
         self.vllm_flash_attn_version = get_flash_attn_version()
@@ -469,7 +482,7 @@ class FlashAttentionImpl(AttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
 
         # Handle encoder attention differently - no KV cache needed
-        if attn_type in (AttentionType.ENCODER_ONLY, ):
+        if attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return self._forward_encoder_attention(query[:num_actual_tokens],
@@ -481,7 +494,8 @@ class FlashAttentionImpl(AttentionImpl):
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(0)
 
-        if self.kv_sharing_target_layer_name is None:
+        if (self.kv_sharing_target_layer_name is None and (key is not None)
+                and (value is not None)):
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
             # NOTE(woosuk): Here, key and value are padded while slot_mapping is
@@ -489,12 +503,17 @@ class FlashAttentionImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
+            if attn_type == AttentionType.ENCODER_DECODER:
+                updated_slot_mapping = attn_metadata.cross_slot_mapping
+            else:
+                updated_slot_mapping = attn_metadata.slot_mapping
+
             reshape_and_cache_flash(
                 key,
                 value,
                 key_cache,
                 value_cache,
-                attn_metadata.slot_mapping,
+                updated_slot_mapping,
                 self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
@@ -520,7 +539,7 @@ class FlashAttentionImpl(AttentionImpl):
             block_table = attn_metadata.block_table
             scheduler_metadata = attn_metadata.scheduler_metadata
 
-            descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
+            descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
 
             flash_attn_varlen_func(
                 q=query[:num_actual_tokens],

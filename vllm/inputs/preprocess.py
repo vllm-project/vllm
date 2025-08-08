@@ -841,9 +841,6 @@ class InputPreprocessor:
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
         if self.model_config.is_encoder_decoder:
-            assert not return_mm_hashes, (
-                "Multimodal hashes for encoder-decoder models should not be ",
-                "returned until they are supported on vLLM V1.")
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
             return self._process_encoder_decoder_prompt(
@@ -873,9 +870,6 @@ class InputPreprocessor:
         [`preprocess`][vllm.inputs.preprocess.InputPreprocessor.preprocess].
         """
         if self.model_config.is_encoder_decoder:
-            assert not return_mm_hashes, (
-                "Multimodal hashes for encoder-decoder models should not be ",
-                "returned until they are supported on vLLM V1.")
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
             return await self._process_encoder_decoder_prompt_async(prompt)

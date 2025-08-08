@@ -19,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
-from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
@@ -58,6 +58,7 @@ class Scheduler(SchedulerInterface):
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
+        self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -131,14 +132,15 @@ class Scheduler(SchedulerInterface):
         )
 
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
-        # projector if needed). Currently, we assume that the encoder also
-        # has the Transformer architecture (e.g., ViT).
+        # projector if needed) for MM models as well as encoder-decoder
+        # transformers.
         self.max_num_encoder_input_tokens = encoder_compute_budget
         # NOTE: For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized because cache size is 0
         # for these models.
         self.encoder_cache_manager = EncoderCacheManager(
-            cache_size=encoder_cache_size)
+            cache_size=encoder_cache_size,
+            is_encoder_decoder=self.is_encoder_decoder)
 
         speculative_config = vllm_config.speculative_config
 
@@ -399,6 +401,7 @@ class Scheduler(SchedulerInterface):
 
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
+                new_cross_blocks: Optional[KVCacheBlocks] = None
 
                 # KVTransfer: loading remote KV, do not allocate for new work.
                 if load_kv_async:
@@ -436,6 +439,23 @@ class Scheduler(SchedulerInterface):
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
+                        if self.is_encoder_decoder:
+                            # For encoder-decoder models, we allocate slots for
+                            # the cross-attention blocks based on the max
+                            # encoder length. This is a single static allocation
+                            # and does not grow with the number of decoder
+                            # tokens.
+                            max_encoder_len = MULTIMODAL_REGISTRY.\
+                                get_encdec_max_encoder_len(
+                                self.vllm_config.model_config)
+                            new_cross_blocks = (self.kv_cache_manager.
+                                                allocate_slots_for_cross_attn(
+                                                    request,
+                                                    max_encoder_len,
+                                                ))
+                            if new_cross_blocks is None:
+                                # The request cannot be scheduled.
+                                break
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -454,9 +474,12 @@ class Scheduler(SchedulerInterface):
                 # This information is used to determine if a load is
                 # needed for this request.
                 if self.connector is not None:
+                    update_blocks = new_computed_blocks + new_blocks
+                    if new_cross_blocks is not None:
+                        update_blocks += new_cross_blocks
                     self.connector.update_state_after_alloc(
                         request,
-                        new_computed_blocks + new_blocks,
+                        update_blocks,
                         num_external_computed_tokens,
                     )
 
@@ -549,6 +572,7 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens,
             req_to_new_block_ids,
         )
+        free_encoder_input_ids = self.encoder_cache_manager.get_freed_ids()
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -562,7 +586,7 @@ class Scheduler(SchedulerInterface):
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
-            free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
+            free_encoder_input_ids=free_encoder_input_ids,
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
         )
@@ -704,7 +728,18 @@ class Scheduler(SchedulerInterface):
             if start_pos >= num_computed_tokens + num_new_tokens:
                 # The encoder input is not needed in this step.
                 break
-            if start_pos + num_encoder_tokens <= num_computed_tokens:
+            if self.is_encoder_decoder and start_pos < num_computed_tokens:
+                # Encoder input has already been computed
+                # The calculation here is a bit different. We don't turn encoder
+                # output into tokens that get processed by the decoder and
+                # reflected in num_computed_tokens. Instead, start_pos reflects
+                # the position where we need to ensure we calculate encoder
+                # inputs. This should always be 0 to ensure we calculate encoder
+                # inputs before running the decoder.  Once we've calculated some
+                # decoder tokens (num_computed_tokens > 0), then we know we
+                # already calculated encoder inputs and can skip here.
+                continue
+            elif start_pos + num_encoder_tokens <= num_computed_tokens:
                 # The encoder input is already computed and stored
                 # in the decoder's KV cache.
                 continue
@@ -936,6 +971,8 @@ class Scheduler(SchedulerInterface):
         return new_token_ids, stopped
 
     def _free_encoder_inputs(self, request: Request) -> None:
+        if not self.encoder_cache_manager:
+            return
         cached_encoder_input_ids = (
             self.encoder_cache_manager.get_cached_input_ids(request))
         # OPTIMIZATION: Avoid list(set) if the set is empty.
@@ -1012,7 +1049,8 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
 
         delay_free_blocks, kv_xfer_params = self._connector_finished(request)
-        self.encoder_cache_manager.free(request)
+        if self.encoder_cache_manager:
+            self.encoder_cache_manager.free(request)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:

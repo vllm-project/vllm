@@ -178,6 +178,7 @@ def run_test(
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("decoder_prompt_type", list(DecoderPromptType))
+@pytest.mark.skip(reason="bart not supported in V1")
 def test_models(hf_runner, vllm_runner, example_encoder_decoder_prompts, model,
                 dtype, max_tokens, num_logprobs, decoder_prompt_type) -> None:
 
@@ -201,6 +202,7 @@ def test_models(hf_runner, vllm_runner, example_encoder_decoder_prompts, model,
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("decoder_prompt_type", [DecoderPromptType.CUSTOM])
+@pytest.mark.skip(reason="bart not supported in V1")
 def test_models_distributed(hf_runner, vllm_runner,
                             example_encoder_decoder_prompts,
                             distributed_executor_backend, model, dtype,

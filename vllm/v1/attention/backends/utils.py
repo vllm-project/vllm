@@ -64,6 +64,14 @@ class CommonAttentionMetadata:
 
     causal: bool = True
 
+    # Encoder/cross-attention specific fields (optional)
+    encoder_seq_start_loc: Optional[torch.Tensor] = None
+    """(batch_size + 1,), cumulative encoder sequence lengths"""
+    max_encoder_seq_len: Optional[int] = None
+    """Maximum encoder sequence length in batch"""
+    cross_slot_mapping: Optional[torch.Tensor] = None
+    """Slot mapping for cross-attention KV cache"""
+
 
 @dataclass
 class UbatchSlice:
