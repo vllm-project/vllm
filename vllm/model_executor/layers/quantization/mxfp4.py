@@ -120,7 +120,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.params_dtype = params_dtype
             layer.num_experts = num_experts
             layer.hidden_size = hidden_size
-            layer.intermediate_size_per_partition = intermediate_size_per_partition_after_pad
+            layer.intermediate_size_per_partition = \
+                intermediate_size_per_partition_after_pad
 
         self.intermediate_size = intermediate_size_per_partition_after_pad
         self.hidden_size = hidden_size
