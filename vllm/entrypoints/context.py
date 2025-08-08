@@ -71,6 +71,7 @@ class HarmonyContext(ConversationContext):
     def append_output(self, output) -> None:
         if isinstance(output, RequestOutput):
             output_token_ids = output.outputs[0].token_ids
+            self.parser = get_streamable_parser_for_assistant()
             for token_id in output_token_ids:
                 self.parser.process(token_id)
             output_msgs = self.parser.messages
