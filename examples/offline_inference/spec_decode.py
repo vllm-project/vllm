@@ -68,6 +68,19 @@ def parse_args():
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--custom-mm-prompts", action="store_true")
+    parser.add_argument(
+        "--no-prefill-token-shift",
+        dest="prefill_token_shift",
+        action="store_false",
+        help="Disable prefill token shift (default: enabled)",
+    )
+    parser.add_argument("--target-kv-layer-copy-from", type=int, default=-1)
+    parser.add_argument(
+        "--draft-kv-layer-copy-to",
+        type=str,
+        default="",
+        help="comma separated list of layer indices to copy to",
+    )
     return parser.parse_args()
 
 
@@ -105,10 +118,24 @@ def main():
 
         elif args.method == "eagle3" and eagle_dir is None:
             eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
+        target_kv_layer_copy_from = args.target_kv_layer_copy_from
+        draft_kv_layers_copy_to = (
+            [int(layer) for layer in args.draft_kv_layer_copy_to.split(",")]
+            if args.draft_kv_layer_copy_to
+            else None
+        )
+        kv_sharing_mapping = None
+        if args.target_kv_layer_copy_from >= 0 and draft_kv_layers_copy_to:
+            kv_sharing_mapping = {
+                f"{layer}": f"{target_kv_layer_copy_from}"
+                for layer in draft_kv_layers_copy_to
+            }
         speculative_config = {
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
+            "prefill_token_shift": args.prefill_token_shift,
+            "kv_sharing_mapping": kv_sharing_mapping,
         }
     elif args.method == "ngram":
         speculative_config = {
