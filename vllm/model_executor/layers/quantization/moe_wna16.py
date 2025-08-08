@@ -6,8 +6,11 @@ from typing import Any, Callable, Optional
 import torch
 
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig, int4_w4a16_moe_quant_config,
+    int8_w8a16_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
+    FusedMoE, FusedMoEConfig, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -160,7 +163,7 @@ class MoeWNA16Config(QuantizationConfig):
             else:
                 raise ValueError("moe_wna16 only support gptq and awq.")
         elif isinstance(layer, FusedMoE):
-            return MoeWNA16Method(self)
+            return MoeWNA16Method(self, layer.moe_config)
         return None
 
 
@@ -175,7 +178,12 @@ class MoeWNA16Method(FusedMoEMethodBase):
         quant_config: The MOE WNA16 (W8A16/W4A16) quantization config.
     """
 
-    def __init__(self, quant_config: MoeWNA16Config):
+    def __init__(
+        self,
+        quant_config: MoeWNA16Config,
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         self.quant_config = quant_config
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -280,6 +288,29 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 layer.register_parameter(key, param)
                 set_weight_attrs(param, extra_weight_attrs)
 
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        weight_bits = self.quant_config.weight_bits
+        has_zp = self.quant_config.has_zp
+
+        if weight_bits == 4:
+            return int4_w4a16_moe_quant_config(
+                w1_scale=layer.w13_scales,
+                w2_scale=layer.w2_scales,
+                w1_zp=layer.w13_qzeros if has_zp else None,
+                w2_zp=layer.w2_qzeros if has_zp else None,
+                block_shape=[0, layer.group_size],
+            )
+        else:
+            assert weight_bits == 8
+            return int8_w8a16_moe_quant_config(
+                w1_scale=layer.w13_scales,
+                w2_scale=layer.w2_scales,
+                w1_zp=layer.w13_qzeros if has_zp else None,
+                w2_zp=layer.w2_qzeros if has_zp else None,
+                block_shape=[0, layer.group_size],
+            )
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -302,6 +333,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `MoeWNA16Method` yet.")
@@ -318,10 +351,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
-
-        weight_bits = self.quant_config.weight_bits
-        has_zp = self.quant_config.has_zp
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
 
         return fused_experts(
             x,
@@ -330,16 +361,11 @@ class MoeWNA16Method(FusedMoEMethodBase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
-            use_int4_w4a16=weight_bits == 4,
-            use_int8_w8a16=weight_bits == 8,
             global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
-            w1_scale=layer.w13_scales,
-            w2_scale=layer.w2_scales,
-            w1_zp=layer.w13_qzeros if has_zp else None,
-            w2_zp=layer.w2_qzeros if has_zp else None,
-            block_shape=[0, layer.group_size])
+            quant_config=self.moe_quant_config,
+        )
 
     @staticmethod
     def get_weight_loader(layer, weight_loader):

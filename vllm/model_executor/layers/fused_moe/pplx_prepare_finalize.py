@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import Optional, Union
 
 import pplx_kernels as pplx
 import torch
@@ -21,7 +21,7 @@ def pplx_hidden_dim_scale_bytes(
     max_num_tokens: int,
     hidden_dim: int,
     in_dtype: torch.dtype,
-    quant_dtype: Optional[torch.dtype],
+    quant_dtype: Union[torch.dtype, str, None],
     per_act_token_quant: bool,
     block_shape: Optional[list[int]],
 ):
@@ -32,6 +32,7 @@ def pplx_hidden_dim_scale_bytes(
     #   ceil_div(hidden_dim, block_size) * sizeof(float32)
     # For per-token: set to 4 * sizeof(float32) (x4 for alignment)
     if quant_dtype is not None:
+        assert isinstance(quant_dtype, torch.dtype)
         assert quant_dtype.itemsize == 1
         hidden_dim_bytes = hidden_dim * quant_dtype.itemsize
         elem_size = torch.float32.itemsize
@@ -89,12 +90,14 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return self.num_dispatchers_
 
     def prepare(
-        self, a1: torch.Tensor, a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor], topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor, num_experts: int,
-        expert_map: Optional[torch.Tensor], apply_router_weight_on_input: bool,
+        self,
+        a1: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_experts: int,
+        expert_map: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-        extra_prepare_args: Optional[dict[str, Any]]
     ) -> tuple[torch.Tensor, Optional[torch.Tensor],
                Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
                Optional[torch.Tensor]]:
@@ -125,7 +128,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         repeat_cols = 4
         repeat_rows = 1 if quant_config.per_act_token_quant else a1.size(0)
         a1q, a1q_scale = moe_kernel_quantize_input(
-            a1, (None if quant_config.per_act_token_quant else a1_scale),
+            a1, (None if quant_config.per_act_token_quant else
+                 quant_config.a1_scale),
             quant_dtype=quant_config.quant_dtype,
             per_act_token_quant=quant_config.per_act_token_quant,
             block_shape=quant_config.block_shape)
@@ -213,11 +217,15 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         return expert_x, expert_x_scale, expert_tokens_meta, None, None
 
-    def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
-                 topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 apply_router_weight_on_input: bool,
-                 weight_and_reduce_impl: mk.TopKWeightAndReduce,
-                 extra_finalize_args: Optional[dict[str, Any]]) -> None:
+    def finalize(
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
+    ) -> None:
         assert isinstance(
             weight_and_reduce_impl, TopKWeightAndReduceDelegate
         ), ("Weight application and reduction happens in the combine kernel.")

@@ -246,7 +246,7 @@ class DeviceCommunicatorBase:
         """
         Prepare the communication buffer for the model.
         """
-        if not self.use_all2all:
+        if "ep" not in self.unique_name:
             return
 
         moe_modules = [
@@ -254,7 +254,7 @@ class DeviceCommunicatorBase:
             if module.__class__.__name__ == "FusedMoE"
         ]
         for module in moe_modules:
-            module.quant_method.init_prepare_finalize(module.moe_config)
+            module.quant_method.init_prepare_finalize()
 
     def dispatch(
             self, hidden_states: torch.Tensor,

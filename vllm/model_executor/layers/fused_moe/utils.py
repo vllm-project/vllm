@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from math import prod
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
 import torch
 
@@ -189,7 +189,7 @@ def moe_kernel_quantize_input(
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
-    elif quant_dtype == torch.uint8:  # nvfp4
+    elif quant_dtype == "nvfp4":
         return _fp4_quantize(A,
                              A_scale,
                              is_sf_swizzled_layout=is_fp4_scale_swizzled)
@@ -252,17 +252,3 @@ def _validate_scale_shape(
         assert block_shape is not None
         expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
         assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"
-
-
-def extract_required_args(
-    extra_args: Optional[dict[str, Any]],
-    required_keys: list[str],
-) -> tuple[Any, ...]:
-    if extra_args is None:
-        raise ValueError("`extra_args` must be provided.")
-
-    missing_keys = [k for k in required_keys if k not in extra_args]
-    if missing_keys:
-        raise ValueError(f"Missing keys in `extra_args`: {missing_keys}")
-
-    return tuple(extra_args[k] for k in required_keys)

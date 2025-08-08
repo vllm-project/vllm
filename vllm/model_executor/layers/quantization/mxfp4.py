@@ -78,7 +78,7 @@ class Mxfp4Config(QuantizationConfig):
 class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def __init__(self, moe: FusedMoEConfig):
-        super().__init__()
+        super().__init__(moe)
         self.topk_indices_dtype = None
         self.moe = moe
 

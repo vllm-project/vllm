@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 
@@ -190,23 +190,19 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     # The Deep Gemm kernels only support block size of 128
     DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
 
-    def __init__(self,
-                 max_num_tokens: int,
-                 num_dispatchers: int,
-                 block_shape: list[int],
-                 per_act_token_quant=False):
+    def __init__(
+        self,
+        max_num_tokens: int,
+        num_dispatchers: int,
+        quant_config: Optional[FusedMoEQuantConfig] = None,
+    ):
         """
         max_num_tokens: Maximum number of tokens from a DP Rank
         num_dispatchers: The number of DP dispatchers.
         block_shape: Block quantization block shape.
         per_act_token_quant: Per activation token quantization flag.
         """
-        super().__init__(
-            FusedMoEQuantConfig(
-                quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=per_act_token_quant,
-                block_shape=block_shape,
-            ))
+        super().__init__(quant_config)
         assert self.block_shape == self.DEEPGEMM_BLOCK_SHAPE
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
@@ -254,18 +250,23 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         output = (num_experts, max_num_tokens * num_dispatchers, K)
         return (workspace13, workspace2, output, a.dtype)
 
-    def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
-              w1: torch.Tensor, w2: torch.Tensor, topk_weights: torch.Tensor,
-              topk_ids: torch.Tensor, activation: str, global_num_experts: int,
-              expert_map: Optional[torch.Tensor],
-              w1_scale: Optional[torch.Tensor],
-              w2_scale: Optional[torch.Tensor], w1_zp: Optional[torch.Tensor],
-              w2_zp: Optional[torch.Tensor], a1q_scale: Optional[torch.Tensor],
-              a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
-              workspace2: torch.Tensor,
-              expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-              apply_router_weight_on_input: bool,
-              extra_expert_args: Optional[dict[str, Any]]):
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: Optional[torch.Tensor],
+        a1q_scale: Optional[torch.Tensor],
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        apply_router_weight_on_input: bool,
+    ):
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
@@ -286,11 +287,11 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # for the M expectation of each batch, correctly setting this value
         # may lead to better performance.
         expected_m = max_num_tokens
-        fp8_m_grouped_gemm_nt_masked((a1q, a1q_scale), (w1, w1_scale),
+        fp8_m_grouped_gemm_nt_masked((a1q, a1q_scale), (w1, self.w1_scale),
                                      workspace1, expert_num_tokens, expected_m)
 
         a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm(workspace1,
                                                       expert_num_tokens)
 
-        fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, w2_scale), output,
-                                     expert_num_tokens, expected_m)
+        fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, self.w2_scale),
+                                     output, expert_num_tokens, expected_m)

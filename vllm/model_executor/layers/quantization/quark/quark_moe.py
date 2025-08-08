@@ -7,8 +7,11 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
+from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
+                                                  FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig, fp8_w8a8_moe_quant_confg, mxfp4_w4a4_moe_quant_config)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     OCP_MX_BLOCK_SIZE)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -24,6 +27,9 @@ __all__ = [
 
 
 class QuarkMoEMethod(FusedMoEMethodBase):
+
+    def __init__(self, moe: FusedMoEConfig):
+        super().__init__(moe)
 
     @staticmethod
     def get_moe_method(
@@ -42,17 +48,24 @@ class QuarkMoEMethod(FusedMoEMethodBase):
         input_config = layer_quant_config.get("input_tensors")
 
         if quant_config._is_fp8_w8a8(weight_config, input_config):
-            return QuarkW8A8Fp8MoEMethod(weight_config, input_config)
+            return QuarkW8A8Fp8MoEMethod(weight_config, input_config,
+                                         module.moe_config)
         elif quant_config._is_mx_fp4(weight_config, input_config):
-            return QuarkW4A4MXFp4MoEMethod(weight_config, input_config)
+            return QuarkW4A4MXFp4MoEMethod(weight_config, input_config,
+                                           module.moe_config)
         else:
             raise RuntimeError("Unsupported FusedMoe scheme")
 
 
 class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
-    def __init__(self, weight_config: dict[str, Any], input_config: dict[str,
-                                                                         Any]):
+    def __init__(
+        self,
+        weight_config: dict[str, Any],
+        input_config: dict[str, Any],
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         self.weight_quant = weight_config
         self.input_quant = input_config
 
@@ -193,6 +206,15 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                     requires_grad=False)
 
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        return fp8_w8a8_moe_quant_confg(
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            a1_scale=layer.w13_input_scale,
+            a2_scale=layer.w2_input_scale,
+        )
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -215,6 +237,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `QuarkW8A8Fp8MoEMethod` yet.")
@@ -231,7 +255,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
 
         return fused_experts(
             x,
@@ -240,21 +265,22 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
-            use_fp8_w8a8=True,
             global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
-            w1_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
-            a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
-            activation=activation)
+            activation=activation,
+            quant_config=self.moe_quant_config)
 
 
 class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
 
-    def __init__(self, weight_config: dict[str, Any], input_config: dict[str,
-                                                                         Any]):
+    def __init__(
+        self,
+        weight_config: dict[str, Any],
+        input_config: dict[str, Any],
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         self.weight_quant = weight_config
         self.input_quant = input_config
 
@@ -347,6 +373,16 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        return mxfp4_w4a4_moe_quant_config(
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            a1_scale=None,
+            a2_scale=None,
+            block_shape=None,
+        )
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -369,6 +405,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
 
         if enable_eplb:
             raise NotImplementedError(
@@ -386,7 +423,8 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
 
         out = fused_experts(
             x,
@@ -395,15 +433,10 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
-            use_mxfp4_w4a4=True,
             global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
-            w1_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
-            a1_scale=None,
-            a2_scale=None,
-            block_shape=None,
             activation=activation,
+            quant_config=self.moe_quant_config,
         )
         return out

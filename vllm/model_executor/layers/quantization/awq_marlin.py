@@ -9,6 +9,8 @@ from torch.nn import Parameter
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
+                                                         FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -147,7 +149,7 @@ class AWQMarlinConfig(QuantizationConfig):
                     "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(
                     self.full_config).get_quant_method(layer, prefix)
-            return AWQMoEMethod(self)
+            return AWQMoEMethod(self, layer.moe_config)
         return None
 
     @classmethod
@@ -321,7 +323,12 @@ class AWQMarlinLinearMethod(LinearMethodBase):
 
 class AWQMoEMethod(FusedMoEMethodBase):
 
-    def __init__(self, quant_config: AWQMarlinConfig):
+    def __init__(
+        self,
+        quant_config: AWQMarlinConfig,
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         self.quant_config = quant_config
         if self.quant_config.weight_bits != 4:
             raise ValueError("AWQMoEMethod only supports 4bit now.")
@@ -465,6 +472,10 @@ class AWQMoEMethod(FusedMoEMethodBase):
             num_bits=self.quant_config.weight_bits)
         replace_parameter(layer, "w2_qzeros", marlin_w2_zp)
 
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        return None
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -487,6 +498,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `AWQMoEMethod` yet.")
@@ -503,7 +516,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
 
         return torch.ops.vllm.fused_marlin_moe(
             x,

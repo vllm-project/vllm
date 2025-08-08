@@ -6,6 +6,8 @@ from typing import Any, Callable, Optional, Union
 import torch
 from packaging import version
 
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
+                                                         FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -132,7 +134,7 @@ class BitsAndBytesConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return BitsAndBytesLinearMethod(self)
         elif isinstance(layer, FusedMoE):
-            return BitsAndBytesMoEMethod(self)
+            return BitsAndBytesMoEMethod(self, layer.moe_config)
         return None
 
 
@@ -411,7 +413,12 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
        quant_config: The BitsAndBytes quantization config.
     """
 
-    def __init__(self, quant_config: BitsAndBytesConfig):
+    def __init__(
+        self,
+        quant_config: BitsAndBytesConfig,
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         try:
             import bitsandbytes
             if version.parse(
@@ -422,7 +429,6 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             raise ImportError("Please install bitsandbytes>=0.46.1 via "
                               "`pip install bitsandbytes>=0.46.1` to use "
                               "bitsandbytes quantizer.") from err
-        self.topk_indices_dtype = None
         self.quant_config = quant_config
 
     def create_weights(
@@ -447,6 +453,10 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             **extra_weight_attrs,
         )
 
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        return None
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -470,6 +480,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
+        assert self.fused_experts is None
 
         if enable_eplb:
             raise NotImplementedError(
@@ -486,10 +497,12 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
+
         if self.quant_config.load_in_8bit:
             w13, w2 = self._apply_8bit_dequant(layer)
         else:
             w13, w2 = self._apply_4bit_dequnt(layer)
+
         return fused_experts(
             hidden_states=x,
             w1=w13,
@@ -501,6 +514,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
+            quant_config=self.moe_quant_config,
         )
 
     def _create_weights_4bit(

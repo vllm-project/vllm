@@ -7,6 +7,7 @@ from typing import Optional
 import torch
 
 from vllm import envs
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
@@ -309,13 +310,7 @@ def rocm_aiter_fused_experts(
         topk_ids: torch.Tensor,
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
-        use_fp8_w8a8: bool = False,
-        per_channel_quant: bool = False,
-        w1_scale: Optional[torch.Tensor] = None,
-        w2_scale: Optional[torch.Tensor] = None,
-        a1_scale: Optional[torch.Tensor] = None,
-        a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[list[int]] = None,
+        quant_config: Optional[FusedMoEQuantConfig] = None,
         expert_map: Optional[torch.Tensor] = None) -> torch.Tensor:
 
     activation_method = (ActivationMethod.SILU
@@ -330,7 +325,8 @@ def rocm_aiter_fused_experts(
         expert_mask = None
 
     # w8a8 per-channel quantization
-    if per_channel_quant and apply_router_weight_on_input and use_fp8_w8a8:
+    if (quant_config.per_channel_quant and apply_router_weight_on_input
+            and quant_config.use_fp8_w8a8):
         # AITER tkw1 kernel for FP8 models with `apply_router_weight_on_input`
         # This applies topk_weights on the GEMM output of the first FC layer
         #  rather than the second FC.
@@ -346,8 +342,8 @@ def rocm_aiter_fused_experts(
             w2,
             topk_weights,
             topk_ids,
-            fc1_scale=w1_scale,
-            fc2_scale=w2_scale,
+            fc1_scale=quant_config.w1_scale,
+            fc2_scale=quant_config.w2_scale,
             fc1_smooth_scale=None,
             fc2_smooth_scale=None,
             a16=False,
@@ -359,14 +355,14 @@ def rocm_aiter_fused_experts(
         quant_method = QuantMethod.NO.value
 
         # w8a8 block-scaled
-        if block_shape is not None and use_fp8_w8a8:
+        if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
             assert not apply_router_weight_on_input, (
                 "apply_router_weight_on_input is\
                 not supported for block scaled moe")
-            assert w1_scale is not None
-            assert w2_scale is not None
+            assert quant_config.w1_scale is not None
+            assert quant_config.w2_scale is not None
             quant_method = QuantMethod.BLOCK_128x128.value
-        elif use_fp8_w8a8:
+        elif quant_config.use_fp8_w8a8:
             # Currently only per tensor quantization method is enabled.
             quant_method = QuantMethod.PER_TENSOR.value
 
@@ -387,10 +383,10 @@ def rocm_aiter_fused_experts(
             expert_mask=expert_mask,
             quant_method=quant_method,
             activation_method=activation_method,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
+            w1_scale=quant_config.w1_scale,
+            w2_scale=quant_config.w2_scale,
+            a1_scale=quant_config.a1_scale,
+            a2_scale=quant_config.a2_scale,
             doweight_stage1=apply_router_weight_on_input)
 
 
