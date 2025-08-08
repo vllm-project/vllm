@@ -128,14 +128,14 @@ class OAIAttention(nn.Module):
         q = q.to(torch.bfloat16)
         k = k.to(torch.bfloat16)
         v = v.contiguous()
-        print("qkv")
-        print(q.shape)
+        # print("qkv")
+        # print(q.shape)
         #print(q[:,:7,:])
         #print(k[:,:7,:])
         #print(v[:,:7,:])
         attn_output = self.attn(q, k, v)
-        print("Attn")
-        print(attn_output[:,:7,:])
+        # print("Attn")
+        # print(attn_output[:,:7,:])
         output, _ = self.o_proj(attn_output)
 
         return output + hidden_states
@@ -175,8 +175,8 @@ class MLPBlock(torch.nn.Module):
         t = self.norm(x)
         g = self.router(t)
         t = self.experts(hidden_states=t, router_logits=g)
-        print(t.shape)
-        print(t[:,:7,:])
+        # print(t.shape)
+        # print(t[:,:7,:])
         return x + t
 
 

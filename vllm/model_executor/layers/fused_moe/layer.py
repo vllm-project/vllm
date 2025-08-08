@@ -708,8 +708,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         batch_size = hidden_states.shape[0]
         
         # Repeat hidden states for all experts
-        print("moeinput")
-        print(hidden_states)
+
         repeated_hidden_states = hidden_states.unsqueeze(0).repeat(num_experts, 1, 1)
         
         # Batch matrix multiply for gate_up projection
@@ -717,12 +716,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         
         # Split gate and up projections
         gate_up = torch.bmm(repeated_hidden_states, w1.transpose(-2, -1)) + w1_bias.unsqueeze(1)
-        print(gate_up)
+
         #gate = gate_up[:, :, :intermediate_size]
         #up = gate_up[:, :, intermediate_size:] 
         gate, up = gate_up[..., ::2], gate_up[..., 1::2]
-        print(gate)
-        print(up)
+
         # Apply SiLU activation to gate
         #gate = F.silu(gate)
         gate = gate.clamp(min=None, max=7.0)
@@ -731,11 +729,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         gated = (up + 1) * glu 
         # Element-wise multiplication (gating)
         #gated = up * gate
-        print(glu)
+
         
         # Batch matrix multiply for down projection
         expert_outputs = torch.bmm(gated,w2.transpose(-2, -1)) + w2_bias.unsqueeze(1)
-        print(expert_outputs)
         # Apply expert weights based on routing
         final_hidden_states = torch.zeros_like(hidden_states)
         for expert_idx in range(num_experts):
@@ -1212,14 +1209,11 @@ class FusedMoE(torch.nn.Module):
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
         #shard_dim = 2
         shard_size = expert_data.shape[shard_dim]
-        print(expert_data.shape)
-        print(shard_size)
-        print(shard_dim)
-        print(loaded_weight.shape)
+
 
         loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
                                              shard_size)
-        print(loaded_weight.shape)
+
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
         if shard_id == "w1":

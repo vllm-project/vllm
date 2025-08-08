@@ -726,7 +726,7 @@ class HpuModelAdapter(torch.nn.Module):
             kwargs.update({
                 'input_ids': None,
             })
-        print(kwargs['input_ids'])
+        # print(kwargs['input_ids'])
         attn_meta = kwargs.pop('attn_metadata')
         if 'kv_caches' in kwargs:
             kwargs.pop('kv_caches')
@@ -3840,7 +3840,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     with self.profiler.record_event('internal',
                                                     model_event_name,
                                                     args=profiler_args):
-                        print(execute_model_kwargs["input_ids"])
+                        # print(execute_model_kwargs["input_ids"])
                         hidden_states = self.model.forward(
                             **execute_model_kwargs,
                             selected_token_indices=sampling_metadata.
