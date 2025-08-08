@@ -28,6 +28,8 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
+from vllm.model_executor.layers.fused_moe.routing_simulator import (
+    RoutingSimulator)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -1362,6 +1364,16 @@ class FusedMoE(torch.nn.Module):
         """
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 
+        # Check if we should use a routing simulation strategy
+        routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
+        if routing_strategy != "":
+            return RoutingSimulator.simulate_routing(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                strategy_name=routing_strategy,
+                top_k=top_k,
+                indices_type=indices_type)
+
         # DeepSeekv2 uses grouped_top_k
         if use_grouped_topk:
             assert topk_group is not None
@@ -1558,18 +1570,19 @@ class FusedMoE(torch.nn.Module):
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
         moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
         num_tokens = full_hidden_states.size(0)
-        for chunk_start_ in range(0, max_tokens_across_dp,
-                                  moe_dp_chunk_size_per_rank):
+        for chunk_idx, chunk_start_ in enumerate(
+                range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank)):
             chunk_start = chunk_start_
             chunk_end = min(chunk_start + moe_dp_chunk_size_per_rank,
                             max_tokens_across_dp)
             # clamp start and end
             chunk_start = min(chunk_start, num_tokens - 1)
             chunk_end = min(chunk_end, num_tokens)
-
-            process_chunk(chunk_start,
-                          chunk_end,
-                          skip_result_store=chunk_start_ >= num_tokens)
+            with ctx.dp_metadata.chunked_sizes(moe_dp_chunk_size_per_rank,
+                                               chunk_idx):
+                process_chunk(chunk_start,
+                              chunk_end,
+                              skip_result_store=chunk_start_ >= num_tokens)
 
         return full_final_hidden_states
 
