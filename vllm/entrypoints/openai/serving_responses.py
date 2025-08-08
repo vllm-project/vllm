@@ -16,8 +16,7 @@ from fastapi import Request
 from openai import BaseModel
 # yapf conflicts with isort for this block
 # yapf: disable
-from openai.types.responses import (ResponseContentPartDoneEvent,
-                                    ResponseCreatedEvent,
+from openai.types.responses import (ResponseCreatedEvent,
                                     ResponseFunctionToolCall,
                                     ResponseInProgressEvent,
                                     ResponseOutputItem,
@@ -844,9 +843,13 @@ class OpenAIServingResponses(OpenAIServing):
                             type="reasoning",
                             content=[
                                 ResponseReasoningTextContent(
-                                    text=previous_item.content[0].text),
+                                    text=previous_item.content[0].text,
+                                    type="reasoning_text",
+                                ),
                             ],
                             status="completed",
+                            id=current_item_id,
+                            summary=[],
                         )
                         yield _send_event(
                             ResponseReasoningTextDoneEvent(
@@ -856,15 +859,6 @@ class OpenAIServingResponses(OpenAIServing):
                                 output_index=current_output_index,
                                 content_index=current_content_index,
                                 text=previous_item.content[0].text,
-                            ))
-                        yield _send_event(
-                            ResponseContentPartDoneEvent(
-                                type="response.content_part.done",
-                                item_id=current_item_id,
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                content_index=current_content_index,
-                                part=reasoning_item,
                             ))
                         yield _send_event(
                             ResponseOutputItemDoneEvent(
