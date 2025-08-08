@@ -121,8 +121,10 @@ class AdditionalHeadsMixin:
         return loaded_params.union(head_loaded_params)
 
     def compute_additional_head(
-        self, hidden_states: torch.Tensor, additional_heads_extra_inputs: Optional[List[Dict[str, Any]]] = None
-    ) -> torch.Tensor:
+        self,
+        hidden_states: torch.Tensor,
+        additional_heads_extra_inputs: Optional[List[Dict[str, Any]]] = None,
+    ) -> torch.Tensor | dict[str, list[float]]:
         """
         Compute logit outputs for all additional heads.
         Returns a tensor of shape [batch_size, num_heads] with outputs for each head.
@@ -131,4 +133,8 @@ class AdditionalHeadsMixin:
         for head in self.heads:
             logits = head(hidden_states)
             head_outputs.append(logits.squeeze(-1))
-        return torch.stack(head_outputs, dim=1)
+        logits = torch.stack(head_outputs, dim=-1)
+        return {
+            "logits": logits.detach().cpu().tolist(),
+            "hidden_states": hidden_states.detach().cpu().tolist(),
+        }
