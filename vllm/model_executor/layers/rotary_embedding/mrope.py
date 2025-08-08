@@ -226,6 +226,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
+        offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward().
 
@@ -278,6 +279,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
+        offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
 
         assert positions.ndim == 1 or positions.ndim == 2
