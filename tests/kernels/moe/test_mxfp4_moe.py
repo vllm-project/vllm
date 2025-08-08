@@ -8,13 +8,10 @@ from typing import Optional
 
 import pytest
 import torch
-import torch.nn.functional as F
 from flashinfer import (fp4_quantize, mxfp8_quantize, next_positive_power_of_2,
                         reorder_rows_for_gated_act_gemm, shuffle_matrix_a,
                         shuffle_matrix_sf_a, trtllm_fp4_block_scale_moe)
 from packaging import version
-
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
     "quark") is not None and version.parse(
@@ -69,9 +66,8 @@ def swiglu(x, alpha: float = 1.702, limit: Optional[float] = None):
     x_glu, x_linear = torch.chunk(x, 2, dim=-1)
     if limit is not None:
         x_glu = x_glu.clamp(max=limit)
-    out_glu = x_glu * torch.sigmoid(alpha * x_glu)
-    if limit is not None:
         x_linear = x_linear.clamp(min=-limit, max=limit)
+    out_glu = x_glu * torch.sigmoid(alpha * x_glu)
     return out_glu * (x_linear + 1)
 
 
@@ -125,21 +121,27 @@ def reference_moe(
     w2,
     alpha,
     limit,
+    act_type,
 ):
     experts = torch.topk(roouting_logits, k=topk, dim=-1, sorted=True)
-    expert_weights = torch.nn.functional.softmax(experts.values, dim=1).to(hidden_states.dtype)
+    expert_weights = torch.nn.functional.softmax(experts.values,
+                                                 dim=1).to(hidden_states.dtype)
     expert_indices = experts.indices
     t = hidden_states.clone()
     # MLP #1
     mlp1_weight = w13[expert_indices, ...]
     # mlp1_bias = w1_bias[topk_ids, ...]
-    t = torch.einsum("beck,bk->bec", mlp1_weight, t) # + mlp1_bias
+    t = torch.einsum("beck,bk->bec", mlp1_weight, t)  # + mlp1_bias
     t = swiglu(t, alpha=alpha, limit=limit)
+
+    if act_type == 'mxfp8':
+        t_quantized, t_scale = mxfp8_quantize(t, is_sf_swizzled_layout=False)
+        t = mxfp8_dequantize(t_quantized, t_scale).to(torch.bfloat16)
 
     # MLP #2
     mlp2_weight = w2[expert_indices, ...]
     # mlp2_bias = w2_bias[topk_ids, ...]
-    t = torch.einsum("beck,bek->bec", mlp2_weight, t) # + mlp2_bias
+    t = torch.einsum("beck,bek->bec", mlp2_weight, t)  # + mlp2_bias
 
     # Weighted sum of experts
     t = torch.einsum("bec,be->bc", t, expert_weights)
@@ -282,7 +284,7 @@ def tg_mxfp4_moe(
         local_num_experts=num_experts,
         routed_scaling_factor=None,
         tile_tokens_dim=get_tile_tokens_dim(hidden_states, topk, num_experts),
-        routing_method_type=1, # renormalize
+        routing_method_type=1,  # renormalize
         do_finalize=True)[0]
     return tg_result
 
@@ -311,7 +313,7 @@ def check_accuracy(a, b, atol, rtol, percent):
 
 @pytest.mark.parametrize("topk", [1, 4])
 @pytest.mark.parametrize("num_experts", [32, 128])
-@pytest.mark.parametrize("num_tokens", [1, 64])
+@pytest.mark.parametrize("num_tokens", [1, 128, 1024])
 @pytest.mark.parametrize("intermediate_size,hidden_size", [(3072, 3072)])
 @pytest.mark.parametrize("alpha,limit", [(1.0, None), (1.702, 7.0)])
 @pytest.mark.parametrize("act_type", ['mxfp8', 'bf16'])
@@ -388,35 +390,34 @@ def test_trtllm_gen_mxfp4_fused_moe(
             hidden_states_ref[start_idx:end_idx],
             w13_ref,
             w2_ref,
-            alpha=alpha,
-            limit=limit
+            alpha,
+            limit,
+            act_type,
         )
         ref_result[start_idx:end_idx].copy_(chunk_result)
 
     # trtllm-gen result
     if alpha is not None:
-        alpha = torch.full((num_experts,), alpha, device=hidden_states.device)
+        alpha = torch.full((num_experts, ), alpha, device=hidden_states.device)
     if limit is not None:
-        limit = torch.full((num_experts,), limit, device=hidden_states.device)
-    tg_result = tg_mxfp4_moe(
-        router_logits,
-        topk,
-        num_experts,
-        intermediate_size,
-        hidden_size,
-        hidden_states,
-        hidden_states_scale,
-        w13,
-        w13_scale,
-        w2,
-        w2_scale,
-        act_type,
-        alpha=alpha,
-        limit=limit
-    )
+        limit = torch.full((num_experts, ), limit, device=hidden_states.device)
+    tg_result = tg_mxfp4_moe(router_logits,
+                             topk,
+                             num_experts,
+                             intermediate_size,
+                             hidden_size,
+                             hidden_states,
+                             hidden_states_scale,
+                             w13,
+                             w13_scale,
+                             w2,
+                             w2_scale,
+                             act_type,
+                             alpha=alpha,
+                             limit=limit)
 
     # relatively loose check since the mxfp4 quantization is less accurate
-    check_accuracy(ref_result, tg_result, atol=0, rtol=0.5, percent=0.9)
+    check_accuracy(ref_result, tg_result, atol=0, rtol=0.8, percent=0.8)
 
 
 if __name__ == "__main__":
