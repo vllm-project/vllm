@@ -2538,12 +2538,8 @@ def copy_kv_blocks(
         src_device=src_device,
         dst_device=dst_device,
         )
-    
-    for idx, (layer, kv_layer) in enumerate(src_kv_caches):
-        if direction == "h2d":
-            k, v = kv_layer[0], kv_layer[1]
-        else:
-            k, v = kv_layer
+    for layer, kv_layer in src_kv_caches.items():
+        k, v = kv_layer[0], kv_layer[1]
         dst_kv_caches[layer][0][dst_indices].copy_(k[src_indices], non_blocking = False)
         dst_kv_caches[layer][1][dst_indices].copy_(v[src_indices], non_blocking = False)
 
