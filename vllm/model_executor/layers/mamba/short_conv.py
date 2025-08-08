@@ -6,7 +6,7 @@ import torch
 from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import get_current_vllm_config
-from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -14,6 +14,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba2_metadata import update_metadata
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateShapeCalculator)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.platforms import current_platform
@@ -205,13 +207,11 @@ class ShortConv(CustomOp):
         output[:num_actual_tokens], _ = self.out_proj(hidden_states)
 
     def get_state_shape(self) -> tuple[tuple[int, ...]]:
-        world_size = get_tensor_model_parallel_world_size()
-        # contiguous along 'dim' axis
-        conv_state_shape = (
-            self.L_cache - 1,
-            divide(self.conv_dim, world_size),
+        return MambaStateShapeCalculator.short_conv_state_shape(
+            tp_world_size=get_tensor_model_parallel_world_size(),
+            intermediate_size=self.conv_dim,
+            conv_kernel=self.L_cache,
         )
-        return (conv_state_shape, )
 
 
 def short_conv(

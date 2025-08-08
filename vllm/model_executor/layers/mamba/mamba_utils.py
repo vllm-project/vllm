@@ -60,6 +60,20 @@ class MambaStateShapeCalculator:
         return conv_state_shape, temporal_state_shape
 
     @classmethod
+    def short_conv_state_shape(
+        cls,
+        tp_world_size: int,
+        intermediate_size: int,
+        conv_kernel: int,
+        use_v1: bool = True,
+    ) -> tuple[tuple[int, int], ...]:
+        conv_dim = divide(intermediate_size, tp_world_size)
+        conv_state_shape = (conv_kernel - 1, conv_dim)
+        if not use_v1:
+            conv_state_shape = conv_state_shape[1], conv_state_shape[0]
+        return (conv_state_shape, )
+
+    @classmethod
     def extra_groups_for_head_shards(cls, ngroups: int, tp_size: int):
         """Compute the increase in group numbers to account for
         replication in order to accompany the head shards."""
