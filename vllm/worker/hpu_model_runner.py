@@ -350,7 +350,7 @@ class HpuModelAdapter(torch.nn.Module):
         self.interleaved_sliding_window = getattr(
             text_config, "interleaved_sliding_window",
             None) if text_config else None
-
+        self.interleaved_sliding_window = 128
         self.use_window_sdpa = os.getenv("PT_HPU_SDPA_QKV_SLICE_MODE_FWD",
                                          "false").strip().lower() in ("1",
                                                                       "true")
@@ -726,6 +726,7 @@ class HpuModelAdapter(torch.nn.Module):
             kwargs.update({
                 'input_ids': None,
             })
+        print(kwargs['input_ids'])
         attn_meta = kwargs.pop('attn_metadata')
         if 'kv_caches' in kwargs:
             kwargs.pop('kv_caches')
@@ -981,7 +982,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.interleaved_sliding_window = getattr(
             self.model_config.hf_text_config, "interleaved_sliding_window",
             None)
-
+        self.interleaved_sliding_window = 128
         self.device_config = (self.device_config if self.device_config
                               is not None else DeviceConfig())
         if is_fake_hpu():
@@ -1181,6 +1182,12 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         with HabanaMemoryProfiler() as m:
             with HabanaMemoryProfiler() as m_getmodel:
                 self.model = get_model(vllm_config=self.vllm_config)
+                #for name, param in self.model.named_parameters():
+                #    print(f"Parameter Name: {name}")
+                #     if name == "model.layers.0.mlp.experts.w13_weight":
+                #        print(param.data.transpose(-2,-1))
+                #    print(param.data.shape)
+                #    print(f"Value (Weights/Biases):\n{param.data}")
             msg = ("Pre-loading model weights on "
                    f"{next(self.model.parameters()).device} "
                    f"took {m_getmodel.get_summary_string()}")
@@ -3833,6 +3840,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     with self.profiler.record_event('internal',
                                                     model_event_name,
                                                     args=profiler_args):
+                        print(execute_model_kwargs["input_ids"])
                         hidden_states = self.model.forward(
                             **execute_model_kwargs,
                             selected_token_indices=sampling_metadata.
