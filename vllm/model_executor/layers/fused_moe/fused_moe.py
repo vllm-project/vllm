@@ -1423,6 +1423,8 @@ def fused_moe(
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
+        w1_bias,
+        w2_bias,
         gating_output: torch.Tensor,
         topk: int,
         renormalize: bool,

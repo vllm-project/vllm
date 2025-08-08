@@ -462,15 +462,23 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
         # Fused gate_up_proj (column parallel)
+        # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(torch.empty(
             num_experts,
+            #hidden_size,
             2 * intermediate_size_per_partition,
             hidden_size,
             dtype=params_dtype),
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
-
+        w13_bias = torch.nn.Parameter(torch.zeros(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            dtype=params_dtype),
+                                        requires_grad=False)
+        layer.register_parameter("w13_bias", w13_bias)
+        set_weight_attrs(w13_bias, extra_weight_attrs)
         # down_proj (row parallel)
         w2_weight = torch.nn.Parameter(torch.empty(
             num_experts,
@@ -480,6 +488,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
+        w2_bias = torch.nn.Parameter(torch.zeros(num_experts,
+                                                    hidden_size,
+                                                    dtype=params_dtype),
+                                        requires_grad=False)
+        layer.register_parameter("w2_bias", w2_bias)
+        set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
@@ -651,6 +665,64 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             e_score_correction_bias,
         )
 
+    def fused_moe(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        w1_bias: torch.Tensor,
+        w2_bias: torch.Tensor,
+        gating_output: torch.Tensor,
+        topk: int,
+        global_num_experts: int,
+        expert_map: torch.Tensor = None,
+        renormalize: bool = False,
+    ) -> torch.Tensor:
+        """
+        Args:
+            hidden_states: [*, hidden_size]
+            w1: [num_experts, intermediate_size * 2, hidden_size]
+            w2: [num_experts, hidden_size, intermediate_size]
+            gating_output: [*, num_experts]
+            expert_map: [num_experts]
+        """
+        orig_shape = hidden_states.shape
+        hidden_size = hidden_states.shape[-1]
+        num_tokens = hidden_states.shape[:-1].numel()
+        num_experts = w1.shape[0]
+        intermediate_size = w2.shape[-1]
+        dtype = hidden_states.dtype
+        hidden_states = hidden_states.view(num_tokens, hidden_size)
+        gating_output = gating_output.view(num_tokens, global_num_experts)
+        topk_weights = gating_output.softmax(dim=-1, dtype=torch.float)
+        topk_weights, selected_experts = topk_weights.topk(topk, dim=-1)
+        if renormalize:
+            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+        topk_weights = topk_weights.to(dtype)
+
+        if expert_map is not None:
+            selected_experts = expert_map[selected_experts]
+
+        final_hidden_states = None
+        for expert_idx in range(num_experts):
+            expert_w1 = w1[expert_idx]
+            expert_w2 = w2[expert_idx]
+            bias_w1 = w1_bias[expert_idx]
+            bias_w2 = w2_bias[expert_idx]
+            expert_mask = (selected_experts == expert_idx)
+            expert_weights = (topk_weights * expert_mask).sum(dim=-1, keepdim=True)
+            x = F.linear(hidden_states, expert_w1, bias_w1)
+            gate = F.silu(x[:, :intermediate_size])
+            x = x[:, intermediate_size:] * gate
+            x = F.linear(x, expert_w2, bias_w2)
+            current_hidden_states = x * expert_weights
+            if final_hidden_states is None:
+                final_hidden_states = current_hidden_states
+            else:
+                final_hidden_states = final_hidden_states + current_hidden_states
+
+        return final_hidden_states.view(orig_shape)  # type: ignore
+
     def forward_hpu(
         self,
         layer: torch.nn.Module,
@@ -670,6 +742,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         activation: str = "silu",
         **kwargs,
     ):
+        return self.fused_moe(hidden_states=x,
+                                 w1=layer.w13_weight,
+                                 w2=layer.w2_weight,
+                                 w1_bias=layer.w13_bias,
+                                 w2_bias=layer.w2_bias,
+                                 topk=top_k,
+                                 gating_output=router_logits,
+                                 global_num_experts=global_num_experts,
+                                 expert_map=expert_map,
+                                 renormalize=renormalize)
         input_shape = x.shape
         x = x.view(-1, x.shape[-1])
         if use_grouped_topk or custom_routing_function is not None:
@@ -1106,9 +1188,16 @@ class FusedMoE(torch.nn.Module):
 
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
-        shard_size = expert_data.shape[shard_dim] // 2
+        #shard_dim = 2
+        shard_size = expert_data.shape[shard_dim]
+        print(expert_data.shape)
+        print(shard_size)
+        print(shard_dim)
+        print(loaded_weight.shape)
+
         loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
                                              shard_size)
+        print(loaded_weight.shape)
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
         if shard_id == "w1":
