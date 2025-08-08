@@ -40,6 +40,7 @@ theme:
     - navigation.sections
     - navigation.prune
     - navigation.top
+    - navigation.indexes
     - search.highlight
     - search.share
     - toc.follow
@@ -50,11 +51,6 @@ hooks:
   - docs/mkdocs/hooks/generate_examples.py
   - docs/mkdocs/hooks/generate_argparse.py
   - docs/mkdocs/hooks/url_schemes.py
-
-# Required to stop api-autonav from raising an error
-# https://github.com/tlambert03/mkdocs-api-autonav/issues/16
-nav:
-  - api
 
 plugins:
   - meta
