@@ -1,34 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Comprehensive end-to-end tests for min_tokens functionality in V1 engine.
+Comprehensive end-to-end tests for `min_tokens` in the V1 engine.
 
-This test file addresses issue #21950: "Verify and add CI coverage for min_tokens"
+Addresses #21950: verify and add CI coverage.
 
-The tests cover:
-1. Basic min_tokens functionality (baseline behavior)
-2. min_tokens with stop strings (the bug Calvin is fixing in PR #22014)
-3. min_tokens with EOS tokens (potential LogitsProcessor bug)
-4. Edge cases (min_tokens=max_tokens, min_tokens=0, etc.)
-5. Multiple stop conditions
-
-Background:
-- Bug #21987: Stop sequences ignored when min_tokens specified  
-- The bug is V1-specific and involves two potential failure points:
-  a) Stop strings bypass min_tokens (detokenizer issue - Calvin's fix)
-  b) EOS tokens may bypass min_tokens (LogitsProcessor issue - needs investigation)
-
-Test Strategy:
-- All tests use V1 engine (VLLM_USE_V1=1)
-- Small model for fast CI execution (facebook/opt-125m)
-- Parametrized tests for comprehensive coverage
-- Clear assertions about expected vs actual token counts
-- Some tests may initially fail (exposing known bugs) until fixes are merged
+Covers:
+1) Basic functionality
+2) Stop strings with `min_tokens` (bug #21987; fix in PR #22014)
+3) EOS behavior with `min_tokens` (potential logits-processor bug)
+4) Edge cases (min_tokens == max_tokens, min_tokens == 0)
+5) Multiple stop conditions
 """
+
 
 import os
 import pytest
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 from vllm import LLM, SamplingParams
 from vllm.outputs import RequestOutput
@@ -46,11 +36,9 @@ class MinTokensTestCase:
         name: str,
         min_tokens: int,
         max_tokens: int,
-        stop: Optional[Union[str, List[str]]] = None,
+        stop: Optional[Union[str, list[str]]] = None,
         expected_min_len: int = None,
         expected_exact_len: int = None,
-        should_pass: bool = True,
-        xfail_reason: Optional[str] = None
     ):
         self.name = name
         self.min_tokens = min_tokens
@@ -58,11 +46,13 @@ class MinTokensTestCase:
         self.stop = stop
         self.expected_min_len = expected_min_len or min_tokens
         self.expected_exact_len = expected_exact_len
-        self.should_pass = should_pass
-        self.xfail_reason = xfail_reason
 
     def __str__(self):
-        return f"{self.name}: min={self.min_tokens}, max={self.max_tokens}, stop={self.stop}"
+      return (
+          f"{self.name}: min={self.min_tokens}, "
+          f"max={self.max_tokens}, stop={self.stop}"
+      )
+
 
 
 # Test scenarios covering all critical cases
@@ -93,33 +83,45 @@ MIN_TOKENS_TEST_CASES = [
     ),
     
     # === STOP STRINGS WITH MIN_TOKENS ===
-    # These tests expose the detokenizer bug where stop strings bypass min_tokens
+    # These tests expose the detokenizer bug where stop strings
+    # bypass min_tokens
     # Using mathematically guaranteed approach with wide stop nets
     pytest.param(
         MinTokensTestCase(
             name="min_tokens_with_comprehensive_stops",
-            min_tokens=5,  # Lower min_tokens for higher confidence
-            max_tokens=20,  # Lower max_tokens to focus the test
-            stop=["a", "e", "i", "o", "u", "t", "n", "s", "r", "l", " "],  # Comprehensive coverage
+            min_tokens=5, 
+            max_tokens=20,
+            stop=[
+              "a", "e", "i", "o", "u",
+              "t", "n", "s", "r", "l", " ",
+            ],
             expected_min_len=5,
-            should_pass=False,
-            xfail_reason="Known bug #21987: Stop strings bypass min_tokens (fixed by PR #22014)"
         ),
-        marks=pytest.mark.xfail(reason="Known bug #21987: Stop strings bypass min_tokens (fixed by PR #22014)", strict=False),
+        marks=pytest.mark.xfail(
+          reason=(
+            "Known bug #21987: stop strings bypass min_tokens "
+            "(fixed by PR #22014)"
+          ), 
+          strict=False
+        ),
         id="min_tokens_with_comprehensive_stops",
     ),
     
     pytest.param(
         MinTokensTestCase(
             name="min_tokens_with_simple_char_stop", 
-            min_tokens=3,  # Very low threshold
+            min_tokens=3,
             max_tokens=15,
-            stop=["e", "a", " "],  # Multiple common patterns
+            stop=["e", "a", " "], 
             expected_min_len=3,
-            should_pass=False,
-            xfail_reason="Known bug #21987: Stop strings bypass min_tokens (fixed by PR #22014)"
         ),
-        marks=pytest.mark.xfail(reason="Known bug #21987: Stop strings bypass min_tokens (fixed by PR #22014)", strict=False),
+        marks=pytest.mark.xfail(
+          reason=(
+            "Known bug #21987: stop strings bypass min_tokens "
+            "(fixed by PR #22014)"
+          ),
+          strict=False
+        ),
         id="min_tokens_with_simple_char_stop",
     ),
     
