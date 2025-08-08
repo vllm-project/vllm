@@ -425,6 +425,9 @@ def sample_recovered_tokens(
         triton.next_power_of_2(vocab_size),
         NO_DRAFT_PROBS=draft_probs is None,
     )
+    # mask any out-of-vocabulary values in recovered_token_ids
+    recovered_token_ids = recovered_token_ids * (recovered_token_ids
+                                                 < vocab_size)
     return recovered_token_ids
 
 
