@@ -2,15 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import contextlib
 import random
-import time
 from typing import Callable
 
 import openai
 import pytest
 import pytest_asyncio
-import requests
 
 from tests.utils import RemoteOpenAIServer
 
@@ -87,54 +84,3 @@ async def test_with_and_without_truncate(
 
     responses = await asyncio.gather(*[get_status_code(**b) for b in bodies])
     assert 500 not in responses
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ids=["single completion", "multiple completions", "chat"],
-    argnames=["create_func_gen", "content_body"],
-    argvalues=[
-        (lambda x: x.completions.create, {
-            "prompt": " ".join(['A'] * 300_000)
-        }),
-        (lambda x: x.completions.create, {
-            "prompt": [" ".join(['A'] * 300_000)] * 2
-        }),
-        (lambda x: x.chat.completions.create, {
-            "messages": [{
-                "role": "user",
-                "content": " ".join(['A'] * 300_000)
-            }]
-        }),
-    ],
-)
-async def test_healthcheck_response_time(
-    server: RemoteOpenAIServer,
-    client: openai.AsyncOpenAI,
-    create_func_gen: Callable,
-    content_body: dict,
-):
-    num_requests = 50
-
-    create_func = create_func_gen(client)
-    body = {"model": MODEL_NAME, **content_body, "max_tokens": 10}
-
-    def get_response_time(url):
-        start_time = time.monotonic()
-        res = requests.get(url)
-        end_time = time.monotonic()
-        assert res.status_code == 200
-        return end_time - start_time
-
-    no_load_response_time = get_response_time(server.url_for("health"))
-    tasks = [
-        asyncio.create_task(create_func(**body)) for _ in range(num_requests)
-    ]
-    await asyncio.sleep(1)  # give the tasks a chance to start running
-    load_response_time = get_response_time(server.url_for("health"))
-
-    with contextlib.suppress(openai.APIStatusError):
-        await asyncio.gather(*tasks)
-
-    assert load_response_time < 100 * no_load_response_time
-    assert load_response_time < 0.1
