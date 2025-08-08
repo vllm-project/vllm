@@ -1,0 +1,28 @@
+name: BC Lint
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+    # branches-ignore:
+    #   - <branches to ignore bc-linter>
+    paths:
+      - vllm/attetion/**
+      - vllm/core/**
+      - vllm/v1/attetion/**
+      - vllm/v1/core/**
+
+jobs:
+  bc_lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run BC Lint Action
+        uses: pytorch/test-infra/.github/actions/bc-lint@main
+        with:
+          repo: ${{ github.event.pull_request.head.repo.full_name }}
+          base_sha: ${{ github.event.pull_request.base.sha }}
+          head_sha: ${{ github.event.pull_request.head.sha }}
+          suppression: ${{ contains(github.event.pull_request.labels.*.name, 'suppress-bc-linter') }}
+          docs_link: 'https://github.com/pytorch/test-infra/wiki/BC-Linter'
