@@ -16,6 +16,8 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE, FusedMoEActivationFormat, FusedMoEConfig, FusedMoEMethodBase,
     FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize,
     FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig, fp8_w8a8_moe_quant_config)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -898,7 +900,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 allow_deep_gemm=self.allow_deep_gemm,
             )
 
-    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         if self.use_marlin or self.flashinfer_moe_enabled:
             return None
 
@@ -973,7 +976,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 expert_map=expert_map,
                 quant_config=self.moe_quant_config,
-
+            )
         elif self.use_marlin:
             assert activation == "silu", (
                 f"{activation} not supported for Marlin MoE.")
