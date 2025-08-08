@@ -817,10 +817,10 @@ class GroupCoordinator:
         return self.device_communicator.recv(size, dtype, src)
 
     def destroy(self):
-        if self.device_group is not None:
+        if hasattr(self, "device_group"):
             torch.distributed.destroy_process_group(self.device_group)
             del self.device_group
-        if self.cpu_group is not None:
+        if hasattr(self, "cpu_group"):
             torch.distributed.destroy_process_group(self.cpu_group)
             del self.cpu_group
         if self.device_communicator is not None:
