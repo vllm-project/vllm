@@ -15,8 +15,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import (get_act_and_mul_fn,
                                                    get_act_fn)
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    fused_topk, torch_vllm_outplace_fused_experts)
+from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -290,6 +289,7 @@ class NomicMoE(nn.Module):
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.router(hidden_states)
+
         # FIXME(Isotr0py): This implementation is too tricky,
         # we should use FusedMoE instead in the future
         # after supporting ungated activation for it.
@@ -297,14 +297,16 @@ class NomicMoE(nn.Module):
                                                router_logits,
                                                self.top_k,
                                                renormalize=False)
-        final_hidden_states = torch_vllm_outplace_fused_experts(
-            hidden_states=hidden_states,
-            w1=self.w1,
-            w2=self.w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation=self.hidden_act + "_no_mul",
-        )
+
+        final_hidden_states = fused_experts(
+            hidden_states,
+            self.w1,
+            self.w2,
+            topk_weights,
+            topk_ids,
+            inplace=False,
+            # TODO: make utility for this?
+            activation=self.hidden_act + "_no_mul")
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
