@@ -481,7 +481,7 @@ def marlin_moe_generate_valid_test_cases():
         if quant_type == scalar_types.float4_e2m1f:
             if group_size not in [16, 32]:
                 return False
-            if dtype == torch.float16:
+            if dtype == torch.float16 and group_size == 32:
                 return False
         if quant_type != scalar_types.float4_e2m1f and group_size == 16:
             return False

@@ -96,6 +96,7 @@ def generate_new_kernels():
             elif scalar_type == "vllm::kFE2M1f" and group_blocks == 2:
                 s_type = "vllm::kFE8M0fnu"
                 if dtype == "fp16":
+                    # we cannot safely dequantize e8m0 to fp16, so skip this
                     continue
             elif dtype == "fp16":
                 s_type = "vllm::kFloat16"
