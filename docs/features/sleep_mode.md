@@ -61,7 +61,7 @@ To enable sleep mode in a vLLM server you need to initialize it with the flag `V
 
 #### Server in development mode
 
-When using the flag `VLLM_SERVER_DEV_MODE=1` you enable development endpoints, This should not be used in production.
+When using the flag `VLLM_SERVER_DEV_MODE=1` you enable development endpoints, and these endpoints should not be exposed to users.
 
 ```bash
 VLLM_SERVER_DEV_MODE=1 python -m vllm.entrypoints.openai.api_server \
