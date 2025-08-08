@@ -896,7 +896,7 @@ def get_tp_group() -> GroupCoordinator:
 
 
 @deprecated("`get_tensor_model_parallel_group` has been replaced with "
-            "`get_tp_group` and will be removed in v0.12. Please use "
+            "`get_tp_group` and may be removed after v0.12. Please use "
             "`get_tp_group` instead.")
 def get_tensor_model_parallel_group():
     return get_tp_group()
@@ -927,7 +927,7 @@ def get_pp_group() -> GroupCoordinator:
 
 
 @deprecated("`get_pipeline_model_parallel_group` has been replaced with "
-            "`get_pp_group` and will be removed in v0.12. Please use "
+            "`get_pp_group` and may be removed in v0.12. Please use "
             "`get_pp_group` instead.")
 def get_pipeline_model_parallel_group():
     return get_pp_group()
