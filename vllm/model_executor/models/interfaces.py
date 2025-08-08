@@ -643,6 +643,7 @@ def supports_cross_encoding(
 
 def default_pooling_type(pooling_type: str) -> object:
     """Set default_pooling_type decorator. """
+
     def func(model: object):
         model.default_pooling_type = pooling_type
         return model
