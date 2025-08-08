@@ -27,6 +27,8 @@ from vllm.distributed import (destroy_distributed_environment,
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.parallel_state import (get_ep_group, get_pp_group,
+                                             get_tp_group)
 from vllm.executor.multiproc_worker_utils import (
     set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
@@ -357,11 +359,11 @@ class WorkerProc:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        dp_rank_str: str,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
         input_shm_handle: Handle,
-        parent_proc_title: str,
     ):
         self.rank = rank
         wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
@@ -380,9 +382,6 @@ class WorkerProc:
         }
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
-        set_process_title(name=get_mp_context().current_process().name,
-                          prefix=parent_proc_title)
-        decorate_logs()
 
         # Initialize MessageQueue for receiving SchedulerOutput
         self.rpc_broadcast_mq = MessageQueue.create_from_handle(
@@ -391,8 +390,28 @@ class WorkerProc:
         # Initializes a message queue for sending the model output
         self.worker_response_mq = MessageQueue(1, 1)
 
-        # Initialize device and loads weights
+        # Initialize device
         self.worker.init_device()
+
+        # Set process title and log prefix
+        pp_size = get_pp_group().world_size
+        pp_rank = get_pp_group().rank_in_group
+        tp_size = get_tp_group().world_size
+        tp_rank = get_tp_group().rank_in_group
+        process_name = "Worker"
+        if dp_rank_str:
+            process_name += f"_{dp_rank_str}"
+        if pp_size > 1:
+            process_name += f"_PP{pp_rank}"
+        if tp_size > 1:
+            process_name += f"_TP{tp_rank}"
+        if vllm_config.parallel_config.enable_expert_parallel:
+            ep_rank = get_ep_group().rank_in_group
+            process_name += f"_EP{ep_rank}"
+        set_process_title(name=process_name)
+        decorate_logs(process_name)
+
+        # Load model
         self.worker.load_model()
 
     @staticmethod
@@ -422,21 +441,23 @@ class WorkerProc:
         # Create death pipe to detect parent process exit
         death_reader, death_writer = context.Pipe(duplex=False)
 
-        worker_name = WorkerProc.get_worker_name(vllm_config, rank)
+        dp_rank_str = ""
+        if vllm_config.parallel_config.data_parallel_size_local > 1:
+            dp_rank_str = setproctitle.getproctitle().split("_")[-1]
         process_kwargs = {
             "vllm_config": vllm_config,
+            "dp_rank_str": dp_rank_str,
             "local_rank": local_rank,
             "rank": rank,
             "distributed_init_method": distributed_init_method,
             "input_shm_handle": input_shm_handle,
             "ready_pipe": (reader, writer),
             "death_pipe": death_reader,
-            "parent_proc_title": setproctitle.getproctitle(),
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=WorkerProc.worker_main,
                                kwargs=process_kwargs,
-                               name=worker_name,
+                               name=f"VllmWorker-{rank}",
                                daemon=True)
 
         proc.start()
