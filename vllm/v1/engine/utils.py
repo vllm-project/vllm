@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Callable, Optional, Union
 from unittest.mock import patch
 
 import msgspec
+import psutil
 import zmq
 
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
@@ -21,6 +22,7 @@ from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import get_mp_context, get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.v1.engine.coordinator import DPCoordinator
+from vllm.v1.engine.engine_proc_observer import EngineProcObserver
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
@@ -93,6 +95,9 @@ class CoreEngineProcManager:
         log_stats: bool,
         client_handshake_address: Optional[str] = None,
     ):
+        self.alive_check_interval = \
+            vllm_config.parallel_config.engine_core_orphaned_check_interval
+
         context = get_mp_context()
         common_kwargs = {
             "vllm_config": vllm_config,
@@ -131,6 +136,20 @@ class CoreEngineProcManager:
                         vllm_config, local_dp_rank) if (
                             data_parallel) else contextlib.nullcontext():
                     proc.start()
+
+            pids_with_create_time = []
+            for proc in self.processes:
+                if proc.pid is None:
+                    continue
+                with contextlib.suppress(psutil.NoSuchProcess):
+                    pids_with_create_time.append(
+                        (proc.pid, psutil.Process(proc.pid).create_time()))
+
+            # Start process that kills orphaned EngineCore processes.
+            context.Process(target=EngineProcObserver.track_processes,
+                            args=(pids_with_create_time, os.getpid(),
+                                  self.alive_check_interval),
+                            daemon=True).start()
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():
