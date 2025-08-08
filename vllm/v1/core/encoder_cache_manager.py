@@ -38,6 +38,7 @@ class EncoderCacheManager:
     Args:
         cache_size: Limit the size of the cache, measured by the number of
                     tokens from the input sequence.
+        is_encoder_decoder: Whether the model is an encoder-decoder model.
 
     Attributes:
         cache_size: Total cache capacity in encoder tokens
@@ -48,13 +49,19 @@ class EncoderCacheManager:
                This is cleared after every call to get_freed_ids().
     """
 
-    def __init__(self, cache_size: int):
+    def __init__(self, cache_size: int, is_encoder_decoder: bool):
         self.cache_size = cache_size
         self.num_free_slots = cache_size
         # req_id -> cached input ids
         self.cached: dict[str, set[int]] = {}
         # list of [req_id, input_id]
         self.freed: list[tuple[str, int]] = []
+
+        # Whether the model is an encoder-decoder model.
+        # If so, we don't need to cache encoder inputs.
+        # We handle it here instead of in the scheduler to keep
+        # the scheduler logic simpler.
+        self.is_encoder_decoder = is_encoder_decoder
 
     def has_cache(self, request: Request, input_id: int) -> bool:
         """Check if encoder output for a specific multimodal input is cached.
@@ -99,6 +106,9 @@ class EncoderCacheManager:
             This method assumes can_allocate() returned True for the same
             request and input_id. It will reduce available cache space.
         """
+        if self.is_encoder_decoder:
+            return
+
         req_id = request.request_id
         if req_id not in self.cached:
             self.cached[req_id] = set()
