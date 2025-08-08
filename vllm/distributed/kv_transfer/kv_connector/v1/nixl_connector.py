@@ -59,6 +59,7 @@ except ImportError:
 _NIXL_SUPPORTED_XPUS = {
     "cuda": ("cuda", ),
     "tpu": ("cpu", ),
+    "xpu": ("cpu", ),
 }
 
 
@@ -721,7 +722,7 @@ class NixlConnectorWorker:
             block_shape = first_kv_cache.shape[-block_rank:]
             block_size, n_kv_heads_x_2, head_dim = block_shape
             self.slot_size_bytes = kv_elem_size * n_kv_heads_x_2 * head_dim
-        elif self.device_type == "cuda":
+        elif self.device_type in ["cuda", "xpu"]:
             assert use_mla == self.use_mla
             # TODO (NickLucche) not compatible with hybrid allocator.
             # Enforce check once it goes live, as a single kv layout
