@@ -9,8 +9,10 @@ import torch
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
+                                                         FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEConfig, FusedMoEMethodBase, FusedMoeWeightScaleSupported,
+    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported,
     UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
@@ -623,7 +625,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         replace_parameter(layer, "w2_scales", marlin_w2_scales)
 
-    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         return None
 
     def apply(

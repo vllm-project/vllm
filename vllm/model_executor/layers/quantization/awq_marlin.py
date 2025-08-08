@@ -9,8 +9,10 @@ from torch.nn import Parameter
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
+                                                         FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEConfig, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
+    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
                                                set_weight_attrs)
@@ -470,7 +472,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
             num_bits=self.quant_config.weight_bits)
         replace_parameter(layer, "w2_qzeros", marlin_w2_zp)
 
-    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         return None
 
     def apply(
