@@ -51,7 +51,7 @@ llm.sleep(level=2)
 # Wake up only weights to avoid OOM
 llm.wake_up(tags=["weights"])
 # ... Update the weights
-# Optionally, wake up KV cache after weights are updated
+# wake up KV cache after weights are updated
 llm.wake_up(tags=["kv_cache"])
 ```
 
