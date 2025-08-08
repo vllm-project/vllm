@@ -1115,7 +1115,8 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs=logprobs,
                 finish_reason="tool_calls" if auto_tools_called else
                 output.finish_reason if output.finish_reason else "stop",
-                stop_reason=output.stop_reason)
+                stop_reason=output.stop_reason,
+                additional_heads=output.additional_heads)
             choices.append(choice_data)
 
         if request.echo:
