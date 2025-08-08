@@ -161,6 +161,9 @@ class PrometheusStatLogger(StatLoggerBase):
 
         unregister_vllm_metrics()
         self.vllm_config = vllm_config
+        # Common labels and model info used by gauges
+        labelnames = ["model_name", "engine"]
+        model_name = vllm_config.model_config.served_model_name
         # Build a long-lived SlidingWindowStats to accumulate across iterations
         window_size = getattr(vllm_config.observability_config,
                               "sliding_window_request_count", 100)
@@ -231,9 +234,6 @@ class PrometheusStatLogger(StatLoggerBase):
         # a previous release and which will be removed future
         self.show_hidden_metrics = \
             vllm_config.observability_config.show_hidden_metrics
-
-        labelnames = ["model_name", "engine"]
-        model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
 
         if (len(self.engine_indexes) > 1

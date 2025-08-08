@@ -190,19 +190,23 @@ class IterationStats:
 class SlidingWindowMetric:
     """Represents a single sliding window metric."""
     window_size: int
-    values: deque = field(default_factory=lambda: deque(maxlen=100))
-    
+    values: deque = field(init=False)
+
+    def __post_init__(self):
+        # Ensure the deque respects the configured window_size
+        self.values = deque(maxlen=self.window_size)
+
     def add_value(self, value: float) -> None:
         """Add a new value to the sliding window."""
         self.values.append(value)
-    
+
     @property
     def average(self) -> float:
         """Calculate the average of values in the window."""
         if not self.values:
             return 0.0
         return sum(self.values) / len(self.values)
-    
+
     @property
     def count(self) -> int:
         """Return the number of values in the window."""
