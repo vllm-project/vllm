@@ -726,7 +726,8 @@ class FusedMoE(torch.nn.Module):
         if quant_config and quant_config.get_name() == "mxfp4":
             if current_platform.is_device_capability(90):
                 if not is_torch_equal_or_newer("2.8.0"):
-                    raise RuntimeError("Mxfp4 on hopper requires torch >= 2.8.0")
+                    raise RuntimeError(
+                        "Mxfp4 on hopper requires torch >= 2.8.0")
                 if not has_triton_kernels():
                     raise NotImplementedError(
                         "Triton kernels must be installed for mxfp4 on hopper")
