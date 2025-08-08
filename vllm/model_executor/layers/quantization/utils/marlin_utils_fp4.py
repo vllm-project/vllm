@@ -8,8 +8,8 @@ import torch
 import vllm._custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    USE_FP32_REDUCE_DEFAULT, marlin_make_workspace_new, marlin_permute_scales,
-    marlin_permute_bias, should_use_atomic_add_reduce)
+    USE_FP32_REDUCE_DEFAULT, marlin_make_workspace_new, marlin_permute_bias,
+    marlin_permute_scales, should_use_atomic_add_reduce)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -229,7 +229,8 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module,
             qweight = weight[i].view(torch.int32).T.contiguous()
 
             if w13_interleaved and "w13" in name:
-                qweight = torch.cat([qweight[..., ::2], qweight[..., 1::2]], -1)
+                qweight = torch.cat([qweight[..., ::2], qweight[..., 1::2]],
+                                    -1)
 
             marlin_qweight = ops.gptq_marlin_repack(b_q_weight=qweight,
                                                     perm=perm,

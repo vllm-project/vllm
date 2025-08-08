@@ -167,7 +167,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
 
     if swiglu_config is None:
         torch.ops._C.silu_and_mul(intermediate_cache2,
-                                intermediate_cache1.view(-1, 2 * N))
+                                  intermediate_cache1.view(-1, 2 * N))
     else:
         # TODO: optimize this
         gate_alpha, gate_beta, up_alpha, up_beta, limit = \
