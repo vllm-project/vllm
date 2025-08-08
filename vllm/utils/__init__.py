@@ -3254,6 +3254,12 @@ def has_deep_gemm() -> bool:
     return _has_module("deep_gemm")
 
 
+def has_triton_kernels() -> bool:
+    """Whether the optional `triton_kernels` package is available."""
+
+    return _has_module("triton_kernels")
+
+
 def set_process_title(name: str,
                       suffix: str = "",
                       append: bool = False) -> None:
