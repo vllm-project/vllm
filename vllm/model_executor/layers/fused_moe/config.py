@@ -141,6 +141,7 @@ class FusedMoEQuantConfig:
                 use_int8_w8a8,
                 use_int8_w8a16,
                 use_int4_w4a16,
+                use_mxfp4_w4a4,
             ]
         ]) <= 1, "Quantization flags are mutually exclusive."
 
