@@ -639,9 +639,9 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
+        per_layer_inputs: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-        per_layer_inputs: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if inputs_embeds is not None:
@@ -795,12 +795,21 @@ class Gemma3nForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        *,
+        per_layer_inputs: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds, **kwargs)
+
+        hidden_states = self.model(
+            input_ids,
+            positions,
+            per_layer_inputs=per_layer_inputs,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            **kwargs,
+        )
         return hidden_states
 
     def compute_logits(

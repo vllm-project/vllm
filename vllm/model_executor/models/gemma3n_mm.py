@@ -5,6 +5,7 @@ from typing import Any, Optional, TypedDict, Union, cast
 
 import torch
 from torch import nn
+
 from transformers import AutoModel, BatchFeature
 from transformers.models.gemma3n import (Gemma3nAudioConfig,
                                          Gemma3nAudioFeatureExtractor,
@@ -12,7 +13,6 @@ from transformers.models.gemma3n import (Gemma3nAudioConfig,
                                          Gemma3nTextConfig,
                                          Gemma3nVisionConfig)
 from transformers.models.siglip import SiglipImageProcessorFast
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -204,7 +204,6 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
             input_features=MultiModalFieldConfig.batched("audio"),
-            # input_features_mask=MultiModalFieldConfig.batched("audio"),
         )
 
     def _get_prompt_updates(
@@ -616,9 +615,8 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        # TODO (NickLucche) Each forward pass needs tokens for PLE so we cache
-        # them here on first pass. This breaks the interface, because it
-        # introduces a dependency in the steps (ie it will break it chunkedP).
+        # NOTE (NickLucche) Each pass needs tokens to compute PLE so we cache
+        # them here, as the model  forward has only access to the input_embeds.
         if input_ids is not None:
             per_layer_inputs = self.language_model.model.get_per_layer_input_embeddings(
                 input_ids)
@@ -645,6 +643,21 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         if intermediate_tensors is not None:
             inputs_embeds = None
 
+        # NOTE (NickLucche) During profiling, `get_input_embeddings` is not
+        # called, hence we don't have input_ids to compute PLEs. We create a
+        # zero PLE tensor here to keep inner model compilation stable.
+        # Mind that the assumption here is that `get_input_embeddings` is
+        # *NOT* called until the model starts processing requests.
+        is_profiling = self.per_layer_inputs is None and input_ids is None
+        if is_profiling:
+            assert inputs_embeds is not None
+            self.per_layer_inputs = torch.zeros(
+                inputs_embeds.shape[0],
+                self.config.text_config.num_hidden_layers,
+                self.config.text_config.hidden_size_per_layer_input,
+                device=inputs_embeds.device,
+                dtype=inputs_embeds.dtype)
+
         hidden_states = self.language_model.model(
             input_ids,
             positions,
@@ -653,6 +666,9 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
             inputs_embeds=inputs_embeds,
             **kwargs)
 
+        if is_profiling:
+            # Reset for subsequent _dummy_runs.
+            self.per_layer_inputs = None
         return hidden_states
 
     def compute_logits(
