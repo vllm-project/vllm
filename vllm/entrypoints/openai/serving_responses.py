@@ -53,7 +53,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.tool_server import ToolServer
+from vllm.entrypoints.tool_server import MCPToolServer, ToolServer
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput
@@ -236,6 +236,15 @@ class OpenAIServingResponses(OpenAIServing):
             request_id=request.request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata
+
+        if self.tool_server is not None and isinstance(
+                self.tool_server, MCPToolServer
+        ) and (request.background or request.stream) and request.tools and any(
+                tool.type in ["web_search_preview", "code_interpreter"]
+                for tool in request.tools):
+            return self.create_error_response(
+                "MCP tool server is not supported in background mode and "
+                "streaming mode")
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[ConversationContext, None]] = []
