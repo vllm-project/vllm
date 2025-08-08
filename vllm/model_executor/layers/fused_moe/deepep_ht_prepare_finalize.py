@@ -129,8 +129,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def prepare(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
@@ -152,7 +150,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # Quant and Dispatch
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
-                a1_scale,
+                quant_config.a1_scale,
                 quant_dtype=quant_config.quant_dtype,
                 per_act_token_quant=quant_config.per_act_token_quant,
                 block_shape=quant_config.block_shape,
@@ -183,7 +181,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             if expert_x.numel() != 0:
                 expert_x, expert_x_scale = moe_kernel_quantize_input(
                     expert_x,
-                    a1_scale,
+                    quant_config.a1_scale,
                     quant_dtype=quant_config.quant_dtype,
                     per_act_token_quant=False,
                     block_shape=quant_config.block_shape)
