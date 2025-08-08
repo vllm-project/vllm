@@ -72,6 +72,8 @@ class FrontendArgs:
     """Host name."""
     port: int = 8000
     """Port number."""
+    uds: Optional[str] = None
+    """Unix domain socket path. If set, host and port arguments are ignored."""
     uvicorn_log_level: Literal["debug", "info", "warning", "error", "critical",
                                "trace"] = "info"
     """Log level for uvicorn."""
