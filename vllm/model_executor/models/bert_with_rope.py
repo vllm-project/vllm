@@ -400,6 +400,7 @@ class BertWithRopeEncoder(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class BertWithRope(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
@@ -474,7 +475,6 @@ class BertWithRope(nn.Module, SupportsQuant):
         return loaded_params
 
 
-@support_torch_compile
 class NomicBertModel(BertWithRope):
     # for https://huggingface.co/nomic-ai/nomic-bert-2048
 
@@ -495,7 +495,6 @@ class NomicBertModel(BertWithRope):
         })
 
 
-@support_torch_compile
 class GteNewModel(BertWithRope):
     # for https://huggingface.co/Alibaba-NLP/new-impl
 
@@ -551,7 +550,6 @@ class SnowflakeGteNewModel(GteNewModel):
         })
 
 
-@support_torch_compile
 class JinaRobertaModel(BertWithRope):
     # for https://huggingface.co/jinaai/jina-embeddings-v3
 
@@ -565,20 +563,6 @@ class JinaRobertaModel(BertWithRope):
             "mlp.fc2": "mlp.down_proj",
             "norm2": "mlp_ln",
         })
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        token_type_ids: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        return super().forward(input_ids=input_ids,
-                               positions=position_ids,
-                               intermediate_tensors=intermediate_tensors,
-                               inputs_embeds=inputs_embeds,
-                               token_type_ids=token_type_ids)
 
     @torch.inference_mode()
     def jina_merge_lora_weights(self, weights: Iterable[tuple[str,
