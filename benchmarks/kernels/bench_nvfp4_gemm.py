@@ -11,7 +11,7 @@ from weight_shapes import WEIGHT_SHAPES
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.triton_utils import triton
+from vllm.triton_utils import tl, triton
 
 if not current_platform.has_device_capability(100):
     raise RuntimeError("NVFP4 requires compute capability of 10.0 (Blackwell)")
@@ -22,6 +22,7 @@ FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 PROVIDER_CFGS = {
     "torch-bf16": dict(enabled=True),
+    "triton-nvfp4": dict(enabled=True),
     "nvfp4": dict(no_a_quant=False, enabled=True),
     "nvfp4-noquant": dict(no_a_quant=True, enabled=True),
     "fbgemm-nvfp4": dict(fbgemm=True, no_a_quant=False, enabled=True),
@@ -48,6 +49,78 @@ if _needs_fbgemm:
                 cfg["enabled"] = False
 
 _enabled = [k for k, v in PROVIDER_CFGS.items() if v["enabled"]]
+
+
+@triton.jit
+def linear_kernel(
+    x_ptr,
+    w_ptr,
+    out_ptr,
+    OUT,
+    IN,
+    stride_xb,
+    stride_wo,
+    stride_ob,
+    BLOCK_OUT: tl.constexpr,
+    BLOCK_IN: tl.constexpr,
+):
+    pid_b = tl.program_id(axis=0)
+    pid_o = tl.program_id(axis=1)
+
+    offs_out = pid_o * BLOCK_OUT + tl.arange(0, BLOCK_OUT)
+    mask_out = offs_out < OUT
+
+    acc = tl.zeros([BLOCK_OUT], dtype=tl.float32)
+
+    for k in range(0, IN, BLOCK_IN):
+        offs_in = k + tl.arange(0, BLOCK_IN)
+        mask_in = offs_in < IN
+
+        # Load input vector for batch `pid_b`.
+        x_offsets = pid_b * stride_xb + offs_in
+        x = tl.load(x_ptr + x_offsets, mask=mask_in, other=0.0)
+
+        # Load weight matrix tile.
+        w_offsets = offs_out[:, None] * stride_wo + offs_in[None, :]
+        w = tl.load(
+            w_ptr + w_offsets, mask=mask_out[:, None] & mask_in[None, :], other=0.0
+        )
+
+        # Accumulate dot product.
+        acc += tl.sum(w * x[None, :], axis=1)
+
+    # Write to output
+    out_offsets = pid_b * stride_ob + offs_out
+    tl.store(out_ptr + out_offsets, acc, mask=mask_out)
+
+
+def triton_linear(input, weight):
+    B, IN = input.shape
+    OUT, _ = weight.shape
+
+    out = torch.empty((B, OUT), device=input.device, dtype=input.dtype)
+
+    BLOCK_IN = 32
+    BLOCK_OUT = 32
+
+    grid = lambda meta: (
+        B,
+        triton.cdiv(OUT, meta["BLOCK_OUT"]),
+    )
+
+    linear_kernel[grid](
+        input,
+        weight,
+        out,
+        IN,
+        input.stride(0),
+        weight.stride(0),
+        out.stride(0),
+        BLOCK_OUT=BLOCK_OUT,
+        BLOCK_IN=BLOCK_IN,
+    )
+
+    return out
 
 
 def _quant_weight_nvfp4(b: torch.Tensor, device: str, cfg):
@@ -148,6 +221,10 @@ def benchmark(batch_size, provider, N, K):
     if provider == "torch-bf16":
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
             lambda: torch.nn.functional.linear(a, b), quantiles=quantiles
+        )
+    elif provider == "triton-nvfp4":
+        ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
+            lambda: triton_linear(a, b), quantiles=quantiles
         )
     else:
         cfg = PROVIDER_CFGS[provider]
