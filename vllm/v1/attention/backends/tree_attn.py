@@ -316,7 +316,6 @@ class TreeAttentionImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
-        use_irope: bool = False,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
