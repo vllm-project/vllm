@@ -63,6 +63,8 @@ if TYPE_CHECKING:
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorHandshakeMetadata)
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.layers.quantization.base_config import (
@@ -83,6 +85,7 @@ else:
     BaseModelLoader = Any
     LoadFormats = Any
     TensorizerConfig = Any
+    KVConnectorHandshakeMetadata = Any
     ConfigType = type
     HfOverrides = Union[dict[str, Any], Callable[[type], type]]
 
@@ -2120,6 +2123,10 @@ class ParallelConfig:
     """Enable expert parallelism load balancing for MoE layers."""
     num_redundant_experts: int = 0
     """Number of redundant experts to use for expert parallelism."""
+
+    xfer_handshake_metadata: Optional[dict[int, dict[
+        int, KVConnectorHandshakeMetadata]]] = field(default=None, init=False)
+    """Metadata for KV connector handshake. Structure: dp_rank -> tp_rank"""
     eplb_window_size: int = 1000
     """Window size for expert load recording."""
     eplb_step_interval: int = 3000
@@ -4920,6 +4927,11 @@ class VllmConfig:
             if self.kv_transfer_config is not None:
                 # Hybrid KV cache manager is not compatible with KV transfer.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
+            if (self.kv_transfer_config is not None
+                    and self.kv_transfer_config.is_kv_transfer_instance):
+                from collections import defaultdict
+                self.parallel_config.xfer_handshake_metadata = defaultdict(
+                    dict)
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
