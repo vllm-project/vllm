@@ -26,17 +26,17 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.batched_triton_experts = BatchedTritonExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
-            quant_config,
+            quant_config=quant_config,
         )
 
-        self.allow_deep_gemm = (allow_deep_gemm and use_fp8_w8a8
+        self.allow_deep_gemm = (allow_deep_gemm and self.use_fp8_w8a8
                                 and self.block_shape
                                 == BatchedDeepGemmExperts.DEEPGEMM_BLOCK_SHAPE)
 
         self.batched_deep_gemm_experts = BatchedDeepGemmExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
-            quant_config,
+            quant_config=quant_config,
         ) if self.allow_deep_gemm else None
 
         assert (self.batched_deep_gemm_experts is not None
@@ -123,12 +123,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
@@ -138,7 +133,6 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                    if self.allow_deep_gemm else self.batched_triton_experts)
         assert experts is not None
         experts.apply(output, hidden_states, w1, w2, topk_weights, topk_ids,
-                      activation, global_num_experts, expert_map, w1_scale,
-                      w2_scale, w1_zp, w2_zp, a1q_scale, a2_scale, workspace13,
-                      workspace2, expert_tokens_meta,
+                      activation, global_num_experts, expert_map, a1q_scale,
+                      workspace13, workspace2, expert_tokens_meta,
                       apply_router_weight_on_input)

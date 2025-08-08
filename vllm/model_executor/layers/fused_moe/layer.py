@@ -21,7 +21,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 # yapf: disable
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig, FusedMoEParallelConfig)
+    FusedMoEConfig, FusedMoEParallelConfig, FusedMoEQuantConfig)
 # yapf: enable
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat, FusedMoEModularKernel,
@@ -101,7 +101,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         return False
 
     @staticmethod
-    def _maybe_make_prepare_finalize(moe: FusedMoEConfig) -> Optional[FusedMoEPrepareAndFinalize]:
+    def _maybe_make_prepare_finalize(
+            moe: FusedMoEConfig) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
@@ -189,8 +190,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
         return prepare_finalize
 
-    def maybe_make_prepare_finalize(self) -> Optional[FusedMoEPrepareAndFinalize]:
-        if moe.moe_parallel_config.use_all2all_kernels:
+    def maybe_make_prepare_finalize(
+            self) -> Optional[FusedMoEPrepareAndFinalize]:
+        if self.moe.moe_parallel_config.use_all2all_kernels:
             return FusedMoEMethodBase._maybe_make_prepare_finalize(self.moe)
         else:
             return None
@@ -508,6 +510,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 topk_ids=topk_ids,
                 inplace=True,
                 activation=activation,
+                quant_config=None,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
@@ -845,7 +848,6 @@ class FusedMoE(CustomOp):
         quant_method: Optional[QuantizeMethodBase] = None
         quant_method = (UnquantizedFusedMoEMethod(moe) if quant_config is None
                         else quant_config.get_quant_method(self, prefix))
-
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)

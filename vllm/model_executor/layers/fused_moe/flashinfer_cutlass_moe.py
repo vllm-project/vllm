@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 
@@ -43,7 +43,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
         out_dtype: torch.dtype,
-        quant_config: FuseMoEQuantConfig,
+        quant_config: FusedMoEQuantConfig,
         ep_rank: int = 0,
         ep_size: int = 1,
         tp_rank: int = 0,
@@ -51,8 +51,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         super().__init__(quant_config)
 
-        assert quant_config.quant_dtype == "nvfp4", ("Only nvfp4 quantization is "
-                                                     "currently supported.")
+        assert quant_config.quant_dtype == "nvfp4", (
+            "Only nvfp4 quantization is "
+            "currently supported.")
         self.ep_rank = ep_rank
         self.ep_size = ep_size
         self.tp_rank = tp_rank
@@ -126,12 +127,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],  # Not used
         workspace13: Optional[torch.Tensor],
         workspace2: Optional[torch.Tensor],
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
@@ -141,16 +137,16 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # min because inv_scale.
 
         # Ensure w1_scale and w2_scale are not None before calling view
-        assert w1_scale is not None and w2_scale is not None, (
+        assert self.w1_scale is not None and self.w2_scale is not None, (
             "w1_scale and w2_scale must not "
             "be None for FlashInferExperts")
 
         quant_scales = [
             self.a1_gscale,
-            w1_scale.view(torch.int32),
+            self.w1_scale.view(torch.int32),
             self.g1_alphas,
             self.a2_gscale,
-            w2_scale.view(torch.int32),
+            self.w2_scale.view(torch.int32),
             self.g2_alphas,
         ]
         _ = flashinfer_cutlass_fused_moe(
