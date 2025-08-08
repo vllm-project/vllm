@@ -67,7 +67,6 @@ def test_pooling_params(llm: LLM):
     ), "w_activation should be close to activation(wo_activation)."
 
 
-@pytest.mark.skip_global_cleanup
 def test_encode_api(llm: LLM):
     err_msg = "pooling_task must be one of.+"
     with pytest.raises(ValueError, match=err_msg):
