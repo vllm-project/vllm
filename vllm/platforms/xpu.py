@@ -148,7 +148,8 @@ class XPUPlatform(Platform):
                 vllm_config.scheduler_config.max_model_len,
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
-        if envs.VLLM_KV_CACHE_LAYOUT is None:
+        if (envs.VLLM_KV_CACHE_LAYOUT is None
+                or envs.VLLM_KV_CACHE_LAYOUT != "NHD"):
             os.environ["VLLM_KV_CACHE_LAYOUT"] = "NHD"
             logger.info(
                 "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
