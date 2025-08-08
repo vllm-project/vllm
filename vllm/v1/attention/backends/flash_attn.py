@@ -390,8 +390,8 @@ class FlashAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
-        if kv_cache_dtype != kv_cache_dtype_attn:
-            self.kv_cache_dtype = kv_cache_dtype_attn
+        if envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION is not None:
+            self.kv_cache_dtype = envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0

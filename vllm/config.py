@@ -1869,8 +1869,9 @@ class CacheConfig:
         """
         factors: list[Any] = []
         factors.append(self.cache_dtype)
-        factors.append(self.cache_dtype_attention)
-        factors.append(self.cache_dtype_mamba)
+        # TODO
+        # factors.append(self.cache_dtype_attention)
+        # factors.append(self.cache_dtype_mamba)
         # `cpu_offload_gb` does not use `torch.compile` yet.
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()
