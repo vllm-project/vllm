@@ -726,7 +726,8 @@ class FusedMoE(torch.nn.Module):
                     90) and not has_triton_kernels():
                 raise NotImplementedError(
                     "Triton kernels must be installed for mxfp4 on hopper")
-            if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+            if (current_platform.is_rocm()
+                    or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
                     or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
                 hidden_size = round_up(hidden_size, 256)
 
