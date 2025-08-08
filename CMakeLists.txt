@@ -427,6 +427,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set(SRCS
       "csrc/quantization/cutlass_w8a8/scaled_mm_c3x_sm120.cu"
       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm120_fp8.cu"
+      "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_blockwise_sm120_fp8.cu"
     )
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
