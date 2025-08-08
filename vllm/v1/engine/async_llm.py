@@ -566,7 +566,7 @@ class AsyncLLM(EngineClient):
         await self.engine_core.profile_async(False)
 
     async def reset_mm_cache(self) -> None:
-        self.processor.mm_registry.reset_processor_cache()
+        self.processor.mm_registry.reset_processor_cache(self.model_config)
         self.processor.mm_input_cache_client.reset()
         await self.engine_core.reset_mm_cache_async()
 
