@@ -2984,10 +2984,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         use_mla=use_mla)
                 else:
                     kv_cache_dtype_attn = self.kv_cache_dtype
-                    import os
-                    if os.getenv("NGL_ATTN_KV_CACHE", "auto") != "auto":
+                    if envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION is not None:
                         kv_cache_dtype_attn = STR_DTYPE_TO_TORCH_DTYPE[
-                            os.environ["NGL_ATTN_KV_CACHE"]]
+                            envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION]
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
