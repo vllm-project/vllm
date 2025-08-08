@@ -29,7 +29,7 @@ import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Set, Sequence, Iterable, Union
+from typing import Optional, Sequence, Iterable, Union
 
 import torch
 from torch.distributed import all_gather, all_reduce, ProcessGroup
@@ -158,7 +158,7 @@ class EplbState:
 
     ep_buffer_ready: bool = False
 
-    buffer_lock: threading.Lock = threading.Lock()
+    buffer_lock: threading.Lock = field(default_factory=threading.Lock())
 
     expert_buffer:list[torch.Tensor] = field(default_factory=list)
 
@@ -655,7 +655,7 @@ class EplbState:
         if not is_profile:
             if self.physical_to_logical_map.shape[
                     1] != self.new_physical_to_logical_map.shape[1]:
-                self.physical_to_logical_map = 
+                self.physical_to_logical_map = \
                 self.new_physical_to_logical_map.to(
                     self.physical_to_logical_map.device)
             else:
@@ -663,7 +663,8 @@ class EplbState:
                     self.new_physical_to_logical_map)
             max_physical_slots = self.new_logical_to_physical_map.shape[-1]
             assert max_physical_slots <= self.logical_to_physical_map.shape[-1]
-            self.new_logical_to_physical_map = torch.nn.functional.pad(
+            self.new_logical_to_physical_map = \
+                torch.nn.functional.pad(
                 self.new_logical_to_physical_map,
                 (0,
                  self.logical_to_physical_map.shape[-1] - max_physical_slots),

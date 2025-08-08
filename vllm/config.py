@@ -2033,6 +2033,10 @@ class ParallelConfig:
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
+    eplb_async: bool = False
+    """
+    Use the non-blocking EPLB
+    """
     num_redundant_experts: int = 0
     """Number of redundant experts to use for expert parallelism."""
     eplb_window_size: int = 1000
@@ -2048,10 +2052,6 @@ class ParallelConfig:
     """
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
-    """
-    eplb_async: bool = False
-    """
-    Use the non-blocking EPLB
     """
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model

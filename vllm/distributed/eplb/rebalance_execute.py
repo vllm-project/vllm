@@ -7,7 +7,7 @@ This involves the exchange of expert weights between GPUs.
 
 from collections.abc import Iterable, MutableSequence, Sequence
 from functools import partial
-from typing import Optional, List, Dict, Set, Sequence, Iterable
+from typing import Optional, Sequence, Iterable
 import torch
 import torch.distributed as dist
 from torch.distributed import (P2POp, ProcessGroup, all_gather, barrier,

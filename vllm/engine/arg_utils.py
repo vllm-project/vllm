@@ -311,6 +311,7 @@ class EngineArgs:
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_eplb: bool = ParallelConfig.enable_eplb
+    eplb_async: bool = ParallelConfig..eplb_async
     num_redundant_experts: int = ParallelConfig.num_redundant_experts
     eplb_window_size: int = ParallelConfig.eplb_window_size
     eplb_step_interval: int = ParallelConfig.eplb_step_interval
@@ -653,6 +654,8 @@ class EngineArgs:
             **parallel_kwargs["enable_expert_parallel"])
         parallel_group.add_argument("--enable-eplb",
                                     **parallel_kwargs["enable_eplb"])
+        parallel_group.add_argument("--eplb-async",
+                                    **parallel_kwargs["eplb_async"])                            
         parallel_group.add_argument("--num-redundant-experts",
                                     **parallel_kwargs["num_redundant_experts"])
         parallel_group.add_argument("--eplb-window-size",
@@ -1182,6 +1185,7 @@ class EngineArgs:
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
+            eplb_async=self.eplb_async
             num_redundant_experts=self.num_redundant_experts,
             eplb_window_size=self.eplb_window_size,
             eplb_step_interval=self.eplb_step_interval,
