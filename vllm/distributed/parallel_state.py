@@ -1355,9 +1355,8 @@ def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],
         pg.barrier()
 
     # clean up the shared memory segment
-    with contextlib.suppress(OSError):
-        if rank == source_rank and shm:
-            shm.unlink()
+    if rank == source_rank and shm:
+        shm.unlink()
 
     if isinstance(pg, ProcessGroup):
         torch.distributed.all_reduce(is_in_the_same_node, group=pg)
