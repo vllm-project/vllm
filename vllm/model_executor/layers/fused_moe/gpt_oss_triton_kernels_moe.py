@@ -15,6 +15,8 @@ if has_triton_kernels():
     from triton_kernels.matmul_ogs import (FnSpecs, FusedActivation,
                                            PrecisionConfig, matmul_ogs)
     from triton_kernels.routing import routing
+else:
+    PrecisionConfig = None
 
 
 def triton_kernel_moe_forward(
@@ -91,8 +93,8 @@ def triton_kernel_fused_experts(
     w2_scale: Optional[torch.Tensor] = None,
     w1_bias: Optional[torch.Tensor] = None,
     w2_bias: Optional[torch.Tensor] = None,
-    w1_precision=None,  # PrecisionConfig or None
-    w2_precision=None,  # PrecisionConfig or None
+    w1_precision: Optional[PrecisionConfig] = None,
+    w2_precision: Optional[PrecisionConfig] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[list[int]] = None,
@@ -142,8 +144,14 @@ def triton_kernel_fused_experts(
 
 class BatchedOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
-    def __init__(self, quant_config, max_num_tokens: int, num_dispatchers: int,
-                 w1_precision: PrecisionConfig, w2_precision: PrecisionConfig):
+    def __init__(
+        self,
+        quant_config,
+        max_num_tokens: int,
+        num_dispatchers: int,
+        w1_precision: PrecisionConfig,
+        w2_precision: PrecisionConfig,
+    ):
         super().__init__(quant_config)
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
