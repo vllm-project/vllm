@@ -1,4 +1,4 @@
-# Distributed inference and serving
+# Parallelism and Scaling
 
 ## Distributed inference strategies for a single-model replica
 
