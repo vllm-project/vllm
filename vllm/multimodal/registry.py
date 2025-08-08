@@ -105,10 +105,9 @@ class MultiModalRegistry:
         self._processor_cache: Optional[ProcessingCache] = None
 
     def _get_processor_cache(self, model_config: "ModelConfig"):
-        if self._processor_cache is None:
-            model_id = model_config.model
-            capacity_gb = model_config.mm_processor_cache_gb
-            self._processor_cache = _get_processor_cache(model_id, capacity_gb)
+        model_id = model_config.model
+        capacity_gb = model_config.mm_processor_cache_gb
+        self._processor_cache = _get_processor_cache(model_id, capacity_gb)
 
         return self._processor_cache
 
