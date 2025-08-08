@@ -232,7 +232,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             "implementation based on the prepare_finalize")
 
     @abstractmethod
-    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         raise NotImplementedError
 
     @abstractmethod
@@ -443,7 +444,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             logical_replica_count=logical_replica_count,
         )
 
-    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         return None
 
     def forward_cuda(
@@ -959,7 +961,7 @@ class FusedMoE(CustomOp):
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
-        self.moe_quant_config = quant_method.get_fused_moe_quant_config()
+        self.moe_quant_config = quant_method.get_fused_moe_quant_config(self)
 
         if self.enable_eplb:
             from vllm.model_executor.layers.quantization.fp8 import (

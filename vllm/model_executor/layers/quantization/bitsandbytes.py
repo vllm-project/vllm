@@ -6,8 +6,9 @@ from typing import Any, Callable, Optional, Union
 import torch
 from packaging import version
 
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
+                                                         FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
-                                                        FusedMoEConfig,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
@@ -452,7 +453,8 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             **extra_weight_attrs,
         )
 
-    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         return None
 
     def apply(

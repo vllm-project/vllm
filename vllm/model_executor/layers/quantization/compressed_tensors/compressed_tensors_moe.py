@@ -18,6 +18,10 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE, FusedMoEActivationFormat, FusedMoEConfig, FusedMoEMethodBase,
     FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize,
     FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig, fp8_w8a8_moe_quant_config,
+    int4_w4a16_moe_quant_config, int8_w8a8_moe_quant_config,
+    int8_w8a16_moe_quant_config, nvfp4_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     is_valid_flashinfer_cutlass_fused_moe)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
@@ -122,7 +126,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 return CompressedTensorsWNA16MarlinMoEMethod(
                     quant_config, layer.moe_config)
         elif quant_config._is_fp4a4_nvfp4(weight_quant, input_quant):
-            return CompressedTensorsW4A4MoeMethod(layer.moe_config, layer)
+            return CompressedTensorsW4A4MoeMethod(layer.moe_config)
         elif (quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
               or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)
               or quant_config._is_fp8_w8a8(weight_quant, input_quant)):
@@ -138,7 +142,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
 class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
 
-    def __init__(self, moe: FusedMoEConfig, layer: torch.nn.Module):
+    def __init__(self, moe: FusedMoEConfig):
         from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (  # noqa: E501
             detect_nvfp4_moe_support)
         super().__init__(moe)
@@ -147,7 +151,6 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         self.allow_flashinfer = _nvfp4.allow_flashinfer
         self.use_marlin = _nvfp4.use_marlin
         self.group_size = 16
-        self.layer = layer
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -305,15 +308,12 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             (layer.w2_input_global_scale), requires_grad=False)
 
     def maybe_make_prepare_finalize(
-        self
-    ) -> Optional[mk.FusedMoEPrepareAndFinalize]:
+        self, ) -> Optional[mk.FusedMoEPrepareAndFinalize]:
         if not self.allow_flashinfer:
-            return super().maybe_make_prepare_finalize(moe)
+            return super().maybe_make_prepare_finalize()
 
         prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-            self.moe,
-            self.moe_quant_config,
-        )
+            self.moe)
         logger.debug_once("%s", prepare_finalize.__class__.__name__)
         return prepare_finalize
 
@@ -331,13 +331,14 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         logger.debug_once("Using %s", experts.__class__.__name__)
         return experts
 
-    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         if not self.use_marlin:
             return nvfp4_moe_quant_config(
-                g1_alphas=self.layer.g1_alphas,
-                g2_alphas=self.layer.g2_alphas,
-                a1_gscale=self.layer.w13_input_scale_quant,
-                a2_gscale=self.layer.w2_input_scale_quant,
+                g1_alphas=layer.g1_alphas,
+                g2_alphas=layer.g2_alphas,
+                a1_gscale=layer.w13_input_scale_quant,
+                a2_gscale=layer.w2_input_scale_quant,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
             )
@@ -785,7 +786,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         else:
             return TritonExperts(self.moe_quant_config)
 
-    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         if not self.use_marlin:
             per_act_token = (
                 self.input_quant.strategy == QuantizationStrategy.TOKEN)
@@ -1037,8 +1039,9 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
 
-    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
-        return use_int8_w8a8_moe_quant_config(
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        return int8_w8a8_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
@@ -1105,6 +1108,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             expert_map=expert_map,
             quant_config=self.moe_quant_config,
         )
+
 
 class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
 
@@ -1347,7 +1351,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
 
         layer.workspace = marlin_make_workspace_new(device, 4)
 
-    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         return None
 
     def apply(
@@ -1583,7 +1588,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_scale.transpose(1, 2).contiguous(),
             requires_grad=False)
 
-    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         if self.num_bits == 4:
             return int4_w4a16_moe_quant_config(
                 w1_scale=layer.w13_weight_scale,

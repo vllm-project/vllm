@@ -6,6 +6,9 @@ from typing import Any, Callable, Optional, Union
 import torch
 
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig, int4_w4a16_moe_quant_config,
+    int8_w8a16_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEConfig, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase,
@@ -283,7 +286,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 layer.register_parameter(key, param)
                 set_weight_attrs(param, extra_weight_attrs)
 
-    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         weight_bits = self.quant_config.weight_bits
         has_zp = self.quant_config.has_zp
 

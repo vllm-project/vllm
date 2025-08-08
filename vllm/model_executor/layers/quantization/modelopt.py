@@ -11,7 +11,9 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig, FusedMoEQuantConfig, fp8_w8a8_moe_quant_config,
+    nvfp4_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     is_valid_flashinfer_cutlass_fused_moe)
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -477,7 +479,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight,
                                                   layer.w2_weight)
 
-    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         if self.flashinfer_moe_enabled:
             return None
 
@@ -1054,7 +1057,19 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
 
-        return super().maybe_make_prepare_finalize(moe)
+    def maybe_make_prepare_finalize(
+        self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
+
+        if (self.allow_flashinfer and self.flashinfer_moe_backend
+                == FlashinferMoeBackend.CUTLASS):
+            prepare_finalize = (
+                build_flashinfer_fp4_cutlass_moe_prepare_finalize(
+                    moe
+                ))
+            logger.debug_once("%s", prepare_finalize.__class__.__name__)
+            return prepare_finalize
+
+        return prepare_finalize
 
     def select_gemm_impl(
         self,
@@ -1063,10 +1078,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         experts = select_nvfp4_gemm_impl(
             self.moe,
-            g1_alphas=self.layer.g1_alphas,
-            g2_alphas=self.layer.g2_alphas,
-            a1_gscale=self.layer.w13_input_scale_quant,
-            a2_gscale=self.layer.w2_input_scale_quant,
+            self.moe_quant_config,
             allow_flashinfer=self.allow_flashinfer,
         )
         logger.debug_once("Using %s", experts.__class__.__name__)
@@ -1366,7 +1378,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             layer.w2_weight = Parameter(layer.w2_weight.data,
                                         requires_grad=False)
 
-    def get_fused_moe_quant_config(self) -> Optional[FusedMoEQuantConfig]:
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         if self.use_marlin:
             return None
 
@@ -1558,8 +1571,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
 
         assert is_valid_flashinfer_cutlass_fused_moe(
-            x, layer.w13_weight, layer.w2_weight), (
-                "Flashinfer CUTLASS Fused MoE not applicable!")
+            x, layer.w13_weight,
+            layer.w2_weight), ("Flashinfer CUTLASS Fused MoE not applicable!")
 
         return self.fused_experts(
             hidden_states=x,
