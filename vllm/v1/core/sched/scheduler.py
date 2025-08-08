@@ -169,7 +169,7 @@ class Scheduler(SchedulerInterface):
                     raise ValueError("No reasoning_parser specified.")
                 logger.info(
                     "Enable relaxed thinking, relax_ratio = %s, "
-                    "relax_top_k = %s", speculative_config.relax_ratio, 
+                    "relax_top_k = %s", speculative_config.relax_ratio,
                     speculative_config.relax_top_k)
                 tokenizer = AutoTokenizer.from_pretrained(
                     self.vllm_config.model_config.tokenizer)

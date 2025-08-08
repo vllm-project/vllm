@@ -56,7 +56,7 @@ class RejectionSampler(nn.Module):
         relaxed_thinking: bool = False,
         relax_ratio: float = 1.0,
         relax_top_k: int = 1,
-        thinking_states: torch.Tensor = torch.tensor([]),
+        thinking_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         '''
         Args:
@@ -158,7 +158,7 @@ def rejection_sample(
     relaxed_thinking: bool = False,
     relax_ratio: float = 1.0,
     relax_top_k: int = 1,
-    thinking_states: torch.Tensor = torch.tensor([]),
+    thinking_states: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     assert draft_token_ids.ndim == 1
     assert draft_probs is None or draft_probs.ndim == 2
@@ -189,10 +189,12 @@ def rejection_sample(
         is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
     if not sampling_metadata.all_random:
         if relaxed_thinking:
-            topk_values, topk_indices = torch.topk(target_probs, 
-                                                   k=relax_top_k, 
+            topk_values, topk_indices = torch.topk(target_probs,
+                                                   k=relax_top_k,
                                                    dim=-1)
             topk_indices = topk_indices.to(torch.int32)
+            thinking_states = torch.empty(0) \
+                if thinking_states is None else thinking_states
             relax_ratios = torch.where(thinking_states, relax_ratio, 1.0)
             relax_top_ks = torch.where(thinking_states, relax_top_k, 1)
             relaxed_thinking_sample_kernel[(batch_size, )](
@@ -206,6 +208,7 @@ def rejection_sample(
                 max_spec_len,
                 relax_ratios,
                 relax_top_ks,
+                relax_top_k,
                 num_warps=1,
             )
         else:
@@ -502,9 +505,9 @@ def relaxed_thinking_sample_kernel(
         if not rejected:
             draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
 
-            target_top1_prob = tl.load(topk_values_ptr + 
+            target_top1_prob = tl.load(topk_values_ptr +
                                        (start_idx + pos) * top_k)
-            target_top1_token_id = tl.load(topk_indices_ptr + 
+            target_top1_token_id = tl.load(topk_indices_ptr +
                                            (start_idx + pos) * top_k)
 
             cur_pos_accepted = False
@@ -528,7 +531,7 @@ def relaxed_thinking_sample_kernel(
                 rejected = True
 
             tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
-+                     token_id)
+                     token_id)
 
     if not rejected:
         # If all tokens are accepted, append the bonus token.
