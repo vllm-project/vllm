@@ -239,7 +239,8 @@ class Eagle3HunYuanDenseV1ForCausalLM(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         # combine multiple auxiliary hidden states returned by eagle3
-        return self.model.fc(hidden_states)
+        ret, _ = self.model.fc(hidden_states)
+        return ret
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
