@@ -13,7 +13,8 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.layers.linear import (QKVParallelLinear,
+                                               ReplicatedLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -107,13 +108,13 @@ class Eagle3HunYuanModel(nn.Module):
                                           prefix, f"layers.{start_layer_id}"))
         ])
         if hasattr(self.config, "target_hidden_size"):
-            self.fc = torch.nn.Linear(self.config.target_hidden_size * 3,
-                                      self.config.hidden_size,
-                                      bias=False)
+            self.fc = ReplicatedLinear(self.config.target_hidden_size * 3,
+                                       self.config.hidden_size,
+                                       bias=False)
         else:
-            self.fc = torch.nn.Linear(self.config.hidden_size * 3,
-                                      self.config.hidden_size,
-                                      bias=False)
+            self.fc = ReplicatedLinear(self.config.hidden_size * 3,
+                                       self.config.hidden_size,
+                                       bias=False)
         self.norm = RMSNorm(
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
