@@ -687,19 +687,30 @@ class AsyncMicrobatchTokenizer:
         max_length = kwargs.get("max_length")
 
         if not truncation:
-            return ("encode", add_special_tokens, False, None)
+            return "encode", add_special_tokens, False, None
 
         model_max = getattr(self.tokenizer, "model_max_length", None)
         if max_length is None or (model_max is not None
                                   and max_length == model_max):
-            return ("encode", add_special_tokens, True, "model_max")
+            return "encode", add_special_tokens, True, "model_max"
 
-        return ("encode", "other")
+        return "encode", "other"
 
     def __del__(self):
-        for task in self._batcher_tasks:
-            if not task.done():
-                task.cancel()
+        if ((tasks := getattr(self, "_batcher_tasks", None))
+                and (loop := getattr(self, "_loop", None))
+                and not loop.is_closed()):
+
+            def cancel_tasks():
+                for task in tasks:
+                    task.cancel()
+
+            loop.call_soon_threadsafe(cancel_tasks)
+
+
+def cancel_task_threadsafe(task: Task):
+    if task and not task.done() and not (loop := task.get_loop()).is_closed():
+        loop.call_soon_threadsafe(task.cancel)
 
 
 def make_async(
