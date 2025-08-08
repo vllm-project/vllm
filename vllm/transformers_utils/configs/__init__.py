@@ -14,7 +14,7 @@ from vllm.transformers_utils.configs.exaone4 import Exaone4Config
 from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
-from kimi_audio import WhisperVQConfig
+from kimi_audio import KimiAudioConfig, WhisperVQConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
 from vllm.transformers_utils.configs.minimax_text_01 import MiniMaxText01Config
 from vllm.transformers_utils.configs.minimax_vl_01 import MiniMaxVL01Config
@@ -49,6 +49,7 @@ __all__ = [
     "MLPSpeculatorConfig",
     "MoonViTConfig",
     "KimiVLConfig",
+    "KimiAudioConfig",
     "WhisperVQConfig",
     "NemotronConfig",
     "NemotronHConfig",
