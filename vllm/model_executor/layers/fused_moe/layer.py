@@ -1570,18 +1570,19 @@ class FusedMoE(torch.nn.Module):
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
         moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
         num_tokens = full_hidden_states.size(0)
-        for chunk_start_ in range(0, max_tokens_across_dp,
-                                  moe_dp_chunk_size_per_rank):
+        for chunk_idx, chunk_start_ in enumerate(
+                range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank)):
             chunk_start = chunk_start_
             chunk_end = min(chunk_start + moe_dp_chunk_size_per_rank,
                             max_tokens_across_dp)
             # clamp start and end
             chunk_start = min(chunk_start, num_tokens - 1)
             chunk_end = min(chunk_end, num_tokens)
-
-            process_chunk(chunk_start,
-                          chunk_end,
-                          skip_result_store=chunk_start_ >= num_tokens)
+            with ctx.dp_metadata.chunked_sizes(moe_dp_chunk_size_per_rank,
+                                               chunk_idx):
+                process_chunk(chunk_start,
+                              chunk_end,
+                              skip_result_store=chunk_start_ >= num_tokens)
 
         return full_final_hidden_states
 
