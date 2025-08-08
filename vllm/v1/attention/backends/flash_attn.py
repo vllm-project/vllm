@@ -23,6 +23,7 @@ if is_flash_attn_varlen_func_available():
                                                reshape_and_cache_flash)
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
@@ -164,6 +165,10 @@ class FlashAttentionMetadataBuilder(
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
         self.cache_config = vllm_config.cache_config
+        self.cache_dtype = self.cache_config.cache_dtype
+        if envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION is not None:
+            # Override the kv cache dtype for attention layers.
+            self.cache_dtype = envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION
         self.compilation_config = vllm_config.compilation_config
         self.device = device
 
@@ -250,10 +255,9 @@ class FlashAttentionMetadataBuilder(
 
         def schedule(batch_size, cu_query_lens, max_query_len, seqlens,
                      max_seq_len, causal):
-            cache_dtype = self.cache_config.cache_dtype
-            if cache_dtype.startswith("fp8"):
+            if self.cache_dtype.startswith("fp8"):
                 qkv_dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
-                    cache_dtype)
+                    self.cache_dtype)
             else:
                 qkv_dtype = self.kv_cache_dtype
             if aot_schedule:
@@ -387,6 +391,8 @@ class FlashAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        if envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION is not None:
+            self.kv_cache_dtype = envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0

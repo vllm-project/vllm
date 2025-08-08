@@ -2975,11 +2975,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         attention_chunk_size=self.attention_chunk_size,
                         use_mla=use_mla)
                 else:
+                    kv_cache_dtype_attn = self.kv_cache_dtype
+                    if envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION is not None:
+                        kv_cache_dtype_attn = STR_DTYPE_TO_TORCH_DTYPE[
+                            envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION]
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
+                        dtype=kv_cache_dtype_attn,
                         use_mla=use_mla)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):

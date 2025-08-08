@@ -152,6 +152,8 @@ if TYPE_CHECKING:
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
+    VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION: Optional[str] = None
+    VLLM_OVERRIDE_KV_CACHE_DTYPE_MAMBA: Optional[str] = None
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
@@ -1096,6 +1098,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE":
     lambda: bool(int(os.getenv(\
             "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE", "0"))),
+    
+    # Set the KV-cache dtype only for attention layers in hybrid models.
+    # If none (i.e. not set), the global kv cache dtype is used.
+    "VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION":
+    lambda: os.getenv("VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION", None),
+    
+    # Set the KV-cache dtype only for mamba layers in hybrid models.
+    # If none (i.e. not set), the global kv cache dtype is used.
+    "VLLM_OVERRIDE_KV_CACHE_DTYPE_MAMBA":
+    lambda: os.getenv("VLLM_OVERRIDE_KV_CACHE_DTYPE_MAMBA", None),
 
     # Enables support for the "store" option in the OpenAI Responses API.
     # When set to 1, vLLM's OpenAI server will retain the input and output

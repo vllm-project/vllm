@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, get_dtype_size
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 if TYPE_CHECKING:
@@ -301,13 +301,28 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             kv_cache_dtype = model_config.dtype
         else:
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+        kv_cache_dtype_attn = kv_cache_dtype
+        if envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION is not None:
+            kv_cache_dtype_attn = STR_DTYPE_TO_TORCH_DTYPE[
+                envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_ATTENTION]
+            logger.info("Setting kv cache dtype for attention layers to %s",
+                        kv_cache_dtype_attn)
+            vllm_config.cache_config.cache_dtype_attention = kv_cache_dtype_attn
+        
+        kv_cache_dtype_mamba = kv_cache_dtype
+        if envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_MAMBA is not None:
+            kv_cache_dtype_mamba = STR_DTYPE_TO_TORCH_DTYPE[
+                envs.VLLM_OVERRIDE_KV_CACHE_DTYPE_MAMBA]
+            logger.info("Setting state cache dtype for mamba layers to %s",
+                        kv_cache_dtype_mamba)
+            vllm_config.cache_config.cache_dtype_mamba = kv_cache_dtype_mamba
 
         # get attention page size (for 1 token)
         attn_page_size_1_token = FullAttentionSpec(
             block_size=1,
             num_kv_heads=model_config.get_num_kv_heads(parallel_config),
             head_size=model_config.get_head_size(),
-            dtype=kv_cache_dtype,
+            dtype=kv_cache_dtype_attn,
             use_mla=model_config.use_mla).page_size_bytes
 
         model_cls, _ = ModelRegistry.resolve_model_cls(
@@ -318,7 +333,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         # get mamba page size
         mamba_page_size = MambaSpec(
             shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
-            dtype=kv_cache_dtype,
+            dtype=kv_cache_dtype_mamba,
             block_size=model_config.max_model_len,
         ).page_size_bytes
 
