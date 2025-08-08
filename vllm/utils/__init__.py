@@ -515,8 +515,8 @@ def random_uuid() -> str:
 class AsyncMicrobatchTokenizer:
     """Asynchronous tokenizer with micro-batching.
 
-    Pulls pending encode/decode requests from a queue and batches them 
-    up to reduce overhead. A single-thread ThreadPoolExecutor is used 
+    Pulls pending encode/decode requests from a queue and batches them
+    up to reduce overhead. A single-thread ThreadPoolExecutor is used
     so the event loop stays responsive.
     """
 
@@ -663,18 +663,18 @@ class AsyncMicrobatchTokenizer:
     def _queue_key(self, op: str, kwargs: dict) -> tuple:
         """
         Return a normalized key describing operation + kwargs.
-        
+
         - `add_special_tokens`: {True/False}
         - `truncation`: {True/False}
-          - If `truncation` is False (`max_length` is None), 
+          - If `truncation` is False (`max_length` is None),
             returns a key for a can_batch queue.
           - If `truncation` is True and `max_length` is None or equals
             `tokenizer.model_max_length`, returns a key for a can_batch queue.
           - Otherwise, returns a key for a cannot_batch queue.
-        
+
         Examples:
           - Decode: ("decode",)
-          - Encode typical: 
+          - Encode typical:
             ("encode", add_special_tokens, bool_truncation, max_length_label)
           - Fallback: ("encode", "other")
         """
@@ -3245,7 +3245,7 @@ def has_deep_gemm() -> bool:
 
 def set_process_title(name: str,
                       suffix: str = "",
-                      append: bool = False) -> None:
+                      prefix: str = envs.VLLM_PROCESS_NAME_PREFIX) -> None:
     """
     Set the current process title to a specific name with an
     optional suffix.
@@ -3253,14 +3253,11 @@ def set_process_title(name: str,
     Args:
         name: The title to assign to the current process.
         suffix: An optional suffix to append to the base name.
-        append: Whether to append to the existing process title.
+        prefix: A prefix to prepend to the front separated by `::`.
     """
     if suffix:
         name = f"{name}_{suffix}"
-    if append:
-        name = f"{setproctitle.getproctitle()}_{name}"
-    else:
-        name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
+    name = f"{prefix}::{name}"
     setproctitle.setproctitle(name)
 
 

@@ -18,6 +18,7 @@ from threading import Thread
 from typing import Any, Callable, Optional, Union, cast
 
 import cloudpickle
+import setproctitle
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -360,6 +361,7 @@ class WorkerProc:
         rank: int,
         distributed_init_method: str,
         input_shm_handle: Handle,
+        parent_proc_title: str,
     ):
         self.rank = rank
         wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
@@ -378,18 +380,9 @@ class WorkerProc:
         }
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
-
-        pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-        pp_str = f"PP{rank // tp_size}" if pp_size > 1 else ""
-        tp_str = f"TP{rank % tp_size}" if tp_size > 1 else ""
-        suffix = f"{pp_str}{'_' if pp_str and tp_str else ''}{tp_str}"
-        base_process_name = "Worker"
-        set_process_title(name=base_process_name, suffix=suffix)
-        log_process_name = base_process_name
-        if suffix:
-            log_process_name = f"{log_process_name} {suffix}"
-        decorate_logs(log_process_name)
+        set_process_title(name=get_mp_context().current_process().name,
+                          prefix=parent_proc_title)
+        decorate_logs()
 
         # Initialize MessageQueue for receiving SchedulerOutput
         self.rpc_broadcast_mq = MessageQueue.create_from_handle(
@@ -401,6 +394,18 @@ class WorkerProc:
         # Initialize device and loads weights
         self.worker.init_device()
         self.worker.load_model()
+
+    @staticmethod
+    def get_worker_name(vllm_config: VllmConfig, rank: int) -> str:
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        pp_str = f"PP{rank // tp_size}" if pp_size > 1 else ""
+        tp_str = f"TP{rank % tp_size}" if tp_size > 1 else ""
+        suffix = f"{pp_str}{'_' if pp_str and tp_str else ''}{tp_str}"
+        process_name = "Worker"
+        if suffix:
+            process_name = f"{process_name}_{suffix}"
+        return process_name
 
     @staticmethod
     def make_worker_process(
@@ -417,6 +422,7 @@ class WorkerProc:
         # Create death pipe to detect parent process exit
         death_reader, death_writer = context.Pipe(duplex=False)
 
+        worker_name = WorkerProc.get_worker_name(vllm_config, rank)
         process_kwargs = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -425,11 +431,12 @@ class WorkerProc:
             "input_shm_handle": input_shm_handle,
             "ready_pipe": (reader, writer),
             "death_pipe": death_reader,
+            "parent_proc_title": setproctitle.getproctitle(),
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=WorkerProc.worker_main,
                                kwargs=process_kwargs,
-                               name=f"VllmWorker-{rank}",
+                               name=worker_name,
                                daemon=True)
 
         proc.start()
