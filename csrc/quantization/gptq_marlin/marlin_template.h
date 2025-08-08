@@ -1482,14 +1482,24 @@ __global__ void Marlin(
       if constexpr (!has_act_order && group_blocks == -1 &&
                     w_type.size_bits() == 4 &&
                     (has_zp && dequant_skip_flop || !has_zp)) {
-        res = __hmul2(res, s[0]);
+        scalar_t2 tmp_scale = s[0];
+        if constexpr (m_block_size_8) {
+          idx = (threadIdx.x % 8) / 4;
+          tmp_scale = Dtype::num2num2(reinterpret_cast<scalar_t*>(&s[0])[idx]);
+        }
+        res = __hmul2(res, tmp_scale);
       }
 
       if constexpr (w_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
         res = __hmul2(res, global_scale);
       }
       if (has_bias && last) {
-        res = __hadd2(res, b_bias[0]);
+        scalar_t2 tmp_bias = b_bias[0];
+        if constexpr (m_block_size_8) {
+          idx = (threadIdx.x % 8) / 4;
+          tmp_bias = Dtype::num2num2(reinterpret_cast<scalar_t*>(&b_bias[0])[idx]);
+        }
+        res = __hadd2(res, tmp_bias);
       }
 
       if constexpr (m_block_size_8) {
