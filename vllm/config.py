@@ -274,8 +274,8 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
-LogprobsMode = Literal["raw_logprobs", "raw_logits", "processed_logprobs",
-                       "processed_logits"]
+LogprobsMode = Literal["raw_logprobs", "raw_logits", "final_logprobs",
+                       "processed_logprobs", "processed_logits"]
 
 
 @config
@@ -382,9 +382,11 @@ class ModelConfig:
     logprobs_mode: LogprobsMode = "raw_logprobs"
     """Indicates the content returned in the logprobs and prompt_logprobs.
     Supported mode:
-    1) raw_logprobs, 2) processed_logprobs, 3) raw_logits, 4) processed_logits.
-    Raw means the values before applying logit processors, like bad words.
-    Processed means the values after applying such processors.
+    1) raw_logprobs, 2) processed_logprobs, 3) final_logprobs, 4) raw_logits,
+    5) processed_logits. Raw means the values before applying any logit
+    processors, like bad words. Processed means the values after applying all
+    processors, except argmax invariant processors, temperature and top_k/top_p.
+    Final means after applying all logit processors.
     """
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
@@ -3472,24 +3474,24 @@ class PoolerConfig:
     ## for embeddings models
     normalize: Optional[bool] = None
     """
-    Whether to normalize the embeddings outputs. 
+    Whether to normalize the embeddings outputs.
     """
     dimensions: Optional[int] = None
     """
-    Reduce the dimensions of embeddings if model 
+    Reduce the dimensions of embeddings if model
     support matryoshka representation.
     """
 
     ## for classification models
     activation: Optional[bool] = None
     """
-    Whether to apply activation function to the classification outputs. 
+    Whether to apply activation function to the classification outputs.
     """
 
     ## for reward models
     softmax: Optional[bool] = None
     """
-    Whether to apply softmax to the reward outputs. 
+    Whether to apply softmax to the reward outputs.
     """
     step_tag_id: Optional[int] = None
     """
