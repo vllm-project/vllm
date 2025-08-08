@@ -561,11 +561,12 @@ def test_marlin_gemm_subset_input():
     assert max_diff < 0.04
 
 
-def test_marlin_gemm_with_bias():
+@pytest.mark.parametrize("size_m", [1, 256])
+def test_marlin_gemm_with_bias(size_m):
     quant_type = scalar_types.uint4b8
     group_size = 128
 
-    size_m, size_k, size_n = 32, 1024, 2048
+    size_k, size_n = 1024, 2048
     a_input = rand_data((size_m, size_k))
     b_weight = rand_data((size_k, size_n))
     b_bias = rand_data((size_n, )) * 10
