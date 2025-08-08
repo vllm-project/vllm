@@ -3236,7 +3236,7 @@ class SpeculativeConfig:
 
         from vllm.transformers_utils.configs import SpeculatorsConfig
 
-        eagle3_target_supported = ["llama"]
+        eagle3_target_supported = ["llama", "qwen2_5_vl"]
         if self.draft_model_config and isinstance(
                 self.draft_model_config.hf_config, SpeculatorsConfig):
             eagle3_target_supported.append("qwen")
