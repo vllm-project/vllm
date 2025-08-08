@@ -139,20 +139,6 @@ using CollectiveEpilogue =
 // The Scale information must get paired with the operand that will be scaled.
 // In this example, B is scaled so we make a tuple of B's information and the
 // scale information.
-using CollectiveMainloopScaleOnly =
-    typename cutlass::gemm::collective::CollectiveBuilder<
-        ArchTag, OperatorClass,
-        cute::tuple<ElementB, cutlass::Array<ElementScale, 8>>,
-        LayoutB_Transpose, AlignmentB, ElementA, LayoutA_Transpose, AlignmentA,
-        ElementAccumulator, TileShape, ClusterShape,
-        cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-            sizeof(typename CollectiveEpilogue::SharedStorage))>,
-        KernelSchedule>::CollectiveOp;
-
-using GemmKernelScaleOnly = cutlass::gemm::kernel::GemmUniversal<
-    Shape<int, int, int, int>,  // Indicates ProblemShape
-    CollectiveMainloopScaleOnly, CollectiveEpilogue>;
-
 using CollectiveMainloopShuffled =
     typename cutlass::gemm::collective::CollectiveBuilder<
         ArchTag, OperatorClass,
@@ -167,16 +153,12 @@ using GemmKernelShuffled = cutlass::gemm::kernel::GemmUniversal<
     Shape<int, int, int, int>,  // Indicates ProblemShape
     CollectiveMainloopShuffled, CollectiveEpilogue>;
 
-using GemmScaleOnly =
-    cutlass::gemm::device::GemmUniversalAdapter<GemmKernelScaleOnly>;
 using GemmShuffled =
     cutlass::gemm::device::GemmUniversalAdapter<GemmKernelShuffled>;
 
-using StrideC = typename GemmKernelScaleOnly::StrideC;
-using StrideD = typename GemmKernelScaleOnly::StrideD;
-
-using StrideC_ref = cutlass::detail::TagToStrideC_t<LayoutC>;
-using StrideD_ref = cutlass::detail::TagToStrideC_t<LayoutD>;
+using StrideC = typename GemmKernelShuffled::StrideC;
+using StrideD = typename GemmKernelShuffled::StrideD;
+using StrideS = typename CollectiveMainloopShuffled::StrideScale;
 
 //
 // Data members
@@ -184,34 +166,14 @@ using StrideD_ref = cutlass::detail::TagToStrideC_t<LayoutD>;
 
 /// Initialization
 StrideA stride_A;
-StrideB stride_B;
 StrideC stride_C;
-StrideC_ref stride_C_ref;
 StrideD stride_D;
-StrideD_ref stride_D_ref;
+StrideS stride_S;
 uint64_t seed;
 
 LayoutB_Reordered layout_B_reordered;
 
-using StrideS = typename CollectiveMainloopScaleOnly::StrideScale;
-using StrideS_ref = cutlass::detail::TagToStrideB_t<LayoutScale>;
-StrideS stride_S;
-StrideS_ref stride_S_ref;
-
-cutlass::DeviceAllocation<ElementA> block_A;
-cutlass::DeviceAllocation<ElementB> block_B;
-cutlass::DeviceAllocation<ElementB> block_B_modified;
-cutlass::DeviceAllocation<ElementA> block_B_dq;
-cutlass::DeviceAllocation<ElementScale> block_scale;
-cutlass::DeviceAllocation<cutlass::Array<ElementScale, 8>> block_scale_packed;
-cutlass::DeviceAllocation<ElementZero> block_zero;
 cutlass::DeviceAllocation<ElementC> block_C;
-cutlass::DeviceAllocation<
-    typename GemmScaleOnly::EpilogueOutputOp::ElementOutput>
-    block_D;
-cutlass::DeviceAllocation<
-    typename GemmScaleOnly::EpilogueOutputOp::ElementOutput>
-    block_ref_D;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 /// Testbed utility types
@@ -230,235 +192,27 @@ struct Options : MixedDtypeOptions {
 
     mode = 1;  // override the mode value to always be scale only mode
   }
-
-  /// Prints the usage statement.
-  std::ostream& print_usage(std::ostream& out) const {
-    out << "55_hopper_int4_fp8_gemm\n\n"
-        << "  Hopper Mixed Data Type GEMM using a Warp Specialized kernel.\n\n"
-        << "Options:\n\n"
-        << "  --help                      If specified, displays this usage "
-           "statement\n\n"
-        << "  --m=<int>                   Sets the M extent of the GEMM\n"
-        << "  --n=<int>                   Sets the N extent of the GEMM\n"
-        << "  --k=<int>                   Sets the K extent of the GEMM\n"
-        << "  --l=<int>                   The number of independent gemm "
-           "problems with mnk shape\n"
-        << "  --g=<int>                   The size of each group for the "
-           "scales. To broadcast a vector of scales or zeros, set the group "
-           "size to K.\n"
-        << "  --alpha=<f32>               Epilogue scalar alpha\n"
-        << "  --beta=<f32>                Epilogue scalar beta\n\n"
-        << "  --iterations=<int>          Number of profiling iterations to "
-           "perform.\n\n"
-        << "  --warmup=<int>              Number of warmup iterations to "
-           "perform.\n\n"
-        << "  --shuffle=<boolean>         Enable the offline layout "
-           "swizzling.\n\n";
-
-    out << "\n\nExamples:\n\n"
-        << "$ " << "55_hopper_int4_fp8_gemm"
-        << " --m=1024 --n=512 --k=1024 -g=1024 --l=10 --alpha=2 --beta=0.707 "
-           "\n\n";
-
-    return out;
-  }
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 /// GEMM setup and evaluation
 /////////////////////////////////////////////////////////////////////////////////////////////////
-
-/// Initialize operands to be used in the GEMM and reference GEMM
-void initialize(Options const& options, const ElementScale* S_ptr,
-                const ElementB* B_ptr) {
-  auto shape_B = cute::make_shape(options.n, options.k, options.l);
-  int const scale_k = cutlass::ceil_div(options.k, options.g);
-  stride_A = cutlass::make_cute_packed_stride(
-      StrideA{}, cute::make_shape(options.m, options.k, options.l));
-  stride_B = cutlass::make_cute_packed_stride(StrideB{}, shape_B);
-  // Reverse stride here due to swap and transpose
-  stride_C = cutlass::make_cute_packed_stride(
-      StrideC{}, cute::make_shape(options.n, options.m, options.l));
-  stride_C_ref = cutlass::make_cute_packed_stride(
-      StrideC_ref{}, cute::make_shape(options.m, options.n, options.l));
-  // Reverse stride here due to swap and transpose
-  stride_D = cutlass::make_cute_packed_stride(
-      StrideD{}, cute::make_shape(options.n, options.m, options.l));
-  stride_D_ref = cutlass::make_cute_packed_stride(
-      StrideD_ref{}, cute::make_shape(options.m, options.n, options.l));
-
-  auto layout_B = make_layout(shape_B, stride_B);
-
-  auto a_coord = cutlass::make_Coord(options.m * options.l, options.k);
-  auto b_coord = cutlass::make_Coord(options.k, options.n * options.l);
-  auto c_coord = cutlass::make_Coord(options.m * options.l, options.n);
-
-  block_B.reset(b_coord.product());
-  block_B_modified.reset(b_coord.product());
-  block_B_dq.reset(b_coord.product());
-  block_C.reset(c_coord.product());
-  block_D.reset(c_coord.product());
-  block_ref_D.reset(c_coord.product());
-
-  block_scale.reset(scale_k * options.l * options.n);
-  block_scale_packed.reset(scale_k * options.l * options.n);
-  block_zero.reset(scale_k * options.l * options.n);
-
-  initialize_tensor(block_B, seed + 2021);
-  // czhu change to B_ptr which we passed in
-  cutlass::unified_encode_int4b(
-      B_ptr, block_B_modified.get(),
-      block_B.size());  // this drop perf by ~30 tflops? wtf
-  // cutlass::unified_encode_int4b(block_B.get(), block_B_modified.get(),
-  // block_B.size());
-  initialize_tensor(block_C, seed + 2020);
-  // czhu: support pass in our own block_scale (unpacked)
-  initialize_scale(block_scale, options);
-  cutlass::pack_scale_fp8(S_ptr, block_scale_packed.get(), block_scale.size());
-  // cutlass::pack_scale_fp8(block_scale.get(), block_scale_packed.get(),
-  // block_scale.size());
-  initialize_zero(block_zero, options);
-
-  auto shape_scale_zero = cute::make_shape(options.n, scale_k, options.l);
-  stride_S = cutlass::make_cute_packed_stride(
-      StrideS{}, cute::make_shape(options.n, scale_k, options.l));
-  stride_S_ref = cutlass::make_cute_packed_stride(
-      StrideS_ref{}, cute::make_shape(options.n, scale_k, options.l));
-  auto layout_scale_zero = make_layout(shape_scale_zero, stride_S_ref);
-
-  // czhu: this moved to verify
-  // cudaStream_t stream = cudaStreamDefault;
-  // cutlass::dequantize(block_B_dq.get(), block_B.get(), layout_B,
-  // block_scale.get(), block_zero.get(), layout_scale_zero, options.g, stream);
-
-  if (options.shuffle) {
-    // Repeat the reorder layout atom to tile the whole tensor shape
-    layout_B_reordered = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
-    cutlass::reorder_tensor(block_B_modified.get(), layout_B,
-                            layout_B_reordered);
-    print("in initialize\n");
-    print("layout_B: ");
-    print(layout_B);
-    print("\n");
-    print("Quantized tensor layout: ");
-    print(layout_B_reordered);
-    print("\n");
-  }
-}
-
-bool verify(Options const& options, ElementD* D_ptr, const MmaType* A_ptr,
-            const ElementScale* S_ptr, const QuantType* B_ptr) {
-  //
-  // Compute reference output
-  //
-
-  // In this example, we use the GPU default kernels as a reference (unfused
-  // scale). This avoids numerical differences due to different accumulation
-  // order.
-
-  // Again, due to numerical differences, we must use fast acc here when the mma
-  // type is FP8 as the fused implementation only supports fast acc at the
-  // moment.
-  constexpr bool IsFP8Input = cute::is_same_v<MmaType, cutlass::float_e4m3_t> ||
-                              cute::is_same_v<MmaType, cutlass::float_e5m2_t>;
-  using FP8Sched = cute::conditional_t<
-      size<0>(TileShape{}) == 64,
-      cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum,
-      cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8FastAccum>;
-  using ScheduleRef =
-      cute::conditional_t<IsFP8Input, FP8Sched,
-                          cutlass::gemm::collective::KernelScheduleAuto>;
-
-  using CollectiveMainloopRef =
-      typename cutlass::gemm::collective::CollectiveBuilder<
-          ArchTag, OperatorClass, MmaType, LayoutA, AlignmentA, MmaType,
-          LayoutB, AlignmentB, ElementAccumulator, TileShape, ClusterShape,
-          cutlass::gemm::collective::StageCountAuto, ScheduleRef>::CollectiveOp;
-
-  using CollectiveEpilogueRef =
-      typename cutlass::epilogue::collective::CollectiveBuilder<
-          cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, TileShape,
-          ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
-          ElementAccumulator, ElementAccumulator, ElementC, LayoutC, AlignmentC,
-          ElementD, LayoutD, AlignmentD,
-          cutlass::epilogue::NoSmemWarpSpecialized>::CollectiveOp;
-
-  using GemmKernelRef = cutlass::gemm::kernel::GemmUniversal<
-      Shape<int, int, int, int>,  // Indicates ProblemShape
-      CollectiveMainloopRef, CollectiveEpilogueRef>;
-
-  using GemmRef = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelRef>;
-
-  // do the dequantize step here so we can pass in the original scales and
-  // weights block_B_dq
-  auto shape_B = cute::make_shape(options.n, options.k, options.l);
-  int const scale_k = cutlass::ceil_div(options.k, options.g);
-  stride_B = cutlass::make_cute_packed_stride(StrideB{}, shape_B);
-  auto layout_B = make_layout(shape_B, stride_B);
-
-  auto shape_scale_zero = cute::make_shape(options.n, scale_k, options.l);
-  stride_S_ref = cutlass::make_cute_packed_stride(
-      StrideS_ref{}, cute::make_shape(options.n, scale_k, options.l));
-  auto layout_scale_zero = make_layout(shape_scale_zero, stride_S_ref);
-
-  cudaStream_t stream = cudaStreamDefault;
-  // block_zero is initialized to 0s so we can ignore it basically
-  // S_ptr is unpacked scales fp8, B_ptr is the original weights B before
-  // encoding and reorder
-  cutlass::dequantize(block_B_dq.get(), B_ptr, layout_B, S_ptr,
-                      block_zero.get(), layout_scale_zero, options.g, stream);
-  // uses activations we passed in and dequantized B, no scales
-  // dequantize b is from unpacked B_ptr and unpacked S_ptr (it is fp8 type)
-  // GemmRef is fp8 fastaccum gemm, alpha=1.0, beta=0.0
-  typename GemmRef::Arguments arguments{
-      cutlass::gemm::GemmUniversalMode::kGemm,
-      {options.m, options.n, options.k, options.l},
-      {A_ptr, stride_A, block_B_dq.get(), stride_B},
-      {{options.alpha, options.beta},
-       block_C.get(),
-       stride_C_ref,
-       block_ref_D.get(),
-       stride_D_ref}};
-
-  // Run the gemm where the scaling is performed outside of the kernel.
-  GemmRef gemm_ref;
-  size_t workspace_size = GemmRef::get_workspace_size(arguments);
-  cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
-  CUTLASS_CHECK(gemm_ref.can_implement(arguments));
-  CUTLASS_CHECK(gemm_ref.initialize(arguments, workspace.get()));
-  CUTLASS_CHECK(gemm_ref.run());
-
-  // compare_reference
-  ElementD const epsilon(1e-2f);
-  ElementD const non_zero_floor(1e-4f);
-  bool passed = cutlass::reference::device::BlockCompareRelativelyEqual(
-      block_ref_D.get(), D_ptr, block_D.size(), epsilon, non_zero_floor);
-
-  return passed;
-}
-
-/////////////////////////////////////////////////////////////////////////////////////////////////
-// end w4a8 example
-torch::Tensor mm(
-    torch::Tensor const& A, torch::Tensor const& B,
-    torch::Tensor const& B_packed,  // just for testing convenience
-    int64_t b_type_id, std::optional<at::ScalarType> const& maybe_out_type,
-    torch::Tensor const& group_scales,
-    torch::Tensor const&
-        group_scales_unpacked,  // czhu: this is just for testing convenience,
-                                // remove from final thing
-    std::optional<int64_t> maybe_group_size,
-    std::optional<torch::Tensor> const& maybe_channel_scales,
-    std::optional<torch::Tensor> const& maybe_token_scales) {
-  // run the stuff
+torch::Tensor mm(torch::Tensor const& A,
+                 torch::Tensor const& B,  // already packed
+                 int64_t b_type_id,
+                 std::optional<at::ScalarType> const& maybe_out_type,
+                 torch::Tensor const& group_scales,  // already packed
+                 std::optional<int64_t> maybe_group_size,
+                 std::optional<torch::Tensor> const& maybe_channel_scales,
+                 std::optional<torch::Tensor> const& maybe_token_scales) {
   Options options;
   // try mnk = 5120x4096x6144
   options.m = 5120;
   options.k = 6144;
   options.n = 4096;
-  constexpr bool shuffled = true;
+
   // Allocate output
-  using ElementOutput = typename GemmScaleOnly::EpilogueOutputOp::ElementOutput;
+  using ElementOutput = typename GemmShuffled::EpilogueOutputOp::ElementOutput;
   auto device = A.device();
   torch::Tensor D =
       torch::zeros({options.m, options.n},
@@ -466,49 +220,47 @@ torch::Tensor mm(
                        .dtype(equivalent_scalar_type_v<ElementOutput>)
                        .device(device));
 
-  std::cout << "Running in per-column scale mode." << std::endl;
-  if (shuffled) {
-    std::cout << "Offline shuffle enabled." << std::endl;
-  } else {
-    std::cout << "Offline shuffle disabled." << std::endl;
-  }
-
   // run logic, pass in S_ptr so we can pass in scales
-  auto S_ptr =
-      static_cast<ElementScale const*>(group_scales_unpacked.const_data_ptr());
   auto B_ptr = static_cast<QuantType const*>(B.const_data_ptr());
-  auto B_packed_ptr = static_cast<QuantType const*>(B_packed.const_data_ptr());
-  initialize(options, S_ptr, B_ptr);
 
   // Instantiate CUTLASS kernel depending on templates
-  using GemmType = std::conditional_t<shuffled, GemmShuffled, GemmScaleOnly>;
-  GemmType gemm;
+  GemmShuffled gemm;
 
   // Create a structure of gemm kernel arguments suitable for invoking an
   // instance of Gemm auto arguments = args_from_options<GemmShuffled>(options);
   /// Populates a Gemm::Arguments structure from the given commandline options
   /// Swap the A and B tensors, as well as problem shapes here.
-  using Args = typename GemmType::Arguments;
+  using Args = typename GemmShuffled::Arguments;
   auto D_ptr = static_cast<ElementOutput*>(D.data_ptr());
   auto A_ptr = static_cast<MmaType const*>(A.const_data_ptr());
-  auto S_packed_ptr =
-      static_cast<cutlass::Array<ElementScale, 8>*>(group_scales.data_ptr());
+  auto S_ptr = static_cast<cutlass::Array<ElementScale, 8> const*>(
+      group_scales.const_data_ptr());
   // currently uses all the input (A, B, scales)
-  // B_packed_ptr vs block_B_modified.get()
-  auto arguments = Args{cutlass::gemm::GemmUniversalMode::kGemm,
-                        {options.n, options.m, options.k, options.l},
-                        {B_packed_ptr, layout_B_reordered, A_ptr, stride_A,
-                         S_packed_ptr, stride_S, options.g},
-                        {{options.alpha, options.beta},
-                         block_C.get(),
-                         stride_C,
-                         D_ptr,
-                         stride_D}};
-  // end args logic
+  // init strides here
+  int const scale_k = cutlass::ceil_div(options.k, options.g);
+  stride_A = cutlass::make_cute_packed_stride(
+      StrideA{}, cute::make_shape(options.m, options.k, options.l));
+  // Reverse stride here due to swap and transpose
+  stride_C = cutlass::make_cute_packed_stride(
+      StrideC{}, cute::make_shape(options.n, options.m, options.l));
+  // Reverse stride here due to swap and transpose
+  stride_D = cutlass::make_cute_packed_stride(
+      StrideD{}, cute::make_shape(options.n, options.m, options.l));
+  stride_S = cutlass::make_cute_packed_stride(
+      StrideS{}, cute::make_shape(options.n, scale_k, options.l));
+  auto arguments = Args{
+      cutlass::gemm::GemmUniversalMode::kGemm,
+      {options.n, options.m, options.k, options.l},
+      {B_ptr, layout_B_reordered, A_ptr, stride_A, S_ptr, stride_S, options.g},
+      {{options.alpha, options.beta},
+       D_ptr,  // dont accumulate anything anyways since beta=0
+       stride_C,
+       D_ptr,
+       stride_D}};
 
   // Using the arguments, query for extra workspace required for matrix
   // multiplication computation
-  size_t workspace_size = GemmType::get_workspace_size(arguments);
+  size_t workspace_size = GemmShuffled::get_workspace_size(arguments);
 
   // Allocate workspace memory
   cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
@@ -521,16 +273,6 @@ torch::Tensor mm(
 
   // Correctness / Warmup iteration
   CUTLASS_CHECK(gemm.run());
-
-  // Check if output from CUTLASS kernel and reference kernel are equal or not
-  // MixedDtypeResult result;
-  // S_ptr is the scales before packing, that is used to check the reference
-  // result.passed = verify(options, D_ptr, A_ptr, S_ptr, B_ptr);
-  // mixed_dtype_profiling(gemm, options, result);
-  // std::cout << "  Disposition: " << (result.passed ? "Passed" : "Failed") <<
-  // std::endl; if (!result.passed) {
-  //   exit(-1);
-  // }
 
   return D;
 }
@@ -568,13 +310,6 @@ torch::Tensor encode_and_reorder_int4b(torch::Tensor const& B) {
   // layoutright/row major
   auto layout_B = make_layout(shape_B, LayoutRight{});
   cutlass::reorder_tensor(B_packed_ptr, layout_B, layout_B_reordered);
-  // print("in encode_and_reorder_int4b\n");
-  // print("layout_B: ");
-  // print(layout_B);
-  // print("\n");
-  // print("Quantized tensor layout: ");
-  // print(layout_B_reordered);
-  // print("\n");
   return B_packed;
 }
 
