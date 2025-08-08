@@ -187,6 +187,17 @@ class Worker(LocalOrDistributedWorkerBase):
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
             self.baseline_snapshot = MemorySnapshot()
+        elif self.device_config.device.type == "mps":
+            # MPS device initialization
+            self.device = torch.device("mps")
+            # MPS doesn't need set_device like CUDA
+            
+            # MPS doesn't need dtype checking like CUDA
+            # MPS doesn't have memory stats like CUDA
+            gc.collect()
+            # Note: MPS doesn't have empty_cache() equivalent
+            # Create a minimal memory snapshot for MPS since it doesn't support CUDA memory APIs
+            self.baseline_snapshot = MemorySnapshot(auto_measure=False)
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -244,10 +255,18 @@ class Worker(LocalOrDistributedWorkerBase):
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-
-        free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
+        if self.device_config.device.type == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+            free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
+        elif self.device_config.device.type == "mps":
+            # MPS doesn't have direct memory management APIs like CUDA
+            # Use the total memory from platform config
+            from vllm.platforms import current_platform
+            free_memory_pre_profile = current_platform.get_device_total_memory()
+            total_gpu_memory = current_platform.get_device_total_memory()
+        else:
+            raise RuntimeError(f"Unsupported device type: {self.device_config.device.type}")
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
