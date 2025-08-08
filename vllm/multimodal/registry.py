@@ -88,6 +88,7 @@ class _ProcessorFactories(Generic[_I]):
 
 
 # Make sure a different cache is used for each model config
+# NOTE: ModelConfig is not hashable so it cannot be passed directly
 @lru_cache(maxsize=1)
 def _get_processor_cache(model_id: str, capacity_gb: int):
     return ProcessingCache(capacity_gb) if capacity_gb > 0 else None
