@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
@@ -86,6 +87,13 @@ class _ProcessorFactories(Generic[_I]):
         return self.processor(info, dummy_inputs_builder, cache=cache)
 
 
+# Make sure a different cache is used for each model config
+# NOTE: ModelConfig is not hashable so it cannot be passed directly
+@lru_cache(maxsize=1)
+def _get_processor_cache(model_id: str, capacity_gb: int):
+    return ProcessingCache(capacity_gb) if capacity_gb > 0 else None
+
+
 class MultiModalRegistry:
     """
     A registry that dispatches data processing according to the model.
@@ -95,22 +103,15 @@ class MultiModalRegistry:
         self._processor_factories = ClassRegistry[nn.Module,
                                                   _ProcessorFactories]()
 
-        self._processor_cache: Optional[ProcessingCache] = None
-
     def _get_processor_cache(self, model_config: "ModelConfig"):
+        model_id = model_config.model
         capacity_gb = model_config.mm_processor_cache_gb
-        if capacity_gb is None:
-            return None  # Overrides `disable_cache` argument
+        return _get_processor_cache(model_id, capacity_gb)
 
-        if self._processor_cache is None:
-            self._processor_cache = ProcessingCache(capacity_gb)
-
-        return self._processor_cache
-
-    def reset_processor_cache(self) -> bool:
+    def reset_processor_cache(self, model_config: "ModelConfig") -> bool:
         """Reset the multi-modal processing cache."""
-        if self._processor_cache:
-            self._processor_cache.reset()
+        if processor_cache := self._get_processor_cache(model_config):
+            processor_cache.reset()
 
         return True  # Success
 

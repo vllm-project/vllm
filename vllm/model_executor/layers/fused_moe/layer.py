@@ -36,7 +36,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import (direct_register_custom_op, has_deep_ep, has_pplx,
-                        round_up)
+                        has_triton_kernels, is_torch_equal_or_newer, round_up)
 from vllm.utils.flashinfer import has_flashinfer
 
 if current_platform.is_cuda_alike():
@@ -723,10 +723,17 @@ class FusedMoE(torch.nn.Module):
         self.global_num_experts = num_experts + num_redundant_experts
 
         # we padding globally so EP buffer allocation works
-        if quant_config and quant_config.get_name() == "mxfp4" and (
-                envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
-            hidden_size = round_up(hidden_size, 256)
+        if quant_config and quant_config.get_name() == "mxfp4":
+            if not is_torch_equal_or_newer("2.8.0"):
+                raise RuntimeError("Mxfp4 on hopper requires torch >= 2.8.0")
+            if current_platform.is_device_capability(
+                    90) and not has_triton_kernels():
+                raise NotImplementedError(
+                    "Triton kernels must be installed for mxfp4 on hopper")
+            if (current_platform.is_rocm()
+                    or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+                    or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+                hidden_size = round_up(hidden_size, 256)
 
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config
@@ -1570,18 +1577,19 @@ class FusedMoE(torch.nn.Module):
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
         moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
         num_tokens = full_hidden_states.size(0)
-        for chunk_start_ in range(0, max_tokens_across_dp,
-                                  moe_dp_chunk_size_per_rank):
+        for chunk_idx, chunk_start_ in enumerate(
+                range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank)):
             chunk_start = chunk_start_
             chunk_end = min(chunk_start + moe_dp_chunk_size_per_rank,
                             max_tokens_across_dp)
             # clamp start and end
             chunk_start = min(chunk_start, num_tokens - 1)
             chunk_end = min(chunk_end, num_tokens)
-
-            process_chunk(chunk_start,
-                          chunk_end,
-                          skip_result_store=chunk_start_ >= num_tokens)
+            with ctx.dp_metadata.chunked_sizes(moe_dp_chunk_size_per_rank,
+                                               chunk_idx):
+                process_chunk(chunk_start,
+                              chunk_end,
+                              skip_result_store=chunk_start_ >= num_tokens)
 
         return full_final_hidden_states
 
