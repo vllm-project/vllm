@@ -61,18 +61,17 @@ class OAIAttention(nn.Module):
                 "original_max_position_embeddings":
                 config.rope_scaling["original_max_position_embeddings"],
                 "beta_fast":
-                config.rope_ntk_beta,
+                config.rope_scaling["beta_fast"],
                 "beta_slow":
-                config.rope_ntk_alpha,
+                config.rope_scaling["beta_slow"],
             },
             is_neox_style=True,
         )
 
         tp_size = get_tensor_model_parallel_world_size()
 
-        attention_sink_dtype = (
-            torch.float32 if envs.VLLM_USE_TRTLLM_CONTEXT_ATTENTION
-            or envs.VLLM_USE_TRTLLM_DECODE_ATTENTION else torch.bfloat16)
+        attention_sink_dtype = (torch.float32 if envs.VLLM_USE_TRTLLM_ATTENTION
+                                else torch.bfloat16)
         self.sinks = torch.nn.Parameter(
             torch.empty(config.num_attention_heads // tp_size,
                         dtype=attention_sink_dtype,
@@ -154,7 +153,7 @@ class MLPBlock(torch.nn.Module):
                                       dtype=torch.bfloat16)
         assert config.intermediate_size % self.world_size == 0
         self.experts = FusedMoE(num_experts=config.num_local_experts,
-                                top_k=config.num_experts_per_token,
+                                top_k=config.num_experts_per_tok,
                                 hidden_size=config.hidden_size,
                                 intermediate_size=config.intermediate_size,
                                 reduce_results=True,
