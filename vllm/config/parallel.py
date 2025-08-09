@@ -160,7 +160,7 @@ class ParallelConfig:
         self.data_parallel_master_port += 1
         return answer
 
-    def stateless_init_dp_group(self) -> "ProcessGroup":
+    def stateless_init_dp_group(self) -> ProcessGroup:
         # NOTE: In high-concurrency scenarios multiple processes
         # can pick the same (currently free) port through a race
         # condition when calling `get_open_port()`. When the first
@@ -198,7 +198,7 @@ class ParallelConfig:
         raise last_exc
 
     @staticmethod
-    def has_unfinished_dp(dp_group: "ProcessGroup",
+    def has_unfinished_dp(dp_group: ProcessGroup,
                           has_unfinished: bool) -> bool:
         tensor = torch.tensor([has_unfinished],
                               dtype=torch.int32,
@@ -212,7 +212,7 @@ class ParallelConfig:
         return aggregated_has_unfinished
 
     @staticmethod
-    def sync_kv_cache_memory_size(dp_group: "ProcessGroup",
+    def sync_kv_cache_memory_size(dp_group: ProcessGroup,
                                   kv_cache_memory: int) -> int:
         if kv_cache_memory == -1:
             kv_cache_memory = torch.iinfo(torch.int64).max
