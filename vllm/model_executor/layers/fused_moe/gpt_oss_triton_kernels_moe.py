@@ -24,9 +24,6 @@ if has_triton_kernels():
             "Failed to import Triton kernels. Please make sure your triton "
             "version is compatible.")
 
-if TYPE_CHECKING:
-    from triton_kernels.matmul_ogs import PrecisionConfig
-
 
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
