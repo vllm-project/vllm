@@ -227,6 +227,19 @@ class CudaPlatformBase(Platform):
         if use_mla:
             # TODO(lucas): refactor to be more concise
             #  we should probably consider factoring out V1 here
+            if selected_backend == _Backend.FLASHINFER_MLA:
+                if use_v1 and cls.has_device_capability(100):
+                    from vllm.v1.attention.backends.utils import (
+                        set_kv_cache_layout)
+                    set_kv_cache_layout("HND")
+                    logger.info_once(
+                        "Using FlashInfer MLA backend on V1 engine.")
+                    return ("vllm.v1.attention.backends.mla."
+                            "flashinfer_mla.FlashInferMLABackend")
+                else:
+                    logger.warning(
+                        "FlashInfer MLA backend is only supported on V1 engine"
+                        " and requires compute capability 10.0")
             if selected_backend == _Backend.CUTLASS_MLA:
                 if use_v1:
                     logger.info_once("Using Cutlass MLA backend on V1 engine.")
