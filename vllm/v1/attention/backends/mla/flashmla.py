@@ -55,8 +55,8 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
-    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.PURE_DECODE_ONLY
+    cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -95,7 +95,10 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             1, # MQA for the decode path
         )
 
-        if self.compilation_config.full_cuda_graph:
+        # TODO: we can disambiguate between decode and mixed-prefill decode here
+        # so we can only use the persistent buffer if a cudagraph is actually
+        # being used.
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             assert self.cg_buf_tile_scheduler_metadata is not None
             assert self.cg_buf_num_splits is not None
 

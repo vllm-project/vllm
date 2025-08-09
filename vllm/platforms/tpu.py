@@ -99,7 +99,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        from vllm.config import CompilationLevel
+        from vllm.config import CompilationLevel, CUDAGraphMode
 
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.
@@ -109,8 +109,10 @@ class TpuPlatform(Platform):
 
         # TPU only supports DYNAMO_ONCE compilation level
         if compilation_config.level != CompilationLevel.DYNAMO_ONCE:
-            logger.info("[TPU] Forcing DYNAMO_ONCE compilation level")
+            logger.info("[TPU] Forcing DYNAMO_ONCE compilation level, and "
+                        "disabling cudagraph.")
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
