@@ -89,7 +89,8 @@ void convert_vertical_slash_indexes_mergehead(
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
               double epsilon);
 
-void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
+void fused_add_rms_norm(torch::Tensor& out, torch::Tensor& input,
+                        torch::Tensor& residual_out, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
 void apply_repetition_penalties_(torch::Tensor& logits,
@@ -103,6 +104,7 @@ void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
 
 void fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
                                          torch::Tensor& input,
+                                         torch::Tensor& residual_out,
                                          torch::Tensor& residual,
                                          torch::Tensor& weight,
                                          torch::Tensor& scale, double epsilon);
@@ -113,6 +115,7 @@ void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
                                       torch::Tensor& scales,
                                       double const epsilon,
                                       std::optional<torch::Tensor> scale_ub,
+                                      std::optional<torch::Tensor> residual_out,
                                       std::optional<torch::Tensor> residual);
 
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
