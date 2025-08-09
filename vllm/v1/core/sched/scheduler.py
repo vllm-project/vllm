@@ -39,7 +39,6 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
-    
     # Policy mapping for efficient policy lookup
     _POLICY_MAPPING = {
         "priority": SchedulingPolicy.PRIORITY,
@@ -109,7 +108,8 @@ class Scheduler(SchedulerInterface):
         try:
             self.policy = self._POLICY_MAPPING[policy_name]
         except KeyError:
-            raise ValueError(f"Unknown scheduling policy: {policy_name}") from None
+            raise ValueError(
+                f"Unknown scheduling policy: {policy_name}") from None
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
