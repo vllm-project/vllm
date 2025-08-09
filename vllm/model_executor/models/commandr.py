@@ -27,7 +27,7 @@ from typing import Optional, Union
 
 import torch
 from torch import nn
-from transformers import CohereConfig
+from transformers import Cohere2Config, CohereConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -89,7 +89,7 @@ class CohereMLP(nn.Module):
 
     def __init__(
         self,
-        config: CohereConfig,
+        config: Union[CohereConfig, Cohere2Config],
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
@@ -124,7 +124,7 @@ class CohereAttention(nn.Module):
 
     def __init__(
         self,
-        config: CohereConfig,
+        config: Union[CohereConfig, Cohere2Config],
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -242,7 +242,7 @@ class CohereAttention(nn.Module):
 class CohereDecoderLayer(nn.Module):
 
     def __init__(self,
-                 config: CohereConfig,
+                 config: Union[CohereConfig, Cohere2Config],
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
