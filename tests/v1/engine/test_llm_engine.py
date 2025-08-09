@@ -152,10 +152,18 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
                 f"{len(completion_counts)} unique completions; expected"
                 f" {n}. Repeats: {repeats}")
 
+
 sampling_params_sets = [
-    {"logprobs": 2, "min_p": 0.5},
-    {"logprobs": 3, "min_p": 0.7},
+    {
+        "logprobs": 2,
+        "min_p": 0.5
+    },
+    {
+        "logprobs": 3,
+        "min_p": 0.7
+    },
 ]
+
 
 @pytest.mark.parametrize("model", ["Qwen/Qwen3-0.6B"])
 @pytest.mark.parametrize("num_index", [2, 5])
@@ -164,9 +172,8 @@ sampling_params_sets = [
     RequestOutputKind.FINAL_ONLY
 ])
 @pytest.mark.parametrize("params", sampling_params_sets)
-def test_llmengine_streaming_with_parallel_sampling(
-    model, output_kind, num_index, params
-) -> None:
+def test_llmengine_streaming_with_parallel_sampling(model, output_kind,
+                                                    num_index, params) -> None:
     """Test output_kind in LLMEngine when parallel sampling (index) `n>1`.
     """
     engine_args = EngineArgs(model=model, gpu_memory_utilization=0.5)
@@ -175,16 +182,14 @@ def test_llmengine_streaming_with_parallel_sampling(
     NUM_REQUESTS = 10
     NUM_TOKENS = 20
 
-    sampling_params = SamplingParams(
-        max_tokens=NUM_TOKENS,
-        min_tokens=NUM_TOKENS,
-        n=num_index,
-        **({
-            "output_kind": output_kind
-        } if output_kind is not None else {}),
-        temperature=0.9,
-        **params
-    )
+    sampling_params = SamplingParams(max_tokens=NUM_TOKENS,
+                                     min_tokens=NUM_TOKENS,
+                                     n=num_index,
+                                     **({
+                                         "output_kind": output_kind
+                                     } if output_kind is not None else {}),
+                                     temperature=0.9,
+                                     **params)
 
     if output_kind is None:
         assert (sampling_params.output_kind == RequestOutputKind.CUMULATIVE
