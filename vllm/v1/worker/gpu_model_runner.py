@@ -1239,8 +1239,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         if (self.scheduler_config.chunked_prefill_enabled
                 and "encode" in supported_tasks):
-            # Chunked prefill is not supported with the encode task
-            # which using ALL pooling.
             supported_tasks.remove("encode")
 
             logger.info_once("Chunked prefill is not supported with "
