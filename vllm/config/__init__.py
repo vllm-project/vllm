@@ -1120,15 +1120,14 @@ class ModelConfig:
         supported_quantization = me_quant.QUANTIZATION_METHODS
         optimized_quantization_methods = [
             "fp8",
-           
             "modelopt",
             "gptq_marlin_24",
-            "gptq_marlin", "awq_marlin",
-           
+            "gptq_marlin",
+            "awq_marlin",
             "fbgemm_fp8",
             "compressed-tensors",
-            "experts_int8", "quark",
-           
+            "experts_int8",
+            "quark",
             "modelopt_fp4",
             "bitblas",
             "gptq_bitblas",
