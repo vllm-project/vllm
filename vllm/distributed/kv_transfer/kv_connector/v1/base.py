@@ -12,6 +12,8 @@ The class provides the following primitives:
             times for a given request and should be side-effect free.
         update_state_after_alloc() - update KVConnector state after
             temporary buffer alloc by the CacheManager.
+        update_connector_output() - update KVConnector state after
+            output is received from worker-side connectors.
         request_finished() - called when a request is finished, with
             the computed kv cache blocks for the request.
             Returns whether KV cache should be freed now or will be
@@ -38,6 +40,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -282,6 +285,16 @@ class KVConnectorBase_V1(ABC):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         pass
+
+    def update_connector_output(self, connector_output: KVConnectorOutput):
+        """
+        Update KVConnector state from worker-side connectors output.
+
+        Args:
+            connector_output (KVConnectorOutput): the worker-side
+                connectors output.
+        """
+        return
 
     def request_finished(
         self,

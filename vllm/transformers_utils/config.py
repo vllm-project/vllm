@@ -35,7 +35,8 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              MllamaConfig, MLPSpeculatorConfig,
                                              Nemotron_Nano_VL_Config,
                                              NemotronConfig, NVLM_D_Config,
-                                             RWConfig, SpeculatorsConfig,
+                                             OvisConfig, RWConfig,
+                                             SpeculatorsConfig,
                                              Step3TextConfig, Step3VLConfig,
                                              UltravoxConfig)
 # yapf: enable
@@ -85,6 +86,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "speculators": SpeculatorsConfig,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
+    "ovis": OvisConfig,
     "ultravox": UltravoxConfig,
     "step3_vl": Step3VLConfig,
     "step3_text": Step3TextConfig,
@@ -448,6 +450,20 @@ def get_config(
                 f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
+
+    # ModelOpt 0.31.0 and after saves the quantization config in the model
+    # config file.
+    quantization_config = config_dict.get("quantization_config", None)
+
+    # ModelOpt 0.29.0 and before saves the quantization config in a separate
+    # "hf_quant_config.json" in the same directory as the model config file.
+    if quantization_config is None \
+        and file_or_path_exists(model, "hf_quant_config.json", revision):
+        quantization_config = get_hf_file_to_dict("hf_quant_config.json",
+                                                  model, revision)
+
+    if quantization_config is not None:
+        config.quantization_config = quantization_config
 
     if hf_overrides_kw:
         logger.debug("Overriding HF config with %s", hf_overrides_kw)

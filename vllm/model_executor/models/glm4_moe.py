@@ -28,7 +28,7 @@ from typing import Any, Optional, Union
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers.models.glm4_moe import Glm4MoeConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -100,7 +100,7 @@ class Glm4MoE(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Glm4MoeConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         enable_eplb: bool = False,
@@ -123,6 +123,7 @@ class Glm4MoE(nn.Module):
                                      config.n_routed_experts,
                                      bias=False,
                                      quant_config=None,
+                                     params_dtype=torch.float32,
                                      prefix=f"{prefix}.gate")
 
         self.gate.e_score_correction_bias = nn.Parameter(
@@ -180,7 +181,7 @@ class Glm4MoE(nn.Module):
 
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
-        router_logits, _ = self.gate(hidden_states)
+        router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits) * self.routed_scaling_factor
@@ -197,7 +198,7 @@ class Glm4MoeAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Glm4MoeConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -296,7 +297,7 @@ class Glm4MoeDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Glm4MoeConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -600,8 +601,6 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
                                           quant_config=quant_config)
         else:
             self.lm_head = PPMissingLayer()
-        if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
@@ -682,7 +681,7 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         return self.model.get_expert_mapping()
 
 
-def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
+def get_spec_layer_idx_from_weight_name(config: Glm4MoeConfig,
                                         weight_name: str) -> Optional[int]:
     if hasattr(config,
                "num_nextn_predict_layers") and (config.num_nextn_predict_layers
