@@ -280,6 +280,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          transformers_version_reason="vLLM impl inherits PreTrainedModel and clashes with get_input_embeddings",  # noqa: E501
                                         trust_remote_code=True),
     "QWenLMHeadModel": _HfExamplesInfo("Qwen/Qwen-7B-Chat",
+                                       max_transformers_version="4.53",
+                                       transformers_version_reason="HF model uses remote code that is not compatible with latest Transformers",  # noqa: E501
                                        trust_remote_code=True),
     "Qwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2-0.5B-Instruct",
                                         extras={"2.5": "Qwen/Qwen2.5-0.5B-Instruct"}), # noqa: E501
@@ -429,7 +431,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6",
                                 trust_remote_code=True),
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
-                                extras={"2.6": "openbmb/MiniCPM-V-2_6"},  # noqa: E501
+                                extras={"2.6": "openbmb/MiniCPM-V-2_6", "4.0": "openbmb/MiniCPM-V-4"},  # noqa: E501
                                 trust_remote_code=True),
     "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo("MiniMaxAI/MiniMax-VL-01", # noqa: E501
                                               trust_remote_code=True,

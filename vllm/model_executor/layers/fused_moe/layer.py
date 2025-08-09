@@ -28,13 +28,15 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
+from vllm.model_executor.layers.fused_moe.routing_simulator import (
+    RoutingSimulator)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import (direct_register_custom_op, has_deep_ep, has_pplx,
-                        round_up)
+                        has_triton_kernels, is_torch_equal_or_newer, round_up)
 from vllm.utils.flashinfer import has_flashinfer
 
 if current_platform.is_cuda_alike():
@@ -721,10 +723,17 @@ class FusedMoE(torch.nn.Module):
         self.global_num_experts = num_experts + num_redundant_experts
 
         # we padding globally so EP buffer allocation works
-        if quant_config and quant_config.get_name() == "mxfp4" and (
-                envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
-            hidden_size = round_up(hidden_size, 256)
+        if quant_config and quant_config.get_name() == "mxfp4":
+            if not is_torch_equal_or_newer("2.8.0"):
+                raise RuntimeError("Mxfp4 on hopper requires torch >= 2.8.0")
+            if current_platform.is_device_capability(
+                    90) and not has_triton_kernels():
+                raise NotImplementedError(
+                    "Triton kernels must be installed for mxfp4 on hopper")
+            if (current_platform.is_rocm()
+                    or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+                    or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+                hidden_size = round_up(hidden_size, 256)
 
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config
@@ -1362,6 +1371,16 @@ class FusedMoE(torch.nn.Module):
         """
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 
+        # Check if we should use a routing simulation strategy
+        routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
+        if routing_strategy != "":
+            return RoutingSimulator.simulate_routing(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                strategy_name=routing_strategy,
+                top_k=top_k,
+                indices_type=indices_type)
+
         # DeepSeekv2 uses grouped_top_k
         if use_grouped_topk:
             assert topk_group is not None
@@ -1430,22 +1449,9 @@ class FusedMoE(torch.nn.Module):
             # to the modular kernel, we can move this logic there
             # to achieve better efficiency.
 
-            # `expert_load_view`: (num_logical_experts,)
+            # `expert_load_view`: (num_physical_experts,)
 
-            # Mask out non-local experts
-            if expert_map is not None:
-                topk_ids_local = expert_map[topk_ids]
-                topk_ids_flatten = topk_ids_local.flatten()
-            else:
-                topk_ids_flatten = topk_ids.flatten()
-
-            # Should be equivalent to:
-            # ```
-            # topk_ids_masked = topk_ids_local[topk_ids_local >= 0]
-            # expert_load_view += topk_ids_masked.bincount(
-            #     minlength=expert_load_view.shape[0])
-            # ```
-            # We use `scatter_add_` since `bincount` cannot be compiled
+            topk_ids_flatten = topk_ids.flatten()
 
             # Performance optimization:
             # `masked_fill` is significantly faster than `masked_select`
@@ -1571,18 +1577,19 @@ class FusedMoE(torch.nn.Module):
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
         moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
         num_tokens = full_hidden_states.size(0)
-        for chunk_start_ in range(0, max_tokens_across_dp,
-                                  moe_dp_chunk_size_per_rank):
+        for chunk_idx, chunk_start_ in enumerate(
+                range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank)):
             chunk_start = chunk_start_
             chunk_end = min(chunk_start + moe_dp_chunk_size_per_rank,
                             max_tokens_across_dp)
             # clamp start and end
             chunk_start = min(chunk_start, num_tokens - 1)
             chunk_end = min(chunk_end, num_tokens)
-
-            process_chunk(chunk_start,
-                          chunk_end,
-                          skip_result_store=chunk_start_ >= num_tokens)
+            with ctx.dp_metadata.chunked_sizes(moe_dp_chunk_size_per_rank,
+                                               chunk_idx):
+                process_chunk(chunk_start,
+                              chunk_end,
+                              skip_result_store=chunk_start_ >= num_tokens)
 
         return full_final_hidden_states
 
