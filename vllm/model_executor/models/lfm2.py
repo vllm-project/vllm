@@ -18,6 +18,8 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateShapeCalculator)
 from vllm.model_executor.layers.mamba.short_conv import ShortConv
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -29,7 +31,8 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import (HasInnerState, IsHybrid, SupportsLoRA, SupportsPP,
                          SupportsQuant)
-from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
+                    is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -320,7 +323,7 @@ class Lfm2Model(nn.Module):
             org_num_embeddings=config.vocab_size)
 
         def get_layer(prefix: str):
-            layer_idx = int(prefix.rsplit(".", 1)[1])
+            layer_idx = extract_layer_index(prefix)
             is_attn = self.config.layer_types[layer_idx] == "full_attention"
             layer_class = (Lfm2AttentionDecoderLayer
                            if is_attn else Lfm2ShortConvDecoderLayer)
@@ -365,14 +368,7 @@ class Lfm2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        kv_cache_index = 0
-        state_cache_index = 0
         for layer in self.layers[self.start_layer:self.end_layer]:
-            if isinstance(layer, Lfm2AttentionDecoderLayer):
-                kv_cache_index += 1
-            elif isinstance(layer, Lfm2ShortConvDecoderLayer):
-                state_cache_index += 1
-
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
@@ -461,14 +457,12 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
 
-        world_size = parallel_config.tensor_parallel_size
-        hidden_size = hf_config.conv_dim
-        conv_L_cache = hf_config.conv_L_cache
-        conv_state_shape = (
-            conv_L_cache - 1,
-            hidden_size // world_size,
+        return MambaStateShapeCalculator.short_conv_state_shape(
+            tp_world_size=parallel_config.tensor_parallel_size,
+            intermediate_size=hf_config.conv_dim,
+            conv_kernel=hf_config.conv_L_cache,
+            use_v1=use_v1,
         )
-        return (conv_state_shape, )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.model_config.hf_config
@@ -478,7 +472,8 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         scheduler_config = vllm_config.scheduler_config
         assert (not cache_config.enable_prefix_caching
                 ), "Lfm2 currently does not support prefix caching"
-        assert envs.VLLM_USE_V1, ("V0 has been deprecated for Lfm2ForCausalLM")
+        assert envs.VLLM_USE_V1, (
+            "Lfm2ForCausalLM doesn't support vLLM v0. Please enable v1")
 
         super().__init__()
         self.config = config
