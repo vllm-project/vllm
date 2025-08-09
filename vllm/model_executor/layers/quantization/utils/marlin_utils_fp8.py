@@ -58,6 +58,7 @@ def apply_fp8_marlin_linear(
     output = ops.gptq_marlin_gemm(a=reshaped_x,
                                   c=None,
                                   b_q_weight=weight,
+                                  b_bias=bias,
                                   b_scales=weight_scale,
                                   global_scale=None,
                                   b_zeros=None,
@@ -70,9 +71,6 @@ def apply_fp8_marlin_linear(
                                   size_k=size_k,
                                   use_atomic_add=use_atomic_add,
                                   use_fp32_reduce=use_fp32_reduce)
-
-    if bias is not None:
-        output.add_(bias)  # In-place add
 
     return output.reshape(out_shape)
 

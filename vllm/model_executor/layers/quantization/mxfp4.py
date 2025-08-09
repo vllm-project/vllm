@@ -15,13 +15,17 @@ from vllm.model_executor.layers.linear import (LinearBase,
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    prepare_moe_fp4_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _can_support_mxfp4, _swizzle_mxfp4)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import next_power_of_2, round_up
+from vllm.scalar_type import scalar_types
+from vllm.utils import (has_triton_kernels, is_torch_equal_or_newer,
+                        next_power_of_2, round_up)
 
 if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
         or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
@@ -42,7 +46,7 @@ class Mxfp4Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 90
+        return 80
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -81,6 +85,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         super().__init__()
         self.topk_indices_dtype = None
         self.moe = moe
+        self.use_marlin = False
+        if current_platform.is_cuda() and \
+                not current_platform.has_device_capability(100):
+            if not current_platform.is_device_capability(90):
+                # marlin kernel has better performance on ampere
+                self.use_marlin = True
+            if not has_triton_kernels():
+                self.use_marlin = True
+            if not is_torch_equal_or_newer("2.8.0"):
+                self.use_marlin = True
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -101,11 +115,20 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         intermediate_size_per_partition_after_pad = \
             intermediate_size_per_partition
-        # pad the intermediate size to be a multiple of 2 * mxfp4_block
-        # for to hold non-uniform sharded tensor as well as swizzling
-        # other padding to increase performance
-        if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+        if self.use_marlin:
+            intermediate_size_per_partition_after_pad = round_up(
+                intermediate_size_per_partition, 128)
+            hidden_size = round_up(hidden_size, 256)
+
+            layer.params_dtype = params_dtype
+            layer.num_experts = num_experts
+            layer.hidden_size = hidden_size
+            layer.intermediate_size_per_partition = \
+                intermediate_size_per_partition_after_pad
+        elif (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+              or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+            # pad the intermediate size to be a multiple of 2 * mxfp4_block
+            # for to hold non-uniform sharded tensor as well as swizzling
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 256)
             hidden_size = round_up(hidden_size, 256)
@@ -191,8 +214,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer):
-        if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+        if self.use_marlin:
+            prepare_moe_fp4_layer_for_marlin(layer, w13_interleaved=True)
+        elif (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+              or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
             layer.gemm1_alpha = Parameter(torch.tensor(
                 [1.702] * self.num_experts, dtype=torch.float32).cuda(),
                                           requires_grad=False)
@@ -398,6 +423,39 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         if enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")
+
+        if self.use_marlin:
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias)
+
+            return torch.ops.vllm.fused_marlin_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_bias,
+                layer.w2_bias,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                global_scale1=None,
+                global_scale2=None,
+                quant_type_id=scalar_types.float4_e2m1f.id,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                # hardcoded for gpt-oss
+                swiglu_config=[1.702, 0.0, 1.0, 1.0, 7.0],
+                expert_map=expert_map)
 
         assert _can_support_mxfp4(
             use_grouped_topk, topk_group, num_expert_group, expert_map,
