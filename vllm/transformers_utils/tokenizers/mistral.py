@@ -519,3 +519,13 @@ class MistralTokenizer(TokenizerBase):
             tokens = [self.tokenizer.id_to_byte_piece(id) for id in ids]
 
         return tokens
+
+    def num_special_tokens_to_add(self) -> int:
+        # MistralTokenizer always adds [INST] and [/INST]
+        num_tokens = 2
+
+        # MistralTokenizer does not appear to add an eos token
+        if hasattr(self, "bos_token_id") and self.bos_token_id is not None:
+            num_tokens += 1
+
+        return num_tokens
