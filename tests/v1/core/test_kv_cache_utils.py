@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes, sha256, sha256_cbor_64bit
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -33,14 +33,14 @@ def make_request(request_id,
                  mm_hashes=None,
                  cache_salt=None):
     if mm_positions is None:
-        multi_modal_inputs = None
+        mm_kwargs = None
     else:
-        multi_modal_inputs = [MultiModalKwargs({})] * len(mm_positions)
+        mm_kwargs = [MultiModalKwargsItem()] * len(mm_positions)
 
     return Request(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
-        multi_modal_inputs=multi_modal_inputs,
+        multi_modal_kwargs=mm_kwargs,
         multi_modal_hashes=mm_hashes,
         multi_modal_placeholders=mm_positions,
         sampling_params=SamplingParams(max_tokens=17),
