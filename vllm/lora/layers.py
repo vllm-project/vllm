@@ -932,12 +932,13 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         else:
             # TODO: simplify code below
             splitted_input = split_tensor_along_last_dim(
-                input_, num_partitions=self.base_layer.tp_size)
+                input_, num_partitions=self.base_layer.comm_group_size)
             input_parallel = splitted_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
         output_parallel = self.apply(input_parallel)
-        if self.base_layer.reduce_results and self.base_layer.tp_size > 1:
+        if self.base_layer.reduce_results and \
+            self.base_layer.comm_group_size > 1:
             output_ = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output_ = output_parallel
