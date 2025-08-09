@@ -736,11 +736,8 @@ def cast_overflow_tensors(
     return tensors
 
 
-def fast_topk(
-    values: torch.Tensor, 
-    topk: int, 
-    dim: int
-) -> tuple[torch.Tensor, torch.Tensor]:
+def fast_topk(values: torch.Tensor, topk: int,
+              dim: int) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Optimized topk implementation that uses torch.max for k=1 case.
     
