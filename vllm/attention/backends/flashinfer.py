@@ -1114,10 +1114,12 @@ class FlashInferImpl(AttentionImpl):
             assert decode_meta.decode_wrapper._sm_scale == softmax_scale
             # TODO: @pavanimajety Remove this once the switch happens
             # inside flashinfer.
-            if not use_trtllm_attention(
-                    num_decode_tokens, attn_metadata.max_decode_seq_len,
-                    kv_cache_dtype, attn_metadata.num_qo_heads,
-                    attn_metadata.num_kv_heads, attn_metadata.head_dim):
+            if not use_trtllm_attention(attn_metadata.num_qo_heads,
+                                        attn_metadata.num_kv_heads,
+                                        num_decode_tokens,
+                                        attn_metadata.max_decode_seq_len,
+                                        kv_cache_dtype,
+                                        is_prefill=False):
                 decode_meta.decode_wrapper.run(
                     decode_query,
                     kv_cache.permute(*stride_order),
