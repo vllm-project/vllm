@@ -317,9 +317,8 @@ class BaseMultiModalField(ABC):
 
         validated_data = list[NestedTensors]()
         for i, item in enumerate(elems):
-            if item.data is None:
-                raise ValueError(f"Cannot merge with empty `elems[{i}]`")
-
+            assert item.data is not None, (
+                f"Cannot merge with empty `elems[{i}]`")
             validated_data.append(item.data)
 
         return self._reduce_data(validated_data, pin_memory=pin_memory)
@@ -674,7 +673,8 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
 
         out_data = dict[str, NestedTensors]()
         for key, item in self.items():
-            assert item.data is not None
+            assert item.data is not None, (
+                f"Cannot get data of empty `items[{key}]`")
             out_data[key] = item.data
 
         return out_data
