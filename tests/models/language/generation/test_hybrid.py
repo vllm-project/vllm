@@ -20,7 +20,7 @@ pytestmark = pytest.mark.hybrid_model
 SSM_MODELS = [
     "state-spaces/mamba-130m-hf",
     "tiiuae/falcon-mamba-tiny-dev",
-    "mistralai/Mamba-Codestral-7B-v0.1",
+    "yujiepan/mamba2-codestral-v0.1-tiny-random",
 ]
 
 HYBRID_MODELS = [
@@ -29,8 +29,6 @@ HYBRID_MODELS = [
     # "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
     "hmellor/tiny-random-BambaForCausalLM",
-    "ibm-ai-platform/Bamba-9B-v1",
-    "nvidia/Nemotron-H-8B-Base-8K",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
@@ -41,23 +39,18 @@ HF_UNSUPPORTED_MODELS = [
     # Mamba2 is buggy for Codestral as it doesn't handle n_groups, so the test
     # doesn't compare vLLM output with HF output.
     # See https://github.com/huggingface/transformers/pull/35943
-    "mistralai/Mamba-Codestral-7B-v0.1",
-    # Note: I'm not seeing the same output from vLLM V0 vs. HF transformers
-    # for Nemotron-H-8B; currently only compare vLLM V0 vs. vLLM V1
-    "nvidia/Nemotron-H-8B-Base-8K",
-    # NOTE: Currently the test fails due to HF transformers issue fixed in:
-    # https://github.com/huggingface/transformers/pull/39033
-    # We will enable vLLM test for Granite after next HF transformers release.
-    "ibm-granite/granite-4.0-tiny-preview",
+    "yujiepan/mamba2-codestral-v0.1-tiny-random",
+    # transformers 4.55 is still producing garbage for this model
+    # TODO(tdoublep): follow-up on transformers side
+    "ibm-granite/granite-4.0-tiny-preview"
 ]
 
 V1_SUPPORTED_MODELS = [
     "state-spaces/mamba-130m-hf",
     "ai21labs/Jamba-tiny-dev",
-    "mistralai/Mamba-Codestral-7B-v0.1",
-    "ibm-ai-platform/Bamba-9B-v1",
+    "yujiepan/mamba2-codestral-v0.1-tiny-random",
     "Zyphra/Zamba2-1.2B-instruct",
-    "nvidia/Nemotron-H-8B-Base-8K",
+    "hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
