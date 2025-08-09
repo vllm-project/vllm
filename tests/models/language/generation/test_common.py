@@ -38,62 +38,62 @@ AITER_MODEL_LIST = [
     "model",
     [
         pytest.param("Saesara/swissai"),  # apertus
-        # pytest.param(
-        #     "bigscience/bloom-560m",  # bloom - testing alibi slopes
-        #     marks=[pytest.mark.core_model],
-        # ),
-        # pytest.param(
-        #     "openai-community/gpt2",  # gpt2
-        #     marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        # ),
-        # pytest.param("Milos/slovak-gpt-j-405M"),  # gptj
-        # pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
-        # pytest.param("EleutherAI/pythia-70m"),  # gpt_neox
-        # pytest.param(
-        #     "google/gemma-1.1-2b-it",  # gemma
-        #     marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        # ),
-        # pytest.param(
-        #     "zai-org/chatglm3-6b",  # chatglm (text-only)
-        # ),
-        # pytest.param(
-        #     "meta-llama/Llama-3.2-1B-Instruct",  # llama
-        #     marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        # ),
-        # pytest.param(
-        #     "openbmb/MiniCPM3-4B",
-        #     # fused_moe not supported on CPU
-        #     marks=[pytest.mark.core_model,
-        #            large_gpu_mark(min_gb=32)],
-        # ),
-        # pytest.param(
-        #     "facebook/opt-125m",  # opt
-        #     marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        # ),
-        # pytest.param(
-        #     "microsoft/phi-2",  # phi
-        #     marks=[pytest.mark.core_model],
-        # ),
-        # pytest.param(
-        #     "Qwen/Qwen-7B-Chat",  # qwen (text-only)
-        # ),
-        # pytest.param(
-        #     "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
-        #     marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        # ),
-        # pytest.param(
-        #     "Qwen/Qwen3-8B",  # qwen (text-only)
-        # ),
-        # pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
-        # pytest.param("bigcode/starcoder2-3b"),  # starcoder2
-        # pytest.param(
-        #     "TitanML/tiny-mixtral",  # mixtral
-        #     marks=[pytest.mark.core_model],
-        # ),
-        # pytest.param(
-        #     "allenai/OLMoE-1B-7B-0924-Instruct",
-        #     marks=[pytest.mark.cpu_model],
-        # )
+        pytest.param(
+            "bigscience/bloom-560m",  # bloom - testing alibi slopes
+            marks=[pytest.mark.core_model],
+        ),
+        pytest.param(
+            "openai-community/gpt2",  # gpt2
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
+        pytest.param("Milos/slovak-gpt-j-405M"),  # gptj
+        pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
+        pytest.param("EleutherAI/pythia-70m"),  # gpt_neox
+        pytest.param(
+            "google/gemma-1.1-2b-it",  # gemma
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
+        pytest.param(
+            "zai-org/chatglm3-6b",  # chatglm (text-only)
+        ),
+        pytest.param(
+            "meta-llama/Llama-3.2-1B-Instruct",  # llama
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
+        pytest.param(
+            "openbmb/MiniCPM3-4B",
+            # fused_moe not supported on CPU
+            marks=[pytest.mark.core_model,
+                   large_gpu_mark(min_gb=32)],
+        ),
+        pytest.param(
+            "facebook/opt-125m",  # opt
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
+        pytest.param(
+            "microsoft/phi-2",  # phi
+            marks=[pytest.mark.core_model],
+        ),
+        pytest.param(
+            "Qwen/Qwen-7B-Chat",  # qwen (text-only)
+        ),
+        pytest.param(
+            "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
+        pytest.param(
+            "Qwen/Qwen3-8B",  # qwen (text-only)
+        ),
+        pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
+        pytest.param("bigcode/starcoder2-3b"),  # starcoder2
+        pytest.param(
+            "TitanML/tiny-mixtral",  # mixtral
+            marks=[pytest.mark.core_model],
+        ),
+        pytest.param(
+            "allenai/OLMoE-1B-7B-0924-Instruct",
+            marks=[pytest.mark.cpu_model],
+        )
     ])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
