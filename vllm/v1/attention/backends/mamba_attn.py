@@ -7,6 +7,7 @@ from typing import ClassVar, Optional
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
@@ -93,8 +94,18 @@ class Mamba2AttentionMetadataBuilder(
         assert isinstance(kv_cache_spec, MambaSpec)
         self.kv_cache_spec = kv_cache_spec
         self.chunk_size = vllm_config.model_config.get_mamba_chunk_size()
+        self.vllm_config = vllm_config
+        self.compilation_config = vllm_config.compilation_config
         assert self.chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models")
+        self.decode_cudagraph_max_bs = min(
+            self.vllm_config.scheduler_config.max_num_seqs,
+            self.compilation_config.max_capture_size)
+        self.state_indices_tensor = torch.empty(
+            (self.decode_cudagraph_max_bs, ),
+            dtype=torch.int32,
+            device=device,
+        )
 
     def build(self,
               common_prefix_len: int,
@@ -146,6 +157,14 @@ class Mamba2AttentionMetadataBuilder(
                     _query_start_loc_to_chunk_indices_offsets(
                         query_start_loc_p, self.chunk_size,
                         num_prefill_tokens))
+
+        elif num_decodes <= self.decode_cudagraph_max_bs:
+            # Pad state tensor for CUDA graph
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decodes)
+            self.state_indices_tensor[:num_decodes].copy_(state_indices_tensor,
+                                                          non_blocking=True)
+            state_indices_tensor = self.state_indices_tensor[:num_input_tokens]
+            state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
         attn_metadata = Mamba2AttentionMetadata(
             num_prefills=num_prefills,
