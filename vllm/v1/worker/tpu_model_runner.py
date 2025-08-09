@@ -1685,7 +1685,11 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
 
     def reset_dynamo_cache(self):
-        if self.supports_mm_inputs:
+
+        # NOTE: We check `is_multimodal_model` instead of `supports_mm_inputs`
+        # since the compiled model object of the language backbone of a
+        # multimodal model needs to be extracted via `get_language_model`.
+        if self.model_config.is_multimodal_model:
             compiled_model = self.model.get_language_model().model
         else:
             compiled_model = self.model.model
