@@ -716,6 +716,9 @@ def test_is_kv_cache_type_uniform():
     }
     assert not is_kv_cache_type_uniform(kv_cache_spec)
 
+    # Empty kv_cache_spec is considered uniform
+    assert is_kv_cache_type_uniform({})
+
 
 @pytest.mark.parametrize(
     ("model_id", "max_model_len", "want_estimated_max_len"), [
