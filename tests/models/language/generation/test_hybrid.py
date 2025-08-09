@@ -25,10 +25,8 @@ SSM_MODELS = [
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    # NOTE: Running Plamo2 in transformers implementation requires to install
-    # causal-conv1d package, which is not listed as a test dependency as it's
-    # not compatible with pip-compile.
-    "pfnet/plamo-2-1b",
+    # skipping until vLLM implementation issues are resolved
+    # "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
     "hmellor/tiny-random-BambaForCausalLM",
     "ibm-ai-platform/Bamba-9B-v1",
@@ -83,12 +81,16 @@ def test_models(
     try:
         model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
         model_info.check_available_online(on_fail="skip")
-        model_info.check_transformers_version(on_fail="skip")
+        hf_version_check = model_info.check_transformers_version(
+            on_fail="return")
     except ValueError:
-        pass
+        hf_version_check = None
+
+    if hf_version_check is not None:
+        print(f"Skipping transformers comparison because: {hf_version_check}")
 
     with hf_runner(model) as hf_model:
-        if model not in HF_UNSUPPORTED_MODELS:
+        if model not in HF_UNSUPPORTED_MODELS and hf_version_check is None:
             hf_outputs = hf_model.generate_greedy_logprobs_limit(
                 example_prompts, max_tokens, num_logprobs)
         else:

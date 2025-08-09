@@ -131,19 +131,6 @@ MAX_JOBS=16 uv pip install --system \
     --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.30"
 ```
 
-### Mamba
-
-```bash
-uv pip install --system \
-    --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.5"
-```
-
-### causal-conv1d
-
-```bash
-uv pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
-```
-
 ## Update all the different vLLM platforms
 
 Rather than attempting to update all vLLM platforms in a single pull request, it's more manageable
