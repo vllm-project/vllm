@@ -1672,12 +1672,11 @@ class FlexibleArgumentParser(ArgumentParser):
     _json_tip: str = (
         "When passing JSON CLI arguments, the following sets of arguments "
         "are equivalent:\n"
-        '   - `--json-arg \'{"key1": "value1", "key2": {"key3": "value2"}}\'`\n'
-        "   - `--json-arg.key1 value1 --json-arg.key2.key3 value2`\n\n"
-        "Additionally, list elements can be passed individually using `+`:\n"
-        '   - `--json-arg \'{"key4": ["value3", "value4", "value5"]}\'`\n'
-        "   - `--json-arg.key4+ value3 --json-arg.key4+=\'value4,value5\'`\n\n"
-    )
+        '   --json-arg \'{"key1": "value1", "key2": {"key3": "value2"}}\'\n'
+        "   --json-arg.key1 value1 --json-arg.key2.key3 value2\n\n"
+        "Additionally, list elements can be passed individually using +:\n"
+        '   --json-arg \'{"key4": ["value3", "value4", "value5"]}\'\n'
+        "   --json-arg.key4+ value3 --json-arg.key4+=\'value4,value5\'\n\n")
 
     def __init__(self, *args, **kwargs):
         # Set the default "formatter_class" to SortedHelpFormatter
@@ -1726,8 +1725,9 @@ class FlexibleArgumentParser(ArgumentParser):
 
     def format_help(self) -> str:
         # Add tip about JSON arguments to the epilog
-        if not self.epilog.startswith(FlexibleArgumentParser._json_tip):
-            self.epilog = FlexibleArgumentParser._json_tip + self.epilog
+        epilog = self.epilog or ""
+        if not epilog.startswith(FlexibleArgumentParser._json_tip):
+            self.epilog = FlexibleArgumentParser._json_tip + epilog
         return super().format_help()
 
     def parse_args(  # type: ignore[override]
