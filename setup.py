@@ -441,6 +441,10 @@ def _is_xpu() -> bool:
     return VLLM_TARGET_DEVICE == "xpu"
 
 
+def _is_vulkan() -> bool:
+    return VLLM_TARGET_DEVICE == "vulkan"
+
+
 def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip() or _is_cpu()
 
@@ -557,6 +561,8 @@ def get_vllm_version() -> str:
             version += f"{sep}cpu"
     elif _is_xpu():
         version += f"{sep}xpu"
+    elif _is_vulkan():
+        version += f"{sep}vulkan"
     else:
         raise RuntimeError("Unknown runtime environment")
 
@@ -602,6 +608,8 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("cpu.txt")
     elif _is_xpu():
         requirements = _read_requirements("xpu.txt")
+    elif _is_vulkan():
+        requirements = _read_requirements("vulkan.txt")
     else:
         raise ValueError(
             "Unsupported platform, please use CUDA, ROCm, Neuron, or CPU.")
