@@ -3245,7 +3245,7 @@ def get_served_model_name(model: str,
 
 
 GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines",
-                                  "lm-format-enforcer"]
+                                "lm-format-enforcer"]
 
 
 
