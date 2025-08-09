@@ -746,7 +746,7 @@ def fast_topk(values: torch.Tensor, topk: int,
     
     Args:
         values: Input tensor to find top-k values from
-        topk: Number of top values to return (k). Must be non-negative.
+        topk: Number of top values to return (k). Must be > 0.
         dim: Dimension along which to compute topk
         
     Returns:
