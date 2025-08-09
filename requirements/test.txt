@@ -1051,7 +1051,7 @@ tiktoken==0.7.0
     # via
     #   lm-eval
     #   mistral-common
-timm==1.0.15
+timm==1.0.17
     # via
     #   -r requirements/test.in
     #   open-clip-torch
