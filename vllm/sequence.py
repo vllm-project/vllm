@@ -111,7 +111,7 @@ class RequestMetrics:
         scheduler_time: The time spent in the scheduler when this request was
                         being considered by the scheduler.
         model_forward_time: The time spent in the model forward pass when this
-                            request was in the batch.
+                           request was in the batch.
         model_execute_time: The time spent in the model execute function. This
                             will include model forward, block/sync across
                             workers, cpu-gpu sync time and sampling time.

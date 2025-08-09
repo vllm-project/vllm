@@ -19,7 +19,8 @@ import vllm.envs as envs
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ObservabilityConfig, ParallelConfig, SchedulerConfig,
                          VllmConfig)
-from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs
+from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
+                                 SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.output_processor.interfaces import (
@@ -59,6 +60,7 @@ from vllm.version import __version__ as VLLM_VERSION
 from vllm.worker.model_runner_base import InputProcessingError
 
 logger = init_logger(__name__)
+
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
 _O = TypeVar("_O", RequestOutput, PoolingRequestOutput)
@@ -420,6 +422,26 @@ class LLMEngine:
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
+        if self.device_config.device_type == "cuda":
+            driver_worker = getattr(self.model_executor, "driver_worker", None)
+
+            if driver_worker:
+                model_runner = getattr(driver_worker, "model_runner", None)
+                profile_time = getattr(driver_worker, "profile_time", 0.0)
+
+                if model_runner:
+                    model_gpu_load_time = getattr(model_runner,
+                                                  "model_load_time", 0.0)
+                    cuda_graph_time = getattr(model_runner,
+                                              "cuda_graph_capture_time", 0.0)
+
+                    total_gpu_load_time = (elapsed + model_gpu_load_time +
+                                           profile_time + cuda_graph_time)
+
+                    logger.info(
+                        ("GPU model loading (loading model weights, "
+                         "memory profiling, capturing graphs, init engine) "
+                         " %.2f seconds"), total_gpu_load_time)
 
     @classmethod
     def _get_executor_cls(cls,
@@ -1617,6 +1639,7 @@ class LLMEngine:
         time_queue_requests: List[float] = []
         time_inference_requests: List[float] = []
         time_prefill_requests: List[float] = []
+        time_per_prefill_token_requests: List[float] = []
         time_decode_requests: List[float] = []
         #   Metadata
         num_prompt_tokens_requests: List[int] = []
@@ -1624,6 +1647,9 @@ class LLMEngine:
         n_requests: List[int] = []
         max_num_generation_tokens_requests: List[int] = []
         max_tokens_requests: List[int] = []
+        total_tokens_in_queue = sum(scheduler.get_num_tokens_in_queue()
+                                    for scheduler in self.scheduler)
+        total_evicted_tokens_requests: List[int] = []
         finished_reason_requests: List[str] = []
 
         # LoRA requests
@@ -1721,6 +1747,12 @@ class LLMEngine:
                         time_prefill_requests.append(
                             seq_group.metrics.first_token_time -
                             seq_group.metrics.first_scheduled_time)
+                        num_prompt_tokens = len(seq_group.prompt_token_ids)
+                        if num_prompt_tokens > 0:
+                            time_per_prefill_token = time_prefill_requests[
+                                -1] / num_prompt_tokens
+                            time_per_prefill_token_requests.append(
+                                time_per_prefill_token)
                         time_decode_requests.append(
                             now - seq_group.metrics.first_token_time)
                         time_inference_requests.append(
@@ -1743,6 +1775,11 @@ class LLMEngine:
                         SequenceStatus.get_finished_reason(seq.status)
                         for seq in seq_group.get_finished_seqs()
                     ])
+                    total_evicted = 0
+                    for scheduler in self.scheduler:
+                        if isinstance(scheduler, Scheduler):
+                            total_evicted += scheduler.num_evicted_tokens
+                    total_evicted_tokens_requests.append(total_evicted)
 
             # Number of generation tokens.
             #   num_batched_tokens equals the number of prompt_tokens plus the
@@ -1784,6 +1821,7 @@ class LLMEngine:
             time_queue_requests=time_queue_requests,
             time_inference_requests=time_inference_requests,
             time_prefill_requests=time_prefill_requests,
+            time_per_prefill_token_requests=time_per_prefill_token_requests,
             time_decode_requests=time_decode_requests,
             #   Metadata
             num_prompt_tokens_requests=num_prompt_tokens_requests,
@@ -1792,10 +1830,13 @@ class LLMEngine:
             max_num_generation_tokens_requests,
             n_requests=n_requests,
             max_tokens_requests=max_tokens_requests,
+            total_tokens_in_queue=total_tokens_in_queue,
             finished_reason_requests=finished_reason_requests,
             max_lora=str(max_lora_stat),
             waiting_lora_adapters=list(waiting_lora_adapters.keys()),
-            running_lora_adapters=list(running_lora_adapters.keys()))
+            running_lora_adapters=list(running_lora_adapters.keys()),
+            total_evicted_tokens_requests=total_evicted_tokens_requests,
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
