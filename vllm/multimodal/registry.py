@@ -115,6 +115,45 @@ class MultiModalRegistry:
 
         return True  # Success
 
+    def enable_mm_input_cache(self, model_config: "ModelConfig") -> bool:
+        """Whether the multi-modal input cache should be enabled.
+        NOTE: This is put under MultiModalRegistry on purpose to respect 
+        text-only mode for multimodal models.
+        """
+
+        if not self.supports_multimodal_inputs(model_config):
+            return False
+
+        mm_config = model_config.get_multimodal_config()
+
+        return mm_config.mm_processor_cache_gb > 0
+
+    def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
+        """
+        Checks if the model supports multimodal inputs.
+        Returns True if the model is multimodal with any non-zero supported 
+        modalities, otherwise returns False, effectively running in 
+        text-only mode.
+        """
+        if not model_config.is_multimodal_model:
+            return False
+
+        processor = self.create_processor(model_config, disable_cache=False)
+        supported_modalities = processor.info.get_supported_mm_limits()
+
+        mm_config = model_config.get_multimodal_config()
+
+        # Check if all supported modalities have limit == 0
+        if all(
+                mm_config.get_limit_per_prompt(modality) == 0
+                for modality in supported_modalities):
+            logger.info_once(
+                "All limits of multimodal modalities supported by the model "
+                "are set to 0, running in text-only mode.")
+            return False
+
+        return True
+
     def get_max_tokens_per_item_by_modality(
         self,
         model_config: "ModelConfig",

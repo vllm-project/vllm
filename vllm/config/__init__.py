@@ -1695,15 +1695,6 @@ class ModelConfig:
 
         return mm_config.mm_processor_cache_gb > 0
 
-    @property
-    def enable_mm_input_cache(self) -> bool:
-        """Whether the multi-modal input cache should be enabled."""
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return False
-
-        return mm_config.mm_processor_cache_gb > 0
-
     def get_mm_input_cache_gb(self) -> int:
         mm_config = self.multimodal_config
         if mm_config is None:
