@@ -1,6 +1,34 @@
+"""A registry for vLLM engine backends.
+
+This module provides a mechanism for registering and discovering different
+vLLM engine core implementations. The engine selection process, which happens
+in `vllm.v1.engine.core.EngineCoreProc.run_engine_core`, follows a
+three-tier priority system:
+
+1. **Explicit Naming (`get_engine_core`)**:
+   If the user specifies an `engine_mode` in their configuration (e.g., via the
+   `--engine-mode` CLI flag) with a value other than "default", vLLM will
+   attempt to fetch that exact engine from the registry by its name. This
+   provides a direct way for users to force a specific engine implementation.
+
+2. **Automatic Discovery (`find_supported_engine`)**:
+   If the `engine_mode` is "default", vLLM will perform an automatic discovery
+   by calling `find_supported_engine()`. This function iterates through all
+   registered engines and calls their `is_supported()` static method. The first
+   (and only) engine that returns `True` is selected. This allows external
+   plugins to activate themselves automatically based on the environment (e.g.,
+   hardware, environment variables).
+
+3. **Internal Fallback (in `core.py`)**:
+   If neither an explicitly named engine nor an auto-discovered engine is
+   found, the system falls back to its internal default behavior, selecting
+   either `EngineCoreProc` or `DPEngineCoreProc` based on the parallel
+   configuration.
+"""
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from importlib import import_module
+from typing import Optional
 
 from vllm.v1.engine.interface import IEngineCoreProc
 
@@ -66,3 +94,25 @@ def get_engine_core(name: str) -> type[IEngineCoreProc]:
                 ) from err
         raise ValueError(f"Engine core '{name}' is not registered.")
     return _engine_registry[name]
+
+
+def find_supported_engine() -> Optional[type[IEngineCoreProc]]:
+    """Iterates through registered engines and returns the first one that
+    supports the current environment."""
+    supported_engines = []
+    # Note: .values() is not ordered in older pythons, but for now we assume
+    # either one or zero. If multiple, we raise an error.
+    for engine_class in _engine_registry.values():
+        if engine_class.is_supported():
+            supported_engines.append(engine_class)
+
+    if not supported_engines:
+        return None
+
+    if len(supported_engines) > 1:
+        raise RuntimeError(
+            "Multiple custom engines support the current environment: "
+            f"{[e.__name__ for e in supported_engines]}. "
+            "Please review your configuration or environment to ensure only "
+            "one custom engine's `is_supported()` method returns True.")
+    return supported_engines[0]

@@ -15,6 +15,14 @@ class IEngineCoreProc(Protocol):
     way.
     """
 
+    @staticmethod
+    def is_supported() -> bool:
+        """
+        Returns True if this engine can run in the current environment.
+        The implementation can check for hardware, environment variables, etc.
+        """
+        ...
+
     def __init__(
         self,
         vllm_config: VllmConfig,
