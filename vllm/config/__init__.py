@@ -3834,7 +3834,9 @@ def get_served_model_name(model: str,
     return served_model_name
 
 
-GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines"]
+GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines",
+                                  "lm-format-enforcer"]
+
 
 
 @config
