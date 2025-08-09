@@ -547,6 +547,8 @@ class EngineArgs:
                                  **model_kwargs["model_impl"])
         model_group.add_argument("--override-attention-dtype",
                                  **model_kwargs["override_attention_dtype"])
+        model_group.add_argument("--enable-mla-sharded-kv",
+                                 **model_kwargs["enable_mla_sharded_kv"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)

@@ -520,7 +520,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // SM100 CUTLASS MLA decode
   ops.def(
-      "sm100_cutlass_mla_decode(Tensor! out, Tensor q_nope, Tensor q_pe,"
+      "sm100_cutlass_mla_decode(Tensor! out, Tensor! lse, Tensor q_nope, "
+      "Tensor q_pe,"
       "                         Tensor kv_c_and_k_pe_cache, Tensor seq_lens,"
       "                         Tensor page_table, Tensor workspace, float "
       "scale,"

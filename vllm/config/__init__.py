@@ -464,6 +464,13 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    enable_mla_sharded_kv: bool = False
+    """Enable MLA sharded KV mode for tensor parallelism.
+
+    When enabled with tensor parallelism (>1), MLA decode will gather query
+    tensors across TP ranks to form full queries per rank. Without this flag,
+    MLA with TP>1 is disallowed to avoid silent fallbacks.
+    """
 
     def compute_hash(self) -> str:
         """
@@ -490,6 +497,7 @@ class ModelConfig:
         factors.append(self.generation_config)
         factors.append(self.model_impl)
         factors.append(self.override_generation_config)
+        factors.append(self.enable_mla_sharded_kv)
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
         # hf_config can control how the model looks!

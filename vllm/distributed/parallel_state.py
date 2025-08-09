@@ -400,6 +400,23 @@ class GroupCoordinator:
             raise ValueError("No device communicator found")
         return self.device_communicator.all_gatherv(input_, dim, sizes)
 
+    def all_to_all(self, input_: torch.Tensor, dim: int = 0) -> torch.Tensor:
+        """All-to-all over the device group, splitting along dim equally.
+
+        Note: This is a simple wrapper for torch.distributed.all_to_all_single
+        with equal splits across ranks.
+        """
+        world_size = self.world_size
+        if world_size == 1:
+            return input_
+        if dim < 0:
+            dim += input_.dim()
+        x = input_.movedim(dim, 0).contiguous()
+        assert x.shape[0] % world_size == 0
+        out = torch.empty_like(x)
+        torch.distributed.all_to_all_single(out, x, group=self.device_group)
+        return out.movedim(0, dim).contiguous()
+
     def reduce_scatter(self,
                        input_: torch.Tensor,
                        dim: int = -1) -> torch.Tensor:

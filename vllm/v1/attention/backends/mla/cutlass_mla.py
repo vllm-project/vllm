@@ -184,9 +184,13 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         ), f"page_table.dtype needs to be int32 but got {page_table.dtype}."
 
         out = q_nope.new_empty((B_q, MAX_HEADS, D_latent))
+        lse = torch.empty((B_q, MAX_HEADS),
+                          dtype=torch.float32,
+                          device=q_nope.device)
 
         ops.sm100_cutlass_mla_decode(
             out,
+            lse,
             q_nope,
             q_pe,
             kv_c_and_k_pe_cache,
