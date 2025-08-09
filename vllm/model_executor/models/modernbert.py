@@ -295,7 +295,6 @@ class ModernBertPooler(Pooler):
         return pooled_output
 
 
-@default_pooling_type("CLS")
 class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
                                           SupportsCrossEncoding):
 

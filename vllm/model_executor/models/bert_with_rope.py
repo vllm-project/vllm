@@ -392,7 +392,6 @@ class BertWithRopeEncoder(nn.Module):
         return hidden_states
 
 
-@default_pooling_type("CLS")
 class BertWithRope(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
