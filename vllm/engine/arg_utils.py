@@ -178,17 +178,8 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         kwargs[name] = {"default": default, "help": help}
 
         # Set other kwargs based on the type hints
-        json_tip = """Should either be a valid JSON string or JSON keys
-passed individually. For example, the following sets of arguments are
-equivalent:
-
-- `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`\n
-- `--json-arg.key1 value1 --json-arg.key2.key3 value2`
-
-Additionally, list elements can be passed individually using `+`:
-
-- `--json-arg '{"key4": ["value3", "value4", "value5"]}'`\n
-- `--json-arg.key4+ value3 --json-arg.key4+='value4,value5'`"""
+        json_tip = ("Should either be a valid JSON string or JSON keys passed "
+                    "individually.")
         if dataclass_cls is not None:
 
             def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
@@ -1831,13 +1822,3 @@ def human_readable_int(value):
 
     # Regular plain number.
     return int(value)
-
-
-# These functions are used by sphinx to build the documentation
-def _engine_args_parser():
-    return EngineArgs.add_cli_args(FlexibleArgumentParser())
-
-
-def _async_engine_args_parser():
-    return AsyncEngineArgs.add_cli_args(FlexibleArgumentParser(),
-                                        async_args_only=True)
