@@ -26,7 +26,7 @@ from typing import Any, Optional, Union
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import Exaone4Config
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -96,7 +96,7 @@ class Exaone4Attention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Exaone4Config,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -224,7 +224,7 @@ class Exaone4DecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Exaone4Config,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
