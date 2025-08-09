@@ -85,7 +85,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.topk_indices_dtype = None
         self.moe = moe
         self.use_marlin = current_platform.is_cuda(
-        ) and not current_platform.has_device_capability(90)
+        ) and not current_platform.has_device_capability(100)
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -328,8 +328,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.w2_bias = Parameter(torch.stack(gemm2_bias_shuffled).reshape(
                 self.num_experts, -1),
                                       requires_grad=False)
-        elif self.use_marlin:
-            prepare_moe_fp4_layer_for_marlin(layer, w13_interleaved=True)
         else:
             from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
