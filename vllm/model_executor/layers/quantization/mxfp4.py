@@ -10,8 +10,10 @@ from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
+from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-    triton_kernel_moe_forward)
+    BatchedOAITritonExperts, triton_kernel_moe_forward)
+from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -447,6 +449,188 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         return tile_tokens_dim
 
+    def select_gemm_impl(
+        self,
+        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+        moe: FusedMoEConfig,
+    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        if (prepare_finalize.activation_format ==
+                mk.FusedMoEActivationFormat.BatchedExperts):
+            max_num_tokens_per_rank = (
+                prepare_finalize.max_num_tokens_per_rank())
+            assert max_num_tokens_per_rank is not None
+            return BatchedOAITritonExperts(
+                None,
+                max_num_tokens=max_num_tokens_per_rank,
+                num_dispatchers=prepare_finalize.num_dispatchers(),
+                w1_precision=self.w13_precision_config,
+                w2_precision=self.w2_precision_config,
+            )
+        else:
+            #pass
+
+            if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+                    or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+                # B200 code ??
+                # Quant config shouldn't be None !!
+                return TrtLlmGenExperts(moe)
+            else:
+                # H100 code ??
+                # you use matmul_ogs kernel here!
+                raise NotImplementedError(
+                    "Mxfp4 does not support non-batched experts format for EP")
+
+    def _route_and_experts_example(
+            self,
+            layer: torch.nn.Module,
+            x: torch.Tensor,
+            router_logits: torch.Tensor,
+            top_k: int,
+            renormalize: bool,
+            use_grouped_topk: bool = False,
+            topk_group: Optional[int] = None,
+            num_expert_group: Optional[int] = None,
+            global_num_experts: int = -1,
+            expert_map: Optional[torch.Tensor] = None,
+            custom_routing_function: Optional[Callable] = None,
+            scoring_func: str = "softmax",
+            e_score_correction_bias: Optional[torch.Tensor] = None,
+            apply_router_weight_on_input: bool = False,
+            activation: str = "silu",
+            enable_eplb: bool = False,
+            expert_load_view: Optional[torch.Tensor] = None,
+            logical_to_physical_map: Optional[torch.Tensor] = None,
+            logical_replica_count: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype,
+            enable_eplb=enable_eplb,
+            expert_map=expert_map,
+            expert_load_view=expert_load_view,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count)
+
+        packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
+            torch.bfloat16).view(torch.int16)
+
+        if envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16:
+            assert x.dtype == torch.bfloat16
+            x_quant = x
+            x_scale = None
+        else:
+            x_quant, x_scale = mxfp8_quantize(x, False)  # to mxfp8
+            x_scale = x_scale.view(torch.float8_e4m3fn).reshape(-1)
+
+        output = torch.empty_like(x)
+        kwargs = {
+            "topk_ids": packed_tensor,
+            "routing_bias": None,
+            "hidden_states": x_quant,
+            "hidden_states_scale": x_scale,
+            "gemm1_weights": layer.w13_weight,
+            "gemm1_weights_scale": layer.w13_weight_scale,
+            "gemm1_bias": layer.w13_bias,
+            "gemm1_alpha": layer.gemm1_alpha,
+            "gemm1_beta": layer.gemm1_beta,
+            "gemm1_clamp_limit": layer.gemm1_clamp_limit,
+            "gemm2_weights": layer.w2_weight,
+            "gemm2_weights_scale": layer.w2_weight_scale,
+            "gemm2_bias": layer.w2_bias,
+            "output1_scale_scalar": None,
+            "output1_scale_gate_scalar": None,
+            "output2_scale_scalar": None,
+            "num_experts": self.num_experts,
+            "top_k": top_k,
+            "n_group": None,
+            "topk_group": None,
+            "intermediate_size": self.intermediate_size,
+            "local_expert_offset": 0,
+            "local_num_experts": self.num_experts,
+            "routed_scaling_factor": None,
+            "tile_tokens_dim": 8,
+            "routing_method_type": 1,
+            "do_finalize": True,
+            "output": output,
+        }
+
+        trtllm_fp4_block_scale_routed_moe(**kwargs)
+        return output
+
+    def _route_and_experts(
+            self,
+            layer: torch.nn.Module,
+            x: torch.Tensor,
+            router_logits: torch.Tensor,
+            top_k: int,
+            renormalize: bool,
+            use_grouped_topk: bool = False,
+            topk_group: Optional[int] = None,
+            num_expert_group: Optional[int] = None,
+            global_num_experts: int = -1,
+            expert_map: Optional[torch.Tensor] = None,
+            custom_routing_function: Optional[Callable] = None,
+            scoring_func: str = "softmax",
+            e_score_correction_bias: Optional[torch.Tensor] = None,
+            apply_router_weight_on_input: bool = False,
+            activation: str = "silu",
+            enable_eplb: bool = False,
+            expert_load_view: Optional[torch.Tensor] = None,
+            logical_to_physical_map: Optional[torch.Tensor] = None,
+            logical_replica_count: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+
+        assert isinstance(self.fused_experts, mk.FusedMoEModularKernel)
+
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype,
+            enable_eplb=enable_eplb,
+            expert_map=expert_map,
+            expert_load_view=expert_load_view,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count)
+
+        return self.fused_experts(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            inplace=True,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            extra_expert_args={
+                "w1_bias": layer.w13_bias,
+                "w2_bias": layer.w2_bias,
+                "gemm1_alpha": layer.gemm1_alpha,
+                "gemm1_beta": layer.gemm1_beta,
+                "gemm1_clamp_limit": layer.gemm1_clamp_limit
+            })
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -504,6 +688,25 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 global_num_experts=global_num_experts,
                 activation=activation,
                 expert_map=expert_map)
+
+        if False:
+            # TODO(varun) : remove before landing
+            return self._route_and_experts_example(
+                layer, x, router_logits, top_k, renormalize, use_grouped_topk,
+                topk_group, num_expert_group, global_num_experts, expert_map,
+                custom_routing_function, scoring_func, e_score_correction_bias,
+                apply_router_weight_on_input, activation, enable_eplb,
+                expert_load_view, logical_to_physical_map,
+                logical_replica_count)
+
+        if self.fused_experts is not None:
+            return self._route_and_experts(
+                layer, x, router_logits, top_k, renormalize, use_grouped_topk,
+                topk_group, num_expert_group, global_num_experts, expert_map,
+                custom_routing_function, scoring_func, e_score_correction_bias,
+                apply_router_weight_on_input, activation, enable_eplb,
+                expert_load_view, logical_to_physical_map,
+                logical_replica_count)
 
         assert _can_support_mxfp4(
             use_grouped_topk, topk_group, num_expert_group, expert_map,
