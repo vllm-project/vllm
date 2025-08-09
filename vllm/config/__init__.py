@@ -30,8 +30,8 @@ from typing_extensions import Self, assert_never, runtime_checkable
 import vllm.envs as envs
 from vllm import version
 from vllm.config.compilation import (CompilationConfig, CompilationLevel,
-                                     CUDAGraphMode)
-from vllm.config.parallel import ParallelConfig
+                                     CUDAGraphMode, PassConfig)
+from vllm.config.parallel import DistributedExecutorBackend, ParallelConfig
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
