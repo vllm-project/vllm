@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Optional
 
 import pytest
 
-from vllm import LLM, EngineArgs, LLMEngine
+from vllm import LLM, EngineArgs
+from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.sampling_params import (GuidedDecodingParams, RequestOutputKind,
                                   SamplingParams)
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
