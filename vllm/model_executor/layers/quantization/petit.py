@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.parameter import (ModelWeightParameter,
                                            PerTensorScaleParameter)
+from vllm.platforms import current_platform
 
 # Initialize logger for the module
 logger = init_logger(__name__)
@@ -39,6 +40,7 @@ class PetitNvFp4Config(QuantizationConfig):
         group_size: Optional[int] = None,
         exclude_modules: Optional[list[str]] = None,
     ) -> None:
+        self._check_hardware_support()
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
         if is_checkpoint_nvfp4_serialized:
             logger.warning("Detected nvfp4 checkpoint. Please note that the "
@@ -46,6 +48,20 @@ class PetitNvFp4Config(QuantizationConfig):
         self.group_size = group_size
         self.kv_cache_quant_algo = kv_cache_quant_algo
         self.exclude_modules = exclude_modules
+
+    def _check_hardware_support(self) -> None:
+        """
+        Verifies that the current hardware is supported by the Petit backend.
+        This backend is specifically designed for AMD GPUs and is not
+        supported on the CUDA platform.
+        """
+        # This check ensures the code is NOT running on an NVIDIA GPU.
+        if current_platform.is_cuda():
+            raise ValueError(
+                "The 'petit' quantization backend is designed for AMD GPUs "
+                "and is not supported on the CUDA platform. For NVIDIA GPUs, "
+                "please use a different quantization method such as FP8, AWQ, "
+                "or GPTQ.")
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
