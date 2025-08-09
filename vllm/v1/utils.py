@@ -283,7 +283,21 @@ def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,
 
     Returns the sliced target tensor.
     """
-    return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)
+    if length <= 0:
+        # For length=0, this is a no-op. For negative length, this preserves
+        # the original slicing behavior from the end of the tensor.
+        return to_tensor[:length].copy_(from_tensor[:length],
+                                        non_blocking=True)
+
+    # Clamp length to the minimum of the two tensor sizes to avoid out-of-bounds
+    # access with narrow(), which is stricter than slicing.
+    copy_len = min(length, from_tensor.shape[0], to_tensor.shape[0])
+
+    # Use narrow() for better memory efficiency when safe to do so
+    to_slice = to_tensor.narrow(0, 0, copy_len)
+    from_slice = from_tensor.narrow(0, 0, copy_len)
+
+    return to_slice.copy_(from_slice, non_blocking=True)
 
 
 def report_usage_stats(
