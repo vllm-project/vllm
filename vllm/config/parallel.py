@@ -23,9 +23,9 @@ if TYPE_CHECKING:
 
     from vllm.executor.executor_base import ExecutorBase
 else:
-    RuntimeEnv = object
-    PlacementGroup = object
-    ExecutorBase = object
+    RuntimeEnv = Any
+    PlacementGroup = Any
+    ExecutorBase = Any
 
 logger = init_logger(__name__)
 
