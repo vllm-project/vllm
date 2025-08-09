@@ -106,9 +106,10 @@ class Scheduler(SchedulerInterface):
         self.requests: dict[str, Request] = {}
         # Scheduling policy
         policy_name = self.scheduler_config.policy
-        if policy_name not in self._POLICY_MAPPING:
-            raise ValueError(f"Unknown scheduling policy: {policy_name}")
-        self.policy = self._POLICY_MAPPING[policy_name]
+        try:
+            self.policy = self._POLICY_MAPPING[policy_name]
+        except KeyError:
+            raise ValueError(f"Unknown scheduling policy: {policy_name}") from None
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
