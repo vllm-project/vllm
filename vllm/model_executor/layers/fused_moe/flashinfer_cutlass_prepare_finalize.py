@@ -60,8 +60,6 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
-        assert not apply_router_weight_on_input
-
         (a1_gscale, use_dp, local_tokens) = extract_required_args(
             extra_prepare_args, ['a1_gscale', 'use_dp', 'local_tokens'])
 
