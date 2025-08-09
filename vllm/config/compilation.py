@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
 
 if TYPE_CHECKING:
-    from vllm.config.config import VllmConfig
+    from vllm.config import VllmConfig
 else:
     VllmConfig = object
 
