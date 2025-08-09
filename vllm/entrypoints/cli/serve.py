@@ -29,6 +29,19 @@ from vllm.v1.utils import (APIServerProcessManager,
 
 logger = init_logger(__name__)
 
+VLLM_SERVE_EPILOG = """
+When passing JSON CLI arguments, the following sets of arguments are equivalent:
+
+   - `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`
+   - `--json-arg.key1 value1 --json-arg.key2.key3 value2`
+
+Additionally, list elements can be passed individually using `+`:
+
+   - `--json-arg '{"key4": ["value3", "value4", "value5"]}'`
+   - `--json-arg.key4+ value3 --json-arg.key4+='value4,value5'`
+
+"""
+
 
 class ServeSubcommand(CLISubcommand):
     """The `serve` subcommand for the vLLM CLI. """
@@ -63,7 +76,7 @@ class ServeSubcommand(CLISubcommand):
 
         serve_parser = make_arg_parser(serve_parser)
         show_filtered_argument_or_group_from_help(serve_parser, ["serve"])
-        serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG
+        serve_parser.epilog = VLLM_SERVE_EPILOG + VLLM_SUBCMD_PARSER_EPILOG
         return serve_parser
 
 
