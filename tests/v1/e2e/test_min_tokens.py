@@ -23,7 +23,7 @@ from vllm.outputs import RequestOutput
 
 # Test configuration
 TEST_MODEL = "facebook/opt-125m"  # Small model for fast CI execution
-TEMPERATURE = 0.0  # Deterministic generation for consistent testing
+GREEDY = 0.0  # Deterministic generation for consistent testing
 
 
 class MinTokensTestCase:
@@ -217,7 +217,7 @@ def test_min_tokens_comprehensive(llm_v1: LLM, test_case: MinTokensTestCase):
         min_tokens=test_case.min_tokens,
         max_tokens=test_case.max_tokens,
         stop=test_case.stop,
-        temperature=TEMPERATURE,
+        temperature=GREEDY,
         include_stop_str_in_output=True  # Include stop strings for debugging
     )
 
@@ -256,7 +256,7 @@ def test_min_tokens_basic_functionality(llm_v1: LLM):
     """
     sampling_params = SamplingParams(min_tokens=10,
                                      max_tokens=20,
-                                     temperature=TEMPERATURE)
+                                     temperature=GREEDY)
 
     prompt = "Once upon a time"
     outputs = llm_v1.generate([prompt], sampling_params)
@@ -290,7 +290,7 @@ def test_min_tokens_stop_strings_bug(llm_v1: LLM):
         max_tokens=50,
         # Common letter; likely appears early
         stop=["e"],
-        temperature=TEMPERATURE,
+        temperature=GREEDY,
         include_stop_str_in_output=True)
 
     # Simple prompt that will generate text containing "e"
@@ -336,7 +336,7 @@ def test_min_tokens_stop_strings_guaranteed_early_trigger(llm_v1: LLM):
         max_tokens=200,
         # Use multiple very common patterns - at least one will appear
         stop=["e", "a", "i", "o", "u", " ", "t", "n", "s", "r"],
-        temperature=0.0,  # Maximum determinism
+        temperature=GREEDY, 
         include_stop_str_in_output=True)
 
     # Simple prompt that will generate some text
@@ -357,46 +357,99 @@ def test_min_tokens_stop_strings_guaranteed_early_trigger(llm_v1: LLM):
     # will trigger early termination before min_tokens=50 is reached
     # It's virtually impossible to generate 50 tokens without hitting
     # at least one of: e, a, i, o, u, space, t, n, s, r
-    if stop_reason == "stop":
-        assert token_count >= 50, ("Bug confirmed: "
-                                   f"{token_count} tokens < min_tokens=50. "
-                                   f"Reason: {stop_reason}. "
-                                   f"Text: {repr(generated_text)}")
+    finish_reason = (outputs[0].outputs[0].finish_reason
+                 if outputs[0].outputs else "unknown")
+
+    print(f"Finish reason: {finish_reason}")
+    
+    if finish_reason == "stop":
+        assert token_count >= 50, (
+            "Bug confirmed: "
+            f"{token_count} tokens < min_tokens=50. "
+            f"Reason: {finish_reason}. "
+            f"Text: {repr(generated_text)}"
+        )
+
 
 
 @pytest.mark.xfail(
-    reason=(
-        "Potential logits-processor bug: EOS tokens may bypass min_tokens"),
+    reason=("Potential logits-processor bug: EOS tokens may bypass min_tokens"),
     strict=False,
 )
 def test_min_tokens_eos_behavior(llm_v1: LLM):
     """
-    Test min_tokens behavior with EOS tokens (no explicit stop strings).
-    
-    This tests the MinTokensLogitsProcessor's handling of EOS tokens.
-    If this fails, it indicates a logits-processor bug because the
-    MinTokensLogitsProcessor may have failed to block an EOS 
-    when the token count is less than min_tokens
-    """
-    # If the bug is fixed upstream, this test will XPASS
+    Verify EOS handling with and without min_tokens.
 
-    sampling_params = SamplingParams(
-        min_tokens=25,
-        max_tokens=25,  # Force exact length
-        temperature=TEMPERATURE)
+    - Without min_tokens: expect early EOS -> finish_reason == "stop",
+      stop_reason is None, and generated tokens < max_tokens (25).
+    - With min_tokens: EOS should be blocked until min_tokens is reached
+      (finish_reason == "length"); verify that eos_token_id does not appear
+      in generated token_ids.
+    """
+    # tokenizer + eos id
+    tokenizer = llm_v1.get_tokenizer()
+    eos_token_id = tokenizer.eos_token_id
 
     prompt = "The capital of France is"
-    outputs = llm_v1.generate([prompt], sampling_params)
+    max_toks = 25
 
-    assert len(outputs) == 1
-    token_count = get_token_count(outputs[0])
+    # Case 1: WITHOUT min_tokens
+    sp_no_min = SamplingParams(
+        max_tokens=max_toks,
+        temperature=GREEDY,
+    )
+    out_no_min = llm_v1.generate([prompt], sp_no_min)
+    assert len(out_no_min) == 1
+    choice_no_min = out_no_min[0].outputs[0]
 
-    # This should generate exactly 25 tokens
-    stop_reason = (outputs[0].outputs[0].stop_reason
-                   if outputs[0].outputs else "no output")
-    assert token_count == 25, ("Expected exactly 25 tokens. "
-                               f"Got {token_count}. "
-                               f"Reason: {stop_reason}")
+    ids_no_min = choice_no_min.token_ids or []
+    finish_no_min = choice_no_min.finish_reason
+    stop_no_min = choice_no_min.stop_reason
+
+    print("[no-min] tokens=", len(ids_no_min),
+          " finish=", finish_no_min,
+          " stop_reason=", stop_no_min)
+
+    assert finish_no_min == "stop", (
+        f"Expected finish_reason 'stop' without min_tokens, got {finish_no_min}"
+    )
+    assert stop_no_min is None, (
+        "For EOS-based stop (no user stop strings), stop_reason should be None."
+    )
+    assert len(ids_no_min) < max_toks, (
+        f"Expected early EOS with < {max_toks} tokens, got {len(ids_no_min)}"
+    )
+
+    # Case 2: WITH min_tokens
+    sp_with_min = SamplingParams(
+        min_tokens=max_toks,
+        max_tokens=max_toks,
+        temperature=GREEDY,
+    )
+    out_with_min = llm_v1.generate([prompt], sp_with_min)
+    assert len(out_with_min) == 1
+    choice_with_min = out_with_min[0].outputs[0]
+
+    ids_with_min = choice_with_min.token_ids or []
+    finish_with_min = choice_with_min.finish_reason
+    stop_with_min = choice_with_min.stop_reason
+
+    print("[with-min] tokens=", len(ids_with_min),
+          " finish=", finish_with_min,
+          " stop_reason=", stop_with_min)
+
+    # Exact length reached; EOS should have been blocked
+    assert len(ids_with_min) == max_toks, (
+        f"Expected exactly {max_toks} tokens with min_tokens; "
+        f"got {len(ids_with_min)}"
+    )
+    assert finish_with_min == "length", (
+        f"Expected finish_reason 'length' with min_tokens; got {finish_with_min}"
+    )
+    assert eos_token_id not in ids_with_min, (
+        "EOS token id should not appear when min_tokens prevents early EOS."
+    )
+
 
 
 def test_min_tokens_validation():
