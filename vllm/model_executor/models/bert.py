@@ -466,7 +466,7 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor,
         positions: torch.Tensor,
         token_type_ids: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
