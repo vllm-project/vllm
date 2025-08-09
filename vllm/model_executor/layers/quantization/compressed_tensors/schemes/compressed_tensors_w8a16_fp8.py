@@ -4,7 +4,9 @@
 from typing import Callable, Optional
 
 import torch
-from compressed_tensors.quantization import QuantizationStrategy
+from compressed_tensors.quantization import (QuantizationArgs,
+                                             QuantizationStrategy,
+                                             QuantizationType)
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
@@ -16,11 +18,35 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
 
-__all__ = ["CompressedTensorsW8A16Fp8"]
+__all__ = ["is_fp8_w8a16", "CompressedTensorsW8A16Fp8"]
 
 SUPPORTED_STRATEGIES = [
     QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR
 ]
+
+
+def is_fp8_w8a16(weight_quant: QuantizationArgs,
+                 input_quant: Optional[QuantizationArgs]) -> bool:
+    # Confirm weights quantized.
+    if weight_quant is None:
+        return False
+
+    # Confirm we have floating points.
+    if weight_quant.type != QuantizationType.FLOAT:
+        return False
+
+    # Confirm weight scheme is supported.
+    is_symmetric_weight = weight_quant.symmetric
+    is_static_weight = not weight_quant.dynamic
+    is_per_tensor_or_channel_weight = (weight_quant.strategy in [
+        QuantizationStrategy.TENSOR, QuantizationStrategy.CHANNEL
+    ])
+    if not (is_symmetric_weight and is_static_weight  # noqa: SIM103
+            and is_per_tensor_or_channel_weight):
+        return False
+
+    # All conditions satisfied.
+    return True
 
 
 class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):

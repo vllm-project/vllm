@@ -4,7 +4,8 @@
 from typing import Callable, Optional
 
 import torch
-from compressed_tensors.quantization import QuantizationStrategy
+from compressed_tensors.quantization import (QuantizationArgs,
+                                             QuantizationStrategy)
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -17,6 +18,44 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            PerTensorScaleParameter)
 
 logger = init_logger(__name__)
+
+__all__ = [
+    "is_static_tensor_w8a8", "is_dynamic_token_w8a8",
+    "CompressedTensorsW8A8Int8"
+]
+
+
+def is_static_tensor_w8a8(weight_quant: QuantizationArgs,
+                          input_quant: Optional[QuantizationArgs]) -> bool:
+    if input_quant is None:
+        return False
+
+    is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
+    weight_strategy = (
+        weight_quant.strategy == QuantizationStrategy.TENSOR.value
+        or weight_quant.strategy == QuantizationStrategy.CHANNEL.value)
+    is_tensor = (weight_strategy
+                 and input_quant.strategy == QuantizationStrategy.TENSOR.value)
+    is_static = not weight_quant.dynamic and not input_quant.dynamic
+
+    # Both symmetric and asymmetric input quantization supported.
+    # Only symmetric weight quantization supported.
+    return is_8_bits and is_tensor and weight_quant.symmetric and is_static
+
+
+def is_dynamic_token_w8a8(self, weight_quant: QuantizationArgs,
+                          input_quant: Optional[QuantizationArgs]) -> bool:
+    is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
+    weight_strategy = (
+        weight_quant.strategy == QuantizationStrategy.TENSOR.value
+        or weight_quant.strategy == QuantizationStrategy.CHANNEL.value)
+    is_token = (weight_strategy
+                and input_quant.strategy == QuantizationStrategy.TOKEN.value)
+    is_dynamic = not weight_quant.dynamic and input_quant.dynamic
+
+    # Both symmetric and asymmetric input quantization supported.
+    # Only symmetric weight quantization supported.
+    return is_8_bits and is_token and weight_quant.symmetric and is_dynamic
 
 
 class CompressedTensorsW8A8Int8(CompressedTensorsScheme):

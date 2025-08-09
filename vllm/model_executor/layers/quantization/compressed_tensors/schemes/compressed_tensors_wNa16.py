@@ -4,7 +4,9 @@
 from typing import Callable, Optional
 
 import torch
-from compressed_tensors.quantization import ActivationOrdering
+from compressed_tensors.quantization import (ActivationOrdering,
+                                             QuantizationArgs,
+                                             QuantizationStrategy)
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -26,13 +28,24 @@ from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 
-__all__ = ["CompressedTensorsWNA16"]
+__all__ = ["is_wNa16_group_channel", "CompressedTensorsWNA16"]
 WNA16_SUPPORTED_TYPES_MAP = {
     4: scalar_types.uint4b8,
     8: scalar_types.uint8b128
 }
 WNA16_ZP_SUPPORTED_TYPES_MAP = {4: scalar_types.uint4, 8: scalar_types.uint8}
 WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
+
+
+def is_wNa16_group_channel(weight_quant: QuantizationArgs,
+                           input_quant: Optional[QuantizationArgs]) -> bool:
+    input_quant_none = input_quant is None
+    is_channel_group = (
+        weight_quant.strategy == QuantizationStrategy.CHANNEL.value
+        or weight_quant.strategy == QuantizationStrategy.GROUP.value)
+    is_static = not weight_quant.dynamic
+
+    return (is_channel_group and input_quant_none and is_static)
 
 
 class CompressedTensorsWNA16(CompressedTensorsScheme):

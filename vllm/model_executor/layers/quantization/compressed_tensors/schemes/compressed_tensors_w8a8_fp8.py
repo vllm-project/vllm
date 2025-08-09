@@ -4,7 +4,9 @@
 from typing import Callable, Optional
 
 import torch
-from compressed_tensors.quantization import QuantizationStrategy
+from compressed_tensors.quantization import (QuantizationArgs,
+                                             QuantizationStrategy,
+                                             QuantizationType)
 from torch.nn import Parameter
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -19,7 +21,51 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            PerTensorScaleParameter)
 from vllm.platforms import current_platform
 
-__all__ = ["CompressedTensorsW8A8Fp8"]
+__all__ = [
+    "is_fp8_w8a8", "is_fp8_w8a8_sm90", "is_fp8_w8a8_sm100",
+    "CompressedTensorsW8A8Fp8"
+]
+
+
+def is_fp8_w8a8(self, weight_quant: QuantizationArgs,
+                input_quant: Optional[QuantizationArgs]) -> bool:
+    # Confirm weights and activations quantized.
+    if weight_quant is None or input_quant is None:
+        return False
+    # Confirm weight scheme is supported.
+    is_floating_point = (weight_quant.type == QuantizationType.FLOAT
+                         and input_quant.type == QuantizationType.FLOAT)
+    is_symmetric_weight = weight_quant.symmetric
+    is_static_weight = not weight_quant.dynamic
+    is_per_tensor_or_channel_weight = (weight_quant.strategy in [
+        QuantizationStrategy.TENSOR, QuantizationStrategy.CHANNEL
+    ])
+    if not (is_floating_point and is_symmetric_weight and is_static_weight
+            and is_per_tensor_or_channel_weight):
+        return False
+    # Dynamic quantization is always supported if weights supported.
+    if input_quant.dynamic:
+        return True
+    # Confirm activation scheme is supported.
+    is_symmetric_activation = input_quant.symmetric
+    is_per_tensor_activation = (
+        input_quant.strategy == QuantizationStrategy.TENSOR)
+    return is_symmetric_activation and is_per_tensor_activation
+
+
+# TODO: resolve _check_scheme_supported
+def is_fp8_w8a8_sm90(self, weight_quant: QuantizationArgs,
+                     input_quant: Optional[QuantizationArgs]) -> bool:
+    return (CompressedTensorsScheme.check_scheme_supported(
+        90, error=False, match_exact=True)
+            and is_fp8_w8a8(weight_quant, input_quant))
+
+
+def is_fp8_w8a8_sm100(self, weight_quant: QuantizationArgs,
+                      input_quant: Optional[QuantizationArgs]) -> bool:
+    return (CompressedTensorsScheme.check_scheme_supported(
+        100, error=False, match_exact=True)
+            and is_fp8_w8a8(weight_quant, input_quant))
 
 
 class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
