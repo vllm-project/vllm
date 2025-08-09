@@ -8,6 +8,7 @@ from torch import nn
 from transformers import ModernBertConfig
 
 from vllm.attention import Attention, AttentionType
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -46,7 +47,7 @@ class ModernBertEmbeddings(nn.Module):
         input_ids: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if inputs_embeds:
+        if inputs_embeds is not None:
             return self.norm(inputs_embeds)
         else:
             inputs_embeds = self.tok_embeddings(input_ids)
@@ -117,7 +118,7 @@ class ModernBertAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_ids: Optional[torch.LongTensor] = None,
+        position_ids: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.Wqkv(hidden_states)
         q, k, v = qkv.split([self.all_head_size] * 3, dim=-1)
@@ -169,9 +170,9 @@ class ModernBertLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_ids: Optional[torch.LongTensor] = None,
-    ):
-        attn_outputs = self.attn(self.attn_norm(hidden_states),
+        position_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        attn_outputs = self.attn(hidden_states=self.attn_norm(hidden_states),
                                  position_ids=position_ids)
         hidden_states = hidden_states + attn_outputs
         mlp_output = self.mlp(self.mlp_norm(hidden_states))
@@ -192,13 +193,14 @@ class ModernBertEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_ids: Optional[torch.LongTensor] = None,
+        position_ids: torch.Tensor,
     ) -> torch.Tensor:
         for i, layer in enumerate(self.layers):
             hidden_states = layer(hidden_states, position_ids)
         return hidden_states
 
 
+@support_torch_compile
 class ModernBertModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"layers.": "encoder_layer.layers."})
@@ -234,13 +236,11 @@ class ModernBertModel(nn.Module):
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        positions: Optional[torch.Tensor] = None,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
     ) -> torch.Tensor:
-        position_ids = positions if positions is not None else position_ids
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
@@ -249,7 +249,7 @@ class ModernBertModel(nn.Module):
 
         outputs = self.encoder_layer(
             hidden_states=hidden_states,
-            position_ids=position_ids,
+            position_ids=positions,
         )
         norm_outputs = self.final_norm(outputs)
         return norm_outputs
