@@ -186,7 +186,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-1.1-2b-it"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
-    "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it",    # noqa: E501
+    "Gemma3nForCausalLM": _HfExamplesInfo("google/gemma-3n-E2B-it",
                                           min_transformers_version="4.53"),
     "GlmForCausalLM": _HfExamplesInfo("zai-org/glm-4-9b-chat-hf"),
     "Glm4ForCausalLM": _HfExamplesInfo("zai-org/GLM-4-9B-0414"),
@@ -391,6 +391,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Emu3ForConditionalGeneration": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
+    "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it",    # noqa: E501
+                                        min_transformers_version="4.53"),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo("ibm-granite/granite-speech-3.3-2b"),  # noqa: E501
     "GLM4VForCausalLM": _HfExamplesInfo("zai-org/glm-4v-9b",
                                         trust_remote_code=True,
