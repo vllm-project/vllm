@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# ruff: noqa: F401
 import ast
 import copy
 import enum
@@ -10,11 +11,9 @@ import json
 import textwrap
 import uuid
 import warnings
-from collections import Counter
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
-                         replace)
+from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
 from functools import cached_property, lru_cache
 from importlib.util import find_spec
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
@@ -22,16 +21,18 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
 
 import regex as re
 import torch
-from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
+from pydantic import (ConfigDict, SkipValidation, field_validator,
                       model_validator)
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self, assert_never, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
-from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
+from vllm.config.compilation import (CompilationConfig, CompilationLevel,
+                                     PassConfig)
+from vllm.config.parallel import DistributedExecutorBackend, ParallelConfig
+from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.platforms import current_platform
@@ -49,41 +50,31 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                         POOLING_MODEL_MAX_NUM_BATCHED_TOKENS, GiB_bytes,
                         LayerBlockType, LazyLoader, common_broadcastable_dtype,
-                        cuda_device_count_stateless, get_cpu_memory,
-                        get_open_port, is_torch_equal_or_newer, random_uuid,
-                        resolve_obj_by_qualname)
+                        get_cpu_memory, random_uuid)
 
 # yapf: enable
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
-    from ray.runtime_env import RuntimeEnv
-    from ray.util.placement_group import PlacementGroup
     from transformers.configuration_utils import PretrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
-    from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
-    ConfigType = type[DataclassInstance]
     HfOverrides = Union[dict, Callable[[type], type]]
 else:
     DataclassInstance = Any
-    PlacementGroup = Any
-    RuntimeEnv = Any
     PretrainedConfig = Any
-    ExecutorBase = Any
     QuantizationConfig = Any
     QuantizationMethods = Any
     BaseModelLoader = Any
     LoadFormats = Any
     TensorizerConfig = Any
-    ConfigType = type
     HfOverrides = Union[dict[str, Any], Callable[[type], type]]
 
     me_quant = LazyLoader("model_executor", globals(),
@@ -93,7 +84,6 @@ else:
 
 logger = init_logger(__name__)
 DataclassInstanceT = TypeVar("DataclassInstanceT", bound=DataclassInstance)
-ConfigT = TypeVar("ConfigT", bound=ConfigType)
 
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
                      "score", "reward", "transcription", "draft"]
@@ -232,23 +222,6 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
             out[target.id] = doc
 
     return out
-
-
-def config(cls: ConfigT) -> ConfigT:
-    """
-    A decorator that ensures all fields in a dataclass have default values
-    and that each field has a docstring.
-
-    If a `ConfigT` is used as a CLI argument itself, the default value provided
-    by `get_kwargs` will be the result parsing a JSON string as the kwargs
-    (i.e. `ConfigT(**json.loads(cli_arg))`). However, if a particular `ConfigT`
-    requires custom construction from CLI (i.e. `CompilationConfig`), it can
-    have a `from_cli` method, which will be called instead.
-
-    Config validation is performed by the tools/validate_config.py
-    script, which is invoked during the pre-commit checks.
-    """
-    return cls
 
 
 def get_field(cls: ConfigType, name: str) -> Field:
@@ -1715,15 +1688,6 @@ class ModelConfig:
 
         return mm_config.mm_processor_cache_gb > 0
 
-    @property
-    def enable_mm_input_cache(self) -> bool:
-        """Whether the multi-modal input cache should be enabled."""
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return False
-
-        return mm_config.mm_processor_cache_gb > 0
-
     def get_mm_input_cache_gb(self) -> int:
         mm_config = self.multimodal_config
         if mm_config is None:
@@ -2070,352 +2034,6 @@ class LoadConfig:
                 self.ignore_patterns)
         else:
             self.ignore_patterns = ["original/**/*"]
-
-
-DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
-
-
-@config
-@dataclass
-class ParallelConfig:
-    """Configuration for the distributed execution."""
-
-    pipeline_parallel_size: int = 1
-    """Number of pipeline parallel groups."""
-    tensor_parallel_size: int = 1
-    """Number of tensor parallel groups."""
-    data_parallel_size: int = 1
-    """Number of data parallel groups. MoE layers will be sharded according to
-    the product of the tensor parallel size and data parallel size."""
-    data_parallel_size_local: int = 1
-    """Number of local data parallel groups."""
-    data_parallel_rank: int = 0
-    """Rank of the data parallel group."""
-    data_parallel_rank_local: Optional[int] = None
-    """Local rank of the data parallel group,
-    set only in SPMD mode."""
-    data_parallel_master_ip: str = "127.0.0.1"
-    """IP of the data parallel master."""
-    data_parallel_rpc_port: int = 29550
-    """Port for data parallel messaging."""
-    data_parallel_master_port: int = 29500
-    """Port of the data parallel master."""
-    data_parallel_backend: str = "mp"
-    """Backend to use for data parallel, either "mp" or "ray"."""
-    data_parallel_external_lb: bool = False
-    """Whether to use "external" DP LB mode. Applies only to online serving
-    and when data_parallel_size > 0. This is useful for a "one-pod-per-rank"
-    wide-EP setup in Kuberentes. Set implicitly when --data-parallel-rank
-    is provided explicitly to vllm serve."""
-    data_parallel_hybrid_lb: bool = False
-    """Whether to use "hybrid" DP LB mode. Applies only to online serving
-    and when data_parallel_size > 0. Enables running an AsyncLLM
-    and API server on a "per-node" basis where vLLM load balances
-    between local data parallel ranks, but an external LB balances
-    between vLLM nodes/replicas. Set explicitly in conjunction with
-    --data-parallel-start-rank."""
-    enable_expert_parallel: bool = False
-    """Use expert parallelism instead of tensor parallelism for MoE layers."""
-    enable_eplb: bool = False
-    """Enable expert parallelism load balancing for MoE layers."""
-    num_redundant_experts: int = 0
-    """Number of redundant experts to use for expert parallelism."""
-    eplb_window_size: int = 1000
-    """Window size for expert load recording."""
-    eplb_step_interval: int = 3000
-    """
-    Interval for rearranging experts in expert parallelism.
-
-    Note that if this is greater than the EPLB window size, only the metrics
-    of the last `eplb_window_size` steps will be used for rearranging experts.
-    """
-    eplb_log_balancedness: bool = False
-    """
-    Log the balancedness each step of expert parallelism.
-    This is turned off by default since it will cause communication overhead.
-    """
-
-    max_parallel_loading_workers: Optional[int] = None
-    """Maximum number of parallel loading workers when loading model
-    sequentially in multiple batches. To avoid RAM OOM when using tensor
-    parallel and large models."""
-
-    disable_custom_all_reduce: bool = False
-    """Disable the custom all-reduce kernel and fall back to NCCL."""
-
-    ray_workers_use_nsight: bool = False
-    """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
-
-    ray_runtime_env: Optional["RuntimeEnv"] = None
-    """Ray runtime environment to pass to distributed workers."""
-
-    placement_group: Optional["PlacementGroup"] = None
-    """ray distributed model workers placement group."""
-
-    distributed_executor_backend: Optional[Union[DistributedExecutorBackend,
-                                                 type["ExecutorBase"]]] = None
-    """Backend to use for distributed model
-    workers, either "ray" or "mp" (multiprocessing). If the product
-    of pipeline_parallel_size and tensor_parallel_size is less than
-    or equal to the number of GPUs available, "mp" will be used to
-    keep processing on a single host. Otherwise, this will default
-    to "ray" if Ray is installed and fail otherwise. Note that tpu
-    only support Ray for distributed inference."""
-
-    worker_cls: str = "auto"
-    """The full name of the worker class to use. If "auto", the worker class
-    will be determined based on the platform."""
-    sd_worker_cls: str = "auto"
-    """The full name of the worker class to use for speculative decoding.
-    If "auto", the worker class will be determined based on the platform."""
-    worker_extension_cls: str = ""
-    """The full name of the worker extension class to use. The worker extension
-    class is dynamically inherited by the worker class. This is used to inject
-    new attributes and methods to the worker class for use in collective_rpc
-    calls."""
-
-    world_size: int = field(init=False)
-    """world_size is TPxPP, it affects the number of workers we create."""
-
-    rank: int = 0
-    """Global rank in distributed setup."""
-
-    enable_multimodal_encoder_data_parallel: bool = False
-    """ Use data parallelism instead of tensor parallelism for vision encoder.
-    Only support LLama4 for now"""
-
-    @property
-    def world_size_across_dp(self) -> int:
-        """world_size_across_dp is TPxPPxDP, it is the size of the world
-        including data parallelism."""
-        return self.world_size * self.data_parallel_size
-
-    def get_next_dp_init_port(self) -> int:
-        """
-        We might need to initialize process groups in multiple
-        processes that is related to data parallelism,
-        e.g. both in the worker and in the engine, which
-        can live in different processes. To avoid port conflicts, we
-        increment the port number each time we need to initialize a
-        new process group related to data parallelism.
-        """
-        answer = self.data_parallel_master_port
-        self.data_parallel_master_port += 1
-        return answer
-
-    def stateless_init_dp_group(self) -> "ProcessGroup":
-        # NOTE: In high-concurrency scenarios multiple processes
-        # can pick the same (currently free) port through a race
-        # condition when calling `get_open_port()`. When the first
-        # process binds the port the others will subsequently fail
-        # with `torch.distributed.DistNetworkError: EADDRINUSE`.
-        # To make the initialization more robust we retry a few times
-        # with a fresh port whenever this specific error is observed.
-        from torch.distributed import DistNetworkError
-
-        from vllm.distributed.utils import (
-            stateless_init_torch_distributed_process_group)
-
-        max_retries = 5
-        last_exc: Optional[Exception] = None
-        for _ in range(max_retries):
-            try:
-                # use gloo since the engine process might not have cuda device
-                return stateless_init_torch_distributed_process_group(
-                    self.data_parallel_master_ip,
-                    self.get_next_dp_init_port(),
-                    self.data_parallel_rank,
-                    self.data_parallel_size,
-                    backend="gloo")
-            except DistNetworkError as e:
-                # We only want to retry when the root cause is EADDRINUSE.
-                if "EADDRINUSE" in str(e):
-                    logger.warning(
-                        "Address already in use. Retrying with a new port.")
-                    last_exc = e
-                    continue  # try again with a new port
-                raise e
-
-        # If we get here all retries have failed.
-        assert last_exc is not None
-        raise last_exc
-
-    @staticmethod
-    def has_unfinished_dp(dp_group: "ProcessGroup",
-                          has_unfinished: bool) -> bool:
-        tensor = torch.tensor([has_unfinished],
-                              dtype=torch.int32,
-                              device="cpu")
-        # dp rank 0: has_unfinished_seqs=True
-        # dp rank 1: has_unfinished_seqs=False
-        # aggregated: has_unfinished_seqs=True
-        # so this is an OR operation, i.e. MAX in integers
-        torch.distributed.all_reduce(tensor, op=ReduceOp.MAX, group=dp_group)
-        aggregated_has_unfinished = bool(tensor.item())
-        return aggregated_has_unfinished
-
-    @staticmethod
-    def sync_kv_cache_memory_size(dp_group: "ProcessGroup",
-                                  kv_cache_memory: int) -> int:
-        if kv_cache_memory == -1:
-            kv_cache_memory = torch.iinfo(torch.int64).max
-        tensor = torch.tensor([kv_cache_memory],
-                              dtype=torch.int64,
-                              device="cpu")
-        # we cannot use broadcast for stateless dp group since it depends
-        # on global rank
-        torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
-        return tensor.item()
-
-    def compute_hash(self):
-        """
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        factors: list[Any] = []
-        factors.append(self.pipeline_parallel_size)
-        factors.append(self.tensor_parallel_size)
-        factors.append(self.enable_expert_parallel)
-        factors.append(self.data_parallel_size)
-        factors.append(envs.VLLM_ALL2ALL_BACKEND)
-        return hashlib.sha256(str(factors).encode()).hexdigest()
-
-    def __post_init__(self) -> None:
-        self.world_size = self.pipeline_parallel_size * \
-            self.tensor_parallel_size
-
-        if self.data_parallel_size_local > self.data_parallel_size:
-            raise ValueError(
-                f"data_parallel_size_local ({self.data_parallel_size_local}) "
-                f"must be <= data_parallel_size ({self.data_parallel_size})")
-
-        if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
-            # Data parallel was specified in the engine args.
-            self.data_parallel_master_port = get_open_port()
-
-            if not (0 <= self.data_parallel_rank < self.data_parallel_size):
-                raise ValueError(
-                    f"data_parallel_rank ({self.data_parallel_rank})"
-                    f" must be in the range [0, {self.data_parallel_size})")
-        else:
-            # Otherwise fall back to env vars (e.g. for offline SPMD case).
-            self.data_parallel_size = envs.VLLM_DP_SIZE
-            self.data_parallel_rank = envs.VLLM_DP_RANK
-            self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
-            self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
-            self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
-
-            if self.data_parallel_external_lb:
-                raise ValueError("data_parallel_external_lb can only "
-                                 "be set when data_parallel_size > 1")
-
-        if self.distributed_executor_backend == "external_launcher":
-            import os
-            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-            logger.info("Disabling V1 multiprocessing for external launcher.")
-
-        if self.enable_eplb:
-            if not current_platform.is_cuda():
-                raise ValueError(
-                    "Expert parallelism load balancing is only supported on "
-                    "CUDA devices now.")
-            if self.num_redundant_experts < 0:
-                raise ValueError(
-                    "num_redundant_experts must be non-negative, but got "
-                    f"{self.num_redundant_experts}.")
-            if not self.enable_expert_parallel:
-                raise ValueError(
-                    "enable_expert_parallel must be True to use EPLB.")
-            if self.tensor_parallel_size * self.data_parallel_size <= 1:
-                raise ValueError(
-                    "EPLB requires tensor_parallel_size or data_parallel_size "
-                    f"to be greater than 1, but got "
-                    f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
-                )
-        else:
-            if self.num_redundant_experts != 0:
-                raise ValueError(
-                    "num_redundant_experts should be used with EPLB."
-                    f"{self.num_redundant_experts}.")
-        if self.distributed_executor_backend is None and self.world_size > 1:
-            # We use multiprocessing by default if world_size fits on the
-            # current node and we aren't in a ray placement group.
-
-            from vllm.executor import ray_utils
-            backend: DistributedExecutorBackend = "mp"
-            ray_found = ray_utils.ray_is_available()
-            if current_platform.is_neuron():
-                # neuron uses single process to control multiple devices
-                backend = "uni"
-            elif current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
-                backend = "uni"
-            elif (current_platform.is_cuda()
-                  and cuda_device_count_stateless() < self.world_size):
-                if not ray_found:
-                    raise ValueError("Unable to load Ray: "
-                                     f"{ray_utils.ray_import_err}. Ray is "
-                                     "required for multi-node inference, "
-                                     "please install Ray with `pip install "
-                                     "ray`.")
-                backend = "ray"
-            elif self.data_parallel_backend == "ray":
-                logger.info("Using ray distributed inference because "
-                            "data_parallel_backend is ray")
-                backend = "ray"
-            elif ray_found:
-                if self.placement_group:
-                    backend = "ray"
-                else:
-                    from ray import is_initialized as ray_is_initialized
-                    if ray_is_initialized():
-                        from ray.util import get_current_placement_group
-                        if get_current_placement_group():
-                            backend = "ray"
-            self.distributed_executor_backend = backend
-            logger.debug("Defaulting to use %s for distributed inference",
-                         backend)
-
-        if self.distributed_executor_backend is None and self.world_size == 1:
-            self.distributed_executor_backend = "uni"
-
-    @property
-    def use_ray(self) -> bool:
-        return self.distributed_executor_backend == "ray" or (
-            isinstance(self.distributed_executor_backend, type)
-            and self.distributed_executor_backend.uses_ray)
-
-    @model_validator(mode='after')
-    def _verify_args(self) -> Self:
-        # Lazy import to avoid circular import
-        from vllm.executor.executor_base import ExecutorBase
-        from vllm.platforms import current_platform
-        if self.distributed_executor_backend not in (
-                "ray", "mp", "uni",
-                "external_launcher", None) and not (isinstance(
-                    self.distributed_executor_backend, type) and issubclass(
-                        self.distributed_executor_backend, ExecutorBase)):
-            raise ValueError(
-                "Unrecognized distributed executor backend "
-                f"{self.distributed_executor_backend}. Supported "
-                "values are 'ray', 'mp' 'uni', 'external_launcher' or"
-                " custom ExecutorBase subclass.")
-        if self.use_ray:
-            from vllm.executor import ray_utils
-            ray_utils.assert_ray_available()
-
-        if not current_platform.use_custom_allreduce():
-            self.disable_custom_all_reduce = True
-            logger.debug(
-                "Disabled the custom all-reduce kernel because it is not "
-                "supported on current platform.")
-        if self.ray_workers_use_nsight and not self.use_ray:
-            raise ValueError("Unable to use nsight profiling unless workers "
-                             "run with Ray.")
-
-        return self
 
 
 PreemptionMode = Literal["swap", "recompute"]
@@ -4152,421 +3770,6 @@ class KVEventsConfig:
     """The topic to use for the event publisher. Consumers can subscribe to
     this topic to receive events.
     """
-
-
-class CompilationLevel:
-    # constants for the levels of the compilation process
-    NO_COMPILATION = 0
-    DYNAMO_AS_IS = 1
-    DYNAMO_ONCE = 2
-    PIECEWISE = 3
-
-
-@config
-@dataclass
-class PassConfig:
-    """Configuration for custom Inductor passes.
-
-    This is separate from general `CompilationConfig` so that inductor passes
-    don't all have access to full configuration - that would create a cycle as
-    the `PassManager` is set as a property of config."""
-
-    enable_fusion: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
-    """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
-    enable_attn_fusion: bool = False
-    """Whether to enable the custom attention+quant fusion pass."""
-    enable_noop: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
-    """Whether to enable the custom no-op elimination pass."""
-    enable_sequence_parallelism: bool = False
-    """Whether to enable sequence parallelism."""
-    enable_async_tp: bool = False
-    """Whether to enable async TP."""
-    enable_fi_allreduce_fusion: bool = False
-    """Whether to enable flashinfer allreduce fusion."""
-    fi_allreduce_fusion_max_token_num: int = 16384
-    """Max number of tokens to used in flashinfer allreduce fusion."""
-
-    # TODO(luka) better pass enabling system.
-
-    def uuid(self):
-        """
-        Produces a hash unique to the pass configuration.
-        Any new fields that affect compilation should be added to the hash.
-        Any future fields that don't affect compilation should be excluded.
-        """
-        return InductorPass.hash_dict(asdict(self))
-
-    def __post_init__(self) -> None:
-        if not self.enable_noop:
-            if self.enable_fusion:
-                logger.warning_once(
-                    "Fusion enabled but reshape elimination disabled. "
-                    "RMSNorm/SiluMul + quant (fp8) fusion might not work")
-            if self.enable_attn_fusion:
-                logger.warning_once(
-                    "Fusion enabled but reshape elimination disabled. "
-                    "Attention + quant (fp8) fusion might not work")
-
-
-@config
-@dataclass
-class CompilationConfig:
-    """Configuration for compilation. It has three parts:
-
-    - Top-level Compilation control:
-        - [`level`][vllm.config.CompilationConfig.level]
-        - [`debug_dump_path`][vllm.config.CompilationConfig.debug_dump_path]
-        - [`cache_dir`][vllm.config.CompilationConfig.cache_dir]
-        - [`backend`][vllm.config.CompilationConfig.backend]
-        - [`custom_ops`][vllm.config.CompilationConfig.custom_ops]
-        - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
-    - CudaGraph capture:
-        - [`use_cudagraph`][vllm.config.CompilationConfig.use_cudagraph]
-        - [`cudagraph_capture_sizes`]
-        [vllm.config.CompilationConfig.cudagraph_capture_sizes]
-        - [`cudagraph_num_of_warmups`]
-        [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
-        - [`cudagraph_copy_inputs`]
-        [vllm.config.CompilationConfig.cudagraph_copy_inputs]
-        - [`full_cuda_graph`][vllm.config.CompilationConfig.full_cuda_graph]
-    - Inductor compilation:
-        - [`use_inductor`][vllm.config.CompilationConfig.use_inductor]
-        - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
-        - [`inductor_compile_config`]
-        [vllm.config.CompilationConfig.inductor_compile_config]
-        - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
-        - custom inductor passes
-
-    Why we have different sizes for cudagraph and inductor:
-    - cudagraph: a cudagraph captured for a specific size can only be used
-        for the same size. We need to capture all the sizes we want to use.
-    - inductor: a graph compiled by inductor for a general shape can be used
-        for different sizes. Inductor can also compile for specific sizes,
-        where it can have more information to optimize the graph with fully
-        static shapes. However, we find the general shape compilation is
-        sufficient for most cases. It might be beneficial to compile for
-        certain small batchsizes, where inductor is good at optimizing.
-    """
-    # Top-level Compilation control
-    level: Optional[int] = None
-    """The level of compilation:
-
-    - None: If None, we will select the default compilation level.
-      For V1 engine this is 3, for V0 engine this is 0.
-    - 0: no compilation.
-    - 1: dynamo as is.
-    - 2: dynamo once.
-    - 3: piecewise compilation."""
-    debug_dump_path: str = ""
-    """The path to dump the debug information."""
-    cache_dir: str = ""
-    """The directory to store the compiled graph, to accelerate Inductor
-    compilation. By default, it will use model-related information to generate
-    a cache directory."""
-    backend: str = ""
-    """The backend for compilation. It needs to be a string:
-
-    - "" (empty string): use the default backend.
-    - "eager"/"openxla"/...: use the specified backend registered in PyTorch.
-    - "full.module.name": a qualified name which can be used to import the
-
-    backend function.
-    We use string to avoid serialization issues when using compilation in a
-    distributed setting. When the compilation level is 1 or 2, the backend is
-    used for the compilation directly (it sees the whole graph). When the
-    compilation level is 3, the backend is used for the piecewise compilation
-    (it sees a part of the graph)."""
-    custom_ops: list[str] = field(default_factory=list)
-    """Fine-grained control over which custom ops to enable/disable. Use 'all'
-    to enable all, 'none' to disable all. Also specify a list of custom op
-    names to enable (prefixed with a '+'), or disable (prefixed with a '-').
-    Examples:
-
-    - 'all,-op1' to enable all except op1
-    - 'none,+op1,+op2' to enable only op1 and op2
-
-    By default, all custom ops are enabled when running without Inductor and
-    disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
-    Inductor generates (fused) Triton kernels for disabled custom ops."""
-    splitting_ops: list[str] = field(default_factory=list)
-    """A list of ops to split the full graph into subgraphs, used in piecewise
-    compilation."""
-
-    # Inductor capture
-    use_inductor: bool = True
-    """Whether to use inductor compilation:
-
-    - False: inductor compilation is not used. graph runs in eager
-        (custom_ops enabled by default).
-    - True: inductor compilation is used (custom_ops disabled by default).
-        One graph for symbolic shape and one graph per size in compile_sizes
-        are compiled using configurations in inductor_compile_config.
-
-    This setting is ignored if level<PIECEWISE."""
-    compile_sizes: Optional[list[Union[int, str]]] = None
-    """Sizes to compile for inductor. In addition
-    to integers, it also supports "cudagraph_capture_sizes" to
-    specify the sizes for cudagraph capture."""
-    inductor_compile_config: dict = field(default_factory=dict)
-    """Additional configurations for inductor.
-    - None: use default configurations."""
-    inductor_passes: dict[str, str] = field(default_factory=dict)
-    """Additional passes for inductor. It is a dictionary
-    from pass name to pass function qualified name. We use function
-    name because the config uses JSON format. If we pass the config
-    from Python, functions can also be passed directly via Python object
-    constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
-
-    # CudaGraph compilation
-    use_cudagraph: bool = field(default_factory=lambda: envs.VLLM_USE_V1)
-    """Whether to use cudagraph inside compilation.
-    - False: cudagraph inside compilation is not used.
-    - True: cudagraph inside compilation is used. It requires
-        that all input buffers have fixed addresses, and all
-        splitting ops write their outputs to input buffers.
-    In the vLLM V1 Engine, this flag only applies for
-    CompilationLevel.PIECEWISE (aka -O3).
-    Note that this is orthogonal to the cudagraph capture logic
-    outside of compilation.
-    TODO: move outside cudagraph logic into compilation.
-    torch.compile will handle cudagraph capture logic in the future."""
-    cudagraph_num_of_warmups: int = 0
-    """Number of warmup runs for cudagraph.
-    It means the first several runs will be treated as warmup runs.
-    Only after that, the execution will be recorded, and the recorded
-    cudagraph will be used for subsequent runs."""
-    cudagraph_capture_sizes: Optional[list[int]] = None
-    """Sizes to capture cudagraph.
-    - None (default): capture sizes are inferred from vllm config.
-    - list[int]: capture sizes are specified as given."""
-    cudagraph_copy_inputs: bool = False
-    """Whether to copy input tensors for
-    cudagraph. If the caller can guarantee that the same input buffers
-    are always used, it can set this to False. Otherwise, it should
-    set this to True, and the compiler will copy the input to an
-    internally managed buffer. Default is False."""
-    full_cuda_graph: bool = False
-    """whether to use a full cuda graph for the entire forward pass rather than
-    splitting certain operations such as attention into subgraphs. Thus this
-    flag cannot be used together with splitting_ops. This may provide
-    performance benefits for smaller models."""
-
-    pass_config: PassConfig = field(default_factory=PassConfig)
-    """Custom inductor passes, see PassConfig for more details"""
-
-    max_capture_size: int = field(default=None, init=False)  # type: ignore
-    """not configurable, computed after init"""
-    local_cache_dir: str = field(default=None, init=False)  # type: ignore
-    """local cache dir for each rank"""
-    bs_to_padded_graph_size: list[int] = field(
-        default=None,  # type: ignore
-        init=False)
-    """optimization:
-    Intuitively, bs_to_padded_graph_size should be dict[int, int].
-    since we know all keys are in a range [0, max_capture_size],
-    we can optimize it to list[int] for better lookup performance."""
-
-    # keep track of enabled and disabled custom ops
-    enabled_custom_ops: Counter[str] = field(default_factory=Counter,
-                                             init=False)
-    """custom ops that are enabled"""
-    disabled_custom_ops: Counter[str] = field(default_factory=Counter,
-                                              init=False)
-    """custom ops that are disabled"""
-    traced_files: set[str] = field(default_factory=set, init=False)
-    """files that are traced for compilation"""
-    compilation_time: float = field(default=0.0, init=False)
-    """time taken for compilation"""
-
-    static_forward_context: dict[str, Any] = field(default_factory=dict,
-                                                   init=False)
-    """Per-model forward context
-    Map from layer name to layer objects that need to be accessed outside
-    model code, e.g., Attention, FusedMOE when dp_size>1."""
-
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        factors: list[Any] = []
-        factors.append(self.level)
-        factors.append(self.backend)
-        factors.append(self.custom_ops)
-        factors.append(self.splitting_ops)
-        factors.append(self.use_inductor)
-        factors.append(self.inductor_compile_config)
-        factors.append(self.inductor_passes)
-        factors.append(self.pass_config.uuid())
-        return hashlib.sha256(str(factors).encode()).hexdigest()
-
-    def __repr__(self) -> str:
-        exclude = {
-            "static_forward_context": True,
-            "enabled_custom_ops": True,
-            "disabled_custom_ops": True,
-            "compilation_time": True,
-            "bs_to_padded_graph_size": True,
-            "traced_files": True,
-            "inductor_compile_config": {
-                "post_grad_custom_post_pass": True,
-            },
-        }
-
-        # exclude default attr in pass_config
-        pass_config_exclude = {}
-        for attr, default_val in vars(PassConfig()).items():
-            if getattr(self.pass_config, attr) == default_val:
-                pass_config_exclude[attr] = True
-        if pass_config_exclude:
-            exclude["pass_config"] = pass_config_exclude
-
-        # The cast to string is necessary because Pydantic is mocked in docs
-        # builds and sphinx-argparse doesn't know the return type of decode()
-        return str(
-            TypeAdapter(CompilationConfig).dump_json(
-                self,
-                exclude=exclude,  # type: ignore[arg-type]
-                exclude_unset=True).decode())
-
-    __str__ = __repr__
-
-    @classmethod
-    def from_cli(cls, cli_value: str) -> "CompilationConfig":
-        """Parse the CLI value for the compilation config.
-        -O1, -O2, -O3, etc. is handled in FlexibleArgumentParser.
-        """
-        return TypeAdapter(CompilationConfig).validate_json(cli_value)
-
-    def __post_init__(self) -> None:
-        count_none = self.custom_ops.count("none")
-        count_all = self.custom_ops.count("all")
-        assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
-
-        # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
-        # 1. A bug in PyTorch, fixed in 2.7:
-        #    https://github.com/pytorch/pytorch/issues/147924
-        # 2. Custom passes (fusion) rely on auto-functionalization V1 and don't
-        #    work with V2. Addressing this will take extra engineering effort
-        #    and it is not yet a priority. RFC here:
-        #    https://github.com/vllm-project/vllm/issues/14703
-
-        if is_torch_equal_or_newer("2.6"):
-            KEY = 'enable_auto_functionalized_v2'
-            if KEY not in self.inductor_compile_config:
-                self.inductor_compile_config[KEY] = False
-
-        for k, v in self.inductor_passes.items():
-            if not isinstance(v, str):
-                assert callable(v), (
-                    f"pass {k} should be callable or a qualified name")
-                self.inductor_compile_config[k] = v if isinstance(
-                    v, InductorPass) else CallableInductorPass(v)
-                continue
-
-            # resolve function from qualified name
-            names = v.split(".")
-            module = ".".join(names[:-1])
-            func_name = names[-1]
-            func = __import__(module).__dict__[func_name]
-            self.inductor_compile_config[k] = func if isinstance(
-                func, InductorPass) else CallableInductorPass(func)
-
-        if isinstance(self.pass_config, dict):
-            self.pass_config = PassConfig(**self.pass_config)
-
-    def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
-        if self.level == CompilationLevel.NO_COMPILATION:
-            raise ValueError("No compilation level is set.")
-
-        from torch._dynamo.backends.registry import list_backends
-        torch_backends = list_backends(exclude_tags=tuple())
-        if self.level in [
-                CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE
-        ]:
-            if self.backend == "":
-                return "eager"
-            if self.backend in torch_backends:
-                return self.backend
-            return resolve_obj_by_qualname(self.backend)
-
-        # TODO: pass user-specified backend to piecewise compilation
-        # merge with the config use_inductor
-        assert self.level == CompilationLevel.PIECEWISE
-
-        from vllm.compilation.backends import VllmBackend
-        return VllmBackend(vllm_config)
-
-    def init_with_cudagraph_sizes(self,
-                                  cudagraph_capture_sizes: list[int]) -> None:
-        """To complete the initialization of config,
-        we need to know the cudagraph sizes."""
-
-        if self.cudagraph_capture_sizes is None:
-            self.cudagraph_capture_sizes = cudagraph_capture_sizes
-        else:
-            # de-duplicate the sizes provided by the config
-            dedup_sizes = list(set(self.cudagraph_capture_sizes))
-            if len(dedup_sizes) < len(self.cudagraph_capture_sizes):
-                logger.info(("cudagraph sizes specified by model runner"
-                             " %s is overridden by config %s"),
-                            cudagraph_capture_sizes, dedup_sizes)
-            self.cudagraph_capture_sizes = dedup_sizes
-
-        computed_compile_sizes = []
-        if self.compile_sizes is not None:
-            # de-duplicate the sizes provided by the config
-            self.compile_sizes = list(set(self.compile_sizes))
-            for x in self.compile_sizes:
-                if isinstance(x, str):
-                    assert x == "cudagraph_capture_sizes", \
-                    "Unrecognized size type in compile_sizes, " \
-                    f"expect 'cudagraph_capture_sizes', got {x}"
-                    computed_compile_sizes.extend(self.cudagraph_capture_sizes)
-                else:
-                    assert isinstance(x, int)
-                    computed_compile_sizes.append(x)
-        self.compile_sizes = computed_compile_sizes  # type: ignore
-
-        # sort to make sure cudagraph capture sizes are in descending order
-        self.cudagraph_capture_sizes.sort(reverse=True)
-        self.max_capture_size = self.cudagraph_capture_sizes[
-            0] if self.cudagraph_capture_sizes else 0
-
-        # pre-compute the mapping from batch size to padded graph size
-        self.bs_to_padded_graph_size = [
-            0 for i in range(self.max_capture_size + 1)
-        ]
-        for end, start in zip(self.cudagraph_capture_sizes,
-                              self.cudagraph_capture_sizes[1:] + [0]):
-            for bs in range(start, end):
-                if bs == start:
-                    self.bs_to_padded_graph_size[bs] = start
-                else:
-                    self.bs_to_padded_graph_size[bs] = end
-        self.bs_to_padded_graph_size[
-            self.max_capture_size] = self.max_capture_size
-
-    def set_splitting_ops_for_v1(self):
-        # NOTE: this function needs to be called
-        if self.splitting_ops and self.full_cuda_graph:
-            raise ValueError("full_cuda_graph cannot be used together with "
-                             "splitting_ops, as Full CUDA graph will override "
-                             f"the splitting_ops: {self.splitting_ops}")
-
-        if not self.splitting_ops:
-            self.splitting_ops = [] if self.full_cuda_graph else [
-                "vllm.unified_attention",
-                "vllm.unified_attention_with_output",
-                "vllm.mamba_mixer2",
-            ]
 
 
 @config
