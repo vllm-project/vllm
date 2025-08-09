@@ -388,8 +388,8 @@ def test_min_tokens_eos_behavior(llm_v1: LLM):
     tokenizer = llm_v1.get_tokenizer()
     eos_token_id = tokenizer.eos_token_id
 
-    prompt = "The capital of France is"
-    max_toks = 25
+    prompt = "Answer with just 'Yes'."
+    max_toks = 64
 
     # Case 1: WITHOUT min_tokens
     sp_no_min = SamplingParams(
