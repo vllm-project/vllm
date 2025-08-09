@@ -12,7 +12,7 @@ import torch.distributed
 import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
-from transformers.configuration_utils import PretrainedConfig
+from transformers import MiniMaxConfig
 
 from vllm import envs
 from vllm.attention import Attention, AttentionMetadata
@@ -656,7 +656,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: MiniMaxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         expert_num: int = 1,
@@ -860,7 +860,7 @@ class MiniMaxText01Model(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: MiniMaxConfig,
         quant_config: Optional[QuantizationConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         scheduler_config=None,
