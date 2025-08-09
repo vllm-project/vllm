@@ -11,6 +11,7 @@ from compressed_tensors.config import (CompressionFormat,
 from compressed_tensors.quantization import (QuantizationArgs,
                                              QuantizationStrategy,
                                              QuantizationType)
+from compressed_tensors.transform import TransformConfig, TransformLocation, TransformFactory, TransformBase
 from pydantic import BaseModel
 
 import vllm.envs as envs
@@ -32,7 +33,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format,
-    should_ignore_layer)
+    should_ignore_layer, is_match)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported)
@@ -60,6 +61,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         sparsity_ignore_list: list[str],
         kv_cache_scheme: Optional[dict[str, Any]] = None,
         config: Optional[dict[str, Any]] = None,
+        transform_config: Optional[TransformConfig] = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -70,6 +72,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.sparsity_scheme_map = sparsity_scheme_map
         self.sparsity_ignore_list = sparsity_ignore_list
         self.config = config
+        self.transform_config = transform_config
+        
+        self.transform_factories = {}
 
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
@@ -129,6 +134,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             config=config)
         sparsity_scheme_map, sparsity_ignore_list = cls._parse_sparsity_config(
             config=config)
+        transform_config = config.get("transform_config", None)
 
         return cls(
             target_scheme_map=target_scheme_map,
@@ -137,6 +143,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             sparsity_scheme_map=sparsity_scheme_map,
             sparsity_ignore_list=sparsity_ignore_list,
             config=config,
+            transform_config=transform_config,
         )
 
     @classmethod
@@ -521,6 +528,38 @@ class CompressedTensorsConfig(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping)
             sparsity_scheme = self.sparsity_scheme_map[matched_target]
 
+        def replace_with_check(original, new):
+            if new and original:
+                raise ValueError(
+                    "The provided compressed tensors config has overlapping "
+                    f"config groups for the layer {layer_name}")
+
+            return new or original
+
+        input_tfm = None
+        output_tfm = None
+        if self.transform_config is not None:
+            for scheme in self.transform_config.config_groups.values():
+                for args in scheme.apply:
+                    if is_match(layer_name,
+                                layer,
+                                args.targets,
+                                args.ignore,
+                                fused=self.packed_modules_mapping):
+                        if args.location == TransformLocation.INPUT:
+                            input_tfm = replace_with_check(input_tfm,
+                                                        (scheme, args))
+                        if args.location == TransformLocation.OUTPUT:
+                            output_tfm = replace_with_check(
+                                output_tfm, (scheme, args))
+                        
+                        if scheme not in self.transform_factories:
+                            self.transform_factories = TransformFactory.from_scheme(scheme)
+
+        # attach transforms for later retrieval by LinearMethod, or 
+        layer.input_tfm = input_tfm
+        layer.output_tfm = output_tfm
+
         if self.supports_cutlass_24(weight_quant=weight_quant,
                                     input_quant=input_quant,
                                     sparsity_scheme=sparsity_scheme):
@@ -664,6 +703,13 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             output_size=output_size,
             params_dtype=params_dtype,
             weight_loader=weight_loader)
+        
+        # transform weights are shared, so weight loader's `copy_`
+        # will load across shared transform weight tensors
+        for attr_name in ("input_tfm", "output_tfm"):
+            if getattr(layer, attr_name, None) is not None:
+                scheme, args = getattr(layer, attr_name)
+                self.quantization_config.transform_factories[scheme]._apply_to_module(layer, args)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -676,10 +722,31 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
 
         """
 
+        input_transform = None
+        output_transform = None
+        for child in layer.children():
+            if isinstance(child, TransformBase):
+                if child.args.location == TransformLocation.INPUT:
+                    input_transform = child
+                
+                if child.args.location == TransformLocation.OUTPUT:
+                    output_transform = child
+
+        if input_transform is not None:
+            x = input_transform(x)
+
         scheme = layer.scheme
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
-        return scheme.apply_weights(layer, x, bias=bias)
+        x = scheme.apply_weights(layer, x, bias=bias)
+    
+        if output_transform is not None:
+            x = output_transform(x)
+
+        return x
+    
+
+# TODO: need to add a quant method for VocabParallelEmbedding so transforms can apply
 
 
 class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
