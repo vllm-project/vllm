@@ -4386,19 +4386,10 @@ class VllmConfig:
         # settings (see the below code).
         if self.compilation_config.level is None:
             if envs.VLLM_USE_V1:
-                if self.model_config is not None:
-                    if not self.model_config.enforce_eager:
-                        self.compilation_config.level = \
-                            CompilationLevel.PIECEWISE
-                    else:
-                        self.compilation_config.level = \
-                            CompilationLevel.NO_COMPILATION
-                # When model_config is None (most often happens during testing),
-                # consider cudagraph_mode as a factor.
-                elif self.compilation_config.cudagraph_mode in \
-                    [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
-                    self.compilation_config.level = \
-                        CompilationLevel.PIECEWISE
+                enforce_eager = self.model_config is not None and \
+                    self.model_config.enforce_eager
+                if not enforce_eager:
+                    self.compilation_config.level = CompilationLevel.PIECEWISE
                 else:
                     self.compilation_config.level = \
                             CompilationLevel.NO_COMPILATION
