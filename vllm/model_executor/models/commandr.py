@@ -89,7 +89,7 @@ class CohereMLP(nn.Module):
 
     def __init__(
         self,
-        config: CohereConfig,
+        config: Union[CohereConfig, Cohere2Config],
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
@@ -234,7 +234,7 @@ class CohereAttention(nn.Module):
 class CohereDecoderLayer(nn.Module):
 
     def __init__(self,
-                 config: CohereConfig,
+                 config: Union[CohereConfig, Cohere2Config],
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
