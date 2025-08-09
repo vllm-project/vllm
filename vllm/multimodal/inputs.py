@@ -648,10 +648,13 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
     def from_elems(elems: Sequence[MultiModalFieldElem]):
         return MultiModalKwargsItem({elem.key: elem for elem in elems})
 
-    def __init__(self, data: Mapping[str, MultiModalFieldElem]):
+    def __init__(
+        self,
+        data: Optional[Mapping[str, MultiModalFieldElem]] = None,
+    ) -> None:
         super().__init__(data)
 
-        modalities = {elem.modality for elem in data.values()}
+        modalities = {elem.modality for elem in self.data.values()}
         assert len(modalities) == 1, f"Found different modalities={modalities}"
         self._modality = next(iter(modalities))
 
@@ -766,7 +769,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
 
     def __init__(
         self,
-        data: Mapping[str, NestedTensors],
+        data: Optional[Mapping[str, NestedTensors]] = None,
         *,
         items: Optional[Sequence[MultiModalKwargsItem]] = None,
     ) -> None:
