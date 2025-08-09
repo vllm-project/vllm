@@ -444,7 +444,7 @@ def test_min_tokens_eos_behavior(llm_v1: LLM):
         f"got {len(ids_with_min)}"
     )
     assert finish_with_min == "length", (
-        f"Expected finish_reason 'length' with min_tokens; got {finish_with_min}"
+        f"Expected finish_reason 'length'; got {finish_with_min}"
     )
     assert eos_token_id not in ids_with_min, (
         "EOS token id should not appear when min_tokens prevents early EOS."
