@@ -193,8 +193,6 @@ Additionally, list elements can be passed individually using `+`:
 
             def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
                 try:
-                    if hasattr(cls, "from_cli"):
-                        return cls.from_cli(val)
                     return TypeAdapter(cls).validate_json(val)
                 except ValidationError as e:
                     raise argparse.ArgumentTypeError(repr(e)) from e
@@ -455,9 +453,9 @@ class EngineArgs:
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
         # CompilationConfig object
-        if isinstance(self.compilation_config, (int, dict)):
-            self.compilation_config = CompilationConfig.from_cli(
-                str(self.compilation_config))
+        if isinstance(self.compilation_config, dict):
+            self.compilation_config = CompilationConfig(
+                **self.compilation_config)
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
