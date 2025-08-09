@@ -72,7 +72,7 @@ class FusedMoEQuantDesc:
     shape: Optional[GroupShape] = None
 
     scale: Optional[torch.Tensor] = None
-    alpha_or_gscale: Optional[torch.Tensor] = None
+    alpha_or_gscale: Optional[torch.Tensor] = None # store as 1/gs or gs?
     zp: Optional[torch.Tensor] = None
     # TODO: should be in union with other stuff?
     precision: Optional["PrecisionConfig"] = None
@@ -242,6 +242,29 @@ class FusedMoEQuantConfig:
             return (num_experts, *scale_shape)
         else:
             return None
+
+    @staticmethod
+    def make(
+        quant_dtype: Union[torch.dtype, str, None] = None,
+        per_act_token_quant: bool = False,
+        per_out_ch_quant: bool = False,
+        block_shape: Optional[list[int]] = None,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None,
+        g1_alphas: Optional[torch.Tensor] = None,
+        g2_alphas: Optional[torch.Tensor] = None,
+        a1_gscale: Optional[torch.Tensor] = None,
+        a2_gscale: Optional[torch.Tensor] = None,
+    ) -> "FusedMoEQuantConfig":
+        a1_shape, a2_shape = _quant_flags_to_group_shape(False, False, None)
+        return FusedMoEQuantConfig(
+            a1=FusedMoEQuantDesc(quant_dtype, a1_shape, a1_scale, a1_gscale),
+            a2=FusedMoEQuantDesc(quant_dtype, a2_shape, a2_scale, a1_gscale),
+            w1=FusedMoEQuantDesc(quant_dtype, None, w1_scale, g1_alphas),
+            w2=FusedMoEQuantDesc(quant_dtype, None, w2_scale, g2_alphas),
+        )
 
 
 def _quant_flags_to_group_shape(

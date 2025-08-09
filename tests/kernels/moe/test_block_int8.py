@@ -9,7 +9,7 @@ from tests.kernels.quant_utils import (native_per_token_group_quant_int8,
                                        native_w8a8_block_matmul)
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.platforms import current_platform
 
 if current_platform.get_device_capability() < (7, 0):
@@ -117,31 +117,30 @@ def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
 
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
+    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
 
-    (_, w1, w1_s, _), (_, w2, w2_s,
-                       _) = make_test_weights(E,
-                                              N,
-                                              K,
-                                              dtype,
-                                              torch.int8,
-                                              per_act_token_quant=False,
-                                              block_shape=block_size)
+    w1, w2, quant_config = make_test_quant_config(
+        E,
+        N,
+        K,
+        dtype,
+        quant_dtype=torch.int8,
+        per_act_token_quant=False,
+        block_shape=block_size,
+    )
+
 
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
-        out = fused_moe(
+        out = fused_experts(
             a,
             w1,
             w2,
-            score,
-            topk,
-            renormalize=False,
-            use_int8_w8a8=True,
-            w1_scale=w1_s,
-            w2_scale=w2_s,
-            block_shape=block_size,
+            topk_weights,
+            topk_ids,
+            quant_confg=quant_config
         )
-        ref_out = torch_w8a8_block_int8_moe(a, w1, w2, w1_s, w2_s, score, topk,
+        ref_out = torch_w8a8_block_int8_moe(a, w1, w2, quant_config.w1_scale, quant_config.w2_scale, score, topk,
                                             block_size)
 
     # Check results
