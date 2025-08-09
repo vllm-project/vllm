@@ -111,6 +111,10 @@ Models that combine Mamba-2 and Mamba-1 layers with standard attention layers ar
 `Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`, `JambaForCausalLM`). Please note that
 these models currently require disabling prefix caching and using the FlashInfer attention backend in V1.
 
+Hybrid models with mechanisms different to Mamba are also supported (e.g, `MiniMaxText01ForCausalLM`, `MiniMaxM1ForCausalLM`).
+Please note that these models currently require disabling prefix caching, enforcing eager mode, and using the FlashInfer
+attention backend in V1.
+
 #### Encoder-Decoder Models
 
 Models requiring cross-attention between separate encoder and decoder (e.g., `BartForConditionalGeneration`, `MllamaForConditionalGeneration`)
