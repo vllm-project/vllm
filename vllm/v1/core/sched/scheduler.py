@@ -39,6 +39,11 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
+    # Policy mapping for efficient policy lookup
+    _POLICY_MAPPING = {
+        "priority": SchedulingPolicy.PRIORITY,
+        "fcfs": SchedulingPolicy.FCFS,
+    }
 
     def __init__(
         self,
@@ -99,13 +104,12 @@ class Scheduler(SchedulerInterface):
         # req_id -> Request
         self.requests: dict[str, Request] = {}
         # Scheduling policy
-        if self.scheduler_config.policy == "priority":
-            self.policy = SchedulingPolicy.PRIORITY
-        elif self.scheduler_config.policy == "fcfs":
-            self.policy = SchedulingPolicy.FCFS
-        else:
+        policy_name = self.scheduler_config.policy
+        try:
+            self.policy = self._POLICY_MAPPING[policy_name]
+        except KeyError:
             raise ValueError(
-                f"Unknown scheduling policy: {self.scheduler_config.policy}")
+                f"Unknown scheduling policy: {policy_name}") from None
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
