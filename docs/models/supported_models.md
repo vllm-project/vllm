@@ -583,6 +583,9 @@ See [this page](../features/multimodal_inputs.md) on how to pass multi-modal inp
 
     **This is no longer required if you are using vLLM V1.**
 
+!!! tip
+    For hybrid-only models such as Llama-4, Step3 and Mistral-3, a text-only mode can be enabled by setting all supported multimodal modalities to 0 (e.g, `--limit-mm-per-prompt '{"image":0}`) so that their multimodal modules will not be loaded to free up more GPU memory for KV cache.
+
 !!! note
     vLLM currently only supports adding LoRA to the language backbone of multimodal models.
 
