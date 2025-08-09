@@ -228,7 +228,6 @@ class Llama4VisionAttention(nn.Module):
         self.num_local_heads = self.num_heads // self.tp_size
         self.q_size = self.num_local_heads * self.head_dim
         self.kv_size = self.num_local_heads * self.head_dim
-        self.attention_dropout = config.attention_dropout
         self.scaling = self.head_dim**-0.5
 
         self.attn = MultiHeadAttention(self.num_local_heads, self.head_dim,

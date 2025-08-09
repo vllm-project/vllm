@@ -132,7 +132,6 @@ class CohereAttention(nn.Module):
         super().__init__()
         tp_size = get_tensor_model_parallel_world_size()
         self.config = config
-        self.attention_dropout = config.attention_dropout
         self.hidden_size = config.hidden_size
         self.total_num_heads = config.num_attention_heads
         self.num_heads = self.total_num_heads // tp_size

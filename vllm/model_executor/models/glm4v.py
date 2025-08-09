@@ -121,7 +121,6 @@ class EVA2CLIPAttention(nn.Module):
 
         self.attn = MultiHeadAttention(self.num_heads_per_rank, self.head_dim,
                                        self.scale)
-        self.output_dropout = torch.nn.Dropout(config.dropout_prob)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         qkv, _ = self.query_key_value(x)  # B, L, 3 * H * D
@@ -129,7 +128,6 @@ class EVA2CLIPAttention(nn.Module):
 
         out = self.attn(q, k, v)
         output, _ = self.dense(out)
-        output = self.output_dropout(output)
         return output
 
 

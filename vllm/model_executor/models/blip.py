@@ -95,7 +95,6 @@ class BlipAttention(nn.Module):
                 f"(got `embed_dim`: {self.embed_dim} and `num_heads`:"
                 f" {self.num_heads}).")
         self.scale = self.head_dim**-0.5
-        self.dropout = config.attention_dropout
 
         self.qkv = QKVParallelLinear(
             self.embed_dim,
