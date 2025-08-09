@@ -11,6 +11,10 @@ from vllm.config import VllmConfig
 class NgramProposer:
 
     def __init__(self, vllm_config: VllmConfig):
+        assert vllm_config.speculative_config is not None
+        assert vllm_config.speculative_config.prompt_lookup_min is not None
+        assert vllm_config.speculative_config.prompt_lookup_max is not None
+
         # Minimum length of the n-gram to match.
         self.min_n = vllm_config.speculative_config.prompt_lookup_min
         # Maximum length of the n-gram to match.
@@ -54,17 +58,13 @@ class NgramProposer:
               followed that pattern. Here we will return [4,2,3] because 
               we only have three tokens after the match.
         """
-        # Do not generate draft tokens beyond the max model length.
-        k = min(self.k, self.max_model_len - context_token_ids.shape[0])
-        if k <= 0:
-            return None
-
         # TODO(woosuk): Optimize this.
-        for n in range(self.max_n, self.min_n - 1, -1):
-            result = _find_subarray_kmp(context_token_ids, n, k)
-            if result is not None:
-                return result
-        return None
+        return _find_longest_matched_ngram_and_propose_tokens(
+            origin_tokens=context_token_ids,
+            min_ngram=self.min_n,
+            max_ngram=self.max_n,
+            max_model_len=self.max_model_len,
+            k=self.k)
 
     def load_model(self, *args, **kwargs):
         # No model to load.
@@ -72,61 +72,86 @@ class NgramProposer:
 
 
 @jit(nopython=True)
-def _kmp_lps_array(pattern: np.ndarray) -> np.ndarray:
+def _find_longest_matched_ngram_and_propose_tokens(
+        origin_tokens: np.ndarray, min_ngram: int, max_ngram: int,
+        max_model_len: int, k: int) -> Optional[np.ndarray]:
     """
-    Build the lps (longest proper prefix which is also suffix) 
-    array for the pattern.
+    Find the longest n-gram which matches the suffix of the given tokens
+    whose length is within [min_ngram, max_ngram] (inclusive).
+
+    If found, we will extract k right after the matched ngram.
     """
-    lps = np.zeros(len(pattern), dtype=np.int32)
-    prev_lps = 0  # length of the previous longest prefix suffix
+    # Do not generate draft tokens is context is shorter than minimum n-gram
+    total_token = origin_tokens.shape[0]
+    if total_token < min_ngram:
+        return None
+
+    # Do not generate draft tokens beyond the max model length.
+    k = min(k, max_model_len - total_token)
+    if k <= 0:
+        return None
+
+    # Flip tokens, and the goal become to find longest ngram
+    # on the rightmost position which matches the prefix with
+    # length [min_n, max_n] (inclusive).
+    tokens = origin_tokens[::-1]
+
+    # Longest prefix (not including itself) which is a suffix of
+    # the current position.
+    #   lps[i] = max{v, where tokens[0:v] == tokens[i+1-v:i+1]}
+    #
+    # As ngram is capped by max_ngram to save memory, we only need to
+    # store lps for the first max_ngram prefix.
+    lps = np.zeros(max_ngram, dtype=np.int32)
+
+    longest_ngram = 0
+    position = 0
+
+    # lps[0] always equal to 0, we starts with index 1
+    prev_lps = 0
     i = 1
-
-    while i < len(pattern):
-        if pattern[i] == pattern[prev_lps]:
+    while i < total_token:
+        # tokens[:prev_lps] is the longest prefix as a suffix of tokens[:i]
+        if tokens[prev_lps] == tokens[i]:
+            # Token match: tokens[:prev_lps+1] is the longest prefix as
+            # a suffix of tokens[:i+1]
             prev_lps += 1
-            lps[i] = prev_lps
+            # Check if we found a longer valid ngram.
+            #
+            # Update position when longest_ngram matched prev_lps,
+            # as we want to get the target n-gram of the earliest position
+            # in the original tokens (i.e.
+            # latest position in the reversed tokens)
+            if prev_lps >= longest_ngram:
+                longest_ngram = prev_lps
+                position = i
+            if i < max_ngram:
+                # Store LPS for the first max_ngram prefix
+                lps[i] = prev_lps
+            if prev_lps == max_ngram:
+                # When prev_lps reached max_ngram, update prev_lps
+                # to lps[max_ngram-1] to avoid matching ngram
+                # longer than max_ngram
+                prev_lps = lps[max_ngram - 1]
             i += 1
+        elif prev_lps != 0:
+            # Token mismatch: try the second longest prefix
+            # among all suffix of tokens[:i],
+            # which is the longest prefix of tokens[:prev_lps]
+            prev_lps = lps[prev_lps - 1]
         else:
-            if prev_lps != 0:
-                prev_lps = lps[prev_lps - 1]
-            else:
-                lps[i] = 0
-                i += 1
-    return lps
-
-
-@jit(nopython=True)
-def _find_subarray_kmp(
-    context_token_ids: np.ndarray,
-    n: int,
-    k: int,
-) -> Optional[np.ndarray]:
-    context_len = context_token_ids.shape[0]
-    assert n > 0
-
-    pattern = context_token_ids[-n:]
-    # Precompute lps array for Y
-    lps = _kmp_lps_array(pattern)
-
-    i = 0
-    j = 0
-    # -n because the last n tokens are used as pattern
-    while i < context_len - n:
-        if context_token_ids[i] == pattern[j]:
+            # Token mismatch, and no more prefix (except empty string)
+            # as a suffix of tokens[:i]
             i += 1
-            j += 1
 
-            # If we have matched the entire Y
-            if j == n:
-                # Found pattern in context, gather the next K elements
-                return context_token_ids[i:i + k]
-        else:
-            # Mismatch
-            if j != 0:
-                # Use the lps array to avoid re-checking elements
-                j = lps[j - 1]
-            else:
-                i += 1
+    if longest_ngram < min_ngram:
+        # No valid ngram is found
+        return None
 
-    # Y not found
-    return None
+    # Flip the position back, so in origin_tokens,
+    # origin_tokens[total_token-1-position:total_token-1-position+longest_ngram]
+    # is the matched ngram, so we should start drafting tokens from
+    # total_token-1-position+longest_ngram
+    start_position = total_token - 1 - position + longest_ngram
+    k = min(k, total_token - start_position)
+    return origin_tokens[start_position:start_position + k]
