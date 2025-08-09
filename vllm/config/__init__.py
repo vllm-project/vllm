@@ -4424,15 +4424,13 @@ class VllmConfig:
                 True
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
-        if envs.VLLM_USE_V1 and self.model_config is not None and \
-            not self.model_config.enforce_eager:
-            self.compilation_config.cudagraph_num_of_warmups = 1
-            self.compilation_config.set_splitting_ops_for_v1()
 
         # disable cudagraph when enforce eager execution
         if self.model_config is not None and self.model_config.enforce_eager:
             logger.info("Cudagraph is disabled under eager mode")
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        elif envs.VLLM_USE_V1:
+            self.compilation_config.cudagraph_num_of_warmups = 1
 
         self._set_cudagraph_sizes()
 
@@ -4508,6 +4506,11 @@ class VllmConfig:
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
+
+        # Do this after all the updates to compilation_config.level
+        if envs.VLLM_USE_V1 and \
+            self.compilation_config.level == CompilationLevel.PIECEWISE:
+            self.compilation_config.set_splitting_ops_for_v1()
 
         if (envs.VLLM_USE_V1
                 and not self.scheduler_config.disable_hybrid_kv_cache_manager):
