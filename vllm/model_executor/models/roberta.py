@@ -105,7 +105,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor,
         positions: torch.Tensor,
         token_type_ids: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
@@ -119,8 +119,8 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
                                   position_ids=positions,
                                   padding_idx=self.padding_idx)
 
-        return self.model(input_ids=input_ids,
-                          position_ids=positions,
+        return self.model(input_ids,
+                          positions,
                           token_type_ids=token_type_ids,
                           inputs_embeds=inputs_embeds,
                           intermediate_tensors=intermediate_tensors)
