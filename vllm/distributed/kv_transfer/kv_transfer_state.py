@@ -3,11 +3,11 @@
 from typing import TYPE_CHECKING, Optional
 
 from vllm import envs
+from vllm.distributed.kv_transfer.kv_connector import (KVConnectorBase,
+                                                       KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
-from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
-                                                          KVConnectorRole)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -44,7 +44,7 @@ def is_v1_kv_transfer_group(
     if connector is None:
         return False
 
-    return isinstance(connector, KVConnectorBase_V1)
+    return isinstance(connector, KVConnectorBase)
 
 
 def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:

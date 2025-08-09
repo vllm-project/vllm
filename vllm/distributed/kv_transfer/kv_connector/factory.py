@@ -5,8 +5,8 @@ import importlib
 from typing import TYPE_CHECKING, Callable
 
 import vllm.envs as envs
-from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector import (KVConnectorBase,
+                                                       KVConnectorRole)
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -72,25 +72,25 @@ class KVConnectorFactory:
 
 KVConnectorFactory.register_connector(
     "SharedStorageConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector",
+    "vllm.distributed.kv_transfer.kv_connector.shared_storage_connector",
     "SharedStorageConnector")
 
 KVConnectorFactory.register_connector(
     "P2pNcclConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_connector",
+    "vllm.distributed.kv_transfer.kv_connector.p2p.p2p_nccl_connector",
     "P2pNcclConnector")
 
 KVConnectorFactory.register_connector(
-    "LMCacheConnectorV1",
-    "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector",
-    "LMCacheConnectorV1")
+    "LMCacheConnector",
+    "vllm.distributed.kv_transfer.kv_connector.lmcache_connector",
+    "LMCacheConnector")
 
 KVConnectorFactory.register_connector(
     "NixlConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector",
+    "vllm.distributed.kv_transfer.kv_connector.nixl_connector",
     "NixlConnector")
 
 KVConnectorFactory.register_connector(
     "MultiConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.multi_connector",
+    "vllm.distributed.kv_transfer.kv_connector.multi_connector",
     "MultiConnector")
