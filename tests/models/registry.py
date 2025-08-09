@@ -79,17 +79,17 @@ class _HfExamplesInfo:
     def check_transformers_version(
         self,
         *,
-        on_fail: Literal["error", "skip"],
+        on_fail: Literal["error", "skip", "return"],
         check_min_version: bool = True,
         check_max_version: bool = True,
-    ) -> None:
+    ) -> Optional[str]:
         """
         If the installed transformers version does not meet the requirements,
         perform the given action.
         """
         if (self.min_transformers_version is None
                 and self.max_transformers_version is None):
-            return
+            return None
 
         current_version = TRANSFORMERS_VERSION
         cur_base_version = Version(current_version).base_version
@@ -105,15 +105,17 @@ class _HfExamplesInfo:
               and Version(cur_base_version) > Version(max_version)):
             msg += f"<={max_version}` is required to run this model."
         else:
-            return
+            return None
 
         if self.transformers_version_reason:
             msg += f" Reason: {self.transformers_version_reason}"
 
         if on_fail == "error":
             raise RuntimeError(msg)
-        else:
+        elif on_fail == "skip":
             pytest.skip(msg)
+
+        return msg
 
     def check_available_online(
         self,
@@ -148,7 +150,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "BailingMoeForCausalLM": _HfExamplesInfo("inclusionAI/Ling-lite-1.5",
                                          trust_remote_code=True),
-    "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B",
+    "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B-v1",
+                                        min_transformers_version="4.55.1",
                                         extras={"tiny": "hmellor/tiny-random-BambaForCausalLM"}),  # noqa: E501
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloom-560m",
                                         {"1b": "bigscience/bloomz-1b1"}),
@@ -223,6 +226,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini",
+                                        min_transformers_version="4.55.1",
                                         extras={
                                             "tiny": "ai21labs/Jamba-tiny-dev",
                                             "random": "ai21labs/Jamba-tiny-random",  # noqa: E501
