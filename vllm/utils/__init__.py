@@ -1669,11 +1669,19 @@ class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
     _deprecated: set[Action] = set()
+    _json_tip: str = (
+        "When passing JSON CLI arguments, the following sets of arguments "
+        "are equivalent:\n"
+        '   --json-arg \'{"key1": "value1", "key2": {"key3": "value2"}}\'\n'
+        "   --json-arg.key1 value1 --json-arg.key2.key3 value2\n\n"
+        "Additionally, list elements can be passed individually using +:\n"
+        '   --json-arg \'{"key4": ["value3", "value4", "value5"]}\'\n'
+        "   --json-arg.key4+ value3 --json-arg.key4+=\'value4,value5\'\n\n")
 
     def __init__(self, *args, **kwargs):
-        # Set the default 'formatter_class' to SortedHelpFormatter
-        if 'formatter_class' not in kwargs:
-            kwargs['formatter_class'] = SortedHelpFormatter
+        # Set the default "formatter_class" to SortedHelpFormatter
+        if "formatter_class" not in kwargs:
+            kwargs["formatter_class"] = SortedHelpFormatter
         super().__init__(*args, **kwargs)
 
     if sys.version_info < (3, 13):
@@ -1714,6 +1722,13 @@ class FlexibleArgumentParser(ArgumentParser):
             group = self._FlexibleArgumentGroup(self, *args, **kwargs)
             self._action_groups.append(group)
             return group
+
+    def format_help(self) -> str:
+        # Add tip about JSON arguments to the epilog
+        epilog = self.epilog or ""
+        if not epilog.startswith(FlexibleArgumentParser._json_tip):
+            self.epilog = FlexibleArgumentParser._json_tip + epilog
+        return super().format_help()
 
     def parse_args(  # type: ignore[override]
         self,
