@@ -21,6 +21,10 @@ from .ssd_state_passing import _state_passing_fwd
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 
 
+def is_int_pow_2(n):
+    return isinstance(n, int) and n > 0 and (n & (n - 1)) == 0
+
+
 def _mamba_chunk_scan_combined_fwd(x,
                                    dt,
                                    A,
@@ -38,6 +42,7 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
                                    out=None):
+    assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
     assert nheads % ngroups == 0
