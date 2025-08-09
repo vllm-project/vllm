@@ -174,7 +174,10 @@ class Worker(WorkerBase):
             self.init_snapshot = MemorySnapshot()
             self.requested_memory = (self.init_snapshot.total_memory *
                                      self.cache_config.gpu_memory_utilization)
-            if self.init_snapshot.free_memory < self.requested_memory:
+            # Skip the memory check when num_gpu_blocks_override is set
+            # as the user is explicitly requesting a specific number of blocks
+            if (self.cache_config.num_gpu_blocks_override is None and 
+                self.init_snapshot.free_memory < self.requested_memory):
                 GiB = lambda b: round(b / GiB_bytes, 2)
                 raise ValueError(
                     f"Free memory on device "
