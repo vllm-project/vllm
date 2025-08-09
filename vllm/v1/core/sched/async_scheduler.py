@@ -20,11 +20,10 @@ class AsyncScheduler(Scheduler):
         super()._update_after_schedule(scheduler_output)
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
-            if (request.num_computed_tokens == request.num_tokens +
+            if (request.num_computed_tokens == request.num_tokens_with_spec +
                     request.num_output_placeholders):
                 # The request will generate a new token in this scheduling step.
-                # TODO(woosuk): Support speculative decoding.
-                request.num_output_placeholders += 1
+                request.num_output_placeholders = 1 + self.num_spec_tokens
 
     def _update_request_with_output(
         self,
@@ -35,13 +34,7 @@ class AsyncScheduler(Scheduler):
         new_token_ids, stopped = super()._update_request_with_output(
             request, new_token_ids)
 
-        # Update the number of output placeholders.
-        request.num_output_placeholders -= len(new_token_ids)
-        assert request.num_output_placeholders >= 0
-
         # Cache the new tokens. Preempted requests should be skipped.
         if status_before_update == RequestStatus.RUNNING:
-            self.kv_cache_manager.cache_blocks(
-                request,
-                request.num_computed_tokens - request.num_output_placeholders)
+            self.kv_cache_manager.cache_blocks(request, request.num_tokens)
         return new_token_ids, stopped
