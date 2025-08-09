@@ -3248,7 +3248,6 @@ GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines",
                                 "lm-format-enforcer"]
 
 
-
 @config
 @dataclass
 class DecodingConfig:
