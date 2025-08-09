@@ -23,7 +23,8 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
-from vllm.utils import get_open_port, get_open_zmq_inproc_path, make_zmq_socket
+from vllm.utils import (cancel_task_threadsafe, get_open_port,
+                        get_open_zmq_inproc_path, make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
                             ReconfigureDistributedRequest, ReconfigureRankType,
@@ -342,10 +343,8 @@ class BackgroundResources:
         if self.coordinator is not None:
             self.coordinator.close()
 
-        if self.output_queue_task is not None:
-            self.output_queue_task.cancel()
-        if self.stats_update_task is not None:
-            self.stats_update_task.cancel()
+        cancel_task_threadsafe(self.output_queue_task)
+        cancel_task_threadsafe(self.stats_update_task)
 
         # ZMQ context termination can hang if the sockets
         # aren't explicitly closed first.
