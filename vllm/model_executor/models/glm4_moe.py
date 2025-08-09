@@ -28,7 +28,7 @@ from typing import Any, Optional, Union
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers.models.glm4_moe import Glm4MoeConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -100,7 +100,7 @@ class Glm4MoE(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Glm4MoeConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         enable_eplb: bool = False,
@@ -198,7 +198,7 @@ class Glm4MoeAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Glm4MoeConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -297,7 +297,7 @@ class Glm4MoeDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Glm4MoeConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -681,7 +681,7 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         return self.model.get_expert_mapping()
 
 
-def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
+def get_spec_layer_idx_from_weight_name(config: Glm4MoeConfig,
                                         weight_name: str) -> Optional[int]:
     if hasattr(config,
                "num_nextn_predict_layers") and (config.num_nextn_predict_layers
