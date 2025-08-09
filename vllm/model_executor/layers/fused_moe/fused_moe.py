@@ -2000,7 +2000,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             qintermediate_cache2,
             w2,
             intermediate_cache3,
-            None,  # TODO support B_bias
             a2q_scale,
             w2_scale,
             w2_zp,
