@@ -104,6 +104,14 @@ class InputBatch:
         )
         self.num_computed_tokens_cpu = \
             self.num_computed_tokens_cpu_tensor.numpy()
+        self.num_dropped_tokens_list_cpu_tensor = torch.zeros(
+             (max_num_reqs, ),
+             device="cpu",
+             dtype=torch.int32,
+             pin_memory=pin_memory,
+         )
+        self.num_dropped_tokens_list_cpu = \
+            self.num_dropped_tokens_list_cpu_tensor.numpy()
 
         # Block table.
         self.block_table = MultiGroupBlockTable(
