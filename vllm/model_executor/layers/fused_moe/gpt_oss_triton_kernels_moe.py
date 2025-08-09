@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
-from vllm.model_executor.layers.fused_moe.utils import extract_required_args
 from vllm.utils import has_triton_kernels
 
 if has_triton_kernels():
@@ -151,12 +150,16 @@ class BatchedOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_dispatchers: int,
         w1_precision: "PrecisionConfig",
         w2_precision: "PrecisionConfig",
+        w1_bias: Optional[torch.Tensor],
+        w2_bias: Optional[torch.Tensor],
     ):
         super().__init__(quant_config)
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
         self.w1_precision = w1_precision
         self.w2_precision = w2_precision
+        self.w1_bias = w1_bias
+        self.w2_bias = w2_bias
 
     @property
     def activation_formats(
@@ -210,11 +213,7 @@ class BatchedOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
-        extra_expert_args: Optional[dict[str, Any]],
     ):
-        w1_bias, w2_bias = (extract_required_args(extra_expert_args,
-                                                  ["w1_bias", "w2_bias"]))
-
         return triton_kernel_fused_experts(
             output,
             hidden_states,
@@ -231,8 +230,8 @@ class BatchedOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             expert_map=expert_map,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
-            w1_bias=w1_bias,
-            w2_bias=w2_bias,
+            w1_bias=self.w1_bias,
+            w2_bias=self.w2_bias,
             w1_precision=self.w1_precision,
             w2_precision=self.w2_precision,
             a1_scale=a1q_scale,

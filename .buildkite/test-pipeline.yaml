@@ -409,6 +409,7 @@ steps:
 - label: Kernels MoE Test %N
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
+  - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/
