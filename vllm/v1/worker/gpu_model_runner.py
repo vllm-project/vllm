@@ -596,13 +596,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         req_mm_kwargs = list(req_mm_kwargs)
                     mm_kwargs.extend(req_mm_kwargs)
 
-                return next(
-                    mm_kwargs_group
-                    for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
+                # Input all modalities at once
+                mm_kwargs_combined: BatchedTensorInputs = {}
+                for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
                         mm_kwargs,
                         device=self.device,
                         pin_memory=self.pin_memory,
-                    ))
+                ):
+                    mm_kwargs_combined.update(mm_kwargs_group)
+
+                return mm_kwargs_combined
 
         return {}
 
