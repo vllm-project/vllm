@@ -15,9 +15,6 @@ if has_triton_kernels():
     from triton_kernels.matmul_ogs import FnSpecs, FusedActivation, matmul_ogs
     from triton_kernels.routing import routing
 
-if TYPE_CHECKING:
-    from triton_kernels.matmul_ogs import PrecisionConfig
-
 
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
