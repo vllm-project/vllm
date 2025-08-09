@@ -14,9 +14,17 @@ from vllm.executor.ray_utils import ray
 from vllm.logger import init_logger
 
 if ray is not None:
+    from ray import serve
+    from ray.serve.context import ReplicaContext
     from ray.util import metrics as ray_metrics
 else:
     ray_metrics = None
+
+
+def _get_replica_id() -> str:
+    ctx: ReplicaContext = serve.get_replica_context()
+    return ctx.replica_id.unique_id
+
 
 logger = init_logger(__name__)
 
@@ -214,12 +222,21 @@ class _RayGaugeWrapper:
                  labelnames: Optional[List[str]] = None,
                  multiprocess_mode: str = ""):
         del multiprocess_mode
-        labelnames_tuple = tuple(labelnames) if labelnames else None
+
+        # Add ReplicaId to tag_keys to allow setting it as a default tag
+        labelnames_list = list(labelnames) if labelnames else []
+        if "ReplicaId" not in labelnames_list:
+            labelnames_list.append("ReplicaId")
+        labelnames_tuple = tuple(labelnames_list)
+
         self._gauge = ray_metrics.Gauge(name=name,
                                         description=documentation,
                                         tag_keys=labelnames_tuple)
 
+        self._gauge.set_default_tags({"ReplicaId": _get_replica_id()})
+
     def labels(self, **labels):
+        labels.update({"ReplicaId": _get_replica_id()})
         self._gauge.set_default_tags(labels)
         return self
 
@@ -239,12 +256,20 @@ class _RayCounterWrapper:
                  name: str,
                  documentation: str = "",
                  labelnames: Optional[List[str]] = None):
-        labelnames_tuple = tuple(labelnames) if labelnames else None
+        # Add ReplicaId to tag_keys to allow setting it as a default tag
+        labelnames_list = list(labelnames) if labelnames else []
+        if "ReplicaId" not in labelnames_list:
+            labelnames_list.append("ReplicaId")
+        labelnames_tuple = tuple(labelnames_list)
+
         self._counter = ray_metrics.Counter(name=name,
                                             description=documentation,
                                             tag_keys=labelnames_tuple)
 
+        self._counter.set_default_tags({"ReplicaId": _get_replica_id()})
+
     def labels(self, **labels):
+        labels.update({"ReplicaId": _get_replica_id()})
         self._counter.set_default_tags(labels)
         return self
 
@@ -263,14 +288,22 @@ class _RayHistogramWrapper:
                  documentation: str = "",
                  labelnames: Optional[List[str]] = None,
                  buckets: Optional[List[float]] = None):
-        labelnames_tuple = tuple(labelnames) if labelnames else None
+        # Add ReplicaId to tag_keys to allow setting it as a default tag
+        labelnames_list = list(labelnames) if labelnames else []
+        if "ReplicaId" not in labelnames_list:
+            labelnames_list.append("ReplicaId")
+        labelnames_tuple = tuple(labelnames_list)
+
         boundaries = buckets if buckets else []
         self._histogram = ray_metrics.Histogram(name=name,
                                                 description=documentation,
                                                 tag_keys=labelnames_tuple,
                                                 boundaries=boundaries)
 
+        self._histogram.set_default_tags({"ReplicaId": _get_replica_id()})
+
     def labels(self, **labels):
+        labels.update({"ReplicaId": _get_replica_id()})
         self._histogram.set_default_tags(labels)
         return self
 

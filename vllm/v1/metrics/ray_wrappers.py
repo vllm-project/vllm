@@ -7,10 +7,17 @@ from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
 
 try:
+    from ray import serve
+    from ray.serve.context import ReplicaContext
     from ray.util import metrics as ray_metrics
     from ray.util.metrics import Metric
 except ImportError:
     ray_metrics = None
+
+
+def _get_replica_id() -> str:
+    ctx: ReplicaContext = serve.get_replica_context()
+    return ctx.replica_id.unique_id
 
 
 class RayPrometheusMetric:
@@ -31,12 +38,17 @@ class RayPrometheusMetric:
             self.metric.set_default_tags(labelskwargs)
 
         if labels:
+            tag_keys = list(self.metric._tag_keys)
+            if "ReplicaId" in tag_keys and len(labels) == len(tag_keys) - 1:
+                replica_idx = tag_keys.index("ReplicaId")
+                labels_list = list(labels)
+                labels_list.insert(replica_idx, _get_replica_id())
+                labels = tuple(labels_list)
             if len(labels) != len(self.metric._tag_keys):
                 raise ValueError(
                     "Number of labels must match the number of tag keys. "
                     f"Expected {len(self.metric._tag_keys)}, got {len(labels)}"
                 )
-
             self.metric.set_default_tags(
                 dict(zip(self.metric._tag_keys, labels)))
 
@@ -57,10 +69,17 @@ class RayGaugeWrapper(RayPrometheusMetric):
         # "mostrecent", "all", "sum" do not apply. This logic can be manually
         # implemented at the observability layer (Prometheus/Grafana).
         del multiprocess_mode
-        labelnames_tuple = tuple(labelnames) if labelnames else None
+
+        # Add ReplicaId to tag_keys to allow setting it as a default tag
+        labelnames_list = list(labelnames) if labelnames else []
+        if "ReplicaId" not in labelnames_list:
+            labelnames_list.append("ReplicaId")
+        labelnames_tuple = tuple(labelnames_list)
+
         self.metric = ray_metrics.Gauge(name=name,
                                         description=documentation,
                                         tag_keys=labelnames_tuple)
+        self.metric.set_default_tags({"ReplicaId": _get_replica_id()})
 
     def set(self, value: Union[int, float]):
         return self.metric.set(value)
@@ -78,10 +97,19 @@ class RayCounterWrapper(RayPrometheusMetric):
                  name: str,
                  documentation: Optional[str] = "",
                  labelnames: Optional[list[str]] = None):
-        labelnames_tuple = tuple(labelnames) if labelnames else None
+        # Add ReplicaId to tag_keys to allow setting it as a default tag
+        labelnames_list = list(labelnames) if labelnames else []
+        if "ReplicaId" not in labelnames_list:
+            labelnames_list.append("ReplicaId")
+        labelnames_tuple = tuple(labelnames_list)
+
         self.metric = ray_metrics.Counter(name=name,
                                           description=documentation,
                                           tag_keys=labelnames_tuple)
+
+        # Set ReplicaId as a default tag to provide a more concise identifier
+        # than the verbose WorkerId that Ray automatically adds
+        self.metric.set_default_tags({"ReplicaId": _get_replica_id()})
 
     def inc(self, value: Union[int, float] = 1.0):
         if value == 0:
@@ -98,12 +126,21 @@ class RayHistogramWrapper(RayPrometheusMetric):
                  documentation: Optional[str] = "",
                  labelnames: Optional[list[str]] = None,
                  buckets: Optional[list[float]] = None):
-        labelnames_tuple = tuple(labelnames) if labelnames else None
+        # Add ReplicaId to tag_keys to allow setting it as a default tag
+        labelnames_list = list(labelnames) if labelnames else []
+        if "ReplicaId" not in labelnames_list:
+            labelnames_list.append("ReplicaId")
+        labelnames_tuple = tuple(labelnames_list)
+
         boundaries = buckets if buckets else []
         self.metric = ray_metrics.Histogram(name=name,
                                             description=documentation,
                                             tag_keys=labelnames_tuple,
                                             boundaries=boundaries)
+
+        # Set ReplicaId as a default tag to provide a more concise identifier
+        # than the verbose WorkerId that Ray automatically adds
+        self.metric.set_default_tags({"ReplicaId": _get_replica_id()})
 
     def observe(self, value: Union[int, float]):
         return self.metric.observe(value)
