@@ -535,8 +535,6 @@ steps:
   - vllm/
   - tests/models/language
   commands:
-    # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
-    - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m core_model
 
@@ -547,8 +545,10 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-    # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
-    - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
+    # Install fast path packages for testing against transformers
+    # Note: also needed to run plamo2 model in vLLM
+    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
+    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s models/language/generation -m hybrid_model
 
 - label: Language Models Test (Extended Generation) # 1hr20min
