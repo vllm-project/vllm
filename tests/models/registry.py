@@ -343,7 +343,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
                                                   transformers_version_reason="HF model uses remote code that is not compatible with latest Transformers"),  # noqa: E501
     "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2", v0_only=True),  # noqa: E501
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1", v0_only=True),  # noqa: E501
-    "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small", v0_only=True),  # noqa: E501
+    "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small"),  # noqa: E501
     # [Multimodal]
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
     "Phi3VForCausalLM": _HfExamplesInfo("TIGER-Lab/VLM2Vec-Full",
@@ -361,7 +361,7 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2", v0_only=True),  # noqa: E501
     "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True), # noqa: E501
     "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base", v0_only=True),  # noqa: E501
-    "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3", v0_only=True),  # noqa: E501
+    "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3"),  # noqa: E501
 }
 
 _AUTOMATIC_CONVERTED_MODELS = {
