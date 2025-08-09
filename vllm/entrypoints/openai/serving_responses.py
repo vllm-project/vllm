@@ -769,8 +769,8 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         sampling_params: SamplingParams,
-        result_generator: AsyncIterator[StreamingHarmonyContext],
-        context: StreamingHarmonyContext,
+        result_generator: AsyncIterator[Optional[ConversationContext]],
+        context: ConversationContext,
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
@@ -778,6 +778,11 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> AsyncGenerator[str, None]:
         # TODO:
         # 1. Handle disconnect
+
+        if not isinstance(context, StreamingHarmonyContext):
+            raise NotImplementedError(
+                "Streaming is not supported for responses API without Harmony."
+            )
 
         created_time = created_time or int(time.time())
 
@@ -822,6 +827,8 @@ class OpenAIServingResponses(OpenAIServing):
             ))
 
         async for ctx in result_generator:
+
+            assert isinstance(ctx, StreamingHarmonyContext)
 
             if ctx.is_expecting_start():
                 current_output_index += 1
