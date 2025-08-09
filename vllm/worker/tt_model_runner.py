@@ -492,7 +492,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     next_token_ids, read_event = next_token_ids
                     self.cached_read_events.append(read_event)
                 self.cached_step_outputs.append(next_token_ids)
-                if not self.llama_tg and i < num_steps - 1:
+                if (not self.llama_tg and i < num_steps - 1
+                        and not self.sample_on_device_mode):
                     # Prepare the inputs for the next step
                     new_input_tokens = next_token_ids.unsqueeze(dim=1).int()
                     if new_input_tokens.shape[
@@ -624,10 +625,12 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             execute_model_kwargs["prompt_lens"] = model_input.prompt_lens
         else:
             execute_model_kwargs["start_pos"] = model_input.input_positions
+
         if self.sample_on_device_mode == "all" or (
                 self.sample_on_device_mode == "decode_only" and is_decode):
             execute_model_kwargs[
                 "sampling_params"] = model_input.tt_sampling_params
+
         if model_input.cross_block_tables is not None:
             execute_model_kwargs[
                 "cross_page_table"] = model_input.cross_block_tables
