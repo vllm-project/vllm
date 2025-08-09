@@ -303,13 +303,14 @@ class EngineCore:
         # Note that this is not blocking.
         if not self.batch_queue.full():
             scheduler_output = self.scheduler.schedule()
-            if scheduler_output.total_num_scheduled_tokens > 0:
+            if scheduler_output.total_num_scheduled_tokens > 0 or scheduler_output.finished_req_ids:
                 future = self.model_executor.execute_model(scheduler_output)
                 self.batch_queue.put_nowait(
                     (future, scheduler_output))  # type: ignore
 
         scheduled_batch = (scheduler_output is not None
-                           and scheduler_output.total_num_scheduled_tokens > 0)
+                           and (scheduler_output.total_num_scheduled_tokens > 0
+                                or scheduler_output.finished_req_ids))
 
         # If no more requests can be scheduled and the job queue is not empty,
         # block until the first batch in the job queue is finished.
