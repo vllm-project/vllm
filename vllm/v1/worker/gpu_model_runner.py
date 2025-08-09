@@ -41,6 +41,7 @@ from vllm.model_executor.models.interfaces_base import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
                                     PlaceholderRange)
+from vllm.multimodal.profiling import DummyDecoderData
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
@@ -587,6 +588,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
     ) -> BatchedTensorInputs:
         if self.is_multimodal_raw_input_supported:  # noqa: SIM102
+            # This model requires the raw multimodal data in input.
             if scheduler_output:
                 multi_modal_kwargs_list = list[MultiModalKwargs]()
                 for req in scheduler_output.scheduled_new_reqs:
@@ -605,8 +607,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert mm_budget is not None
 
             dummy_modality, _ = mm_budget.get_modality_with_max_tokens()
+            dummy_mm_data = self._get_mm_decoder_dummy_data(dummy_modality, 1)
 
-            return self._get_mm_dummy_batch(dummy_modality, num_seqs)
+            return self._get_mm_decoder_dummy_batch(
+                dummy_modality,
+                dummy_mm_data,
+                num_seqs,
+            )
 
         return {}
 
@@ -1512,6 +1519,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
             model_mm_kwargs = {}
+
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_input_tokens]
         else:
@@ -2123,17 +2131,35 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             yield
             input_ids.fill_(0)
 
-    def _get_mm_dummy_batch(
+    def _get_mm_decoder_dummy_data(
         self,
         modality: str,
+        max_items_per_prompt: int,
+    ) -> DummyDecoderData:
+        """Dummy data for profiling and precompiling multimodal processor."""
+        model_config = self.model_config
+        if model_config.get_multimodal_config().is_mm_processing_gpu:
+            # Result in the maximum GPU consumption of HF processor
+            mm_counts = {modality: max_items_per_prompt}
+            disable_cache = True
+        else:
+            mm_counts = {modality: 1}
+            disable_cache = False
+
+        return self.mm_registry.get_decoder_dummy_data(
+            model_config=model_config,
+            seq_len=self.max_num_tokens,
+            mm_counts=mm_counts,
+            disable_cache=disable_cache,
+        )
+
+    def _get_mm_decoder_dummy_batch(
+        self,
+        modality: str,
+        dummy_decoder_data: DummyDecoderData,
         max_items_per_batch: int,
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
-        dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
-            model_config=self.model_config,
-            seq_len=self.max_num_tokens,
-            mm_counts={modality: 1},
-        )
         dummy_mm_data = dummy_decoder_data.multi_modal_data
 
         # Result in the maximum GPU consumption of the model
@@ -2447,8 +2473,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
 
                 # Create dummy batch of multimodal inputs.
-                batched_dummy_mm_inputs = self._get_mm_dummy_batch(
+                dummy_mm_data = self._get_mm_decoder_dummy_data(
                     dummy_modality,
+                    max_mm_items_per_prompt,
+                )
+                batched_dummy_mm_inputs = self._get_mm_decoder_dummy_batch(
+                    dummy_modality,
+                    dummy_mm_data,
                     max_mm_items_per_batch,
                 )
 

@@ -153,6 +153,33 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
     [Multi-modal processor cache](#processor-cache) is disabled when API server scale-out is enabled
     because it requires a one-to-one correspondance between API and engine core processes.
 
+### GPU Multi-Modal Processing
+
+You can speed up multi-modal input processing by running Hugging Face processors on the GPU.
+To support this, the processor must accept a `device` argument in its call signature.
+As of this writing, the following processors are known to support GPU acceleration:
+
+- Descendants of `BaseImageProcessorFast` (requires `use_fast=True`)
+- Descendants of `BaseVideoProcessor`
+- `WhisperFeatureExtractor`
+
+To run Hugging Face processors on the GPU, you can pass the `device` argument
+(and `use_fast` if needed) via `mm_processor_kwargs`:
+
+```python
+# Fast image processor requires use_fast=True
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          mm_processor_kwargs={"use_fast": True, "device": "cuda"})
+
+# Whisper feature extractor does not require use_fast
+llm = LLM(model="Qwen/Qwen2-Audio-7B-Instruct",
+          mm_processor_kwargs={"device": "cuda"})
+```
+
+!!! warning
+    The speed-up from GPU processing varies from model to model. In some cases, GPU processing may even become detrimental.
+    Make sure you perform benchmarking before enabling this!
+
 ## Multi-Modal Caching
 
 ### Processor Cache
