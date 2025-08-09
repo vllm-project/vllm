@@ -3,7 +3,8 @@
 
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
-from typing import Optional
+from typing import Optional, Generator
+import logging
 
 import regex as re
 import torch
@@ -221,13 +222,16 @@ def _match_fused_layer(
 # The code below is copied from `compressed_tensors/utils/match.py`
 # and will be substituted after the release of `compressed-tensors>=0.11`
 
+_LOGGER: logging.Logger = logging.getLogger(__name__)
+
 FusedMappping = Mapping[str, Iterable[str]]
 
 
 def is_match(
     name: str,
     module: torch.nn.Module,
-    target: str,
+    targets: str | Iterable[str],
+    ignore: str | Iterable[str] = tuple(),
     fused: Optional[FusedMappping] = None,
 ) -> bool:
     """
@@ -249,12 +253,21 @@ def is_match(
     :fused: optional mapping from suffixes of fused modules to the suffixes of their
         corresponding shards
     """
-    return (_match_name(name, target, fused) or _match_class(module, target))
+    targets = [targets] if isinstance(targets, str) else targets
+    ignore = [ignore] if isinstance(ignore, str) else ignore
+
+    return (
+        any(
+            _match_name(name, target, fused) or _match_class(module, target)
+            for target in targets
+        )
+        and not any(
+            _match_name(name, ign, fused) or _match_class(module, ign) for ign in ignore
+        )
+    )
 
 
-def _match_name(name: str,
-                target: str,
-                fused: Optional[FusedMappping] = None) -> bool:
+def _match_name(name: str, target: str, fused: Optional[FusedMappping] = None) -> bool:
     """
     Returns true if target string begins with "re:" and regex matches or if target
     string exactly matches name. If the name refers to a fused module defined by vLLM,
@@ -271,7 +284,8 @@ def _match_name(name: str,
                 name_stripped = name.removesuffix(fused_suffix)
                 return any(
                     _match_name(name_stripped + shard_suffix, target)
-                    for shard_suffix in fused[fused_suffix])
+                    for shard_suffix in fused[fused_suffix]
+                )
 
     if target.startswith("re:"):
         return re.match(target.removeprefix("re:"), name) is not None
@@ -289,6 +303,12 @@ def _match_class(module: torch.nn.Module, target: str) -> bool:
     """
     # will never match against a regex pattern since `:` is not allowed in class names
     return any(
-        (issubclass(cls, torch.nn.Module) and (cls.__name__ == target or (
-            cls.__name__ == "LinearBase" and target == "Linear")))
-        for cls in module.__class__.__mro__)
+        (
+            issubclass(cls, torch.nn.Module)
+            and (
+                cls.__name__ == target
+                or (cls.__name__ == "LinearBase" and target == "Linear")
+            )
+        )
+        for cls in module.__class__.__mro__
+    )

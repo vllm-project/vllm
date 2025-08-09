@@ -72,9 +72,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.sparsity_scheme_map = sparsity_scheme_map
         self.sparsity_ignore_list = sparsity_ignore_list
         self.config = config
-        self.transform_config = transform_config
-        
-        self.transform_factories = {}
+
+        self.transform_config = TransformConfig.model_validate(transform_config)
+        self.transform_factories: dict[int, TransformFactory] = {}
 
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
@@ -117,7 +117,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
             if scheme is None:
-                return UnquantizedLinearMethod()
+                # transform schcmes have been attached by get_scheme
+                return CompressedTensorsUnquantizedLinearMethod(self)
             layer.scheme = scheme
             return CompressedTensorsLinearMethod(self)
         if isinstance(layer, Attention):
@@ -539,7 +540,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         input_tfm = None
         output_tfm = None
         if self.transform_config is not None:
-            for scheme in self.transform_config.config_groups.values():
+            for name, scheme in self.transform_config.config_groups.items():
                 for args in scheme.apply:
                     if is_match(layer_name,
                                 layer,
@@ -553,8 +554,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                             output_tfm = replace_with_check(
                                 output_tfm, (scheme, args))
                         
-                        if scheme not in self.transform_factories:
-                            self.transform_factories = TransformFactory.from_scheme(scheme)
+                        if id(scheme) not in self.transform_factories:
+                            self.transform_factories[id(scheme)] = TransformFactory.from_scheme(scheme, name=name)
 
         # attach transforms for later retrieval by LinearMethod, or 
         layer.input_tfm = input_tfm
@@ -674,6 +675,62 @@ class CompressedTensorsConfig(QuantizationConfig):
             return False
 
         return weight_quant.num_bits == input_quant.num_bits == 8
+    
+
+class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
+    def __init__(self, quantization_config: CompressedTensorsConfig):
+        self.quantization_config = quantization_config
+
+    def create_weights(self, layer: torch.nn.Module,
+                       input_size_per_partition: int,
+                       output_partition_sizes: list[int], input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
+        
+        super().create_weights(layer=layer, input_size_per_partition=input_size_per_partition, output_partition_sizes=output_partition_sizes, input_size=input_size, output_size=output_size, params_dtype=params_dtype, **extra_weight_attrs)
+        
+        for attr_name in ("input_tfm", "output_tfm"):
+            if getattr(layer, attr_name, None) is not None:
+                scheme, args = getattr(layer, attr_name)
+                # NOTE: this will actually fail on older CT versions due to
+                # an overly-narrow assertion that the module is `torch.nn.Linear`
+
+                # TODO: find way to support adding transforms to fused modules
+                # such as QKVLinear
+                # maybe something like:
+                # if isinstance(layer, KQVProj):
+                #     self.quantization_config.transform_factories[id(scheme)]._apply_to_module(layer, args)
+
+                print(layer)
+                print(layer.device)
+                print(layer.dtype)
+                self.quantization_config.transform_factories[id(scheme)]._apply_to_module(layer, args)
+                print(layer)
+
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        
+        input_transform = None
+        output_transform = None
+        for child in layer.children():
+            if isinstance(child, TransformBase):
+                if child.args.location == TransformLocation.INPUT:
+                    input_transform = child
+                
+                if child.args.location == TransformLocation.OUTPUT:
+                    output_transform = child
+
+        if input_transform is not None:
+            x = input_transform(x)
+
+        x = super().apply(layer=layer, x=x, bias=bias)
+    
+        if output_transform is not None:
+            x = output_transform(x)
+
+        return x
 
 
 class CompressedTensorsLinearMethod(LinearMethodBase):
@@ -704,12 +761,14 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             params_dtype=params_dtype,
             weight_loader=weight_loader)
         
+        print("create_weights")
         # transform weights are shared, so weight loader's `copy_`
         # will load across shared transform weight tensors
         for attr_name in ("input_tfm", "output_tfm"):
             if getattr(layer, attr_name, None) is not None:
                 scheme, args = getattr(layer, attr_name)
-                self.quantization_config.transform_factories[scheme]._apply_to_module(layer, args)
+                self.quantization_config.transform_factories[id(scheme)]._apply_to_module(layer, args)
+                print(layer)
 
     def apply(self,
               layer: torch.nn.Module,
