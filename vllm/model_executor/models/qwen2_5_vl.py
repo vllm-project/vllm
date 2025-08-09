@@ -843,17 +843,12 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
 
-        if multimodal_config.get_limit_per_prompt("image") or \
-            multimodal_config.get_limit_per_prompt("video"):
-            self.visual = Qwen2_5_VisionTransformer(
-                config.vision_config,
-                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                quant_config=self._maybe_ignore_quant_config(
-                    self.quant_config),
-                prefix=maybe_prefix(prefix, "visual"),
-            )
-        else:
-            self.visual = None
+        self.visual = Qwen2_5_VisionTransformer(
+            config.vision_config,
+            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+            quant_config=self._maybe_ignore_quant_config(self.quant_config),
+            prefix=maybe_prefix(prefix, "visual"),
+        )
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
@@ -1157,10 +1152,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
 
-        skip_prefixes = []
-        if self.visual is None:
-            skip_prefixes.extend(["visual."])
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:

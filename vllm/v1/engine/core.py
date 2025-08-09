@@ -21,7 +21,6 @@ from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -126,7 +125,7 @@ class EngineCore:
         )
 
         self.mm_input_cache_server = MultiModalInputCacheServer(
-            vllm_config.model_config, MULTIMODAL_REGISTRY)
+            vllm_config.model_config)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
