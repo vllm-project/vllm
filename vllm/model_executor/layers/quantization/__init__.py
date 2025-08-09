@@ -109,11 +109,11 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
     from .neuron_quant import NeuronQuantConfig
+    from .petit import PetitNvFp4Config
     from .ptpc_fp8 import PTPCFp8Config
     from .rtn import RTNConfig
     from .torchao import TorchAOConfig
     from .tpu_int8 import Int8TpuConfig
-    from .petit import PetitNvFp4Config
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AWQConfig,
