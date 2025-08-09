@@ -40,7 +40,7 @@ async def health() -> Response:
     return Response(status_code=200)
 
 
-@app.post("/generate")
+@app.post("/generateeeee")
 async def generate(request: Request) -> Response:
     """Generate completion for the request.
 
