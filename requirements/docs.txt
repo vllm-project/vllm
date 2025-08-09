@@ -29,3 +29,4 @@ setproctitle
 torch
 transformers
 zmq
+ijson # Required for mistral streaming tool parser
