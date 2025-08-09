@@ -749,7 +749,7 @@ def fast_topk(
     
     Args:
         values: Input tensor to find top-k values from
-        topk: Number of top values to return (k)
+        topk: Number of top values to return (k). Must be non-negative.
         dim: Dimension along which to compute topk
         
     Returns:
