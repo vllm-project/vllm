@@ -157,9 +157,12 @@ __global__ void clamp_swiglu_kernel_with_params(
     const scalar_t* __restrict__ input,  // [..., 2, d]
     const int d, const float alpha, const float limit) {
   const int64_t token_idx = blockIdx.x;
+  // TODO: Vectorize loads and stores.
   for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
-    const scalar_t gate = VLLM_LDG(&input[token_idx * 2 * d + idx]);
-    const scalar_t up = VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
+    // gate = x[..., ::2]  (even indices)
+    const scalar_t gate = VLLM_LDG(&input[token_idx * 2 * d + 2 * idx]);
+    // up = x[..., 1::2]   (odd indices)
+    const scalar_t up = VLLM_LDG(&input[token_idx * 2 * d + 2 * idx + 1]);
 
     out[token_idx * d + idx] = ACT_FN(gate, up, alpha, limit);
   }

@@ -84,7 +84,7 @@ def test_act_and_mul(
     out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
     if activation == "fatrelu":
         opcheck(fn, (out, x, threshold))
-    if activation == "swiglu_oai":
+    elif activation == "swiglu_oai":
         opcheck(fn, (out, x, layer.alpha, layer.limit))
     else:
         opcheck(fn, (out, x))
