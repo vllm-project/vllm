@@ -41,9 +41,12 @@ class LMFormatEnforcerGrammar(StructuredOutputGrammar):
     current_tokens_prefix: list[int] = field(default_factory=list)
 
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
+        original_len = len(self.current_tokens_prefix)
         for token in tokens:
             if not self.token_enforcer.get_allowed_tokens(
                     self.current_tokens_prefix).is_token_allowed(token):
+                # Rollback partial updates to ensure atomicity.
+                del self.current_tokens_prefix[original_len:]
                 return False
             self.current_tokens_prefix.append(token)
         return True
