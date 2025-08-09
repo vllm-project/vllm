@@ -1517,6 +1517,13 @@ class ModelConfig:
             # Hybrid model Jamba
             layers_block_type_value = getattr(self.hf_config,
                                               "layers_block_type", None)
+
+            # Hybrid models in transformers >= 4.54.0
+            # populate a `layer_types` attribute
+            if layers_block_type_value is None:
+                layers_block_type_value = getattr(self.hf_text_config,
+                                                  "layer_types", None)
+
             if layers_block_type_value is not None:
                 if hasattr(self.hf_text_config,
                            "model_type") and (self.hf_text_config.model_type
@@ -1526,8 +1533,14 @@ class ModelConfig:
                                    for t in layers_block_type_value[start:end])
                     else:
                         return self.get_num_layers(parallel_config)
-                return sum(t == block_type.value
-                           for t in layers_block_type_value[start:end])
+
+                # Support with hybrid transformers configs >= 4.54.0
+                if attn_block_type:
+                    return sum(t in ("full_attention", "attention")
+                               for t in layers_block_type_value[start:end])
+                else:
+                    return sum(t == block_type.value
+                               for t in layers_block_type_value[start:end])
 
             # Hybrid model Minimax
             attn_type_list = getattr(self.hf_config, "attn_type_list", None)
