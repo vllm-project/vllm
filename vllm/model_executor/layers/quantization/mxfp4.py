@@ -24,7 +24,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils import next_power_of_2, round_up
+from vllm.utils import (has_triton_kernels, is_torch_equal_or_newer,
+                        next_power_of_2, round_up)
 
 if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
         or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
@@ -84,8 +85,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         super().__init__()
         self.topk_indices_dtype = None
         self.moe = moe
-        self.use_marlin = current_platform.is_cuda(
-        ) and not current_platform.has_device_capability(100)
+        self.use_marlin = False
+        if current_platform.is_cuda() and \
+                not current_platform.has_device_capability(100):
+            if not current_platform.is_device_capability(90):
+                # marlin kernel has better performance on ampere
+                self.use_marlin = True
+            if not has_triton_kernels():
+                self.use_marlin = True
+            if not is_torch_equal_or_newer("2.8.0"):
+                self.use_marlin = True
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -106,20 +115,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         intermediate_size_per_partition_after_pad = \
             intermediate_size_per_partition
-        # pad the intermediate size to be a multiple of 2 * mxfp4_block
-        # for to hold non-uniform sharded tensor as well as swizzling
-        if not self.use_marlin and (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8 or
-                                    envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
-            intermediate_size_per_partition_after_pad = round_up(
-                intermediate_size_per_partition, 256)
-            hidden_size = round_up(hidden_size, 256)
-        elif current_platform.is_rocm():
-            intermediate_size_per_partition_after_pad = round_up(
-                intermediate_size_per_partition, 128)
-        else:
-            intermediate_size_per_partition_after_pad = round_up(
-                intermediate_size_per_partition, 64)
-
         if self.use_marlin:
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 128)
@@ -130,6 +125,19 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.hidden_size = hidden_size
             layer.intermediate_size_per_partition = \
                 intermediate_size_per_partition_after_pad
+        elif (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+              or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+            # pad the intermediate size to be a multiple of 2 * mxfp4_block
+            # for to hold non-uniform sharded tensor as well as swizzling
+            intermediate_size_per_partition_after_pad = round_up(
+                intermediate_size_per_partition, 256)
+            hidden_size = round_up(hidden_size, 256)
+        elif current_platform.is_rocm():
+            intermediate_size_per_partition_after_pad = round_up(
+                intermediate_size_per_partition, 128)
+        else:
+            intermediate_size_per_partition_after_pad = round_up(
+                intermediate_size_per_partition, 64)
 
         self.intermediate_size = intermediate_size_per_partition_after_pad
         self.hidden_size = hidden_size
@@ -206,8 +214,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer):
-        if not self.use_marlin and (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8 or
-                                    envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+        if self.use_marlin:
+            prepare_moe_fp4_layer_for_marlin(layer, w13_interleaved=True)
+        elif (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+              or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
             layer.gemm1_alpha = Parameter(torch.tensor(
                 [1.702] * self.num_experts, dtype=torch.float32).cuda(),
                                           requires_grad=False)
