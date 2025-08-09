@@ -157,7 +157,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cache_config.cache_dtype]
         self._hidden_states_dtype = self.dtype
 
-        self.is_multimodal_model = model_config.is_multimodal_model
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
@@ -193,6 +192,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
+        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
+            model_config)
         # TODO: Support M-RoPE (e.g, Qwen2-VL)
         assert not self.uses_mrope, "TPU does not support M-RoPE yet."
 
@@ -293,7 +294,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.mm_registry,
             max_model_len=self.max_model_len,
             max_num_reqs=self.max_num_reqs,
-        ) if self.is_multimodal_model else None)
+        ) if self.supports_mm_inputs else None)
 
         if not self.use_spmd:
             self.sample_from_logits_func = torch.compile(
@@ -947,7 +948,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _get_model_inputs(self, input_ids: torch.Tensor,
                           mm_embeds: list[torch.Tensor]):
-        if self.is_multimodal_model:
+        if self.supports_mm_inputs:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
@@ -979,7 +980,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return self.kv_connector_no_forward(scheduler_output,
                                                 self.vllm_config)
 
-        if self.is_multimodal_model:
+        if self.supports_mm_inputs:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
@@ -1230,7 +1231,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     @torch.no_grad()
     def _dummy_run(self, num_tokens: int, num_reqs: int,
                    num_blocks: int) -> None:
-        if self.is_multimodal_model:
+        if self.supports_mm_inputs:
             input_ids = None
             inputs_embeds = torch.zeros((num_tokens, self.hidden_size),
                                         dtype=self.dtype,
@@ -1271,7 +1272,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             _num_slices_per_kv_cache_update_block,
         )
 
-        if self.is_multimodal_model:
+        if self.supports_mm_inputs:
             torch._dynamo.mark_dynamic(inputs_embeds, 0)
         else:
             torch._dynamo.mark_dynamic(input_ids, 0)
@@ -1305,7 +1306,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         xm.mark_step()  # Captures metadata updates
 
     def _precompile_mm_encoder(self) -> None:
-        if not self.is_multimodal_model:
+        if not self.supports_mm_inputs:
             return
 
         # Pre-compile MM encoder for all supported data modalities.
@@ -1527,7 +1528,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_tokens: int,
     ) -> None:
         # Profile with multimodal encoder & encoder cache.
-        if self.is_multimodal_model:
+        if self.supports_mm_inputs:
             mm_budget = self.mm_budget
             assert mm_budget is not None
 
@@ -1684,7 +1685,11 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
 
     def reset_dynamo_cache(self):
-        if self.is_multimodal_model:
+
+        # NOTE: We check `is_multimodal_model` instead of `supports_mm_inputs`
+        # since the compiled model object of the language backbone of a
+        # multimodal model needs to be extracted via `get_language_model`.
+        if self.model_config.is_multimodal_model:
             compiled_model = self.model.get_language_model().model
         else:
             compiled_model = self.model.model
