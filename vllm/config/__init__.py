@@ -2125,6 +2125,23 @@ class ParallelConfig:
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
+    num_redundant_experts: Optional[int] = None
+    """`num_redundant_experts` is deprecated and has been replaced with
+    `eplb_config.num_redundant_experts`. This will be removed in v0.12.0.
+    Please use `eplb_config.num_redundant_experts` instead."""
+    eplb_window_size: Optional[int] = None
+    """`eplb_window_size` is deprecated and has been replaced with
+    `eplb_config.window_size`. This will be removed in v0.12.0.
+    Please use `eplb_config.window_size` instead."""
+    eplb_step_interval: Optional[int] = None
+    """`eplb_step_interval` is deprecated and has been replaced with
+    `eplb_config.step_interval`. This will be removed in v0.12.0.
+    Please use `eplb_config.step_interval` instead."""
+    eplb_log_balancedness: Optional[bool] = None
+    """`eplb_log_balancedness` is deprecated and has been replaced with
+    `eplb_config.log_balancedness`. This will be removed in v0.12.0.
+    Please use `eplb_config.log_balancedness` instead."""
+
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
@@ -2274,6 +2291,38 @@ class ParallelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
+        # Forward deprecated fields to their new location
+        if self.num_redundant_experts is not None:
+            self.eplb_config.num_redundant_experts = (
+                self.num_redundant_experts)
+            logger.warning_once(
+                "num_redundant_experts is deprecated and has been replaced "
+                "with eplb_config.num_redundant_experts. This will be removed "
+                "in v0.12.0. Changing this field after initialization will "
+                "have no effect.")
+        if self.eplb_window_size is not None:
+            self.eplb_config.window_size = self.eplb_window_size
+            logger.warning_once(
+                "eplb_window_size is deprecated and has been replaced "
+                "with eplb_config.window_size. This will be removed "
+                "in v0.12.0. Changing this field after initialization will "
+                "have no effect.")
+        if self.eplb_step_interval is not None:
+            self.eplb_config.step_interval = self.eplb_step_interval
+            logger.warning_once(
+                "eplb_step_interval is deprecated and has been replaced "
+                "with eplb_config.step_interval. This will be removed "
+                "in v0.12.0. Changing this field after initialization will "
+                "have no effect.")
+        if self.eplb_log_balancedness is not None:
+            self.eplb_config.log_balancedness = self.eplb_log_balancedness
+            logger.warning_once(
+                "eplb_log_balancedness is deprecated and has been replaced "
+                "with eplb_config.log_balancedness. This will be removed "
+                "in v0.12.0. Changing this field after initialization will "
+                "have no effect.")
+
+        # Continue with the rest of the initialization
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
@@ -2406,70 +2455,6 @@ class ParallelConfig:
                              "run with Ray.")
 
         return self
-
-    @property
-    @deprecated(
-        "`num_redundant_experts` is deprecated and has been replaced with "
-        "`eplb_config.num_redundant_experts`. This will be removed in v0.12.0. "
-        "Please use `eplb_config.num_redundant_experts` instead.")
-    def num_redundant_experts(self) -> int:
-        return self.eplb_config.num_redundant_experts
-
-    @num_redundant_experts.setter
-    @deprecated(
-        "`num_redundant_experts` is deprecated and has been replaced with "
-        "`eplb_config.num_redundant_experts`. This will be removed in v0.12.0. "
-        "Please use `eplb_config.num_redundant_experts` instead.")
-    def num_redundant_experts(self, value: int):
-        self.eplb_config.num_redundant_experts = value
-
-    @property
-    @deprecated("`eplb_window_size` is deprecated and has been replaced with "
-                "`eplb_config.window_size`. This will be removed in v0.12.0. "
-                "Please use `eplb_config.window_size` instead.")
-    def eplb_window_size(self) -> int:
-        return self.eplb_config.window_size
-
-    @eplb_window_size.setter
-    @deprecated(
-        "`eplb_window_size` is deprecated and has been replaced with "
-        "`eplb_config.lb_window_size`. This will be removed in v0.12.0. "
-        "Please use `eplb_config.lb_window_size` instead.")
-    def eplb_window_size(self, value: int):
-        self.eplb_config.window_size = value
-
-    @property
-    @deprecated(
-        "`eplb_step_interval` is deprecated and has been replaced with "
-        "`eplb_config.lb_step_istep_intervalnterval`."
-        " This will be removed in v0.12.0. "
-        "Please use `eplb_config.step_interval` instead.")
-    def eplb_step_interval(self) -> int:
-        return self.eplb_config.step_interval
-
-    @eplb_step_interval.setter
-    @deprecated(
-        "`eplb_step_interval` is deprecated and has been replaced with "
-        "`eplb_config.step_interval`. This will be removed in v0.12.0. "
-        "Please use `eplb_config.step_interval` instead.")
-    def eplb_step_interval(self, value: int):
-        self.eplb_config.step_interval = value
-
-    @property
-    @deprecated(
-        "`eplb_log_balancedness` is deprecated and has been replaced with "
-        "`eplb_config.log_balancedness`. This will be removed in v0.12.0. "
-        "Please use `eplb_config.log_balancedness` instead.")
-    def eplb_log_balancedness(self) -> bool:
-        return self.eplb_config.log_balancedness
-
-    @eplb_log_balancedness.setter
-    @deprecated(
-        "`eplb_log_balancedness` is deprecated and has been replaced with "
-        "`eplb_config.log_balancedness`. This will be removed in v0.12.0. "
-        "Please use `eplb_config.log_balancedness` instead.")
-    def eplb_log_balancedness(self, value: bool):
-        self.eplb_config.log_balancedness = value
 
 
 PreemptionMode = Literal["swap", "recompute"]
