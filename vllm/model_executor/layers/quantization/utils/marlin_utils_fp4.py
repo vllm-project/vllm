@@ -192,8 +192,7 @@ def prepare_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
     return
 
 
-def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module,
-                                     w13_interleaved: bool = False) -> None:
+def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
     logger.warning_once(
         "Your GPU does not have native support for FP4 computation but "
         "FP4 quantization is being used. Weight-only FP4 compression will "
@@ -228,10 +227,6 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module,
         for i in range(e):
             qweight = weight[i].view(torch.int32).T.contiguous()
 
-            if w13_interleaved and "w13" in name:
-                qweight = torch.cat([qweight[..., ::2], qweight[..., 1::2]],
-                                    -1)
-
             marlin_qweight = ops.gptq_marlin_repack(b_q_weight=qweight,
                                                     perm=perm,
                                                     size_k=size_k,
@@ -263,8 +258,6 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module,
 
         for i in range(e):
             scale = scales[i].T
-            if w13_interleaved and "w13" in name:
-                scale = torch.cat([scale[..., ::2], scale[..., 1::2]], -1)
 
             marlin_scales = marlin_permute_scales(s=scale,
                                                   size_k=size_k,
@@ -296,9 +289,6 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module,
         tensor_list = []
         for i in range(e):
             expert_bias = bias[i]
-            if w13_interleaved and "w13" in name:
-                expert_bias = torch.cat([expert_bias[::2], expert_bias[1::2]],
-                                        -1)
 
             tensor_list.append(marlin_permute_bias(expert_bias))
 

@@ -28,7 +28,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
                      quant_type_id: int,
                      apply_router_weight_on_input: bool = False,
                      global_num_experts: int = -1,
-                     swiglu_config: Optional[list[float]] = None,
+                     activation: Optional[str] = "silu",
                      expert_map: Optional[torch.Tensor] = None,
                      global_scale1: Optional[torch.Tensor] = None,
                      global_scale2: Optional[torch.Tensor] = None,
@@ -166,19 +166,27 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         use_fp32_reduce=True,
         is_zp_float=False)
 
-    if swiglu_config is None:
+    if activation == "silu":
         torch.ops._C.silu_and_mul(intermediate_cache2,
                                   intermediate_cache1.view(-1, 2 * N))
+    elif activation == "swiglu_oai":
+        # NOTE: in gpt-oss, the gate_proj and up_proj is interleaved
+        # - interleaved: gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+        # - origin: gate, up = gate_up[..., :N], gate_up[..., N:]
+
+        @torch.compile(dynamic=True)
+        def swiglu_oai(gate_up):
+            alpha = 1.702
+            limit = 7.0
+            gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+            gate = gate.clamp(min=None, max=limit)
+            up = up.clamp(min=-limit, max=limit)
+            glu = gate * torch.sigmoid(gate * alpha)
+            return (up + 1) * glu
+
+        intermediate_cache2 = swiglu_oai(intermediate_cache1)
     else:
-        # TODO: optimize this
-        gate_alpha, gate_beta, up_alpha, up_beta, limit = \
-            swiglu_config
-        gate_up = intermediate_cache1.view(-1, 2 * N)
-        gate, up = gate_up[..., :N], gate_up[..., N:]
-        gate = gate.clamp(min=None, max=limit)
-        up = up.clamp(min=-limit, max=limit)
-        glu = gate * torch.sigmoid(gate_alpha * gate + gate_beta)
-        intermediate_cache2 = (up_alpha * up + up_beta) * glu
+        assert False, "Only silu and swiglu_oai activations are supported."
 
     if expert_map is not None:
         intermediate_cache3.zero_()

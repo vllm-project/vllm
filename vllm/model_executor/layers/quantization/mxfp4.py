@@ -85,7 +85,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         super().__init__()
         self.topk_indices_dtype = None
         self.moe = moe
-        self.use_marlin = False
+        self.use_marlin = self._should_use_marlin()
+
+    def _should_use_marlin(self):
+        if envs.VLLM_MXFP4_USE_MARLIN is not None:
+            return envs.VLLM_MXFP4_USE_MARLIN
         if current_platform.is_cuda() and \
                 not current_platform.has_device_capability(100):
             if not current_platform.is_device_capability(90):
@@ -95,6 +99,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 self.use_marlin = True
             if not is_torch_equal_or_newer("2.8.0"):
                 self.use_marlin = True
+        return False
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -215,7 +220,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer):
         if self.use_marlin:
-            prepare_moe_fp4_layer_for_marlin(layer, w13_interleaved=True)
+            prepare_moe_fp4_layer_for_marlin(layer)
         elif (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
               or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
             layer.gemm1_alpha = Parameter(torch.tensor(
@@ -453,8 +458,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float4_e2m1f.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
-                # hardcoded for gpt-oss
-                swiglu_config=[1.702, 0.0, 1.0, 1.0, 7.0],
+                activation=activation,
                 expert_map=expert_map)
 
         assert _can_support_mxfp4(
@@ -463,7 +467,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input, scoring_func, activation,
             expert_load_view, logical_to_physical_map,
             logical_replica_count), ("MXFP4 are not supported\
-                                      with this configuration.")
+                                      with this configuration."                                                                                                                                                                                                                                                                                                                           )
 
         if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
                 or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
