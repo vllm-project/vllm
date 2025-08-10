@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+from collections.abc import Iterable
 from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
@@ -10,6 +10,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 from PIL import Image, UnidentifiedImageError
+from typing_extensions import deprecated
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
@@ -25,8 +26,11 @@ from .video import VideoMediaIO
 _M = TypeVar("_M")
 
 if TYPE_CHECKING:
-    from .inputs import MultiModalKwargsItem, MultiModalPlaceholderDict
+    from .inputs import (BatchedTensorInputs, MultiModalKwargs,
+                         MultiModalKwargsItem, MultiModalPlaceholderDict)
 else:
+    BatchedTensorInputs = Any
+    MultiModalKwargs = Any
     MultiModalKwargsItem = Any
     MultiModalPlaceholderDict = Any
 
@@ -334,12 +338,40 @@ def argsort_mm_positions(
     return [(modality, idx) for modality, idx, _ in sorted_flat_items]
 
 
+# Temporary back-compatibility for plugins that define model runner
+@deprecated("`group_mm_inputs_by_modality` is superseded by "
+            "`group_mm_kwargs_by_modality` and will be removed in v0.13. "
+            "Please use `group_mm_kwargs_by_modality` instead.")
+def group_mm_inputs_by_modality(
+    mm_inputs: list[MultiModalKwargs], ) -> list[list[MultiModalKwargs]]:
+    if not mm_inputs:
+        return []
+
+    def modality_group_func(mm_input: MultiModalKwargs) -> Union[str, int]:
+        # If the input has multiple modalities, return a id as the unique key
+        # for the mm_input input.
+        if len(mm_input.modalities) > 1:
+            return id(mm_input)
+
+        elif len(mm_input.modalities) == 1:
+            return list(mm_input.modalities)[0]
+
+        # FIXME(Isotr0py): Modality of mm_input from legacy pipeline is empty,
+        # this is used to make InternVL with legacy pipeline still work with v1.
+        else:
+            return ""
+
+    return [
+        list(group) for _, group in groupby(mm_inputs, key=modality_group_func)
+    ]
+
+
 def group_mm_kwargs_by_modality(
     mm_kwargs: list[MultiModalKwargsItem],
     *,
     device: torch.types.Device = None,
     pin_memory: bool = False,
-):
+) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
     """Group consecutive `MultiModalKwargsItem`s from `mm_kwargs` with the same
     modality together into the same `MultiModalKwargs` instance.
 
