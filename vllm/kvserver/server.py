@@ -227,7 +227,7 @@ if __name__ == "__main__":
             server.step()
     except KeyboardInterrupt:
         print("Received shutdown signal...")
-    except Exception as e:
-        print(f"Server error: {e}")
+    except Exception:
+        logger.exception("Server error")
     finally:
         server.shutdown()
