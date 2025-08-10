@@ -350,7 +350,7 @@ class BertModel(nn.Module, SupportsQuant):
     def forward(
         self,
         input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
+        positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -358,7 +358,7 @@ class BertModel(nn.Module, SupportsQuant):
             hidden_states = inputs_embeds
         else:
             hidden_states = self.embeddings(input_ids=input_ids,
-                                            position_ids=position_ids)
+                                            position_ids=positions)
         return self.encoder(hidden_states)
 
     def _load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

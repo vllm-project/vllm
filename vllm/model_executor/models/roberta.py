@@ -117,7 +117,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
                                   padding_idx=self.padding_idx)
 
         return self.model(input_ids=input_ids,
-                          position_ids=positions,
+                          positions=positions,
                           inputs_embeds=inputs_embeds,
                           intermediate_tensors=intermediate_tensors)
 
