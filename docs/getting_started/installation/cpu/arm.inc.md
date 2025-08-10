@@ -58,7 +58,7 @@ If you want to develop vllm, install it in editable mode instead.
 VLLM_TARGET_DEVICE=cpu python setup.py develop
 ```
 !!! note
-    - Testing has been conducted on AWS Graviton3 instances for compatibility.
+    Testing has been conducted on AWS Graviton3 instances for compatibility.
 
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
