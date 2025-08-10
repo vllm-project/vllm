@@ -81,7 +81,7 @@ which takes priority over both the model's and Sentence Transformers's defaults.
 ## Offline Inference
 
 The [LLM][vllm.LLM] class provides various methods for offline inference.
-See [configuration][configuration] for a list of options when initializing the model.
+See [configuration](../api/summary.md#configuration) for a list of options when initializing the model.
 
 ### `LLM.embed`
 
