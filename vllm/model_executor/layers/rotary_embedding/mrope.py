@@ -25,6 +25,7 @@ def _triton_qwen2vl_mrope_forward(
     n_qh: tl.constexpr,
     n_kh: tl.constexpr,
     hd: tl.constexpr,
+    rd: tl.constexpr,
     pad_n_qh: tl.constexpr,
     pad_n_kh: tl.constexpr,
     pad_hd: tl.constexpr,
@@ -51,19 +52,19 @@ def _triton_qwen2vl_mrope_forward(
     h_end = t_end + mrope_section_h
 
     # Updated stride calculation for half head_dim
-    half_hd = hd // 2
-    t_cos = cos + pid * half_hd
-    h_cos = t_cos + num_tokens * half_hd
-    w_cos = h_cos + num_tokens * half_hd
-    t_sin = sin + pid * half_hd
-    h_sin = t_sin + num_tokens * half_hd
-    w_sin = h_sin + num_tokens * half_hd
+    half_rd = rd // 2
+    t_cos = cos + pid * half_rd
+    h_cos = t_cos + num_tokens * half_rd
+    w_cos = h_cos + num_tokens * half_rd
+    t_sin = sin + pid * half_rd
+    h_sin = t_sin + num_tokens * half_rd
+    w_sin = h_sin + num_tokens * half_rd
 
     # Updated offsets for half head_dim
     cos_offsets = tl.arange(0, pad_hd // 2)
     t_mask = cos_offsets < t_end
     h_mask = (t_end <= cos_offsets) & (cos_offsets < h_end)
-    w_mask = (h_end <= cos_offsets) & (cos_offsets < half_hd)
+    w_mask = (h_end <= cos_offsets) & (cos_offsets < half_rd)
 
     t_cos_row = tl.load(t_cos + cos_offsets, mask=t_mask, other=0)
     h_cos_row = tl.load(h_cos + cos_offsets, mask=h_mask, other=0)
@@ -85,9 +86,9 @@ def _triton_qwen2vl_mrope_forward(
     first_half_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + tl.arange(
         0, pad_hd // 2)[None, :]
     first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (tl.arange(
-        0, pad_hd // 2)[None, :] < hd // 2)
+        0, pad_hd // 2)[None, :] < rd // 2)
     first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (tl.arange(
-        0, pad_hd // 2)[None, :] < hd // 2)
+        0, pad_hd // 2)[None, :] < rd // 2)
 
     q_tile_1 = tl.load(q_ptr + first_half_q_offsets,
                        mask=first_q_mask,
@@ -97,8 +98,8 @@ def _triton_qwen2vl_mrope_forward(
                        other=0).to(sin_row.dtype)
 
     # right half of the head
-    second_half_q_offsets = first_half_q_offsets + (hd // 2)
-    second_half_k_offsets = first_half_k_offsets + (hd // 2)
+    second_half_q_offsets = first_half_q_offsets + (rd // 2)
+    second_half_k_offsets = first_half_k_offsets + (rd // 2)
     second_q_mask = first_q_mask
     second_k_mask = first_k_mask
 
@@ -130,6 +131,7 @@ def triton_mrope(
     sin: torch.Tensor,
     mrope_section: list[int],
     head_size: int,
+    rotary_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Qwen2VL mrope kernel.
 
@@ -166,6 +168,7 @@ def triton_mrope(
         n_q_head,
         n_kv_head,
         head_size,
+        rotary_dim,
         pad_n_q_head,
         pad_n_kv_head,
         pad_hd,
@@ -300,6 +303,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                 sin,
                 self.mrope_section,
                 self.head_size,
+                self.rotary_dim,
             )
 
             return q.reshape(query_shape), k.reshape(key_shape)
