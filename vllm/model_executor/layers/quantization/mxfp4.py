@@ -466,8 +466,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             custom_routing_function, e_score_correction_bias,
             apply_router_weight_on_input, scoring_func, activation,
             expert_load_view, logical_to_physical_map,
-            logical_replica_count), ("MXFP4 are not supported\
-                                      with this configuration."                                                                                                                                                                                                                                                                                                                           )
+            logical_replica_count), (
+                "MXFP4 are not supported with this configuration.")
 
         if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
                 or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
