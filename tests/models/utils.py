@@ -357,7 +357,8 @@ class RerankModelInfo(NamedTuple):
 
 def dummy_hf_overrides(
     hf_config: PretrainedConfig,
-    model_arch: str,
+    *,
+    model_arch: str = "",
     exist_overrides: Optional[dict[str, Any]] = None,
 ) -> PretrainedConfig:
     """
