@@ -65,6 +65,8 @@ class NaivePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
+        # you gotta quantize before sending it over
+
         assert not apply_router_weight_on_input
 
         (use_dp,
