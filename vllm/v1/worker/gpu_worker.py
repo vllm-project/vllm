@@ -175,16 +175,28 @@ class Worker(WorkerBase):
             self.requested_memory = (self.init_snapshot.total_memory *
                                      self.cache_config.gpu_memory_utilization)
             if self.init_snapshot.free_memory < self.requested_memory:
-                GiB = lambda b: round(b / GiB_bytes, 2)
-                raise ValueError(
-                    f"Free memory on device "
-                    f"({GiB(self.init_snapshot.free_memory)}/"
-                    f"{GiB(self.init_snapshot.total_memory)} GiB) on startup "
-                    f"is less than desired GPU memory utilization "
-                    f"({self.cache_config.gpu_memory_utilization}, "
-                    f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
-                    f"utilization or reduce GPU memory used by other processes."
-                )
+                from vllm.v1.engine.initialization_errors import (
+                    InsufficientMemoryError, get_memory_suggestions)
+
+                suggestions = get_memory_suggestions(
+                    required_memory=int(self.requested_memory),
+                    available_memory=self.init_snapshot.free_memory,
+                    current_gpu_utilization=self.cache_config.
+                    gpu_memory_utilization,
+                    max_model_len=self.model_config.max_model_len)
+
+                # Add specific suggestions for startup memory issue
+                suggestions.insert(
+                    0, "Close other GPU processes to free up memory")
+                suggestions.append(
+                    "Check if other processes are using GPU memory with "
+                    "'nvidia-smi'")
+
+                raise InsufficientMemoryError(
+                    required_memory=int(self.requested_memory),
+                    available_memory=self.init_snapshot.free_memory,
+                    memory_type="GPU",
+                    suggestions=suggestions)
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -207,9 +219,45 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self) -> None:
+        from vllm.v1.engine.initialization_errors import (
+            ModelLoadingError, get_cuda_error_suggestions)
+
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        with self._maybe_get_memory_pool_context(tag="weights"):
-            self.model_runner.load_model(eep_scale_up=eep_scale_up)
+        try:
+            with self._maybe_get_memory_pool_context(tag="weights"):
+                self.model_runner.load_model(eep_scale_up=eep_scale_up)
+        except Exception as e:
+            error_details = str(e)
+            suggestions = []
+
+            if "out of memory" in error_details.lower():
+                suggestions = get_cuda_error_suggestions(error_details)
+                suggestions.extend([
+                    "The model is too large for available GPU memory",
+                    "Consider using a smaller model or quantization",
+                    "Try tensor parallelism to distribute the model ",
+                    "across multiple GPUs",
+                ])
+            elif ("file not found" in error_details.lower()
+                  or "no such file" in error_details.lower()):
+                suggestions = [
+                    "Verify the model path is correct and accessible",
+                    "Check if the model files are properly downloaded",
+                    "Ensure proper permissions to access the model directory",
+                ]
+            else:
+                suggestions = get_cuda_error_suggestions(error_details)
+                if not suggestions:
+                    suggestions = [
+                        "Check model compatibility with current vLLM version",
+                        "Verify CUDA installation and GPU drivers",
+                        "Check model configuration parameters",
+                    ]
+
+            raise ModelLoadingError(
+                model_name=self.model_config.model,
+                error_details=f"Model loading failed: {error_details}",
+                suggestions=suggestions) from e
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
@@ -220,7 +268,7 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
-        """Profiles the peak memory usage of the model to determine how much
+        """Profiles the peak memory usage of the model to determine how much 
         memory can be used for KV cache without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
@@ -231,31 +279,82 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
+        from vllm.v1.engine.initialization_errors import (
+            InsufficientMemoryError, get_cuda_error_suggestions,
+            get_memory_suggestions)
+
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         GiB = lambda b: b / GiB_bytes
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        with memory_profiling(
-                self.init_snapshot,
-                weights_memory=int(
-                    self.model_runner.model_memory_usage)) as profile_result:
-            self.model_runner.profile_run()
+        try:
+            with memory_profiling(self.init_snapshot,
+                                  weights_memory=int(
+                                      self.model_runner.model_memory_usage)
+                                  ) as profile_result:
+                self.model_runner.profile_run()
+        except Exception as e:
+            error_details = str(e)
+
+            if "out of memory" in error_details.lower():
+                # Get current memory info for better error reporting
+                free_memory, total_memory = torch.cuda.mem_get_info()
+                suggestions = get_memory_suggestions(
+                    required_memory=int(total_memory *
+                                        0.2),  # Estimate 20% for profiling
+                    available_memory=free_memory,
+                    current_gpu_utilization=self.cache_config.
+                    gpu_memory_utilization,
+                    max_model_len=self.model_config.max_model_len)
+                suggestions.extend([
+                    "Memory profiling failed - the model may be too large",
+                    "Try using smaller batch sizes for profiling",
+                    "Consider using quantization to reduce memory usage",
+                ])
+
+                raise InsufficientMemoryError(
+                    required_memory=int(total_memory * 0.2),
+                    available_memory=free_memory,
+                    memory_type="GPU (during profiling)",
+                    suggestions=suggestions) from e
+            else:
+                suggestions = get_cuda_error_suggestions(error_details)
+                from vllm.v1.engine.initialization_errors import (
+                    ModelLoadingError)
+                raise ModelLoadingError(
+                    model_name=self.model_config.model,
+                    error_details=f"Memory profiling failed: {error_details}",
+                    suggestions=suggestions) from e
 
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        assert self.init_snapshot.free_memory > free_gpu_memory, (
-            "Error in memory profiling. "
-            f"Initial free memory {GiB(self.init_snapshot.free_memory)} GiB, "
-            f"current free memory {GiB(free_gpu_memory)} GiB. "
-            "This happens when other processes sharing the same container "
-            "release GPU memory while vLLM is profiling during initialization. "
-            "To fix this, ensure consistent GPU memory allocation or "
-            "isolate vLLM in its own container.")
+        if not self.init_snapshot.free_memory > free_gpu_memory:
+            logger.warning(
+                "Memory usage increased during profiling. This may indicate "
+                "memory fragmentation or other processes using GPU memory. "
+                "Initial free memory: %.2f GiB, current free memory: %.2f GiB",
+                GiB(self.init_snapshot.free_memory), GiB(free_gpu_memory))
+
         available_kv_cache_memory = self.requested_memory \
             - profile_result.non_kv_cache_memory
+
+        if available_kv_cache_memory <= 0:
+            suggestions = get_memory_suggestions(
+                required_memory=int(profile_result.non_kv_cache_memory),
+                available_memory=int(self.requested_memory),
+                current_gpu_utilization=self.cache_config.
+                gpu_memory_utilization,
+                max_model_len=self.model_config.max_model_len,
+                is_kv_cache=True)
+
+            raise InsufficientMemoryError(
+                required_memory=int(profile_result.non_kv_cache_memory),
+                available_memory=int(self.requested_memory),
+                memory_type="GPU (for KV cache)",
+                suggestions=suggestions)
 
         unrequested_memory = self.init_snapshot.free_memory \
             - self.requested_memory

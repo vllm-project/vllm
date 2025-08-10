@@ -52,6 +52,9 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
+        from vllm.v1.engine.initialization_errors import (
+            ModelLoadingError, log_initialization_info)
+
         if not envs.VLLM_USE_V1:
             raise ValueError(
                 "Using V1 LLMEngine, but envs.VLLM_USE_V1=False. "
@@ -63,6 +66,9 @@ class LLMEngine:
             raise NotImplementedError(
                 "Passing StatLoggers to LLMEngine in V1 is not yet supported. "
                 "Set VLLM_USE_V1=0 and file and issue on Github.")
+
+        # Log initialization details early for debugging
+        log_initialization_info(vllm_config)
 
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -82,38 +88,81 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
-        if self.model_config.skip_tokenizer_init:
-            self.tokenizer = None
-        else:
-            # Tokenizer (+ ensure liveness if running in another process).
-            self.tokenizer = init_tokenizer_from_configs(
-                model_config=vllm_config.model_config,
-                scheduler_config=vllm_config.scheduler_config,
-                lora_config=vllm_config.lora_config)
+        try:
+            if self.model_config.skip_tokenizer_init:
+                self.tokenizer = None
+            else:
+                # Tokenizer (+ ensure liveness if running in another process).
+                self.tokenizer = init_tokenizer_from_configs(
+                    model_config=vllm_config.model_config,
+                    scheduler_config=vllm_config.scheduler_config,
+                    lora_config=vllm_config.lora_config)
+        except Exception as e:
+            raise ModelLoadingError(
+                model_name=vllm_config.model_config.model,
+                error_details=f"Tokenizer initialization failed: {str(e)}",
+                suggestions=[
+                    "Check if the tokenizer files are properly accessible",
+                    "Verify the model path is correct",
+                    "Ensure the model is compatible with vLLM",
+                    "Try setting skip_tokenizer_init=True if tokenizer is "
+                    "not needed",
+                ]) from e
 
-        # Processor (convert Inputs --> EngineCoreRequests)
-        self.processor = Processor(vllm_config=vllm_config,
-                                   tokenizer=self.tokenizer,
-                                   mm_registry=mm_registry)
+        try:
+            # Processor (convert Inputs --> EngineCoreRequests)
+            self.processor = Processor(vllm_config=vllm_config,
+                                       tokenizer=self.tokenizer,
+                                       mm_registry=mm_registry)
+        except Exception as e:
+            raise ModelLoadingError(
+                model_name=vllm_config.model_config.model,
+                error_details=(
+                    f"Input processor initialization failed: {str(e)}"),
+                suggestions=[
+                    "Check multimodal configuration if using vision models",
+                    "Verify model configuration parameters",
+                    "Ensure all required dependencies are installed",
+                ]) from e
 
-        # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
-        self.output_processor = OutputProcessor(self.tokenizer,
-                                                log_stats=self.log_stats)
+        try:
+            # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
+            self.output_processor = OutputProcessor(self.tokenizer,
+                                                    log_stats=self.log_stats)
+        except Exception as e:
+            raise ModelLoadingError(
+                model_name=vllm_config.model_config.model,
+                error_details=
+                f"Output processor initialization failed: {str(e)}",
+                suggestions=[
+                    "This is likely an internal configuration issue",
+                    "Please report this error to the vLLM team",
+                ]) from e
 
-        # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
-        self.engine_core = EngineCoreClient.make_client(
-            multiprocess_mode=multiprocess_mode,
-            asyncio_mode=False,
-            vllm_config=vllm_config,
-            executor_class=executor_class,
-            log_stats=self.log_stats,
-        )
+        try:
+            # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
+            self.engine_core = EngineCoreClient.make_client(
+                multiprocess_mode=multiprocess_mode,
+                asyncio_mode=False,
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=self.log_stats,
+            )
+        except Exception as e:
+            # Engine core initialization is where most memory/model errors occur
+            # The specific error handling is done in
+            # EngineCore._initialize_kv_caches
+            # So we just re-raise here to preserve the enhanced error messages
+            raise e
 
         if not multiprocess_mode:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
 
         # Don't keep the dummy data in memory
+        self.reset_mm_cache()
+
+        logger.info("Successfully initialized vLLM V1 LLMEngine")
         self.reset_mm_cache()
 
     @classmethod
