@@ -1260,11 +1260,8 @@ class OpenAIServingChat(OpenAIServing):
                 finish_reason="tool_calls" if auto_tools_called else
                 output.finish_reason if output.finish_reason else "stop",
                 stop_reason=output.stop_reason,
-                token_ids=(
-                    token_ids
-                    if request.return_token_ids_alongside
-                    else None
-                ),
+                token_ids=(token_ids
+                           if request.return_token_ids_alongside else None),
             )
 
             choices.append(choice_data)
@@ -1306,11 +1303,8 @@ class OpenAIServingChat(OpenAIServing):
             choices=choices,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
-            prompt_token_ids=(
-                final_res.prompt_token_ids
-                if request.return_token_ids_alongside
-                else None
-            ),
+            prompt_token_ids=(final_res.prompt_token_ids
+                              if request.return_token_ids_alongside else None),
             kv_transfer_params=final_res.kv_transfer_params,
         )
 

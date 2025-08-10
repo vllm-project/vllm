@@ -548,16 +548,11 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason=output.finish_reason,
                     stop_reason=output.stop_reason,
                     prompt_logprobs=final_res.prompt_logprobs,
-                    prompt_token_ids=(
-                        prompt_token_ids
-                        if request.return_token_ids_alongside
-                        else None
-                    ),
-                    token_ids=(
-                        token_ids
-                        if request.return_token_ids_alongside
-                        else None
-                    ),
+                    prompt_token_ids=(prompt_token_ids
+                                      if request.return_token_ids_alongside
+                                      else None),
+                    token_ids=(token_ids if request.return_token_ids_alongside
+                               else None),
                 )
                 choices.append(choice_data)
 
