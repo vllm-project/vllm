@@ -251,7 +251,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
-            self._workspace_buffer = torch.empty(
+            self._workspace_buffer = torch.zeros(
                 FLASHINFER_WORKSPACE_BUFFER_SIZE,
                 dtype=torch.uint8,
                 device=self.device)
