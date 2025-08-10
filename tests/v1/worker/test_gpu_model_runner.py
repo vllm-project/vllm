@@ -99,6 +99,8 @@ def get_vllm_config():
 def model_runner():
     vllm_config = get_vllm_config()
     model_config = vllm_config.model_config
+    # set to bf16, otherwise FlexAttention is always chosen
+    torch.set_default_dtype(torch.bfloat16)
     num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
     head_size = model_config.get_head_size()
     vllm_config.compilation_config.static_forward_context[
