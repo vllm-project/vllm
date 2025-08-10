@@ -18,7 +18,7 @@ from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sequence import Logprob, SampleLogprobs
 
 from ....utils import VLLM_PATH, large_gpu_test
-from ...utils import check_logprobs_close
+from ...utils import check_logprobs_close, dummy_hf_overrides
 
 if TYPE_CHECKING:
     from _typeshed import StrPath
@@ -110,11 +110,6 @@ MSGS = [
     _create_msg_format(IMG_URLS[:2]),
     _create_msg_format(IMG_URLS),
 ]
-ENGINE_INPUTS = [
-    _create_engine_inputs(IMG_URLS[:1]),
-    _create_engine_inputs(IMG_URLS[:2]),
-    _create_engine_inputs(IMG_URLS),
-]
 
 SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0, logprobs=5)
 LIMIT_MM_PER_PROMPT = dict(image=4)
@@ -195,7 +190,6 @@ def test_chat(
                          name_1="output")
 
 
-@large_gpu_test(min_gb=48)
 @pytest.mark.parametrize("prompt,expected_ranges",
                          [(_create_engine_inputs_hf(IMG_URLS[:1]),
                            [PlaceholderRange(offset=11, length=494)]),
@@ -204,7 +198,7 @@ def test_chat(
                               PlaceholderRange(offset=277, length=1056),
                               PlaceholderRange(offset=1333, length=418)
                           ])])
-def test_multi_modal_placeholders(vllm_runner, prompt,
+def test_multi_modal_placeholders(vllm_runner, prompt: TextPrompt,
                                   expected_ranges: list[PlaceholderRange],
                                   monkeypatch) -> None:
 
@@ -215,6 +209,8 @@ def test_multi_modal_placeholders(vllm_runner, prompt,
             "mistral-community/pixtral-12b",
             max_model_len=8192,
             limit_mm_per_prompt=LIMIT_MM_PER_PROMPT,
+            load_format="dummy",
+            hf_overrides=dummy_hf_overrides,
     ) as vllm_model:
         outputs = vllm_model.llm.generate(prompt)
 
@@ -230,5 +226,7 @@ def test_multi_modal_placeholders(vllm_runner, prompt,
             expected_ranges), f"{image_placeholder_ranges=}"
         for real_range, expected_range in zip(image_placeholder_ranges,
                                               expected_ranges):
-            assert real_range == expected_range, \
+            assert real_range.offset == expected_range.offset, \
+                f"{real_range=} {expected_range=}"
+            assert real_range.length == expected_range.length, \
                 f"{real_range=} {expected_range=}"
