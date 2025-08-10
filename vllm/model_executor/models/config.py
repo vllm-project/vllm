@@ -296,6 +296,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
+        compilation_config = vllm_config.compilation_config
 
         if cache_config.cache_dtype == "auto":
             kv_cache_dtype = model_config.dtype
@@ -360,6 +361,11 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 "Padding mamba page size by %.2f%% to ensure "
                 "that mamba page size and attention page size are "
                 "exactly equal.", mamba_padding_pct)
+
+        # enable full cuda graphs for decode-only batches
+        # note (tdoublep): this is currently necessary to
+        # match V0 performance
+        compilation_config.full_cuda_graph = True
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
