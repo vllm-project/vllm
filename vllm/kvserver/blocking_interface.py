@@ -1,32 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import abc
-import torch
 
-from lmcache.integration.vllm.vllm_adapter import init_lmcache_engine, lmcache_get_config
+import torch
+from lmcache.integration.vllm.vllm_adapter import (init_lmcache_engine,
+                                                   lmcache_get_config)
 from lmcache.v1.cache_engine import LMCacheEngine
 
-from vllm.config import (
-    VllmConfig,
-    CacheConfig,
-    ModelConfig,
-    ParallelConfig,
-    SchedulerConfig,
-)
+from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+
 class BlockingKVInterface(abc.ABC):
+
     @abc.abstractmethod
     def register_kv_caches(self, rank: int, gpu_kv_caches: list[torch.Tensor]):
         """
         Register the GPU key-value caches.
 
         Args:
-            gpu_kv_caches (list[torch.Tensor]): List of tensors representing the 
-                kvcaches on the GPU.
+            gpu_kv_caches (list[torch.Tensor]): List of tensors representing 
+                the kvcaches on the GPU.
         """
         pass
-
 
     @abc.abstractmethod
     def lookup(self, token_ids: list[int]) -> int:
@@ -42,32 +41,34 @@ class BlockingKVInterface(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def offload(self, 
-                token_ids: list[int], 
-                block_ids: tuple[list[int], ...],
+    def offload(self, token_ids: list[int], block_ids: tuple[list[int], ...],
                 skip_leading_tokens: int) -> None:
         """
         Offload the specified blocks to CPU.
 
         Args:
-            token_ids (list[int]): List of token IDs corresponding to the blocks.
-            block_ids (tuple[list[int], ...]): Tuple of lists of block IDs to offload.
-            skip_leading_tokens (int): Number of leading tokens to skip during offload.
+            token_ids (list[int]): List of token IDs corresponding to the 
+                blocks.
+            block_ids (tuple[list[int], ...]): Tuple of lists of block IDs to 
+                offload.
+            skip_leading_tokens (int): Number of leading tokens to skip during 
+                offload.
         """
         pass
 
     @abc.abstractmethod
-    def onload(self,
-               token_ids: list[int], 
-               block_ids: tuple[list[int], ...],
+    def onload(self, token_ids: list[int], block_ids: tuple[list[int], ...],
                skip_leading_tokens: int) -> None:
         """
         Onload the specified blocks from CPU to GPU.
 
         Args:
-            token_ids (list[int]): List of token IDs corresponding to the blocks.
-            block_ids (tuple[list[int], ...]): Tuple of lists of block IDs to onload.
-            skip_leading_tokens (int): Number of leading tokens to skip during onload.
+            token_ids (list[int]): List of token IDs corresponding to the 
+                blocks.
+            block_ids (tuple[list[int], ...]): Tuple of lists of block IDs to 
+                onload.
+            skip_leading_tokens (int): Number of leading tokens to skip during 
+                onload.
         """
         pass
 
@@ -82,15 +83,16 @@ class BlockingKVInterface(abc.ABC):
 """
 Prototype implementation of BlockingKVInterface using LMCache
 """
+
+
 class LMCacheBlockingKVMgr(BlockingKVInterface):
-    def __init__(self, 
-                 model_config: ModelConfig,
-                 cache_config: CacheConfig,
+
+    def __init__(self, model_config: ModelConfig, cache_config: CacheConfig,
                  parallel_config: ParallelConfig,
                  scheduler_config: SchedulerConfig):
         self.world_size = parallel_config.world_size
         self.gpu_kv_caches: dict[int, list[torch.Tensor]] = {}
-        self.lmcache_engines: dict[int, LMCacheEngine] = {} 
+        self.lmcache_engines: dict[int, LMCacheEngine] = {}
 
         self.vllm_block_size = cache_config.block_size
         self.lmcache_chunk_size = lmcache_get_config().chunk_size
@@ -101,13 +103,13 @@ class LMCacheBlockingKVMgr(BlockingKVInterface):
                 parallel_config,
                 cache_config,
                 scheduler_config,
-                engine_name = f"lmcache_vllm_blocking_{rank}",)
+                engine_name=f"lmcache_vllm_blocking_{rank}",
+            )
             self.lmcache_engines[rank] = lmcache_engine
 
         self.debug_offload_count = 0
 
-    def _get_slot_mapping(self, 
-                          token_ids: list[int],
+    def _get_slot_mapping(self, token_ids: list[int],
                           block_ids: tuple[list[int], ...]) -> torch.Tensor:
         # Flatten block_ids
         block_ids = torch.tensor(block_ids[0], dtype=torch.long)
@@ -116,31 +118,30 @@ class LMCacheBlockingKVMgr(BlockingKVInterface):
         # Convert to tensor
         block_size = self.vllm_block_size
         block_offsets = torch.arange(0, block_size, dtype=torch.long)
-        slot_mapping = (
-            block_offsets.reshape((1, block_size))
-            + block_ids.reshape((num_blocks, 1)) * block_size
-        ).flatten()
+        slot_mapping = (block_offsets.reshape(
+            (1, block_size)) + block_ids.reshape(
+                (num_blocks, 1)) * block_size).flatten()
 
         # TODO: compatibility with multiple cuda devices
         return slot_mapping[:len(token_ids)].cuda()
 
-
-
     def register_kv_caches(self, rank: int, gpu_kv_caches: list[torch.Tensor]):
         if rank in self.gpu_kv_caches:
-            raise ValueError(f"Rank {rank} has already registered its kv caches.")
+            raise ValueError(
+                f"Rank {rank} has already registered its kv caches.")
         if rank > self.world_size:
-            raise ValueError(f"Rank {rank} exceeds world size {self.world_size}.")
+            raise ValueError(
+                f"Rank {rank} exceeds world size {self.world_size}.")
 
         self.gpu_kv_caches[rank] = gpu_kv_caches
 
     def lookup_internal(self, token_ids: list[int], pin: bool) -> int:
         lengths = []
         for i in range(self.world_size):
-            l = self.lmcache_engines[0].lookup(token_ids, pin=pin)
-            lengths.append(l)
+            length = self.lmcache_engines[0].lookup(token_ids, pin=pin)
+            lengths.append(length)
 
-        assert all(l == lengths[0] for l in lengths), \
+        assert all(length == lengths[0] for length in lengths), \
             f"Mismatch in lookup lengths across ranks: {lengths}"
 
         return lengths[0]
@@ -148,9 +149,7 @@ class LMCacheBlockingKVMgr(BlockingKVInterface):
     def lookup(self, token_ids: list[int]) -> int:
         return self.lookup_internal(token_ids, pin=False)
 
-    def offload(self,
-                token_ids: list[int], 
-                block_ids: tuple[list[int], ...],
+    def offload(self, token_ids: list[int], block_ids: tuple[list[int], ...],
                 skip_leading_tokens: int) -> None:
         if len(block_ids) > 1:
             # Don't do for hybrid kv cache
@@ -167,21 +166,18 @@ class LMCacheBlockingKVMgr(BlockingKVInterface):
 
         # prepare token mask
         token_mask = torch.ones_like(token_ids, dtype=torch.bool)
-        skip_leading_tokens = (
-                skip_leading_tokens
-                // self.lmcache_chunk_size
-                * self.lmcache_chunk_size
-            )
+        skip_leading_tokens = (skip_leading_tokens // self.lmcache_chunk_size *
+                               self.lmcache_chunk_size)
         token_mask[:skip_leading_tokens] = False
 
         for rank in range(self.world_size):
             engine = self.lmcache_engines[rank]
             engine.store(
                 token_ids,
-                mask = token_mask,
-                kvcaches = self.gpu_kv_caches[rank],
-                slot_mapping = slot_mapping,
-                offset = skip_leading_tokens,
+                mask=token_mask,
+                kvcaches=self.gpu_kv_caches[rank],
+                slot_mapping=slot_mapping,
+                offset=skip_leading_tokens,
             )
 
         self.debug_offload_count += 1
@@ -189,10 +185,7 @@ class LMCacheBlockingKVMgr(BlockingKVInterface):
                     self.debug_offload_count,
                     len(token_ids) - skip_leading_tokens)
 
-
-    def onload(self,
-               token_ids: list[int], 
-               block_ids: tuple[list[int], ...],
+    def onload(self, token_ids: list[int], block_ids: tuple[list[int], ...],
                skip_leading_tokens: int) -> None:
         if len(block_ids) > 1:
             # Don't do for hybrid kv cache
@@ -209,20 +202,17 @@ class LMCacheBlockingKVMgr(BlockingKVInterface):
 
         # prepare token mask
         token_mask = torch.ones_like(token_ids, dtype=torch.bool)
-        skip_leading_tokens = (
-                skip_leading_tokens
-                // self.lmcache_chunk_size
-                * self.lmcache_chunk_size
-            )
+        skip_leading_tokens = (skip_leading_tokens // self.lmcache_chunk_size *
+                               self.lmcache_chunk_size)
         token_mask[:skip_leading_tokens] = False
 
         for rank in range(self.world_size):
             engine = self.lmcache_engines[rank]
             engine.retrieve(
                 token_ids,
-                mask = token_mask,
-                kvcaches = self.gpu_kv_caches[rank],
-                slot_mapping = slot_mapping,
+                mask=token_mask,
+                kvcaches=self.gpu_kv_caches[rank],
+                slot_mapping=slot_mapping,
             )
 
     def close(self):
@@ -234,15 +224,11 @@ class LMCacheBlockingKVMgr(BlockingKVInterface):
 
 
 def CreateKVInterface(
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
+        model_config: ModelConfig, cache_config: CacheConfig,
         parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig
-    ) -> BlockingKVInterface:
+        scheduler_config: SchedulerConfig) -> BlockingKVInterface:
 
-    return LMCacheBlockingKVMgr(
-        model_config=model_config,
-        cache_config=cache_config,
-        parallel_config=parallel_config,
-        scheduler_config=scheduler_config
-    )
+    return LMCacheBlockingKVMgr(model_config=model_config,
+                                cache_config=cache_config,
+                                parallel_config=parallel_config,
+                                scheduler_config=scheduler_config)
