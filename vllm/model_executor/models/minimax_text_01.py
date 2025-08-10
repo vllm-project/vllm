@@ -654,7 +654,7 @@ class MiniMaxText01Attention(nn.Module):
         return
 
     def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor,
-                **kwargs) -> None:
+                **kwargs) -> torch.Tensor:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         qkv, _ = self.qkv_proj(hidden_states)
