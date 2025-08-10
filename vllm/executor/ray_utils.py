@@ -366,7 +366,8 @@ def initialize_ray_cluster(
                 f"Current node has no {device_str} available. "
                 f"{current_node_resource=}. vLLM engine cannot start without "
                 f"{device_str}. Make sure you have at least {device_resource_request} "
-                f"{device_str} available in a node {current_node_id=} {current_ip=}.")
+                f"{device_str} available in a node {current_node_id=} {current_ip=}."
+            )
         # This way, at least bundle is required to be created in a current
         # node.
         placement_group_specs[0][f"node:{current_ip}"] = 0.001
