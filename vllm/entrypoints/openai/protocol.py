@@ -1489,9 +1489,9 @@ class CompletionResponseChoice(OpenAIBaseModel):
             "to stop, None if the completion finished for some other reason "
             "including encountering the EOS token"),
     )
-    token_ids: Optional[list[int]] = None
+    token_ids: Optional[list[int]] = None  # For response
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
-    prompt_token_ids: Optional[list[int]] = None
+    prompt_token_ids: Optional[list[int]] = None  # For prompt
 
 
 class CompletionResponse(OpenAIBaseModel):
