@@ -1,0 +1,7 @@
+nav:
+  - README.md
+  - serve.md
+  - chat.md
+  - complete.md
+  - bench/*.md
+  - run-batch.md
