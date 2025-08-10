@@ -6,6 +6,17 @@ from vllm.distributed import divide
 class MambaStateShapeCalculator:
 
     @classmethod
+    def linear_attention_state_shape(
+        cls,
+        num_heads: int,
+        tp_size: int,
+        head_dim: int,
+    ) -> tuple[tuple[int, int, int], ...]:
+
+        state_shape = (num_heads // tp_size, head_dim, head_dim)
+        return (state_shape, )
+
+    @classmethod
     def mamba1_state_shape(
         cls,
         tp_world_size: int,
