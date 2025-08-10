@@ -509,21 +509,18 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
                                               slot_id, 32)
         return hidden
 
-    def forward(self, hidden_states: torch.Tensor, output: torch.Tensor,
-                positions: torch.Tensor,
+    def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor,
                 kv_caches: MinimaxCacheParams) -> torch.Tensor:
         if not envs.VLLM_USE_V1:
-            self._forward(hidden_states, output, positions, kv_caches)
+            return self._forward(hidden_states, positions, kv_caches)
         else:
-            torch.ops.vllm.linear_attention(
+            return torch.ops.vllm.linear_attention(
                 hidden_states,
-                output,
                 positions,
                 self.prefix,
             )
 
-    def _forward(self, hidden_states: torch.Tensor, output: torch.Tensor,
-                 positions: torch.Tensor,
+    def _forward(self, hidden_states: torch.Tensor, positions: torch.Tensor,
                  kv_caches: MinimaxCacheParams) -> torch.Tensor:
         forward_context = get_forward_context()
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
@@ -585,7 +582,8 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         gate, _ = self.output_gate(hidden_states[:num_actual_tokens])
         hidden = F.sigmoid(gate) * hidden
         hidden = hidden.to(hidden_states.dtype)
-        output[:num_actual_tokens], _ = self.out_proj(hidden)
+        output, _ = self.out_proj(hidden)
+        return output[:num_actual_tokens]
 
 
 class MiniMaxText01Attention(nn.Module):
@@ -655,8 +653,8 @@ class MiniMaxText01Attention(nn.Module):
         )
         return
 
-    def forward(self, hidden_states: torch.Tensor, output: torch.Tensor,
-                positions: torch.Tensor, **kwargs) -> None:
+    def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor,
+                **kwargs) -> None:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         qkv, _ = self.qkv_proj(hidden_states)
@@ -668,7 +666,8 @@ class MiniMaxText01Attention(nn.Module):
         else:
             q, k = attn_metadata.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
-        output[:], _ = self.o_proj(attn_output)
+        output, _ = self.o_proj(attn_output)
+        return output
 
 
 class MiniMaxText01DecoderLayer(nn.Module):
@@ -816,10 +815,8 @@ class MiniMaxText01DecoderLayer(nn.Module):
         layernorm_input = hidden_states
         layernorm_output = self.input_layernorm(layernorm_input)
         residual = layernorm_output if self.postnorm else layernorm_input
-        self_attention_output = torch.empty_like(layernorm_output)
-        self.self_attn(
+        self_attention_output = self.self_attn(
             hidden_states=layernorm_output,
-            output=self_attention_output,
             positions=positions,
             kv_caches=kv_caches,
         )
@@ -1447,32 +1444,29 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
 def linear_attention(
     hidden_states: torch.Tensor,
-    output: torch.Tensor,
     positions: torch.Tensor,
     layer_name: str,
-) -> None:
+) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
-    print("layer_name: ", layer_name)
     self = forward_context.no_compile_layers[layer_name]
-    self._forward(hidden_states=hidden_states,
-                  output=output,
-                  positions=positions,
-                  kv_caches=None)
+    output = self._forward(hidden_states=hidden_states,
+                           positions=positions,
+                           kv_caches=None)
+    return output
 
 
 def linear_attention_fake(
     hidden_states: torch.Tensor,
-    output: torch.Tensor,
     positions: torch.Tensor,
     layer_name: str,
-) -> None:
-    return
+) -> torch.tensor:
+    return torch.empty_like(hidden_states)
 
 
 direct_register_custom_op(
     op_name="linear_attention",
     op_func=linear_attention,
-    mutates_args=["output"],
+    mutates_args=[],
     fake_impl=linear_attention_fake,
     dispatch_key=current_platform.dispatch_key,
 )
