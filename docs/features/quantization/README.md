@@ -6,6 +6,7 @@ Contents:
 
 - [Supported Hardware](supported_hardware.md)
 - [AutoAWQ](auto_awq.md)
+- [AutoRound](auto_round.md)
 - [BitsAndBytes](bnb.md)
 - [BitBLAS](bitblas.md)
 - [GGUF](gguf.md)

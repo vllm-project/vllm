@@ -8,11 +8,9 @@ from typing import (Final, Literal, Optional, Protocol, TypedDict, TypeVar,
 
 import torch
 import torch.nn as nn
-from packaging.version import Version
 from transformers import (BatchFeature, CLIPVisionConfig, LlavaConfig,
                           PixtralVisionConfig, PretrainedConfig,
                           SiglipVisionConfig)
-from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.models.llava import LlavaProcessor
 from transformers.models.pixtral import PixtralProcessor
 
@@ -307,29 +305,14 @@ class PixtralHFMultiModalProcessor(
 
         pixel_values = processed_outputs.get("pixel_values")
         if pixel_values is not None:
-            # Before/after https://github.com/huggingface/transformers/pull/35122
-            if Version(TRANSFORMERS_VERSION) <= Version("4.48.3"):
-                images = mm_data["images"]
-                assert isinstance(images, list)
+            # Avoid padding since we need the output for each image to be
+            # independent of other images for the cache to work correctly
+            image_sizes = processed_outputs["image_sizes"]
+            assert len(pixel_values) == len(image_sizes)
 
-                # Original output: (1, num_images, C, H, W)
-                # New output: (num_images, C, H, W)
-                assert (isinstance(pixel_values, list)
-                        and len(pixel_values) == 1)
-                assert (isinstance(pixel_values[0], list)
-                        and len(pixel_values[0]) == len(images))
-
-                processed_outputs["pixel_values"] = pixel_values[0]
-            else:
-                # Avoid padding since we need the output for each image to be
-                # independent of other images for the cache to work correctly
-                image_sizes = processed_outputs["image_sizes"]
-                assert len(pixel_values) == len(image_sizes)
-
-                processed_outputs["pixel_values"] = [
-                    p[:, :h, :w]
-                    for p, (h, w) in zip(pixel_values, image_sizes)
-                ]
+            processed_outputs["pixel_values"] = [
+                p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
+            ]
 
         return processed_outputs
 
@@ -784,17 +767,10 @@ class MantisProcessingInfo(LlavaProcessingInfo):
         vision_info = self.get_vision_encoder_info()
 
         kwargs.setdefault("patch_size", vision_info.get_patch_size())
-
-        if Version(TRANSFORMERS_VERSION) < Version("4.48"):
-            # BUG: num_additional_image_tokens = 0 but treated as 1,
-            # so we set vision_feature_select_strategy to None to offset this
-            kwargs.setdefault("vision_feature_select_strategy", None)
-        else:
-            # FIXED: https://github.com/huggingface/transformers/pull/33424/files#diff-6a37acc21efcadaae622b079b2712a131131448ff64262bd219aa346aeec38faL150
-            kwargs.setdefault(
-                "vision_feature_select_strategy",
-                hf_config.vision_feature_select_strategy,
-            )
+        kwargs.setdefault(
+            "vision_feature_select_strategy",
+            hf_config.vision_feature_select_strategy,
+        )
 
         return self.ctx.get_hf_processor(LlavaProcessor, **kwargs)
 

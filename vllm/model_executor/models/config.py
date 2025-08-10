@@ -93,7 +93,7 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         config.num_hidden_layers = config.n_layer
 
         head_dim = config.hidden_size // config.num_attention_heads
-        rotary_emb_dim = head_dim * config.rotary_emb_fraction
+        rotary_emb_dim = int(head_dim * config.rotary_emb_fraction)
         max_trained_positions = getattr(config, "max_trained_positions", 2048)
         config.rotary_kwargs = {
             "head_size": head_dim,
@@ -253,8 +253,10 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             dtype=kv_cache_dtype,
             use_mla=model_config.use_mla).page_size_bytes
 
-        model_cls = ModelRegistry.resolve_model_cls(
-            model_config._model_info.architecture)[0]
+        model_cls, _ = ModelRegistry.resolve_model_cls(
+            model_config.architecture,
+            model_config=model_config,
+        )
 
         # get mamba page size
         mamba_page_size = MambaSpec(

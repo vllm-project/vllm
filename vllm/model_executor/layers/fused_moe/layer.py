@@ -327,7 +327,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.w13_weight.data = shuffled_w13
             layer.w2_weight.data = shuffled_w2
 
-        if current_platform.is_cpu():
+        if current_platform.is_xpu():
+            import intel_extension_for_pytorch as ipex
+            layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+                layer.w13_weight,
+                layer.w2_weight,
+                use_prepack=True,
+            )
+        elif current_platform.is_cpu():
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
                 from vllm.model_executor.layers.fused_moe import cpu_fused_moe
                 dtype = layer.w13_weight.dtype
@@ -509,6 +516,44 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             activation,
         )
 
+    def forward_xpu(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
+    ):
+        if enable_eplb is not False or expert_load_view is not None or \
+                logical_to_physical_map is not None or \
+                logical_replica_count is not None:
+            raise NotImplementedError("Expert load balancing is not supported "
+                                      "for XPU.")
+        assert custom_routing_function is None
+        return layer.ipex_fusion(
+            x,
+            use_grouped_topk,
+            top_k,
+            router_logits,
+            renormalize,
+            topk_group,
+            num_expert_group,
+        )
+
     def forward_tpu(
         self,
         layer: torch.nn.Module,
@@ -591,22 +636,20 @@ def determine_expert_map(
     if ep_size == 1:
         return (global_num_experts, None)
 
-    local_num_experts = global_num_experts // ep_size
+    # Distribute experts as evenly as possible to each rank.
+    base_experts = global_num_experts // ep_size
+    remainder = global_num_experts % ep_size
+    if ep_rank < remainder:
+        local_num_experts = base_experts + 1
+    else:
+        local_num_experts = base_experts
 
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts, ), -1, dtype=torch.int32)
     # Create a expert map for the local experts
-    if ep_rank < (ep_size - 1):
-        # Each non-last rank gets local_num_experts experts.
-        expert_map[ep_rank * local_num_experts:
-                        (ep_rank + 1) * local_num_experts] = \
-            torch.arange(0, local_num_experts, dtype=torch.int32)
-    else:
-        # All remaining experts are assigned to the last rank.
-        local_num_experts = (global_num_experts - ep_rank * local_num_experts)
-
-        expert_map[-local_num_experts:] = \
-            torch.arange(0, local_num_experts, dtype=torch.int32)
+    start_idx = ep_rank * base_experts + min(ep_rank, remainder)
+    expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
+        0, local_num_experts, dtype=torch.int32)
     return (local_num_experts, expert_map)
 
 
@@ -876,6 +919,14 @@ class FusedMoE(torch.nn.Module):
         elif shard_id == "w2":
             param_data[expert_id] = loaded_weight
 
+    def _load_w13_weight_scale(self, shard_dim: int,
+                               loaded_weight: torch.Tensor,
+                               param: torch.Tensor, tp_rank: int):
+        shard_size = param.shape[shard_dim]
+        loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
+                                             shard_size)
+        param.copy_(loaded_weight)
+
     def _load_model_weight_or_group_weight_scale(self,
                                                  shard_dim: int,
                                                  expert_data: torch.Tensor,
@@ -1028,9 +1079,6 @@ class FusedMoE(torch.nn.Module):
             raise ValueError(f"shard_id must be ['w1','w2','w3'] but "
                              f"got {shard_id}.")
 
-        WEIGHT_SCALE_SUPPORTED = [
-            e.value for e in FusedMoeWeightScaleSupported
-        ]
         # Fetch the dim to shard the parameter/loaded weight
         # based on the shard id. This will be whatever
         # dimension intermediate_size_per_partition is used.
@@ -1125,7 +1173,12 @@ class FusedMoE(torch.nn.Module):
                 "weight_scale_2" in weight_name if uses_weight_scale_2 else
                 "weight_scale" in weight_name) or "input_scale" in weight_name
 
-            if per_tensor_conditions:
+            if "w13_weight_scale" in weight_name:
+                self._load_w13_weight_scale(shard_dim=shard_dim,
+                                            loaded_weight=loaded_weight,
+                                            param=param,
+                                            tp_rank=self.tp_rank)
+            elif per_tensor_conditions:
                 self._load_per_tensor_weight_scale(
                     shard_id=shard_id,
                     param=param,
@@ -1174,6 +1227,9 @@ class FusedMoE(torch.nn.Module):
                                                    loaded_weight=loaded_weight,
                                                    expert_id=expert_id)
             else:
+                WEIGHT_SCALE_SUPPORTED = [
+                    e.value for e in FusedMoeWeightScaleSupported
+                ]
                 raise ValueError(
                     f"quant method must be one of {WEIGHT_SCALE_SUPPORTED}")
             return True if return_success else None

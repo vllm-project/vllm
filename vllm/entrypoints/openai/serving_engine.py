@@ -880,7 +880,10 @@ class OpenAIServing:
         _chat_template_kwargs.update(chat_template_kwargs or {})
 
         request_prompt: Union[str, list[int]]
-        if isinstance(tokenizer, MistralTokenizer):
+
+        if tokenizer is None:
+            request_prompt = "placeholder"
+        elif isinstance(tokenizer, MistralTokenizer):
             request_prompt = apply_mistral_chat_template(
                 tokenizer,
                 messages=messages,
@@ -910,7 +913,14 @@ class OpenAIServing:
             request = tool_parser(tokenizer).adjust_request(  # type: ignore
                 request=request)
 
-        if isinstance(request_prompt, str):
+        if tokenizer is None:
+            assert isinstance(request_prompt, str), (
+                "Prompt has to be a string", \
+                "when the tokenizer is not initialised"
+            )
+            prompt_inputs = TextTokensPrompt(prompt=request_prompt,
+                                             prompt_token_ids=[1])
+        elif isinstance(request_prompt, str):
             prompt_inputs = await self._tokenize_prompt_input_async(
                 request,
                 tokenizer,
@@ -947,9 +957,11 @@ class OpenAIServing:
         def _load_and_validate_embed(embed: bytes) -> EmbedsPrompt:
             tensor = torch.load(io.BytesIO(base64.b64decode(embed)),
                                 weights_only=True)
-            assert isinstance(
-                tensor,
-                (torch.FloatTensor, torch.BFloat16Tensor, torch.HalfTensor))
+            assert isinstance(tensor, torch.Tensor) and tensor.dtype in (
+                torch.float32,
+                torch.bfloat16,
+                torch.float16,
+            )
             if tensor.dim() > 2:
                 tensor = tensor.squeeze(0)
                 assert tensor.dim() == 2
