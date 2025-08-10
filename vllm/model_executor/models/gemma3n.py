@@ -313,17 +313,16 @@ class Gemma3nAttention(nn.Module):
                               has_weight=False)
 
         layer_idx = extract_layer_index(prefix)
+        is_sliding = config.layer_types[layer_idx] == "sliding_attention"
+        self.sliding_window = config.sliding_window if is_sliding else None
 
-        is_sliding_window = (
-            getattr(config, "interleaved_sliding_window", None) is not None
-            and config.layer_types[layer_idx] == "sliding_attention")
-
-        if is_sliding_window:
-            self.sliding_window = config.interleaved_sliding_window
+        # Initialize the rotary embedding.
+        if is_sliding:
+            # Local attention. Override the values in config.json.
             rope_theta = config.rope_local_base_freq
             rope_scaling = {"rope_type": "default"}
         else:
-            self.sliding_window = None
+            # Global attention. Use the values in config.json.
             rope_theta = config.rope_theta
             rope_scaling = config.rope_scaling
 
