@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import msgspec
 
+import vllm.envs as envs
 import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
@@ -16,7 +17,6 @@ from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import get_ip
 from vllm.worker.worker_base import WorkerWrapperBase
-import vllm.envs as envs
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -351,7 +351,8 @@ def initialize_ray_cluster(
                 device_str)
         # Create a new placement group
         placement_group_specs: List[Dict[str, float]] = ([{
-            device_str: device_resource_request
+            device_str:
+            device_resource_request
         } for _ in range(parallel_config.world_size)])
 
         # vLLM engine is also a worker to execute model with an accelerator,
