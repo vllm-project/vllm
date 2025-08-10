@@ -38,8 +38,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType
 
-from .interfaces import (HasInnerState, IsHybrid, SupportsLoRA, SupportsPP,
-                         SupportsQuant)
+from .interfaces import (HasInnerState, HasMamba2, IsHybrid, SupportsLoRA,
+                         SupportsPP, SupportsQuant)
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -420,7 +420,7 @@ class BambaModel(nn.Module):
 
 
 class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
-                       IsHybrid, SupportsQuant):
+                       IsHybrid, SupportsQuant, HasMamba2):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

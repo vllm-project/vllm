@@ -26,7 +26,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import (HasInnerState,
+from vllm.model_executor.models.interfaces import (HasInnerState, HasMamba2,
                                                    IsAttentionFree)
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
@@ -198,7 +198,7 @@ class Mamba2Model(nn.Module):
         return loaded_params
 
 
-class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
+class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree, HasMamba2):
 
     @classmethod
     def get_mamba_state_shape_from_config(

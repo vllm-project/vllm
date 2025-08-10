@@ -214,7 +214,7 @@ class CompilationConfig:
     are always used, it can set this to False. Otherwise, it should
     set this to True, and the compiler will copy the input to an
     internally managed buffer. Default is False."""
-    full_cuda_graph: bool = False
+    full_cuda_graph: Optional[bool] = None
     """whether to use a full cuda graph for the entire forward pass rather than
     splitting certain operations such as attention into subgraphs. Thus this
     flag cannot be used together with splitting_ops. This may provide
@@ -344,7 +344,8 @@ class CompilationConfig:
     def init_backend(self, vllm_config: VllmConfig) -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
-
+        if self.full_cuda_graph is None:
+            self.full_cuda_graph = False
         from torch._dynamo.backends.registry import list_backends
         torch_backends = list_backends(exclude_tags=tuple())
         if self.level in [
