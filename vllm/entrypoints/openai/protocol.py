@@ -573,9 +573,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "If specified, the result will include both prompt and response "
             "token ids alongside the generated text. "
             "This is useful for debugging or when you "
-            "need to map generated text back to input tokens."
-        )
-    )
+            "need to map generated text back to input tokens."))
     cache_salt: Optional[str] = Field(
         default=None,
         description=(
@@ -1068,9 +1066,7 @@ class CompletionRequest(OpenAIBaseModel):
             "If specified, the result will include both prompt and response "
             "token ids alongside the generated text. "
             "This is useful for debugging or when you "
-            "need to map generated text back to input tokens."
-        )
-    )
+            "need to map generated text back to input tokens."))
 
     cache_salt: Optional[str] = Field(
         default=None,
@@ -1691,7 +1687,8 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     finish_reason: Optional[str] = "stop"
     # not part of the OpenAI spec but included in vLLM for legacy reasons
     stop_reason: Optional[Union[int, str]] = None
-    # not part of the OpenAI spec but is useful for tracing the tokens in agent scenarios
+    # not part of the OpenAI spec but is useful for tracing the tokens
+    # in agent scenarios
     token_ids: Optional[list[int]] = None
 
 
