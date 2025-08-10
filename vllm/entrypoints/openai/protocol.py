@@ -567,6 +567,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
+    return_token_ids_alongside: Optional[bool] = Field(
+        default=False,
+        description=(
+            "If specified, the result will include both prompt and response "
+            "token ids alongside the generated text. "
+            "This is useful for debugging or when you "
+            "need to map generated text back to input tokens."
+        )
+    )
     cache_salt: Optional[str] = Field(
         default=None,
         description=(
@@ -1053,6 +1062,15 @@ class CompletionRequest(OpenAIBaseModel):
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
+    return_token_ids_alongside: Optional[bool] = Field(
+        default=False,
+        description=(
+            "If specified, the result will include both prompt and response "
+            "token ids alongside the generated text. "
+            "This is useful for debugging or when you "
+            "need to map generated text back to input tokens."
+        )
+    )
 
     cache_salt: Optional[str] = Field(
         default=None,
@@ -1471,7 +1489,9 @@ class CompletionResponseChoice(OpenAIBaseModel):
             "to stop, None if the completion finished for some other reason "
             "including encountering the EOS token"),
     )
+    token_ids: Optional[list[int]] = None
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    prompt_token_ids: Optional[list[int]] = None
 
 
 class CompletionResponse(OpenAIBaseModel):
@@ -1671,6 +1691,8 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     finish_reason: Optional[str] = "stop"
     # not part of the OpenAI spec but included in vLLM for legacy reasons
     stop_reason: Optional[Union[int, str]] = None
+    # not part of the OpenAI spec but is useful for tracing the tokens in agent scenarios
+    token_ids: Optional[list[int]] = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
@@ -1686,6 +1708,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
 
     # vLLM-specific fields that are not in OpenAI spec
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    prompt_token_ids: Optional[list[int]] = None
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None, description="KVTransfer parameters.")
 
