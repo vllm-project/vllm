@@ -344,6 +344,7 @@ class CompilationConfig:
     def init_backend(self, vllm_config: VllmConfig) -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
+
         if self.full_cuda_graph is None:
             self.full_cuda_graph = False
         from torch._dynamo.backends.registry import list_backends
