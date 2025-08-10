@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from vllm.config import VllmConfig
-from vllm.v1.executor.abstract import Executor
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.v1.executor.abstract import Executor
 
 
 class IRunnableEngineCoreProc(Protocol):
@@ -14,10 +15,10 @@ class IRunnableEngineCoreProc(Protocol):
 
     def __init__(
         self,
-        vllm_config: VllmConfig,
+        vllm_config: "VllmConfig",
         local_client: bool,
         handshake_address: str,
-        executor_class: type[Executor],
+        executor_class: type["Executor"],
         log_stats: bool,
         # ... other common args
     ) -> None:

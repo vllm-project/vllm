@@ -44,6 +44,9 @@ vllm = "vllm.entrypoints.cli.main:main"
 [project.entry-points."vllm.general_plugins"]
 lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver"
 
+[project.optional-dependencies]
+tpu = ["tpu_commons"]
+
 [tool.setuptools_scm]
 # no extra settings needed, presence enables setuptools-scm
 

@@ -17,6 +17,9 @@ import msgspec
 import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.dependency_injection.interface import IRunnableEngineCoreProc
+from vllm.dependency_injection.registry import (
+    discover_supported_engine_core_proc, retrieve_engine_core_proc)
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -656,21 +659,44 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-        engine_core: Optional[EngineCoreProc] = None
+        engine_core: Optional[IRunnableEngineCoreProc] = None
         try:
-            parallel_config: ParallelConfig = kwargs[
-                "vllm_config"].parallel_config
+            vllm_config = kwargs["vllm_config"]
+            parallel_config: ParallelConfig = vllm_config.parallel_config
+            engine_name = getattr(vllm_config, "engine_mode", "auto")
+
+            engine_core_proc_cls = None
+            if engine_name == "auto":
+                engine_core_proc_cls = discover_supported_engine_core_proc()
+            else:
+                # Explicit request for a named engine
+                try:
+                    engine_core_proc_cls = retrieve_engine_core_proc(
+                        engine_name)
+                except ValueError as err:
+                    raise ValueError(
+                        f'Specified engine_mode "{engine_name}" was not found '
+                        "in the registry. Please ensure the corresponding "
+                        "plugin is installed and registers the engine "
+                        "correctly.") from err
+
+            if engine_core_proc_cls is None:
+                # Fallback to default logic (this now only happens if mode is
+                # 'auto' and no supported engine was found)
+                if parallel_config.data_parallel_size > 1 or dp_rank > 0:
+                    engine_core_proc_cls = DPEngineCoreProc
+                else:
+                    engine_core_proc_cls = EngineCoreProc
+
+            # Set data parallel rank for this engine process.
             if parallel_config.data_parallel_size > 1 or dp_rank > 0:
-                set_process_title("DPEngineCore", str(dp_rank))
-                decorate_logs()
-                # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
                 parallel_config.data_parallel_rank_local = local_dp_rank
-                engine_core = DPEngineCoreProc(*args, **kwargs)
+                set_process_title("DPEngineCore", str(dp_rank))
             else:
-                set_process_title("EngineCore")
-                decorate_logs()
-                engine_core = EngineCoreProc(*args, **kwargs)
+                set_process_title(engine_core_proc_cls.__name__)
+            decorate_logs()
+            engine_core = engine_core_proc_cls(*args, **kwargs)
 
             engine_core.run_busy_loop()
 

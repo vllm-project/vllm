@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Optional, Union, cast
 import torch
 from tpu_info import device
 
+from vllm.dependency_injection.registry import register_engine_core_proc
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -42,6 +43,19 @@ class TpuPlatform(Platform):
     additional_env_vars: list[str] = [
         "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
     ]
+
+    @staticmethod
+    def _register_tpu_engines():
+        try:
+            from tpu_commons.core.core_tpu import DisaggEngineCoreProc
+            register_engine_core_proc("disaggregated_tpu",
+                                      DisaggEngineCoreProc)
+            logger.info("Successfully registered 'DisaggEngineCoreProc' as "
+                        "'disaggregated_tpu' engine from tpu_commons.")
+        except ImportError:
+            logger.warning(
+                "tpu_commons is not installed. TPU-specific engines will not "
+                "be available. To enable, run: 'pip install -e tpu_commons'")
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,

@@ -30,7 +30,7 @@ three-tier priority system:
 from importlib import import_module
 from typing import Optional
 
-from vllm.v1.engine.interface import IDiscoverableEngineCoreProc
+from vllm.dependency_injection.interface import IDiscoverableEngineCoreProc
 
 # The lazy-load map is a configuration that tells the registry how to find
 # engines that are not part of the core vLLM library and may not be

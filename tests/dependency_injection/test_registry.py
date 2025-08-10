@@ -28,8 +28,8 @@ class MockEngineProc:
 @pytest.fixture
 def cleanup_registry():
     """Fixture to clean up the registry after each test."""
-    from vllm.v1.engine.registry import (_LAZY_ENGINE_CORE_PROC_MAP,
-                                         _engine_core_proc_registry)
+    from vllm.dependency_injection.registry import (_LAZY_ENGINE_CORE_PROC_MAP,
+                                                    _engine_core_proc_registry)
     original_lazy_map = _LAZY_ENGINE_CORE_PROC_MAP.copy()
     yield
     _engine_core_proc_registry.clear()
@@ -42,15 +42,15 @@ def cleanup_registry():
 
 def test_register_and_get_engine(cleanup_registry):
     """Test that an engine can be registered and retrieved."""
-    from vllm.v1.engine.registry import (register_engine_core_proc,
-                                         retrieve_engine_core_proc)
+    from vllm.dependency_injection.registry import (register_engine_core_proc,
+                                                    retrieve_engine_core_proc)
     register_engine_core_proc("mock", MockEngineProc)
     assert retrieve_engine_core_proc("mock") is MockEngineProc
 
 
 def test_get_non_existent_engine(cleanup_registry):
     """Test that getting a non-existent engine raises a ValueError."""
-    from vllm.v1.engine.registry import retrieve_engine_core_proc
+    from vllm.dependency_injection.registry import retrieve_engine_core_proc
     with pytest.raises(ValueError,
                        match="Engine core 'non_existent' is not registered."):
         retrieve_engine_core_proc("non_existent")
@@ -58,7 +58,7 @@ def test_get_non_existent_engine(cleanup_registry):
 
 def test_register_duplicate_engine(cleanup_registry):
     """Test that registering a duplicate engine raises a ValueError."""
-    from vllm.v1.engine.registry import register_engine_core_proc
+    from vllm.dependency_injection.registry import register_engine_core_proc
     register_engine_core_proc("mock", MockEngineProc)
     with pytest.raises(ValueError, match="is already registered"):
         register_engine_core_proc("mock", MockEngineProc)
@@ -67,7 +67,7 @@ def test_register_duplicate_engine(cleanup_registry):
 @pytest.mark.parametrize("reserved_name", ["auto", "default"])
 def test_register_reserved_name_fails(reserved_name: str, cleanup_registry):
     """Test that registering an engine with a reserved name fails."""
-    from vllm.v1.engine.registry import register_engine_core_proc
+    from vllm.dependency_injection.registry import register_engine_core_proc
     with pytest.raises(ValueError, match="is reserved and cannot be used"):
         register_engine_core_proc(reserved_name, MockEngineProc)
 
@@ -77,9 +77,9 @@ def test_register_reserved_name_fails(reserved_name: str, cleanup_registry):
 
 def test_lazy_load_success(cleanup_registry):
     """Test that a lazy-loadable engine can be imported and retrieved."""
-    from vllm.v1.engine.registry import (_LAZY_ENGINE_CORE_PROC_MAP,
-                                         _engine_core_proc_registry,
-                                         retrieve_engine_core_proc)
+    from vllm.dependency_injection.registry import (_LAZY_ENGINE_CORE_PROC_MAP,
+                                                    _engine_core_proc_registry,
+                                                    retrieve_engine_core_proc)
 
     # This test file can be imported, and MockEngineProc is a valid class.
     # Note that we are testing the *current* module.
@@ -100,8 +100,8 @@ def test_lazy_load_success(cleanup_registry):
 
 def test_lazy_load_import_error(cleanup_registry):
     """Test that a helpful error is raised for a non-existent module."""
-    from vllm.v1.engine.registry import (_LAZY_ENGINE_CORE_PROC_MAP,
-                                         retrieve_engine_core_proc)
+    from vllm.dependency_injection.registry import (_LAZY_ENGINE_CORE_PROC_MAP,
+                                                    retrieve_engine_core_proc)
     _LAZY_ENGINE_CORE_PROC_MAP["bad_import"] = {
         "path": "non_existent_module.NonExistentClass"
     }
@@ -112,8 +112,8 @@ def test_lazy_load_import_error(cleanup_registry):
 
 def test_lazy_load_attribute_error(cleanup_registry):
     """Test that a helpful error is raised for a non-existent class."""
-    from vllm.v1.engine.registry import (_LAZY_ENGINE_CORE_PROC_MAP,
-                                         retrieve_engine_core_proc)
+    from vllm.dependency_injection.registry import (_LAZY_ENGINE_CORE_PROC_MAP,
+                                                    retrieve_engine_core_proc)
     module_path = __name__
     _LAZY_ENGINE_CORE_PROC_MAP["bad_attr"] = {
         "path": f"{module_path}.NonExistentClass"
@@ -125,8 +125,8 @@ def test_lazy_load_attribute_error(cleanup_registry):
 
 def test_lazy_load_with_extra_install(cleanup_registry):
     """Test that the error message includes the pip install hint."""
-    from vllm.v1.engine.registry import (_LAZY_ENGINE_CORE_PROC_MAP,
-                                         retrieve_engine_core_proc)
+    from vllm.dependency_injection.registry import (_LAZY_ENGINE_CORE_PROC_MAP,
+                                                    retrieve_engine_core_proc)
     _LAZY_ENGINE_CORE_PROC_MAP["tpu_engine"] = {
         "path": "vllm_tpu_plugin.TpuEngine",
         "extra": "tpu"
@@ -155,22 +155,23 @@ class AnotherSupportedEngine(MockEngineProc):
 
 def test_discover_engine_empty_registry(cleanup_registry):
     """Test that no engine is found when the registry is empty."""
-    from vllm.v1.engine.registry import discover_supported_engine_core_proc
+    from vllm.dependency_injection.registry import (
+        discover_supported_engine_core_proc)
     assert discover_supported_engine_core_proc() is None
 
 
 def test_discover_engine_none_supported(cleanup_registry):
     """Test that no engine is found when no registered engines are supported."""
-    from vllm.v1.engine.registry import (discover_supported_engine_core_proc,
-                                         register_engine_core_proc)
+    from vllm.dependency_injection.registry import (
+        discover_supported_engine_core_proc, register_engine_core_proc)
     register_engine_core_proc("unsupported", UnsupportedEngine)
     assert discover_supported_engine_core_proc() is None
 
 
 def test_discover_engine_one_supported(cleanup_registry):
     """Test that the correct engine is found when one is supported."""
-    from vllm.v1.engine.registry import (discover_supported_engine_core_proc,
-                                         register_engine_core_proc)
+    from vllm.dependency_injection.registry import (
+        discover_supported_engine_core_proc, register_engine_core_proc)
     register_engine_core_proc("unsupported", UnsupportedEngine)
     register_engine_core_proc(
         "supported", MockEngineProc)  # MockEngineProc now returns True
@@ -179,8 +180,8 @@ def test_discover_engine_one_supported(cleanup_registry):
 
 def test_discover_engine_multiple_supported_fails(cleanup_registry):
     """Test that an error is raised if multiple engines are supported."""
-    from vllm.v1.engine.registry import (discover_supported_engine_core_proc,
-                                         register_engine_core_proc)
+    from vllm.dependency_injection.registry import (
+        discover_supported_engine_core_proc, register_engine_core_proc)
     register_engine_core_proc("supported1", MockEngineProc)
     register_engine_core_proc("supported2", AnotherSupportedEngine)
     with pytest.raises(RuntimeError, match="Multiple custom engines support"):
