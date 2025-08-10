@@ -60,6 +60,9 @@ class TensorSchema:
     def __getitem__(self, item) -> Any:
         return getattr(self, item)
 
+    def get(self, item, default=None) -> Any:
+        return getattr(self, item, default)
+
     def _match_shape_with_dynamic(self, actual: tuple[int, ...],
                                   reference: tuple[int, ...],
                                   expected_shape: tuple[Union[int, str], ...],
