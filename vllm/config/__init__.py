@@ -29,7 +29,7 @@ from typing_extensions import Self, assert_never, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
-from vllm.config.cache import (BlockSize, CacheConfig, CacheDtype,
+from vllm.config.cache import (BlockSize, CacheConfig, CacheDType,
                                PrefixCachingHashAlgo)
 from vllm.config.compilation import (CompilationConfig, CompilationLevel,
                                      PassConfig)
