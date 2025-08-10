@@ -18,9 +18,9 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize im
 logger = init_logger(__name__)
 
 
-class FlashInferMoEBakcend(Enum):
-    CUTLASS = "cutlass"
-    FLASHINFER = "flashinfer"
+class FlashinferMoeBackend(Enum):
+    TENSORRT_LLM = "TensorRT-LLM"
+    CUTLASS = "CUTLASS"
 
 
 def calculate_tile_tokens_dim(num_tokens, top_k, num_experts):
@@ -201,23 +201,14 @@ def select_cutlass_fp8_gemm_impl(
     )
 
 
-def get_flashinfer_moe_backend() -> Optional[FlashInferMoEBakcend]:
-    if FlashInferMoEBakcend.CUTLASS.value == \
-        envs.VLLM_FLASHINFER_MOE_FP8_BACKEND:
-        logger.info_once(
-            "Using FlashInfer CUTLASS MoE FP8 kernels" \
-            "for ModelOptFp8MoEMethod."
-        )
-        return FlashInferMoEBakcend.CUTLASS
-    elif FlashInferMoEBakcend.FLASHINFER.value == \
-        envs.VLLM_FLASHINFER_MOE_FP8_BACKEND:
-        logger.info_once(
-            "Using FlashInfer MoE FP8 kernels for ModelOptFp8MoEMethod.")
-        return FlashInferMoEBakcend.FLASHINFER
+def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
+    flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
+    if flashinfer_moe_backend == "throughput":
+        return FlashinferMoeBackend.CUTLASS
+    elif flashinfer_moe_backend == "latency":
+        return FlashinferMoeBackend.TENSORRT_LLM
 
-    logger.warning_once(
-        "Supported flashinfer backends: " \
-        "{[e.value for e in FlashInferMoEBakcend]}" \
-        "got {envs.VLLM_FLASHINFER_MOE_FP8_BACKEND=}"
-    )
-    return None
+    allowed_backends = ["throughput", "latency"]
+    raise ValueError(
+        f"Unknown flashinfer moe backend: {flashinfer_moe_backend}"
+        f" expected one of {allowed_backends}")

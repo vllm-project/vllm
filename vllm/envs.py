@@ -133,7 +133,6 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
-    VLLM_FLASHINFER_MOE_FP8_BACKEND: str = "flashinfer"
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: str = "throughput"
     VLLM_XGRAMMAR_CACHE_MB: int = 0
@@ -968,10 +967,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP8":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))),
-
-    # Allow use of FlashInfer CUTLASS MoE kernels for fused moe ops.
-    "VLLM_FLASHINFER_MOE_FP8_BACKEND":
-    lambda: os.getenv("VLLM_FLASHINFER_MOE_FP8_BACKEND", "flashinfer"),
 
     # Allow use of FlashInfer CUTLASS kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP4":
