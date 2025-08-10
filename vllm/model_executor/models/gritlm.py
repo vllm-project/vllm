@@ -248,7 +248,9 @@ class GritLM(LlamaForCausalLM, SupportsV0Only):
 
             vllm_config.cache_config.sliding_window = None
 
-            hf_config.sliding_window = None
+            for attr in ("sliding_window", "interleaved_sliding_window"):
+                if hasattr(hf_config, attr):
+                    delattr(hf_config, attr)
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 

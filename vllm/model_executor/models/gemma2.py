@@ -144,10 +144,13 @@ class Gemma2Attention(nn.Module):
             is_neox_style=True,
         )
 
+        # reference:
+        # https://github.com/huggingface/transformers/blob/54be2d7ae87e873482b984cc956e165ca4dc0ba3/src/transformers/models/gemma2/modeling_gemma2.py#L312 # noqa
         layer_idx = extract_layer_index(prefix)
-        is_sliding = config.layer_types[layer_idx] == "sliding_attention"
-        sliding_window = config.sliding_window if is_sliding else None
-
+        use_sliding_window = (layer_idx % 2 == 0 and getattr(
+            config, "interleaved_sliding_window", None) is not None)
+        sliding_window = config.interleaved_sliding_window if \
+            use_sliding_window else None
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
