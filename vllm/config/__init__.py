@@ -29,9 +29,10 @@ from typing_extensions import Self, assert_never, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
-from vllm.config.compilation import (BlockSize, CacheConfig, CacheDtype,
-                                     CompilationConfig, CompilationLevel,
-                                     PassConfig, PrefixCachingHashAlgo)
+from vllm.config.cache import (BlockSize, CacheConfig, CacheDtype,
+                               PrefixCachingHashAlgo)
+from vllm.config.compilation import (CompilationConfig, CompilationLevel,
+                                     PassConfig)
 from vllm.config.parallel import DistributedExecutorBackend, ParallelConfig
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
