@@ -25,7 +25,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashInferMoEBakcend, apply_flashinfer_per_tensor_scale_fp8,
+    FlashinferMoeBackend, apply_flashinfer_per_tensor_scale_fp8,
     build_flashinfer_fp8_cutlass_moe_kernel,
     flashinfer_fp8_cutlass_moe_forward, get_flashinfer_moe_backend,
     rotate_flashinfer_fp8_moe_weights, swap_w13_to_w31)
@@ -488,11 +488,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
 
-        self.flashinfer_moe_backend: Optional[FlashInferMoEBakcend] = None
+        self.flashinfer_moe_backend: Optional[FlashinferMoeBackend] = None
         self.fused_experts: Optional[
             mk.FusedMoEModularKernel] = None  # type: ignore
         if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
             self.flashinfer_moe_backend = get_flashinfer_moe_backend()
+            logger.info_once(
+                f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
+            )
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
         self.use_marlin = (not current_platform.has_device_capability(89)
@@ -542,7 +545,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 self.allow_cutlass_block_scaled_grouped_gemm))
 
     def maybe_swap_experts_impl(self, moe_parallel_config):
-        if self.flashinfer_moe_backend == FlashInferMoEBakcend.CUTLASS:
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             self.fused_experts = build_flashinfer_fp8_cutlass_moe_kernel(
                 moe_parallel_config)
 
@@ -852,7 +855,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 assert not self.block_quant
                 w13_weight = swap_w13_to_w31(layer.w13_weight.data)
                 if self.flashinfer_moe_backend == \
-                    FlashInferMoEBakcend.FLASHINFER:
+                    FlashinferMoeBackend.FLASHINFER:
                     rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
                 layer.w13_weight.data = w13_weight.data
 
@@ -953,7 +956,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert logical_replica_count is not None
             assert isinstance(layer, FusedMoE)
 
-        if self.flashinfer_moe_backend == FlashInferMoEBakcend.FLASHINFER:
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             assert activation == 'silu'
             assert scoring_func == 'sigmoid'
             if self.block_quant:
@@ -1047,7 +1050,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
-        elif self.flashinfer_moe_backend == FlashInferMoEBakcend.CUTLASS:
+        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             assert self.fused_experts is not None
             assert self.block_quant is None
             assert (not renormalize and custom_routing_function is not None)
