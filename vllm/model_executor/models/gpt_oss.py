@@ -160,7 +160,9 @@ class MLPBlock(torch.nn.Module):
                                 renormalize=True,
                                 quant_config=quant_config,
                                 prefix=f"{prefix}.experts",
-                                apply_router_weight_on_input=False)
+                                apply_router_weight_on_input=False,
+                                has_bias=True,
+                                activation="swiglu_oai")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         t = self.norm(x)
@@ -262,8 +264,8 @@ class GptOssForCausalLM(nn.Module):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def _load_weights_mxfp4(
+            self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         rename_mapping = {
             "self_attn": "attn",
             "input_layernorm.weight": "attn.norm.weight",
@@ -469,3 +471,147 @@ class GptOssForCausalLM(nn.Module):
                 loaded_params.add(renamed_name)
 
         return loaded_params
+
+    def _load_weights_other(
+            self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        rename_mapping = {
+            "self_attn": "attn",
+            "input_layernorm.weight": "attn.norm.weight",
+            "post_attention_layernorm.weight": "mlp.norm.weight",
+            "embed_tokens": "embedding",
+        }
+
+        def maybe_rename(name: str) -> str:
+            for remap_name, new_name in rename_mapping.items():
+                if remap_name in name:
+                    return name.replace(remap_name, new_name)
+            return name
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
+        intermediate_size = self.model_config.intermediate_size
+
+        per_rank_intermediate_size = cdiv(intermediate_size, tp_size)
+        # Calculate common slicing bounds for current rank
+        tp_rank_start = tp_rank * per_rank_intermediate_size
+        tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size,
+                          intermediate_size)
+
+        # Attention heads per rank
+        heads_per_rank = self.model_config.num_attention_heads // tp_size
+        head_start = tp_rank * heads_per_rank
+
+        use_ep = self.vllm_config.parallel_config.enable_expert_parallel
+        ep_size = get_ep_group().world_size
+        ep_rank = get_ep_group().rank
+        num_experts = self.model_config.num_local_experts
+        experts_per_rank = num_experts // ep_size
+        ep_rank_start = ep_rank * experts_per_rank
+        ep_rank_end = (ep_rank + 1) * experts_per_rank
+
+        for name, weight in weights:
+            if ".experts.gate_up_proj" in name and "bias" not in name:
+                # Handle MLP gate and up projection weights
+                new_name = name.replace(".experts.gate_up_proj",
+                                        ".experts.w13_weight")
+
+                # Extract gate and up projection parts
+                # since the weight is shuffled, we can slice directly
+                if use_ep:
+                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = weight[:, :,
+                                           2 * tp_rank_start:2 * tp_rank_end]
+
+                narrow_weight = narrow_weight.permute(0, 2, 1).contiguous()
+                param = params_dict[new_name]
+
+                param.copy_(narrow_weight)
+                loaded_params.add(new_name)
+
+            elif ".experts.down_proj" in name and "bias" not in name:
+                # Handle MLP down projection weights
+                new_name = name.replace(".experts.down_proj",
+                                        ".experts.w2_weight")
+
+                if use_ep:
+                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = weight[:, tp_rank_start:tp_rank_end, :]
+                narrow_weight = narrow_weight.permute(0, 2, 1).contiguous()
+                param = params_dict[new_name]
+
+                param.copy_(narrow_weight)
+                loaded_params.add(new_name)
+
+            elif "gate_up_proj_bias" in name:
+                # Handle MLP gate and up projection biases
+                new_name = name.replace("gate_up_proj_bias", "w13_bias")
+
+                # Extract gate and up projection bias parts
+                if use_ep:
+                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = weight[:,
+                                           2 * tp_rank_start:2 * tp_rank_end]
+
+                param = params_dict[new_name]
+
+                param.copy_(narrow_weight)
+                loaded_params.add(new_name)
+
+            elif "down_proj_bias" in name:
+                # Handle MLP down projection bias
+                new_name = name.replace("down_proj_bias", "w2_bias")
+
+                if use_ep:
+                    weight = weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    # (only load on rank 0 to avoid duplication)
+                    if tp_rank != 0:
+                        weight.zero_()
+                param = params_dict[new_name]
+                param.copy_(weight)
+                loaded_params.add(new_name)
+            elif "sinks" in name:
+                # Handle attention sinks (distributed across ranks)
+                name = name.replace("self_attn", "attn")
+                param = params_dict[name]
+                narrow_weight = weight.narrow(0, head_start, heads_per_rank)
+                param.data.copy_(narrow_weight)
+                loaded_params.add(name)
+            elif "q_proj" in name or "k_proj" in name or "v_proj" in name:
+                shard_id = ("q" if "q_proj" in name else
+                            "k" if "k_proj" in name else "v")
+                name = name.replace("self_attn", "attn")
+                param_name = name.replace(f"{shard_id}_proj", "qkv")
+                param = params_dict[param_name]
+                weight_loader = param.weight_loader
+                weight_loader(param, weight, loaded_shard_id=shard_id)
+                loaded_params.add(param_name)
+            else:
+                # Handle all other weights with potential renaming
+
+                renamed_name = maybe_rename(name)
+                if renamed_name not in params_dict:
+                    continue
+                param = params_dict[renamed_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, weight)
+                loaded_params.add(renamed_name)
+
+        return loaded_params
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        quant_method = (self.model_config.quantization_config['quant_method']
+                        if hasattr(self.model_config, "quantization_config")
+                        else None)
+        if quant_method == "mxfp4":
+            return self._load_weights_mxfp4(weights)
+        else:
+            return self._load_weights_other(weights)
