@@ -853,7 +853,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 register_moe_scaling_factors(layer)
                 w13_weight = swap_w13_to_w31(layer.w13_weight.data)
                 if self.flashinfer_moe_backend == \
-                    FlashinferMoeBackend.FLASHINFER:
+                    FlashinferMoeBackend.TENSORRT_LLM:
                     rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
                 layer.w13_weight.data = w13_weight.data
 
