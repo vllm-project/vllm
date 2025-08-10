@@ -45,6 +45,7 @@ class EAGLEConfig(PretrainedConfig):
 
         # Eagle model name should follow naming convention of
         # LlamaForCausalLM -> EagleLlamaForCausalLM
+        # LlamaForCausalLM -> Eagle3LlamaForCausalLM / LlamaForCausalLMEagle3
         if method == "eagle":
             assert self.model is not None, \
                 "model should not be None when method is eagle"
@@ -56,8 +57,8 @@ class EAGLEConfig(PretrainedConfig):
             assert self.model is not None, \
                 "model should not be None when method is eagle3"
             kwargs["architectures"] = [
-                f"Eagle3{arch}" if not arch.startswith("Eagle3") \
-                    else arch for arch in self.model.architectures
+                arch if arch.startswith("Eagle3") or arch.endswith("Eagle3")
+                else f"Eagle3{arch}" for arch in self.model.architectures
             ]
         else:
             raise ValueError(f"Invalid method {method}. \

@@ -2852,13 +2852,7 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        from vllm.transformers_utils.configs import SpeculatorsConfig
-
-        eagle3_target_supported = ["llama"]
-        if self.draft_model_config and isinstance(
-                self.draft_model_config.hf_config, SpeculatorsConfig):
-            eagle3_target_supported.append("qwen")
-
+        eagle3_target_supported = ["llama", "qwen"]
         if self.method == "eagle3" and self.target_model_config and not any(
                 supported_model in
                 self.target_model_config.hf_text_config.model_type
