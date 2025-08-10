@@ -462,7 +462,7 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return self.model(input_ids=input_ids,
-                          position_ids=positions,
+                          positions=positions,
                           inputs_embeds=inputs_embeds,
                           intermediate_tensors=intermediate_tensors)
 
@@ -607,6 +607,6 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
             _encode_token_type_ids(input_ids, token_type_ids)
 
         return self.bert(input_ids=input_ids,
-                         position_ids=positions,
+                         positions=positions,
                          inputs_embeds=inputs_embeds,
                          intermediate_tensors=intermediate_tensors)

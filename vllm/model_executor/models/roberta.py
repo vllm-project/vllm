@@ -226,7 +226,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
             assert input_ids is not None
             _encode_token_type_ids(input_ids, token_type_ids)
         return self.roberta(input_ids=input_ids,
-                            position_ids=positions,
+                            positions=positions,
                             inputs_embeds=inputs_embeds,
                             intermediate_tensors=intermediate_tensors)
 
