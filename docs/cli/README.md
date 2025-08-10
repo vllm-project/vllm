@@ -53,6 +53,8 @@ vllm serve --help=max
 vllm serve --help=page
 ```
 
+See [vllm serve](./serve.md) for the full reference of all available arguments.
+
 ## chat
 
 Generate chat completions via the running API server.
@@ -67,6 +69,8 @@ vllm chat --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 # Quick chat with a single prompt
 vllm chat --quick "hi"
 ```
+
+See [vllm chat](./chat.md) for the full reference of all available arguments.
 
 ## complete
 
@@ -83,7 +87,7 @@ vllm complete --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 vllm complete --quick "The future of AI is"
 ```
 
-</details>
+See [vllm complete](./complete.md) for the full reference of all available arguments.
 
 ## bench
 
@@ -110,6 +114,8 @@ vllm bench latency \
     --load-format dummy
 ```
 
+See [vllm bench latency](./bench/latency.md) for the full reference of all available arguments.
+
 ### serve
 
 Benchmark the online serving throughput.
@@ -124,6 +130,8 @@ vllm bench serve \
     --num-prompts  5
 ```
 
+See [vllm bench serve](./bench/serve.md) for the full reference of all available arguments.
+
 ### throughput
 
 Benchmark offline inference throughput.
@@ -136,6 +144,8 @@ vllm bench throughput \
     --enforce-eager \
     --load-format dummy
 ```
+
+See [vllm bench throughput](./bench/throughput.md) for the full reference of all available arguments.
 
 ## collect-env
 
@@ -166,6 +176,8 @@ vllm run-batch \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
+
+See [vllm run-batch](./run-batch.md) for the full reference of all available arguments.
 
 ## More Help
 
