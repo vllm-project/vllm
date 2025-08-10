@@ -771,7 +771,7 @@ The following table lists those that are tested in vLLM.
 Cross-encoder and reranker models are a subset of classification models that accept two prompts as input.
 These models primarily support the [`LLM.score`](./pooling_models.md#llmscore) API.
 
-| Architecture                        | Models             | Inputs   | Example HF Models        | [LoRA][lora-adapter]   | [PP][parallelism-scaling]   | [V1](gh-issue:8779)   |
+| Architecture                        | Models             | Inputs   | Example HF Models        | [LoRA](../features/lora.md)   | [PP](../serving/parallelism_scaling.md)   | [V1](gh-issue:8779)   |
 |-------------------------------------|--------------------|----------|--------------------------|------------------------|-----------------------------|-----------------------|
 | `JinaVLForSequenceClassification` | JinaVL-based | T + I<sup>E+</sup> | `jinaai/jina-reranker-m0`, etc. | | | ✅︎ |
 
