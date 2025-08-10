@@ -2809,7 +2809,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 raise ValueError(msg)
 
             # attempt to resolve the full cudagraph related mode
-            if self.compilation_config.is_attention_splitting:
+            if self.compilation_config.splitting_ops_contain_attention():
                 msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
                 cudagraph_mode = self.compilation_config.cudagraph_mode = \
                     CUDAGraphMode.FULL_AND_PIECEWISE
@@ -2827,7 +2827,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             msg = (f"CUDAGraphMode.{cudagraph_mode.name} is not supported"
                    f" with spec-decode for attention backend "
                    f"{min_cg_builder_name} (support: {min_cg_support})")
-            if self.compilation_config.is_attention_splitting:
+            if self.compilation_config.splitting_ops_contain_attention():
                 msg += "; setting cudagraph_mode=PIECEWISE"
                 cudagraph_mode = self.compilation_config.cudagraph_mode = \
                     CUDAGraphMode.PIECEWISE
