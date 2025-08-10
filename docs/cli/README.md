@@ -16,6 +16,16 @@ Available Commands:
 vllm {chat,complete,serve,bench,collect-env,run-batch}
 ```
 
+When passing JSON CLI arguments, the following sets of arguments are equivalent:
+
+- `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`
+- `--json-arg.key1 value1 --json-arg.key2.key3 value2`
+
+Additionally, list elements can be passed individually using `+`:
+
+- `--json-arg '{"key4": ["value3", "value4", "value5"]}'`
+- `--json-arg.key4+ value3 --json-arg.key4+='value4,value5'`
+
 ## serve
 
 Start the vLLM OpenAI Compatible API server.
@@ -28,6 +38,9 @@ Start the vLLM OpenAI Compatible API server.
 
     # Specify the port
     vllm serve meta-llama/Llama-2-7b-hf --port 8100
+
+    # Serve over a Unix domain socket
+    vllm serve meta-llama/Llama-2-7b-hf --uds /tmp/vllm.sock
 
     # Check with --help for more options
     # To list all groups

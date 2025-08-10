@@ -35,7 +35,8 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              MllamaConfig, MLPSpeculatorConfig,
                                              Nemotron_Nano_VL_Config,
                                              NemotronConfig, NVLM_D_Config,
-                                             RWConfig, SpeculatorsConfig,
+                                             OvisConfig, RWConfig,
+                                             SpeculatorsConfig,
                                              Step3TextConfig, Step3VLConfig,
                                              UltravoxConfig)
 # yapf: enable
@@ -85,6 +86,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "speculators": SpeculatorsConfig,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
+    "ovis": OvisConfig,
     "ultravox": UltravoxConfig,
     "step3_vl": Step3VLConfig,
     "step3_text": Step3TextConfig,
@@ -252,7 +254,8 @@ def _uses_mrope(config: PretrainedConfig) -> bool:
 
 def uses_mrope(config: PretrainedConfig) -> bool:
     """Detect if the model with this config uses M-ROPE."""
-    return _uses_mrope(config) or thinker_uses_mrope(config)
+    return _uses_mrope(config) or _uses_mrope(
+        config.get_text_config()) or thinker_uses_mrope(config)
 
 
 def thinker_uses_mrope(config: PretrainedConfig) -> bool:
@@ -275,6 +278,17 @@ def is_encoder_decoder(config: PretrainedConfig) -> bool:
         return is_encoder_decoder(text_config)
 
     return getattr(config, "is_encoder_decoder", False)
+
+
+def is_interleaved(config: PretrainedConfig) -> bool:
+    """
+    Detect if the model with this config is used with interleaved attention.
+    """
+    text_config = config.get_text_config()
+    if layer_types := getattr(text_config, "layer_types", None):
+        interleaved_types = {"full_attention", "sliding_attention"}
+        return interleaved_types.issubset(layer_types)
+    return False
 
 
 def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
@@ -420,6 +434,23 @@ def get_config(
                     raise e
         config = _maybe_remap_hf_config_attrs(config)
 
+        # Phi4Flash misuses this config as list[int]. Convert it to int and add
+        # the layer_types list[str] to make it HF compatible
+        if (config.model_type == "phi4flash"):
+            # TODO: Remove after the following PR is merged:
+            # https://huggingface.co/microsoft/Phi-4-mini-flash-reasoning/discussions/6
+            if not hasattr(config, "layer_types"):
+                config.layer_types = [
+                    "sliding_attention" if i < config.num_hidden_layers // 2
+                    and i % 2 == 1 else "full_attention"
+                    for i in range(config.num_hidden_layers)
+                ]
+            # TODO: Remove after the following PR is merged:
+            # https://huggingface.co/microsoft/Phi-4-mini-flash-reasoning/discussions/7
+            if isinstance(config.sliding_window, list):
+                config.sliding_window = next(
+                    filter(None, config.sliding_window), None)
+
     elif config_format == ConfigFormat.MISTRAL:
         # This function loads a params.json config which
         # should be used when loading models in mistral format
@@ -431,6 +462,18 @@ def get_config(
             config_dict["max_position_embeddings"] = max_position_embeddings
 
         config = adapt_config_dict(config_dict)
+
+        # Mistral configs may define sliding_window as list[int]. Convert it
+        # to int and add the layer_types list[str] to make it HF compatible
+        if ((sliding_window := getattr(config, "sliding_window", None))
+                and isinstance(sliding_window, list)):
+            pattern_repeats = config.num_hidden_layers // len(sliding_window)
+            layer_types = sliding_window * pattern_repeats
+            config.layer_types = [
+                "full_attention" if layer_type is None else "sliding_attention"
+                for layer_type in layer_types
+            ]
+            config.sliding_window = next(filter(None, sliding_window), None)
     else:
         supported_formats = [
             fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
@@ -448,6 +491,20 @@ def get_config(
                 f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
+
+    # ModelOpt 0.31.0 and after saves the quantization config in the model
+    # config file.
+    quantization_config = config_dict.get("quantization_config", None)
+
+    # ModelOpt 0.29.0 and before saves the quantization config in a separate
+    # "hf_quant_config.json" in the same directory as the model config file.
+    if quantization_config is None \
+        and file_or_path_exists(model, "hf_quant_config.json", revision):
+        quantization_config = get_hf_file_to_dict("hf_quant_config.json",
+                                                  model, revision)
+
+    if quantization_config is not None:
+        config.quantization_config = quantization_config
 
     if hf_overrides_kw:
         logger.debug("Overriding HF config with %s", hf_overrides_kw)
