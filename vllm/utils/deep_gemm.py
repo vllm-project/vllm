@@ -14,6 +14,7 @@ from typing import Any, Callable, NoReturn
 import torch
 
 import vllm.envs as envs
+from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, has_deep_gemm
 
@@ -57,6 +58,14 @@ def _resolve_symbol(module, new: str, old: str) -> Callable[..., Any] | None:
     if hasattr(module, new):
         return getattr(module, new)
     if hasattr(module, old):
+        # TODO(wentao): deprecate old symbol in the future.
+        logger.warning_once(
+            "Found legacy DeepGEMM symbol `%s`. Please upgrade the `deep_gemm` "
+            "package so that `%s` is available. Support for the legacy symbol "
+            "will be removed in a future vLLM release.",
+            old,
+            new,
+        )
         return getattr(module, old)
     return None
 
