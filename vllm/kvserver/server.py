@@ -190,7 +190,7 @@ class KVServer:
             elif cmd == KVServerCmd.LOOKUP_REQUEST:
                 self.handle_lookup_request(client_id, cmd, payload)
             else:
-                print(f"Unknown command from client {client_id}: {cmd}")
+                logger.warning("Unknown command from client %s: %s", client_id, cmd)
 
         self.process_tasks()
 
