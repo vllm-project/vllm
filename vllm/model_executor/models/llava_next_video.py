@@ -40,6 +40,7 @@ class LlavaNextVideoPixelInputs(TensorSchema):
     """    
     Dimensions:
         - bs: Batch size
+        - nv: Number of videos
         - nf: Number of frames
         - nc: Number of channels (3)
         - h: Height of each frame
@@ -53,7 +54,7 @@ class LlavaNextVideoPixelInputs(TensorSchema):
     type: Literal["pixel_values_videos"] = "pixel_values_videos"
 
     data: Annotated[Union[torch.Tensor, list[torch.Tensor]],
-                    TensorShape("bs", "nf", 3, "h", "w")]
+                    TensorShape("bs", "nv", "nf", 3, "h", "w")]
 
 
 class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
