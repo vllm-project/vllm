@@ -74,7 +74,8 @@ class MarkdownFormatter(HelpFormatter):
                 self._markdown_output.append(
                     f"Possible choices: {metavar}\n\n")
 
-            self._markdown_output.append(f"{action.help}\n\n")
+            if action.help:
+                self._markdown_output.append(f"{action.help}\n\n")
 
             if (default := action.default) != SUPPRESS:
                 self._markdown_output.append(f"Default: `{default}`\n\n")
