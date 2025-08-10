@@ -541,7 +541,6 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         qkvact = torch.nn.functional.silu(qkv32)
         qkvact = qkvact.view((qkv.shape[0], self.tp_heads, -1))
         q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
-
         if envs.VLLM_USE_V1:
             if attn_metadata is not None:
                 kv_cache = self.kv_cache[forward_context.virtual_engine][0]
