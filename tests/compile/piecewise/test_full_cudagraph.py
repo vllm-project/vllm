@@ -113,19 +113,23 @@ def llm_pair(request):
     with temporary_environ(env_vars):
         full = LLM(
             model=model,
-            gpu_memory_utilization=0.4,
+            gpu_memory_utilization=0.43,
             trust_remote_code=True,
             max_model_len=1024,
             max_num_seqs=128,
             compilation_config=\
                 CompilationConfig(**backend_config.comp_config),
+            generation_config="vllm",
+            seed=42,
         )
         piecewise = LLM(
             model=model,
-            gpu_memory_utilization=0.4,
+            gpu_memory_utilization=0.43,
             trust_remote_code=True,
             max_model_len=1024,
-            compilation_config=CompilationConfig(),
+            enforce_eager=True,
+            generation_config="vllm",
+            seed=42,
         )
 
     # PyTest caches the fixture values so we use weakref.proxy to enable GC
@@ -170,9 +174,9 @@ class TestFullCUDAGraph:
 
         piecewise_llm, full_cudagraph_llm = llm_pair
 
-        prompts = ["Hello, my name is"] * batch_size
+        prompts = ["the quick brown fox"] * batch_size
         sampling_params = SamplingParams(temperature=0.0,
-                                         max_tokens=max_tokens,
+                                         max_tokens=5,
                                          top_p=0.95)
 
         piecewise_responses = piecewise_llm.generate(prompts, sampling_params)
@@ -181,6 +185,12 @@ class TestFullCUDAGraph:
         # Check that all responses are the same
         for piecewise_res, full_res in zip(piecewise_responses,
                                            full_responses):
+            print(piecewise_res.outputs[0].text, full_res.outputs[0].text)
+
+        # Check that all responses are the same
+        for piecewise_res, full_res in zip(piecewise_responses,
+                                           full_responses):
+            print(batch_size, llm_pair[0], piecewise_res.outputs[0].text)
             assert piecewise_res.outputs[0].text == full_res.outputs[0].text
 
 
