@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, cast
 
 import torch
 from compressed_tensors.config import (CompressionFormat,
@@ -11,7 +11,7 @@ from compressed_tensors.config import (CompressionFormat,
 from compressed_tensors.quantization import (QuantizationArgs,
                                              QuantizationStrategy,
                                              QuantizationType)
-from compressed_tensors.transform import TransformConfig, TransformLocation, TransformFactory, TransformBase
+from compressed_tensors.transform import TransformConfig, TransformLocation, TransformFactory, TransformBase, TransformArgs, TransformScheme, apply_transform_weight
 from pydantic import BaseModel
 
 import vllm.envs as envs
@@ -37,6 +37,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.parameter import ModelWeightParameter
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -116,6 +118,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            # TODO: return a "UnquantizedTransformScheme | QutlassScheme | FWHTScheme"
             if scheme is None:
                 # transform schcmes have been attached by get_scheme
                 return CompressedTensorsUnquantizedLinearMethod(self)
@@ -560,6 +563,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         # attach transforms for later retrieval by LinearMethod, or 
         layer.input_tfm = input_tfm
         layer.output_tfm = output_tfm
+        layer.layer_name = layer_name
 
         if self.supports_cutlass_24(weight_quant=weight_quant,
                                     input_quant=input_quant,
@@ -677,6 +681,93 @@ class CompressedTensorsConfig(QuantizationConfig):
         return weight_quant.num_bits == input_quant.num_bits == 8
     
 
+registry = {}
+
+
+class vllmTransformBase(torch.nn.Module):  # InternalModule
+    def __init__(self, scheme: TransformScheme, args: TransformArgs, layer: torch.nn.Module, weight_loader: Callable, name: str, input_size_per_partition, output_partition_sizes, asdf_args):
+        super().__init__()
+        self.scheme = scheme
+        self.args = args
+
+        if isinstance(layer, LinearBase):
+            self.module_type = torch.nn.Linear
+        elif isinstance(layer, VocabParallelEmbedding):
+            self.module_type = torch.nn.Embedding
+        else:
+            raise ValueError(layer.__mro__)
+
+        # NOTE: weight size might not be what you think
+        # For example, fused up_gate is actually a different shape
+        # prob need to use output_partition_sizes, input_size_per_partition
+        # if input size, use (input_size_per_partition, input_size_per_partition)
+
+        if scheme.head_dim is not None:
+            weight_size = scheme.head_dim
+
+        else:
+            if isinstance(layer, LinearBase):
+                assert hasattr(layer, "weight")
+                # THIS REPRESENTATION IS NOT RUNTIME EFFICIENT, JUST EASY TO LOAD WEIGHTS FOR NOW
+                # WILL LINEARIZE THE APPLICATION OF THESE WEIGHTS AT RUNTIME
+                if args.location == TransformLocation.INPUT:
+                    # there's an optimization to be done if the input tensors are exactly the same
+                    weight_shape = (input_size_per_partition * len(output_partition_sizes), input_size_per_partition)
+
+                elif args.location == TransformLocation.OUTPUT:
+                    # need to assert that output_partition_sizes are all same
+                    # only for the purposes of making weight loading easier
+                    for size in output_partition_sizes:
+                        assert size == output_partition_sizes[0]
+                    weight_shape = (sum(output_partition_sizes), output_partition_sizes)
+                else:
+                    raise ValueError()
+
+            elif isinstance(layer, VocabParallelEmbedding):
+                assert hasattr(layer, "weight")
+                if args.location == TransformLocation.INPUT:
+                    weight_shape = layer.weight.shape[-2]
+                elif args.location == TransformLocation.OUTPUT:
+                    weight_shape = layer.weight.shape[-1]
+                else:
+                    raise ValueError()
+
+            else:
+                raise ValueError()
+
+        self.weight = None
+            
+        def custom_weight_loader(*args, **kwargs):
+            print(f"Loading! {name} {self.weight.shape}")
+            print(asdf_args)
+            ret = weight_loader(*args, **kwargs)
+            print(f"Done! {name} {self.weight.shape}")
+            return ret
+
+        key = (weight_shape, scheme.precision)
+        if key not in registry:
+            print((weight_shape, scheme.precision))
+            registry[key] = torch.empty(weight_shape, dtype=scheme.precision)
+            
+        self.weight = ModelWeightParameter(
+            data=registry[key],
+            input_dim=1,
+            output_dim=0,
+            weight_loader=custom_weight_loader)
+        
+        # TODO: perms
+        
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        if self.args.location == TransformLocation.INPUT:
+            value
+
+
+
+        return apply_transform_weight(self.weight.data, value, self.args.location, self.module_type)
+        raise NotImplementedError()
+    
+
 class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
     def __init__(self, quantization_config: CompressedTensorsConfig):
         self.quantization_config = quantization_config
@@ -684,10 +775,11 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
                        output_partition_sizes: list[int], input_size: int,
-                       output_size: int, params_dtype: torch.dtype,
+                       output_size: int, params_dtype: torch.dtype, weight_loader: Callable,
                        **extra_weight_attrs):
         
-        super().create_weights(layer=layer, input_size_per_partition=input_size_per_partition, output_partition_sizes=output_partition_sizes, input_size=input_size, output_size=output_size, params_dtype=params_dtype, **extra_weight_attrs)
+        asdf_args = dict(layer=layer, input_size_per_partition=input_size_per_partition, output_partition_sizes=output_partition_sizes, input_size=input_size, output_size=output_size, params_dtype=params_dtype, weight_loader=weight_loader)
+        super().create_weights(**asdf_args, **extra_weight_attrs)
         
         for attr_name in ("input_tfm", "output_tfm"):
             if getattr(layer, attr_name, None) is not None:
@@ -701,11 +793,42 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
                 # if isinstance(layer, KQVProj):
                 #     self.quantization_config.transform_factories[id(scheme)]._apply_to_module(layer, args)
 
-                print(layer)
-                print(layer.device)
-                print(layer.dtype)
-                self.quantization_config.transform_factories[id(scheme)]._apply_to_module(layer, args)
-                print(layer)
+                # Hm, actually we account for tp by registering `ModelWeightParameter`s to the module (uses both column and row parallelism)
+                # weight = ModelWeightParameter(data=torch.empty(
+                #     output_size_per_partition,
+                #     input_size_per_partition,
+                #     dtype=torch.int8),
+                #                             input_dim=1,
+                #                             output_dim=0,
+                #                             weight_loader=weight_loader)
+                # I'm still a little unclear on how this `ModelWeightParameter` knows which device to go to
+                # perhaps the weights are dispatched after create_weights? not sure
+
+                name = self.quantization_config.transform_factories[id(scheme)].name
+                transform_name = f"{name}_{args.location}"
+
+                # probably need to create a "transform registry"
+                # maybe we can get away with subclassing the factory, then overloading some things
+
+                transform = vllmTransformBase(
+                    scheme,
+                    args,
+                    layer,
+                    weight_loader,
+                    layer.layer_name + f".{name}_{args.location}",
+                    input_size_per_partition,
+                    output_partition_sizes,
+                    asdf_args
+                )
+                print(layer.layer_name + f".{name}_{args.location}")
+                layer.register_module(transform_name, transform)
+
+                #print(layer)
+                # QKVParallelLinear(in_features=2048, output_features=3072, bias=False, tp_size=1, gather_output=False)
+                #  is on cuda device, empty
+                #print(layer.weight)
+                #self.quantization_config.transform_factories[id(scheme)]._apply_to_module(layer, args)
+                #print(layer)
 
     def apply(self,
               layer: torch.nn.Module,
