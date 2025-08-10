@@ -496,6 +496,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 lora_request=new_req_data.lora_request,
             )
 
+            # Cache computed tokens for new request with
+            # speculative decoding + async scheduling
+            if (self.speculative_config
+                    and self.scheduler_config.async_scheduling):
+                self.cached_num_computed_tokens[req_id] = (
+                    new_req_data.num_computed_tokens +
+                    scheduler_output.num_scheduled_tokens[req_id])
+
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
                 image_grid_thw = []
@@ -1777,23 +1785,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 spec_decode_metadata,
                 spec_decode_common_attn_metadata,
             )
+            # Update cached request states for async scheduling
+            if self.scheduler_config.async_scheduling:
+                for idx, req_id in enumerate(self.input_batch.req_ids):
+                    if req_id in self.cached_spec_token_ids:
+                        # Update num computed tokens for running requests
+                        num_rejected_tokens = max_gen_len - len(
+                            valid_sampled_token_ids[idx])
+                        self.cached_num_computed_tokens[
+                            req_id] += scheduler_output.num_scheduled_tokens[
+                                req_id] - num_rejected_tokens
+                    self.cached_spec_token_ids[req_id] = spec_token_ids[idx]
 
         self.eplb_step()
-
-        if self.speculative_config and self.scheduler_config.async_scheduling:
-            assert spec_token_ids
-            for idx, req_id in enumerate(self.input_batch.req_ids):
-                self.cached_spec_token_ids[req_id] = spec_token_ids[idx]
-                num_rejected_tokens = max_gen_len - len(
-                    valid_sampled_token_ids[idx])
-                if req_id not in self.cached_num_computed_tokens:
-                    self.cached_num_computed_tokens[
-                        req_id] = scheduler_output.num_scheduled_tokens[
-                            req_id] - num_rejected_tokens
-                else:
-                    self.cached_num_computed_tokens[
-                        req_id] += scheduler_output.num_scheduled_tokens[
-                            req_id] - num_rejected_tokens
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,

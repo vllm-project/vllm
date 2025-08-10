@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import deque
+from typing import Optional
 
 import pytest
 
@@ -12,16 +13,20 @@ from .utils import create_requests, create_scheduler
 
 
 def _make_model_runner_output(
-    scheduler_output: SchedulerOutput, ) -> ModelRunnerOutput:
+        scheduler_output: SchedulerOutput,
+        sampled_token_ids: Optional[list[list[int]]] = None,
+        spec_token_ids: Optional[list[list[int]]] = None) -> ModelRunnerOutput:
     req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+    if not sampled_token_ids:
+        sampled_token_ids = [[i] for i in range(len(req_ids))]
     return ModelRunnerOutput(
         req_ids=req_ids,
         req_id_to_index={
             req_id: i
             for i, req_id in enumerate(req_ids)
         },
-        sampled_token_ids=[[i] for i in range(len(req_ids))],
-        spec_token_ids=None,
+        sampled_token_ids=sampled_token_ids,
+        spec_token_ids=spec_token_ids,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -53,6 +58,59 @@ def test_stop_by_max_tokens(max_tokens: int):
     assert scheduler.get_num_unfinished_requests() == 0
     assert req0.num_output_tokens == max_tokens
     assert req1.num_output_tokens == max_tokens
+
+
+def test_spec_decode():
+    max_tokens = 7
+    num_spec_tokens = 3
+    spec_token_ids = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12],
+                      [-1, -2, -3]]
+    sampled_token_ids = [[0], [1, 2, 13], [4, 15], [16], [-1, -2]]
+    scheduler = create_scheduler(num_speculative_tokens=num_spec_tokens,
+                                 async_scheduling=True)
+    requests = create_requests(num_requests=1, max_tokens=max_tokens)
+    req = requests[0]
+
+    sched_outputs: deque[SchedulerOutput] = deque()
+    scheduler.add_request(req)
+    sched_outputs.append(scheduler.schedule())
+    sched_outputs.append(scheduler.schedule())
+
+    i = 0
+    while sched_outputs:
+        sched_output = sched_outputs.popleft()
+        # Overwrite with cached spec decode tokens as done in GPUModelRunner
+        if i > 0:
+            sched_output.scheduled_spec_decode_tokens[
+                req.request_id] = spec_token_ids[i - 1]
+        model_runner_output = _make_model_runner_output(
+            sched_output, [sampled_token_ids[i]], [spec_token_ids[i]])
+        engine_core_output = scheduler.update_from_output(
+            sched_output, model_runner_output)
+        # Validate spec decode stats
+        if engine_core_output:
+            assert engine_core_output[0].scheduler_stats
+            spec_decoding_stats = engine_core_output[
+                0].scheduler_stats.spec_decoding_stats
+            if i == 0:
+                # No spec decode stats for prefill round
+                assert spec_decoding_stats is None
+            else:
+                assert spec_decoding_stats
+                assert spec_decoding_stats.num_drafts == 1
+                assert spec_decoding_stats.num_draft_tokens == num_spec_tokens
+                assert spec_decoding_stats.num_accepted_tokens == len(
+                    sampled_token_ids[i]) - 1
+        sched_output = scheduler.schedule()
+        if sched_output.num_scheduled_tokens:
+            assert sched_output.num_scheduled_tokens[
+                req.request_id] == 1 + num_spec_tokens
+            sched_outputs.append(sched_output)
+        i += 1
+
+    assert scheduler.get_num_unfinished_requests() == 0
+    assert req.num_output_tokens == max_tokens
+    assert req.output_token_ids._x == [0, 1, 2, 13, 4, 15, 16]
 
 
 def test_abort():
