@@ -52,7 +52,7 @@ class SampleRequest:
     prompt: Union[str, Any]
     prompt_len: int
     expected_output_len: int
-    multi_modal_data: Optional[Union[MultiModalDataDict, dict]] = None
+    multi_modal_data: Optional[Union[MultiModalDataDict, dict, list[dict]]] = None
     lora_request: Optional[LoRARequest] = None
 
 
