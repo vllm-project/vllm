@@ -1,7 +1,4 @@
-
-# Title:  \[Perf\]\[Feat\] Workload-Aware KVCache Cache Policy
-
-## PR Descrption
+# Workload-Aware KVCache Cache Policy
 
 Nowadays, cloud providers typically use a unified serving engine deployed on GPUs to serve all request types (text, image, file, agent-calls, etc.) for better resource utilization. However, the mean response time of these workloads is different, causing KVCache reuse time differences. For example, humans respond faster when they process image/audio data than to the complex text or file results generated by the LLM. Based on our analysis of real-world LLM traffic from top-level cloud provider Aliyun Bailian ([https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon](https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon)), we found that the general cache policy (like LRU) for KVCache may not be optimal.
 
