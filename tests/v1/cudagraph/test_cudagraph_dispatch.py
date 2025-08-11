@@ -73,6 +73,7 @@ class TestCudagraphDispatcher:
             cudagraph_mode=params["cudagraph_mode"],
             level=params["compilation_level"],
             cudagraph_capture_sizes=[1, 8])
+        comp_config.set_splitting_ops_for_v1()
 
         config = _create_vllm_config(comp_config, max_num_seqs=8)
         dispatcher = CudagraphDispatcher(config)
