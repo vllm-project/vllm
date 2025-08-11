@@ -426,7 +426,6 @@ steps:
 
 - label: Tensorizer Test # 11min
   mirror_hardwares: [amdexperimental]
-  soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
   - tests/tensorizer_loader
