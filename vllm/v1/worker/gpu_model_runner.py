@@ -2687,16 +2687,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for attn_module in attn_layers.values():
 
             if attn_module.attn_type == AttentionType.ENCODER_ONLY:
+                assert attn_module.sliding_window is None, "Sliding "
+                "window attention is not supported for encoder-only models"
+
                 attn_specs.append(
                     FullAttentionSpec(block_size=block_size,
                                       num_kv_heads=attn_module.num_kv_heads,
-                                      sliding_window=attn_module.sliding_window,
                                       head_size=attn_module.head_size,
                                       dtype=self.kv_cache_dtype,
                                       use_mla=use_mla))
-            else:
-                raise ValueError("Expected only encoder-only layers")
-
         if len(attn_specs) > 0:
             assert len(attn_specs) == len(attn_layers), \
                 "All or none of the layers are expected to be encoder-only"
