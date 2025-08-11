@@ -177,3 +177,45 @@ def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
 
         # cmp output
         assert output[0].outputs[0].text == output3[0].outputs[0].text
+
+class Churn:
+    def cb(self): return 1
+
+def _churn_bound_methods(n=500_000):
+    for _ in range(n):
+        _ = Churn().cb  
+
+def _churn_small_objs(n=2_000_000):
+    for _ in range(n):
+        _ = object()
+
+
+@create_new_process_for_each_test()
+def test_cumem_borrowed_callback_sanity():
+    import vllm.device_allocator.cumem as cu
+
+    A = cu.CuMemAllocator.get_instance()
+
+    alloc = cu.get_pluggable_allocator(A.python_malloc_callback, A.python_free_callback)
+    mpool = torch.cuda.memory.MemPool(alloc._allocator)
+
+    _churn_bound_methods(400_000)
+    _churn_small_objs(500_000)
+    gc.collect()
+
+    with torch.cuda.memory.use_mem_pool(mpool):
+        bufs = [torch.empty(1<<20, dtype=torch.uint8, device="cuda") for _ in range(128)]  # 128 MiB total
+        del bufs
+        gc.collect()
+
+    _churn_bound_methods(1_000_000)
+    gc.collect()
+
+    with torch.cuda.memory.use_mem_pool(mpool):
+        buf = torch.empty(1<<20, dtype=torch.uint8, device="cuda")
+        del buf
+        gc.collect()
+
+    torch.cuda.synchronize()      
+    del mpool, alloc              
+    gc.collect()

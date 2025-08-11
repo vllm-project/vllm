@@ -30,8 +30,6 @@ CUresult error_code = no_error;  // store error code
   } while (0)
 
 // Global references to Python callables
-// NOTE: this is borrowed reference, so we don't need to DECREF them.
-// This brings the limitation that the allocator needs to be singleton.
 static PyObject* g_python_malloc_callback = nullptr;
 static PyObject* g_python_free_callback = nullptr;
 
@@ -156,21 +154,25 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
       (CUmemGenericAllocationHandle*)malloc(
           sizeof(CUmemGenericAllocationHandle));
 
-  if (!g_python_malloc_callback) {
-    std::cerr << "ERROR: g_python_malloc_callback not set.\n";
-    return nullptr;
-  }
-
   // Acquire GIL (not in stable ABI officially, but often works)
   PyGILState_STATE gstate = PyGILState_Ensure();
+  PyObject* cb = g_python_malloc_callback;
+
+  if (!cb) {
+    std::cerr << "ERROR: g_python_malloc_callback not set.\n";
+    PyGILState_Release(gstate);
+    return nullptr;
+  }
 
   PyObject* arg_tuple = create_tuple_from_c_integers(
       (unsigned long long)device, (unsigned long long)alignedSize,
       (unsigned long long)d_mem, (unsigned long long)p_memHandle);
 
+  if (!arg_tuple) { PyGILState_Release(gstate); cuMemAddressFree(d_mem, alignedSize); free(p_memHandle); return nullptr; }
+
   // Call g_python_malloc_callback
   PyObject* py_result =
-      PyObject_CallFunctionObjArgs(g_python_malloc_callback, arg_tuple, NULL);
+      PyObject_CallFunctionObjArgs(cb, arg_tuple, NULL);
   Py_DECREF(arg_tuple);
 
   if (!py_result) {
@@ -178,6 +180,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
     PyGILState_Release(gstate);
     return nullptr;
   }
+  Py_DECREF(py_result);
 
   PyGILState_Release(gstate);
 
@@ -189,22 +192,31 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
 
 // use CUstream instead of cudaStream_t, to avoid including cuda_runtime_api.h
 void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
-  // get memory handle from the pointer
-  if (!g_python_free_callback) {
-    std::cerr << "ERROR: g_python_free_callback not set.\n";
-    return;
-  }
-
   // Acquire GIL (not in stable ABI officially, but often works)
   PyGILState_STATE gstate = PyGILState_Ensure();
+  PyObject* cb = g_python_free_callback;
+
+  // get memory handle from the pointer
+  if (!cb) {
+    std::cerr << "ERROR: g_python_free_callback not set.\n";
+    PyGILState_Release(gstate);
+    return;
+  }
 
   PyObject* py_ptr =
       PyLong_FromUnsignedLongLong(reinterpret_cast<unsigned long long>(ptr));
 
-  PyObject* py_result =
-      PyObject_CallFunctionObjArgs(g_python_free_callback, py_ptr, NULL);
+  if (!py_ptr) { PyGILState_Release(gstate); return; }
 
-  if (!py_result || !PyTuple_Check(py_result) || PyTuple_Size(py_result) != 4) {
+  PyObject* py_result =
+      PyObject_CallFunctionObjArgs(cb, py_ptr, NULL);
+  Py_DECREF(py_ptr);
+  if (!py_result) { PyErr_Print(); PyGILState_Release(gstate); return; }
+
+
+  if (!PyTuple_Check(py_result) || PyTuple_Size(py_result) != 4) {
+    Py_DECREF(py_result);
+    PyGILState_Release(gstate);
     PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");
     return;
   }
@@ -215,10 +227,13 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   if (!PyArg_ParseTuple(py_result, "KKKK", &recv_device, &recv_size,
                         &recv_d_mem, &recv_p_memHandle)) {
     // PyArg_ParseTuple sets an error if it fails
+    Py_DECREF(py_result);
+    PyGILState_Release(gstate);
     return;
   }
-
+  Py_DECREF(py_result);
   PyGILState_Release(gstate);
+
 
   // recv_size == size
   // recv_device == device
@@ -228,10 +243,10 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   CUdeviceptr d_mem = (CUdeviceptr)recv_d_mem;
   CUmemGenericAllocationHandle* p_memHandle =
       (CUmemGenericAllocationHandle*)recv_p_memHandle;
-  unmap_and_release(device, size, d_mem, p_memHandle);
+  unmap_and_release(recv_device, recv_size, d_mem, p_memHandle);
 
   // free address and the handle
-  CUDA_CHECK(cuMemAddressFree(d_mem, size));
+  CUDA_CHECK(cuMemAddressFree(d_mem, recv_size));
   if (error_code != 0) {
     return;
   }
@@ -255,9 +270,12 @@ static PyObject* py_init_module(PyObject* self, PyObject* args) {
     return nullptr;
   }
 
-  // Save the Python callables
-  // This module does not handle GC of these objects, so they must be kept alive
-  // outside of this module.
+  Py_XINCREF(malloc_callback);
+  Py_XINCREF(free_callback);
+
+  Py_XDECREF(g_python_malloc_callback);
+  Py_XDECREF(g_python_free_callback);
+
   g_python_malloc_callback = malloc_callback;
   g_python_free_callback = free_callback;
 
