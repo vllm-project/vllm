@@ -199,11 +199,12 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     # This is a workaround to get the source code of the class.
     try:
         cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
-    except Exception:
+    except (OSError, TypeError):
+        candidate: Optional[ast.ClassDef] = None
         module = inspect.getmodule(cls)
         try:
             module_source = inspect.getsource(module) if module else None
-        except Exception:
+        except (OSError, TypeError):
             module_source = None
 
         if module_source is not None:
@@ -239,17 +240,7 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
                         candidate = child
                         break
 
-            if candidate is None:
-                # Last resort: empty docs mapping for dataclass fields
-                try:
-                    from dataclasses import fields as dc_fields
-                    from dataclasses import is_dataclass as dc_is_dataclass
-                    if dc_is_dataclass(cls):
-                        return {f.name: "" for f in dc_fields(cls)}
-                except Exception:
-                    pass
-                raise
-
+        if candidate:
             cls_node = candidate
         else:
             # Last resort: empty docs mapping for dataclass fields
