@@ -157,7 +157,11 @@ before applying any logits post-processing such as temperature scaling or penalt
 adjustments). As a result, the returned logprobs do not reflect the final adjusted
 probabilities used during sampling.
 
-You can adjust this behavior by setting the `--logprobs-mode` flag. See details in [PR #21398](gh-pr:21398) and [PR #22387](gh-pr:22387).
+You can adjust this behavior by setting the `--logprobs-mode` flag.
+We support 5 modes: `raw_logprobs`, `processed_logprobs`, `final_logprobs`, `raw_logits`, `processed_logits`.
+Raw means the values before applying any logit processors, like bad words.
+Processed means the values after applying all processors, except argmax invariant processors (e.g. min_p),
+temperature and top_k/top_p. Final means after applying all logit processors.
 
 ##### Prompt Logprobs with Prefix Caching
 

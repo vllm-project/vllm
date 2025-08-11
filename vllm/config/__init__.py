@@ -360,8 +360,8 @@ class ModelConfig:
     1) raw_logprobs, 2) processed_logprobs, 3) final_logprobs, 4) raw_logits,
     5) processed_logits. Raw means the values before applying any logit
     processors, like bad words. Processed means the values after applying all
-    processors, except argmax invariant processors, temperature and top_k/top_p.
-    Final means after applying all logit processors.
+    processors, except argmax invariant processors (e.g. min_p), temperature
+    and top_k/top_p. Final means after applying all logit processors.
     """
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
