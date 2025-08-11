@@ -839,7 +839,8 @@ class SupportsEagle3(Protocol):
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
         """
-        Get the layer indices that should output auxiliary hidden states for EAGLE3.
+        Get the layer indices that should output auxiliary hidden states
+        for EAGLE3.
         
         Returns:
             Tuple of layer indices for auxiliary hidden state outputs.
