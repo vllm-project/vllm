@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import dataclasses
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Type, Union
@@ -157,6 +159,10 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             self.max_cross_blocks = (self.model.max_cross_attn_tokens //
                                      self.cache_config.block_size)
 
+        is_dp = (self.model_config.override_tt_config
+                 and self.model_config.override_tt_config.get(
+                     "data_parallel", 1) > 1)
+
         # Detect if the model is a TG Llama to use DP KV cache
         # vLLM doesn't know which blocks correspond to which DP device pool so
         # may allocate non-local blocks to a user. To avoid bad output because
@@ -168,13 +174,12 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         if ("Llama" in self.model_config.model
                 and "70B" in self.model_config.model
                 and self.device_config.device.get_num_devices() == 32
-                and (self.model_config.override_tt_config.get(
-                    "data_parallel", 1) == 1)):
+                and not is_dp):
             self.llama_tg = True
         else:
             self.llama_tg = False
 
-        if self.llama_tg:
+        if self.llama_tg or is_dp:
             self.dp_kv_cache = True
         else:
             self.dp_kv_cache = False
@@ -189,7 +194,6 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             self.req_id_to_seq_id: Dict[str, int] = {}
             self.empty_slots = list(range(self.scheduler_config.max_num_seqs))
             self.seq_groups_to_batch_slot: Dict[int, int] = {}
-            self.prev_seq_groups_list: Optional[List[int]] = None
             if self.async_torch_proc:
                 self.cached_read_events: List[Any] = [
                 ]  # Only used for multi-step execution
@@ -427,17 +431,14 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                                                    dim=1)
 
         if self.dp_kv_cache:
+            prev_seq_groups_list = list(self.seq_groups_to_batch_slot.keys())
 
-            if self.prev_seq_groups_list is None:
-                self.prev_seq_groups_list = seq_groups_list
-
-            # check for pe-empted requests
-            if seq_groups_list != self.prev_seq_groups_list and not is_prompt:
+            # check for preempted requests
+            if seq_groups_list != prev_seq_groups_list and not is_prompt:
                 finished_requests_seq_ids_current = [
-                    seq_id for seq_id in self.prev_seq_groups_list
+                    seq_id for seq_id in prev_seq_groups_list
                     if seq_id not in seq_groups_list
                 ]
-                self.prev_seq_groups_list = seq_groups_list
             else:
                 finished_requests_seq_ids_current = []
 
@@ -445,9 +446,6 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             for seq_id in finished_requests_seq_ids:
                 if seq_id not in finished_requests_seq_ids_current:
                     finished_requests_seq_ids_current.append(seq_id)
-                    # remove seq_id from prev_seq_groups_list
-                    if seq_id in self.prev_seq_groups_list:
-                        self.prev_seq_groups_list.remove(seq_id)
 
             # update the empty slots
             for req in finished_requests_seq_ids_current:
@@ -496,7 +494,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     next_token_ids, read_event = next_token_ids
                     self.cached_read_events.append(read_event)
                 self.cached_step_outputs.append(next_token_ids)
-                if not self.llama_tg and i < num_steps - 1:
+                if (not self.llama_tg and i < num_steps - 1
+                        and not self.sample_on_device_mode):
                     # Prepare the inputs for the next step
                     new_input_tokens = next_token_ids.unsqueeze(dim=1).int()
                     if new_input_tokens.shape[
@@ -628,10 +627,12 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             execute_model_kwargs["prompt_lens"] = model_input.prompt_lens
         else:
             execute_model_kwargs["start_pos"] = model_input.input_positions
+
         if self.sample_on_device_mode == "all" or (
                 self.sample_on_device_mode == "decode_only" and is_decode):
             execute_model_kwargs[
                 "sampling_params"] = model_input.tt_sampling_params
+
         if model_input.cross_block_tables is not None:
             execute_model_kwargs[
                 "cross_page_table"] = model_input.cross_block_tables
@@ -778,7 +779,10 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             next_token_ids = self._sample_tokens(
                 next_logits, model_input.tt_sampling_params)
         else:
-            next_token_ids = tt_out
+            if self.llama_tg:
+                next_token_ids = tt_out
+            else:
+                next_token_ids = tt_out[:model_input.unpadded_batch_size]
         if not is_decode or not self.async_torch_proc:
             return next_token_ids
         else:

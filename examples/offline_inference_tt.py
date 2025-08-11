@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import argparse
 import json
 import os
@@ -26,9 +28,9 @@ def register_tt_models():
     llama_text_version = os.getenv("TT_LLAMA_TEXT_VER", "tt_transformers")
     if llama_text_version == "tt_transformers":
         path_llama_text = "models.tt_transformers.tt.generator_vllm:LlamaForCausalLM"
-    elif llama_text_version == "llama3_subdevices":
+    elif llama_text_version == "llama3_70b_galaxy":
         path_llama_text = (
-            "models.demos.llama3_subdevices.tt.generator_vllm:LlamaForCausalLM"
+            "models.demos.llama3_70b_galaxy.tt.generator_vllm:LlamaForCausalLM"
         )
     elif llama_text_version == "llama2_70b":
         path_llama_text = (
@@ -37,7 +39,7 @@ def register_tt_models():
     else:
         raise ValueError(
             f"Unsupported TT Llama version: {llama_text_version}, "
-            "pick one of [tt_transformers, llama3_subdevices, llama2_70b]"
+            "pick one of [tt_transformers, llama3_70b_galaxy, llama2_70b]"
         )
 
     # Llama3.1/3.2 - Text
@@ -99,6 +101,7 @@ def check_tt_model_supported(model):
         "meta-llama/Llama-3.2-1B-Instruct",
         "meta-llama/Llama-3.2-3B",
         "meta-llama/Llama-3.2-3B-Instruct",
+        "meta-llama/Llama-3.2-11B-Vision",
         "meta-llama/Llama-3.2-11B-Vision-Instruct",
         "meta-llama/Llama-3.2-90B-Vision-Instruct",
         "meta-llama/Llama-3.3-70B",
