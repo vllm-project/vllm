@@ -70,7 +70,7 @@ steps:
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s multimodal
-  - pytest -v -s test_utils.py # Utils
+  - pytest -v -s utils # Utils
   - pytest -v -s worker # Worker
 
 - label: Python-only Installation Test
