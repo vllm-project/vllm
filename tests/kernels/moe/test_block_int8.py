@@ -4,12 +4,12 @@
 import pytest
 import torch
 
-from tests.kernels.moe.utils import make_test_weights
+from tests.kernels.moe.utils import make_test_weights, make_test_quant_config
 from tests.kernels.quant_utils import (native_per_token_group_quant_int8,
                                        native_w8a8_block_matmul)
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
 from vllm.platforms import current_platform
 
 if current_platform.get_device_capability() < (7, 0):
@@ -129,7 +129,6 @@ def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
         block_shape=block_size,
     )
 
-
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
         out = fused_experts(
@@ -138,7 +137,7 @@ def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
             w2,
             topk_weights,
             topk_ids,
-            quant_confg=quant_config
+            quant_config=quant_config
         )
         ref_out = torch_w8a8_block_int8_moe(a, w1, w2, quant_config.w1_scale, quant_config.w2_scale, score, topk,
                                             block_size)
