@@ -5,15 +5,24 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import extract_required_args
 from vllm.utils import has_triton_kernels
 
+logger = init_logger(__name__)
+
 if has_triton_kernels():
-    import triton_kernels.swiglu
-    from triton_kernels.matmul_ogs import FnSpecs, FusedActivation, matmul_ogs
-    from triton_kernels.routing import routing
+    try:
+        import triton_kernels.swiglu
+        from triton_kernels.matmul_ogs import (FnSpecs, FusedActivation,
+                                               matmul_ogs)
+        from triton_kernels.routing import routing
+    except ModuleNotFoundError:
+        logger.error(
+            "Failed to import Triton kernels. Please make sure your triton "
+            "version is compatible.")
 
 if TYPE_CHECKING:
     from triton_kernels.matmul_ogs import PrecisionConfig
