@@ -13,7 +13,10 @@ from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
 from vllm.triton_utils import triton
 
 
-def cal_diff(x: torch.Tensor, y: torch.Tensor, name: str, use_fp8: bool=False) -> None:
+def cal_diff(x: torch.Tensor,
+             y: torch.Tensor,
+             name: str,
+             use_fp8: bool = False) -> None:
     x, y = x.double(), y.double()
     cos_diff = 1 - 2 * (x * y).sum().item() / max(
         (x * x + y * y).sum().item(), 1e-12)
@@ -38,12 +41,16 @@ FLASH_MLA_UNSUPPORTED_REASON = is_flashmla_supported()[1] \
 @pytest.mark.parametrize("block_size", [64])
 @pytest.mark.parametrize("causal", [True])
 @pytest.mark.parametrize("varlen", [False, True])
-@pytest.mark.parametrize("torch_dtype", [torch.bfloat16, torch.float16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("torch_dtype",
+                         [torch.bfloat16, torch.float16, torch.float8_e4m3fn])
 @torch.inference_mode()
 def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal,
                    varlen, torch_dtype):
     device = torch.device("cuda:0")
-    init_dtype = torch.bfloat16 if torch_dtype == torch.float8_e4m3fn else torch_dtype
+    if torch_dtype == torch.float8_e4m3fn:
+        init_dtype = torch.bfloat16
+    else:
+        init_dtype = torch_dtype
     torch.set_default_dtype(init_dtype)
     torch.set_default_device(device)
     torch.cuda.set_device(device)
@@ -77,26 +84,17 @@ def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal,
         cache_seqlens, s_q * h_q // h_kv, h_kv)
 
     init_dtype = q.dtype
-    def prepare_fp8_input():
-        q_fp8, blocked_k_fp8, blocked_v_fp8, descale_q, descale_k = None, None, None, None, None
-
-        if use_fp8:
-            nonlocal q, blocked_k, blocked_v
-            fp8_dtype = torch.float8_e4m3fn
-            descale_q = torch.ones((1), dtype=torch.float32)
-            descale_k = torch.ones((1), dtype=torch.float32)
-            
-            q_fp8 = q.to(fp8_dtype)
-            blocked_k_fp8 = blocked_k.to(fp8_dtype)
-            blocked_v_fp8 = blocked_v.to(fp8_dtype)
-
-        return q_fp8, blocked_k_fp8, blocked_v_fp8, descale_q, descale_k
-
-    q_fp8, blocked_k_fp8, blocked_v_fp8, descale_q, descale_k = prepare_fp8_input()
     if use_fp8:
-        q = q_fp8
-        blocked_k = blocked_k_fp8
-        blocked_v = blocked_v_fp8
+        fp8_dtype = torch.float8_e4m3fn
+        descale_q = torch.ones((1), dtype=torch.float32)
+        descale_k = torch.ones((1), dtype=torch.float32)
+
+        q = q.to(fp8_dtype)
+        blocked_k = blocked_k.to(fp8_dtype)
+        blocked_v = blocked_v.to(fp8_dtype)
+    else:
+        descale_q = None
+        descale_k = None
 
     def flash_mla():
         return flash_mla_with_kvcache(
@@ -134,21 +132,23 @@ def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal,
 
     def ref_mla():
         q_ = (q.to(torch.float) * descale_q).to(init_dtype) if use_fp8 else q
-        blocked_k_ = (blocked_k.to(torch.float) * descale_k).to(init_dtype) if use_fp8 else blocked_k
-        blocked_v_ = (blocked_v.to(torch.float) * descale_k).to(init_dtype) if use_fp8 else blocked_v
+        blocked_k_ = (blocked_k.to(torch.float) *
+                      descale_k).to(init_dtype) if use_fp8 else blocked_k
+        blocked_v_ = (blocked_v.to(torch.float) *
+                      descale_k).to(init_dtype) if use_fp8 else blocked_v
         out = torch.empty(b, s_q, h_q, dv, dtype=torch.float32)
         lse = torch.empty(b, h_q, s_q, dtype=torch.float32)
         for i in range(b):
             begin = i * max_seqlen_pad
             end = begin + cache_seqlens[i]
-            O, LSE = scaled_dot_product_attention(
+            out_i, lse_i = scaled_dot_product_attention(
                 q_[i].transpose(0, 1),
                 blocked_k_.view(-1, h_kv, d)[begin:end].transpose(0, 1),
                 blocked_v_.view(-1, h_kv, dv)[begin:end].transpose(0, 1),
                 is_causal=causal,
             )
-            out[i] = O.transpose(0, 1)
-            lse[i] = LSE
+            out[i] = out_i.transpose(0, 1)
+            lse[i] = lse_i
         return out, lse
 
     out_flash, lse_flash = flash_mla()
@@ -158,7 +158,8 @@ def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal,
 
     t = triton.testing.do_bench(flash_mla)
     FLOPS = s_q * total_seqlens * h_q * (d + dv) * 2
-    bytes = (total_seqlens * h_kv * d + b * s_q * h_q * d) * (torch.finfo(torch_dtype).bits // 8) + (b * s_q * h_q * dv) * (torch.finfo(init_dtype).bits // 8)
-    print(
-        f"{t:.3f} ms, {FLOPS / 10 ** 9 / t:.0f} TFLOPS, {bytes / 10 ** 6 / t:.0f} GB/s"
-    )
+    bytes = (total_seqlens * h_kv * d +
+             b * s_q * h_q * d) * (torch.finfo(torch_dtype).bits // 8) + (
+                 b * s_q * h_q * dv) * (torch.finfo(init_dtype).bits // 8)
+    print(f"{t:.3f} ms, {FLOPS / 10 ** 9 / t:.0f} TFLOPS,",
+          f"{bytes / 10 ** 6 / t:.0f} GB/s")
