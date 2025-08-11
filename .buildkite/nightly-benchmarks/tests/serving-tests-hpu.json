@@ -25,10 +25,7 @@
 	    "block_size": 128,
 	    "max_model_len": 32512,
 	    "gpu_memory_util": 0.99,
-	    "use_paddling_aware_scheduling": "",
 	    "max_num_seqs": 32,
-	    "max_num_prefill_seqs": 16,
-	    "num_scheduler_steps": 1,
             "swap_space": 16,
             "disable_log_stats": "",
             "load_format": "dummy"
@@ -67,10 +64,7 @@
 	    "block_size": 128,
 	    "max_model_len": 33024,
 	    "gpu_memory_util": 0.98,
-	    "use_paddling_aware_scheduling": "",
 	    "max_num_seqs": 32,
-	    "max_num_prefill_seqs": 16,
-	    "num_scheduler_steps": 1,
             "swap_space": 16,
             "disable_log_stats": "",
             "load_format": "dummy"
@@ -110,10 +104,7 @@
 	    "block_size": 128,
 	    "max_model_len": 32512,
 	    "gpu_memory_util": 0.98,
-	    "use_paddling_aware_scheduling": "",
 	    "max_num_seqs": 64,
-	    "max_num_prefill_seqs": 16,
-	    "num_scheduler_steps": 1,
             "swap_space": 16,
             "disable_log_stats": "",
             "load_format": "dummy"
