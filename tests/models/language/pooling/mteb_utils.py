@@ -162,7 +162,8 @@ def mteb_test_embed_models(hf_runner,
                            vllm_runner,
                            model_info: EmbedModelInfo,
                            vllm_extra_kwargs=None,
-                           hf_model_callback=None):
+                           hf_model_callback=None,
+                           atol=MTEB_RERANK_TOL):
     if not model_info.enable_test:
         # A model family has many models with the same architecture,
         # and we don't need to test each one.
@@ -198,7 +199,7 @@ def mteb_test_embed_models(hf_runner,
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
-    assert st_main_score == pytest.approx(vllm_main_score, abs=MTEB_EMBED_TOL)
+    assert st_main_score == pytest.approx(vllm_main_score, abs=atol)
 
 
 def run_mteb_rerank(cross_encoder, tasks, languages):
