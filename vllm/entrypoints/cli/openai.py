@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import readline
 import signal
 import sys
 from typing import TYPE_CHECKING
@@ -12,6 +13,8 @@ from typing import TYPE_CHECKING
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
+from vllm.entrypoints.cli.chat_commands import ChatContext, CommandRegistry
+from vllm.entrypoints.cli.readline_utils import ReadlineEnhancer
 from vllm.entrypoints.cli.types import CLISubcommand
 
 if TYPE_CHECKING:
@@ -113,22 +116,99 @@ class ChatCommand(CLISubcommand):
             print(chat_completion.choices[0].message.content)
             return
 
-        print("Please enter a message for the chat model:")
-        while True:
+        # Initialize command system if enabled
+        use_commands = getattr(args, 'enable_commands', True)
+        command_registry = CommandRegistry() if use_commands else None
+
+        # Create context for commands
+        context = ChatContext(client=client,
+                              model_name=model_name,
+                              conversation=conversation,
+                              system_prompt=system_prompt)
+        readline_enhancer = ReadlineEnhancer(
+            command_registry) if use_commands and readline else None
+
+        # Initialize readline enhancements
+        if use_commands and readline_enhancer:
+            # Get available models for completion
             try:
-                input_message = input("> ")
-            except EOFError:
-                break
-            conversation.append({"role": "user", "content": input_message})
+                models = client.models.list()
+                model_names = [m.id for m in models.data]
+                readline_enhancer.set_available_models(model_names)
+            except Exception:
+                pass
 
-            chat_completion = client.chat.completions.create(
-                model=model_name, messages=conversation)
+        print("Type /help for available commands.")
+        if readline:
+            print("Use Tab for completion, Up/Down for history.")
 
-            response_message = chat_completion.choices[0].message
-            output = response_message.content
+        try:
+            while True:
+                try:
+                    input_message = input("> ")
+                except EOFError:
+                    break
 
-            conversation.append(response_message)  # type: ignore
-            print(output)
+                # Skip empty input
+                if not input_message.strip():
+                    continue
+
+                is_command_run = False
+                if (use_commands and command_registry
+                        and command_registry.is_command(input_message)):
+                    is_command_run = True
+                    cmd_name, cmd_args = command_registry.parse_command(
+                        input_message)
+
+                    if cmd_name:
+                        command = command_registry.get(cmd_name)
+
+                        if command:
+                            result = command.execute(context, cmd_args)
+
+                            if result is None:
+                                # Command that prints nothing, just continue
+                                continue
+
+                            if result == "__EXIT__":
+                                break
+
+                            # Check for the special retry signal
+                            if result.startswith("__RETRY__"):
+                                # The command has already modified
+                                # the conversation history.
+                                # We just need to use the content
+                                # provided in the signal
+                                input_message = result[len("__RETRY__"):]
+                                # Treat this as a normal chat message now
+                                is_command_run = False
+                            else:
+                                print(result)
+                        else:
+                            print(f"Unknown command: /{cmd_name}")
+
+                # If a command was run and it wasn't a retry,
+                # start the next loop.
+                if is_command_run:
+                    continue
+
+                # Chat
+                # Always use the context as the source of truth.
+                context.conversation.append({
+                    "role": "user",
+                    "content": input_message
+                })
+
+                chat_completion = client.chat.completions.create(
+                    model=context.model_name, messages=context.conversation)
+
+                response_message = chat_completion.choices[0].message
+                context.conversation.append(response_message)
+                print(response_message.content)
+
+        finally:
+            if readline_enhancer:
+                readline_enhancer.save_history()
 
     def subparser_init(
             self,
@@ -151,6 +231,12 @@ class ChatCommand(CLISubcommand):
                                  metavar="MESSAGE",
                                  help=("Send a single prompt as MESSAGE "
                                        "and print the response, then exit."))
+        chat_parser.add_argument(
+            "--disable-commands",
+            action="store_false",
+            dest="enable_commands",
+            default=True,
+            help="Disable chat commands (like /help, /save, etc.)")
         return chat_parser
 
 
