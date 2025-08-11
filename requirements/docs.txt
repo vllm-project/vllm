@@ -19,6 +19,7 @@ cloudpickle
 fastapi
 msgspec
 openai
+openai-harmony
 partial-json-parser
 pillow
 psutil
@@ -28,3 +29,5 @@ setproctitle
 torch
 transformers
 zmq
+uvloop
+prometheus-client

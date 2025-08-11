@@ -81,7 +81,7 @@ which takes priority over both the model's and Sentence Transformers's defaults.
 ## Offline Inference
 
 The [LLM][vllm.LLM] class provides various methods for offline inference.
-See [configuration][configuration] for a list of options when initializing the model.
+See [configuration](../api/summary.md#configuration) for a list of options when initializing the model.
 
 ### `LLM.embed`
 
@@ -120,7 +120,7 @@ A code example can be found here: <gh-file:examples/offline_inference/basic/clas
 ### `LLM.score`
 
 The [score][vllm.LLM.score] method outputs similarity scores between sentence pairs.
-It is designed for embedding models and cross encoder models. Embedding models use cosine similarity, and [cross-encoder models](https://www.sbert.net/examples/applications/cross-encoder/README.html) serve as rerankers between candidate query-document pairs in RAG systems.
+It is designed for embedding models and cross-encoder models. Embedding models use cosine similarity, and [cross-encoder models](https://www.sbert.net/examples/applications/cross-encoder/README.html) serve as rerankers between candidate query-document pairs in RAG systems.
 
 !!! note
     vLLM can only perform the model inference component (e.g. embedding, reranking) of RAG.
