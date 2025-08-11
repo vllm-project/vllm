@@ -91,7 +91,7 @@ become available.
 First start serving your model
 
 ```bash
-vllm serve NousResearch/Hermes-3-Llama-3.1-8B --disable-log-requests
+vllm serve NousResearch/Hermes-3-Llama-3.1-8B
 ```
 
 Then run the benchmarking script
@@ -146,7 +146,7 @@ If the dataset you want to benchmark is not supported yet in vLLM, even then you
 
 ```bash
 # start server
-VLLM_USE_V1=1 vllm serve meta-llama/Llama-3.1-8B-Instruct --disable-log-requests
+VLLM_USE_V1=1 vllm serve meta-llama/Llama-3.1-8B-Instruct
 ```
 
 ```bash
@@ -171,7 +171,7 @@ You can skip applying chat template if your data already has it by using `--cust
 
 ```bash
 # need a model with vision capability here
-vllm serve Qwen/Qwen2-VL-7B-Instruct --disable-log-requests
+vllm serve Qwen/Qwen2-VL-7B-Instruct
 ```
 
 ```bash
@@ -205,7 +205,7 @@ vllm bench serve \
 ### Other HuggingFaceDataset Examples
 
 ```bash
-vllm serve Qwen/Qwen2-VL-7B-Instruct --disable-log-requests
+vllm serve Qwen/Qwen2-VL-7B-Instruct
 ```
 
 `lmms-lab/LLaVA-OneVision-Data`:
@@ -430,7 +430,7 @@ Benchmark the performance of structured output generation (JSON, grammar, regex)
 ### Server Setup
 
 ```bash
-vllm serve NousResearch/Hermes-3-Llama-3.1-8B --disable-log-requests
+vllm serve NousResearch/Hermes-3-Llama-3.1-8B
 ```
 
 ### JSON Schema Benchmark

@@ -21,6 +21,7 @@ from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -35,7 +36,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
                             ReconfigureDistributedRequest, ReconfigureRankType,
                             UtilityOutput, UtilityResult)
-from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
+from vllm.v1.engine.mm_input_cache import MultiModalInputCacheServer
 from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -124,9 +125,8 @@ class EngineCore:
             log_stats=self.log_stats,
         )
 
-        # Setup MM Input Mapper.
-        self.mm_input_cache_server = MirroredProcessingCache(
-            vllm_config.model_config)
+        self.mm_input_cache_server = MultiModalInputCacheServer(
+            vllm_config.model_config, MULTIMODAL_REGISTRY)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -413,7 +413,7 @@ class EngineCore:
             # Note on thread safety: no race condition.
             # `mm_input_cache_server` is reset at the end of LLMEngine init,
             # and will only accessed in the input processing thread afterwards.
-            request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
+            request.mm_inputs = self.mm_input_cache_server.get_and_update(
                 request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
@@ -928,7 +928,7 @@ class DPEngineCoreProc(EngineCoreProc):
     ):
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
-        self.counter = 0
+        self.step_counter = 0
         self.current_wave = 0
         self.last_counts = (0, 0)
 
@@ -999,7 +999,9 @@ class DPEngineCoreProc(EngineCoreProc):
         counts = self.scheduler.get_request_counts()
         if counts != self.last_counts:
             self.last_counts = counts
-            stats = SchedulerStats(*counts)
+            stats = SchedulerStats(*counts,
+                                   step_counter=self.step_counter,
+                                   current_wave=self.current_wave)
             self.output_queue.put_nowait(
                 (-1, EngineCoreOutputs(scheduler_stats=stats)))
 
@@ -1041,15 +1043,16 @@ class DPEngineCoreProc(EngineCoreProc):
                     self.output_queue.put_nowait(
                         (client_index,
                          EngineCoreOutputs(wave_complete=self.current_wave)))
+                # Increment wave count and reset step counter.
                 self.current_wave += 1
+                self.step_counter = 0
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
 
         # Optimization - only perform finish-sync all-reduce every 32 steps.
-        self.counter += 1
-        if self.counter != 32:
+        self.step_counter += 1
+        if self.step_counter % 32 != 0:
             return True
-        self.counter = 0
 
         return ParallelConfig.has_unfinished_dp(self.dp_group,
                                                 local_unfinished)

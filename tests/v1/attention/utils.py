@@ -11,7 +11,7 @@ import torch
 from vllm.config import (CacheConfig, CompilationConfig, DeviceConfig,
                          LoadConfig, ModelConfig, ModelDType, ParallelConfig,
                          SchedulerConfig, VllmConfig)
-from vllm.platforms import _Backend
+from vllm.platforms import _Backend, current_platform
 from vllm.utils import resolve_obj_by_qualname
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -109,23 +109,30 @@ def create_common_attn_metadata(
 
 def get_attention_backend(backend_name: _Backend):
     """Set up attention backend classes for testing.
-    
+
     Args:
         backend_name: Name of the backend ("flash_attn", "flashinfer", etc.)
         vllm_config: VllmConfig instance
-        
+
     Returns:
         Tuple of (backend_builder_class, backend_impl_class)
     """
     backend_map = {
         _Backend.FLASH_ATTN_VLLM_V1:
-        "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend",
+        ("vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+         if current_platform.is_cuda() else
+         "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend"
+         ),
         _Backend.FLASHINFER_VLLM_V1:
         "vllm.v1.attention.backends.flashinfer.FlashInferBackend",
         _Backend.FLEX_ATTENTION:
         "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",
         _Backend.TRITON_ATTN_VLLM_V1:
         "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
+        _Backend.TREE_ATTN:
+        "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",
+        _Backend.XFORMERS_VLLM_V1:
+        "vllm.v1.attention.backends.xformers.XFormersAttentionBackend",
     }
 
     if backend_name not in backend_map:
