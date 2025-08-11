@@ -4,6 +4,7 @@
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, cast
 
+import math
 import torch
 from compressed_tensors.config import (CompressionFormat,
                                        SparsityCompressionConfig,
@@ -576,8 +577,10 @@ class CompressedTensorsConfig(QuantizationConfig):
             layer.input_tfm = []
         if not hasattr(layer, "output_tfm"):
             layer.output_tfm = []
-        layer.input_tfm.append(input_tfm)
-        layer.output_tfm.append(output_tfm)
+        if input_tfm is not None:
+            layer.input_tfm.append(input_tfm)
+        if output_tfm is not None:
+            layer.output_tfm.append(output_tfm)
         layer.layer_name = layer_name
 
         if self.supports_cutlass_24(weight_quant=weight_quant,
@@ -731,13 +734,16 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
 
         # Since I think the weight loading is as optimal as it can get, we can consider optimizing the application later
 
+        # we could potentially replace this with a "fake" weight, whose weight loader
+        # is actually a bait and switch to load shards into real weights
+        # essentially bringing this logic out of the parameter. Nicer typing this way
         self.weight = ShardedModelWeightParameter()
 
+        assert len(output_partition_sizes) == 1
         for shard_id, output_shape in enumerate(output_partition_sizes):
             # SHARD_ID is not correct. Need some way of mapping between shard_id used by mapping ("q", "k", "v")
             # and the shard id of this layer. Doesn't seem like this layer has it, so I think I need to assume the ordering of q, k, v.
             # At load time, just enforce an ordering of q = 0, k = 1, v = 2
-
 
             if isinstance(layer, LinearBase):
                 assert hasattr(layer, "weight")
@@ -758,16 +764,29 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
             else:
                 raise ValueError()
             
-            key = (weight_shape, scheme.precision)
+            key = (weight_shape, )
             if key not in registry:
-                print((weight_shape, scheme.precision))
-                registry[key] = torch.empty(weight_shape, dtype=scheme.precision)
+                registry[key] = torch.zeros(  # TODO: change back to empty
+                    weight_shape,
+                    dtype=scheme.precision
+                    #dtype=asdf_args.get("params_dtype"),
+                )
             
-            p = ModelWeightParameter(
+            p = torch.nn.Parameter(
                 data=registry[key],
-                input_dim=1,
-                output_dim=0,
-                weight_loader=default_weight_loader)
+                #input_dim=1,
+                #output_dim=0,
+                #weight_loader=default_weight_loader
+
+                requires_grad=False,
+            )
+            
+            # TODO: use set_weight_attrs
+            p.input_dim = 1
+            p.output_dim = 0
+            # p.weight_loader = lambda *args, **kwargs: None 
+            p.weight_loader = default_weight_loader
+            #set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
 
             self.weight.shards[shard_id] = p
 
@@ -786,6 +805,9 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
         self.quantization_config = quantization_config
         self.num_partitions = None
 
+        self.input_transforms = []
+        self.output_transforms = []
+
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
                        output_partition_sizes: list[int], input_size: int,
@@ -802,13 +824,11 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
         super().create_weights(**asdf_args, **extra_weight_attrs)
 
         self.output_partition_sizes = output_partition_sizes
-        self.input_partition_sizes = [input_size_per_partition] * len(output_partition_sizes)
-        self.cumsum = torch.cumsum(torch.tensor(output_partition_sizes), dim=0).tolist()
-        print(self.cumsum)
 
         # for each transform arg applied (module)
         for attr_name in ("input_tfm", "output_tfm"):
             for (name, scheme, args) in getattr(layer, attr_name):
+                assert layer.layer_name == "model.layers.0.mlp.down_proj", layer.layer_name
 
                 # the transform module will handle any shards that get sent to it
                 # (up gate), (qkv)
@@ -818,56 +838,53 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
                     layer.layer_name + f".{name}_{args.location}",
                     input_size_per_partition, output_partition_sizes,
                     asdf_args)
-                print(layer.layer_name + f".{name}_{args.location}")
 
                 # make sure this checks for duplicates?
                 layer.register_module(transform_name, transform)
-                
+                print(f"registered transform {transform_name}")
+
+                if attr_name == "input_tfm":
+                    self.input_transforms.append(transform)
+                else:
+                    self.output_transforms.append(transform)
 
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        # xs = [torch.narrow(x, 0, start, size) for start, size in zip(self.cumsum, self.output_partition_sizes)]
-        #xs = x.split(self.input_partition_sizes, dim=-1)
         xs = [x for _ in range(len(self.output_partition_sizes))]
 
-        weight_shards = layer.weight.split(self.output_partition_sizes, dim=-2)
+        weight_shards = layer.weight.split(self.output_partition_sizes, dim=0)
         # TODO: bias shards
 
-        input_transforms = []
-        output_transforms = []
-        for child in layer.children():
-            if isinstance(child, vllmTransformBase):
-                if child.args.location == TransformLocation.INPUT:
-                    input_transforms.append(child)
+        if layer.layer_name ==  "model.layers.0.mlp.down_proj":
+            assert len(weight_shards) == 1
+            assert len(self.input_transforms) == 1
+            assert len(self.output_transforms) == 1
+            assert len(self.output_partition_sizes) == 1
 
-                if child.args.location == TransformLocation.OUTPUT:
-                    output_transforms.append(child)
-
+        #assert len(self.input_transforms) == 1
+        #assert len(self.output_transforms) == 1
         for i, weight_shard in enumerate(weight_shards):
-            for transform in input_transforms:
-                transform_shard = transform.weight.shards[i].data
-                xs[i] = dispatch_unquantized_gemm()(layer, xs[i], transform_shard, None)
+            for transform in self.input_transforms:
+                assert layer.layer_name == "model.layers.0.mlp.down_proj", layer.layer_name
+                assert len(weight_shards) == 1
+                transform_shard = transform.weight.shards[i]
+                #xs[i] = dispatch_unquantized_gemm()(layer, xs[i].to(transform_shard.dtype), transform_shard, None).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
+                xs[i] = (xs[i].to(transform_shard.dtype) @ transform_shard).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
 
-            #x.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-            #x[start: start + size] = dispatch_unquantized_gemm()(layer, x[start: start + size], layer.weight, bias)
+            assert bias is None
             xs[i] = dispatch_unquantized_gemm()(layer, xs[i], weight_shard, bias)
 
-            for transform in output_transforms:
-                transform_shard = transform.weight.shards[i].data
-                xs[i] = dispatch_unquantized_gemm()(layer, xs[i], transform_shard, None)
+            for transform in self.output_transforms:
+                assert layer.layer_name == "model.layers.0.mlp.down_proj", layer.layer_name
+                assert len(weight_shards) == 1
+                transform_shard = transform.weight.shards[i]
+                # TODO: inverse is hard coded right now
+                #xs[i] = dispatch_unquantized_gemm()(layer, xs[i].to(transform_shard.dtype), transform_shard, None).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
+                xs[i] = (xs[i].to(transform_shard.dtype) @ transform_shard.T).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
 
-        # for child in layer.children():
-        #     if isinstance(child, vllmTransformBase):
-        #         if child.args.location == TransformLocation.OUTPUT:
-        #             # TODO: use default gemm implementation
-
-        #             for shard_id, shard in child.weight.shards.items():
-        #                 xs[shard_id] = xs[shard_id] @ shard.data
-
-        #return x
         return torch.hstack(xs)
 
 
@@ -898,16 +915,6 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             output_size=output_size,
             params_dtype=params_dtype,
             weight_loader=weight_loader)
-
-        print("create_weights")
-        # transform weights are shared, so weight loader's `copy_`
-        # will load across shared transform weight tensors
-        for attr_name in ("input_tfm", "output_tfm"):
-            if getattr(layer, attr_name, None) is not None:
-                scheme, args = getattr(layer, attr_name)
-                self.quantization_config.transform_factories[id(
-                    scheme)]._apply_to_module(layer, args)
-                print(layer)
 
     def apply(self,
               layer: torch.nn.Module,

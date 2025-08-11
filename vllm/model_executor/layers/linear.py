@@ -810,8 +810,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     "MergedColumnParallelLinear, assume the weight is "
                     "the same for all partitions.")
 
-        print(f"loaded_shard_id: {loaded_shard_id}")
-        print(f"loaded_weight.shape: {loaded_weight.shape}")
         assert param_data.shape == loaded_weight.shape, (param_data.shape,
                                                          loaded_weight.shape,
                                                          self.prefix)

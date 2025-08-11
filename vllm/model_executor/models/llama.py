@@ -416,7 +416,7 @@ class LlamaModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            print(name)
+            #print(name)
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name
@@ -468,6 +468,19 @@ class LlamaModel(nn.Module):
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
+        #print(params_dict.keys() - loaded_params)
+
+        for name, parameter in params_dict.items():
+            if not hasattr(parameter, "shards"):
+                assert not torch.all(parameter.data == 0), (name, parameter.data.shape)
+            else:
+                for shard in parameter.shards.values():
+                    assert not torch.all(shard.data == 0), (name, shard.data.shape)
+                    print((name, shard.data, shard.data.shape))
+
+        print("looks good")
+
         return loaded_params
 
 
