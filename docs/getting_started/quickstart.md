@@ -8,7 +8,7 @@ This guide will help you quickly get started with vLLM to perform:
 ## Prerequisites
 
 - OS: Linux
-- Python: 3.9 -- 3.12
+- Python: 3.9 -- 3.13
 
 ## Installation
 
@@ -17,7 +17,7 @@ If you are using NVIDIA GPUs, you can install vLLM using [pip](https://pypi.org/
 It's recommended to use [uv](https://docs.astral.sh/uv/), a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
 
 ```bash
-uv venv --python 3.12 --seed
+uv venv --python 3.13 --seed
 source .venv/bin/activate
 uv pip install vllm --torch-backend=auto
 ```
@@ -33,7 +33,7 @@ uv run --with vllm vllm --help
 You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments. You can install `uv` to the conda environment through `pip` if you want to manage it within the environment.
 
 ```bash
-conda create -n myenv python=3.12 -y
+conda create -n myenv python=3.13 -y
 conda activate myenv
 pip install --upgrade uv
 uv pip install vllm --torch-backend=auto

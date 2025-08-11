@@ -121,9 +121,9 @@ For additional features and advanced configurations, refer to the official [MkDo
     ```
 
 !!! tip
-    Since the <gh-file:docker/Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.
+    Since the <gh-file:docker/Dockerfile> ships with Python 3.13, all tests in CI (except `mypy`) are run with Python 3.13.
 
-    Therefore, we recommend developing with Python 3.12 to minimise the chance of your local environment clashing with our CI environment.
+    Therefore, we recommend developing with Python 3.13 to minimise the chance of your local environment clashing with our CI environment.
 
 !!! note "Install python3-dev if Python.h is missing"
     If any of the above commands fails with `Python.h: No such file or directory`, install

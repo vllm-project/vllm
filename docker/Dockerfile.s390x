@@ -1,6 +1,6 @@
 # Base UBI image for s390x architecture
 ARG BASE_UBI_IMAGE_TAG=9.5-1736404155
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.13
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS base
 
 # Install basic dependencies

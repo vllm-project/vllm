@@ -120,7 +120,7 @@ source ~/.bashrc
 Create and activate a Conda environment for vLLM:
 
 ```bash
-conda create -n vllm python=3.12 -y
+conda create -n vllm python=3.13 -y
 conda activate vllm
 ```
 

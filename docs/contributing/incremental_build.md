@@ -9,7 +9,7 @@ Before setting up the incremental build:
 1. **vLLM Editable Install:** Ensure you have vLLM installed from source in an editable mode. Using pre-compiled wheels for the initial editable setup can be faster, as the CMake workflow will handle subsequent kernel recompilations.
 
     ```console
-    uv venv --python 3.12 --seed
+    uv venv --python 3.13 --seed
     source .venv/bin/activate
     VLLM_USE_PRECOMPILED=1 uv pip install -U -e . --torch-backend=auto
     ```

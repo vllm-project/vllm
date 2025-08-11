@@ -6,7 +6,7 @@
 # docs/assets/contributing/dockerfile-stages-dependency.png
 
 ARG CUDA_VERSION=12.8.1
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.13
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in

@@ -194,7 +194,74 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
             yield a, b
             a = b
 
-    cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+    # Some class decorators (e.g., pydantic.dataclasses) on Python >=3.13
+    # can make inspect.getsource fail with OSError('source code not available').
+    # This is a workaround to get the source code of the class.
+    try:
+        cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+    except Exception:
+        module = inspect.getmodule(cls)
+        try:
+            module_source = inspect.getsource(module) if module else None
+        except Exception:
+            module_source = None
+
+        if module_source is not None:
+            module_ast = ast.parse(module_source)
+
+            # Resolve nested classes using the qualname path
+            qualname = getattr(
+                cls, "__qualname__", getattr(cls, "__name__", ""))
+            # Remove any <locals> segment
+            qual_parts = qualname.split(".<locals>.")[-1].split(".")
+
+            def find_class(
+                node: ast.AST,
+                parts: list[str],
+            ) -> ast.ClassDef | None:
+                if not parts:
+                    return None
+                name = parts[0]
+                for child in getattr(node, "body", []):
+                    if isinstance(child, ast.ClassDef) and child.name == name:
+                        if len(parts) == 1:
+                            return child
+                        return find_class(child, parts[1:])
+                return None
+
+            candidate = find_class(module_ast, qual_parts)
+            if candidate is None:
+                # Best-effort: pick first matching class by simple name
+                simple_name = getattr(cls, "__name__", "")
+                for child in getattr(module_ast, "body", []):
+                    if isinstance(child,
+                                  ast.ClassDef) and child.name == simple_name:
+                        candidate = child
+                        break
+
+            if candidate is None:
+                # Last resort: empty docs mapping for dataclass fields
+                try:
+                    from dataclasses import fields as dc_fields
+                    from dataclasses import is_dataclass as dc_is_dataclass
+                    if dc_is_dataclass(cls):
+                        return {f.name: "" for f in dc_fields(cls)}
+                except Exception:
+                    pass
+                raise
+
+            cls_node = candidate
+        else:
+            # Last resort: empty docs mapping for dataclass fields
+            try:
+                from dataclasses import fields as dc_fields
+                from dataclasses import is_dataclass as dc_is_dataclass
+                if dc_is_dataclass(cls):
+                    return {f.name: "" for f in dc_fields(cls)}
+            except Exception:
+                pass
+            # If we cannot recover, re-raise to preserve original behavior
+            raise
 
     if not isinstance(cls_node, ast.ClassDef):
         raise TypeError("Given object was not a class.")

@@ -48,7 +48,7 @@ the failure?
     ERROR 05-20 03:26:38 [dump_input.py:68] Dumping input data
     --- Logging error ---  
     Traceback (most recent call last):  
-      File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core.py", line 203, in execute_model  
+      File "/usr/local/lib/python3.13/dist-packages/vllm/v1/engine/core.py", line 203, in execute_model  
         return self.model_executor.execute_model(scheduler_output)
     ...
     FAILED failing/test.py:failing_test1 - Failure description
