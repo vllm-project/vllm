@@ -204,11 +204,11 @@ try:
         """Get the appropriate TPU platform implementation from tpu_commons."""
         if backend_type == "jax":
             from tpu_commons.platforms.tpu_jax import (
-                TpuPlatform as TpuCommonsPlatform)
+                TpuPlatform as TpuCommonsPlatform)  # yapf: disable
             return TpuCommonsPlatform
         elif backend_type == "torchax":
             from tpu_commons.platforms.tpu_torchax import (
-                TpuPlatform as TpuCommonsPlatform)
+                TpuPlatform as TpuCommonsPlatform)  # yapf: disable
             return TpuCommonsPlatform
         else:
             raise ValueError(f"Unknown TPU backend type: {backend_type}")
