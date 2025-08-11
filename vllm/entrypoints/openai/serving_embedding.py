@@ -34,6 +34,7 @@ from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
                           PoolingOutput, PoolingRequestOutput, RequestOutput)
 from vllm.pooling_params import PoolingParams
+from vllm.utils import chunk_list
 
 logger = init_logger(__name__)
 
@@ -161,18 +162,6 @@ class EmbeddingMixin(OpenAIServing):
         # for cross-chunk aggregation (native pooling is used within each chunk)
         return self.supports_chunked_processing
 
-    def _chunk_token_ids(self, token_ids: list[int],
-                         chunk_size: int) -> list[list[int]]:
-        """Split token IDs into chunks of specified size."""
-        if len(token_ids) <= chunk_size:
-            return [token_ids]
-
-        chunks = []
-        for i in range(0, len(token_ids), chunk_size):
-            chunk = token_ids[i:i + chunk_size]
-            chunks.append(chunk)
-        return chunks
-
     async def _process_chunked_request(
         self,
         ctx: EmbeddingServeContext,
@@ -187,7 +176,7 @@ class EmbeddingMixin(OpenAIServing):
 
         # Split into chunks using max_position_embeddings
         max_pos_embeddings = self._get_max_position_embeddings()
-        chunks = self._chunk_token_ids(token_ids, max_pos_embeddings)
+        chunks = list(chunk_list(token_ids, max_pos_embeddings))
 
         # Process all chunks for MEAN aggregation
         chunks_to_process = chunks
