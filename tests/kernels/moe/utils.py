@@ -219,7 +219,7 @@ def make_test_weight(
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
            Optional[torch.Tensor]]:
     w_16 = torch.randn((e, rows, cols), device="cuda", dtype=in_dtype) / 15
-    w_gs = torch.empty((e, ), device="cuda", dtype=torch.float32)
+    w_gs = None
 
     if quant_dtype is not None:
         w_l = [None] * e

@@ -9,8 +9,7 @@ import torch
 
 from tests.kernels.moe.utils import (batched_moe,
                                      make_quantized_test_activations,
-                                     make_test_weight, make_test_weights,
-                                     naive_batched_moe)
+                                     make_test_weights, naive_batched_moe)
 from tests.kernels.quant_utils import native_batched_masked_quant_matmul
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -137,7 +136,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         per_act_token_quant=per_act_token_quant,
     )
 
-    B, B_q, B_scale, _ = make_test_weight(
+    (B, B_q, B_scale, _), _ = make_test_weights(
         num_experts,
         N // 2,
         K,
