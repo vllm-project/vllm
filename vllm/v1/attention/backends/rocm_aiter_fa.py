@@ -291,6 +291,13 @@ class AiterFlashAttentionMetadataBuilder(
             common_prefix_len=common_prefix_len,
             total_tokens=self.total_tokens,
         )
+
+        # If aiter has these two API, we can use them to avoid
+        # repeatedly calling into torch for stream and warp size.
+        if hasattr(aiter, "aiter_set_gpu_stream"):
+            aiter.aiter_set_gpu_stream(torch.cuda.current_stream())
+        if hasattr(aiter, "aiter_set_warp_size_for_device"):
+            aiter.aiter_set_warp_size_for_device(torch.cuda.current_device())
         return attn_metadata
 
     def can_run_in_cudagraph(
