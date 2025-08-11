@@ -190,11 +190,12 @@ class MsgpackEncoder:
         dtype = str(obj.dtype).removeprefix("torch.")
         return dtype, obj.shape, data
 
-    def _encode_mm_item(self, item: MultiModalKwargsItem) -> Any:
-        # Encode as plain dicts + special handling for .field.
+    def _encode_mm_item(self,
+                        item: MultiModalKwargsItem) -> list[dict[str, Any]]:
         return [self._encode_mm_field_elem(elem) for elem in item.values()]
 
-    def _encode_mm_field_elem(self, elem: MultiModalFieldElem) -> Any:
+    def _encode_mm_field_elem(self,
+                              elem: MultiModalFieldElem) -> dict[str, Any]:
         return {
             "modality":
             elem.modality,
@@ -327,14 +328,15 @@ class MsgpackDecoder:
         # Convert back to proper shape & type
         return arr.view(torch_dtype).view(shape)
 
-    def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:
+    def _decode_mm_items(self, obj: list[Any]) -> list[MultiModalKwargsItem]:
         return [self._decode_mm_item(v) for v in obj]
 
-    def _decode_mm_item(self, obj: list) -> MultiModalKwargsItem:
+    def _decode_mm_item(self, obj: list[Any]) -> MultiModalKwargsItem:
         return MultiModalKwargsItem.from_elems(
             [self._decode_mm_field_elem(v) for v in obj])
 
-    def _decode_mm_field_elem(self, obj: dict) -> MultiModalFieldElem:
+    def _decode_mm_field_elem(self, obj: dict[str,
+                                              Any]) -> MultiModalFieldElem:
         if obj["data"] is not None:
             obj["data"] = self._decode_nested_tensors(obj["data"])
 

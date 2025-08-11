@@ -674,7 +674,7 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
         out_data = dict[str, NestedTensors]()
         for key, item in self.items():
             assert item.data is not None, (
-                f"Cannot get data of empty `items[{key}]`")
+                f"Cannot get data of empty `items[{key!r}]`")
             out_data[key] = item.data
 
         return out_data
