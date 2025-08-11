@@ -20,7 +20,7 @@ REQUEST_QUEUE_SIZE = 50  # Maximum number of requests in the queue
 RATE_LIMIT = 5  # Maximum requests per second (rate limiting)
 PRE_SERVICE_URL = "http://localhost:8100/v1/completions"  # Prefill service endpoint
 DECODE_SERVICE_URL = "http://localhost:8200/v1/completions"  # Decode service endpoint
-
+#run this need pip install quart
 app = Quart(__name__)
 
 
@@ -54,7 +54,6 @@ class RateLimiter:
             self.last_refill = time.monotonic()
             self.tokens = self.rate_limit - 1
             return True
-
 
 # Request queue manager with concurrency control
 class RequestQueue:
