@@ -6,8 +6,7 @@ from typing import Optional
 import torch
 
 from vllm import envs
-from vllm.attention.backends.abstract import (AttentionLayer,
-                                              AttentionType,
+from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
                                               is_quantized_kv_cache)
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.attention.ops.triton_flash_attention import triton_attention

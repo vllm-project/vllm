@@ -83,8 +83,8 @@ def flash_mla_with_kvcache(
         softmax_scale: float. The scaling of QK^T before applying softmax. 
                        Default to 1 / sqrt(head_dim).
         causal: bool. Whether to apply causal attention mask.
-        descale_q: (batch_size), torch.float32. Descaling factors for Q, used for fp8 quantization.
-        descale_k: (batch_size), torch.float32. Descaling factors for K, used for fp8 quantization.
+        descale_q: (batch_size), torch.float32. Descaling factors for Q.
+        descale_k: (batch_size), torch.float32. Descaling factors for K.
 
     Return:
         out: (batch_size, seq_len_q, num_heads_q, head_dim_v).
