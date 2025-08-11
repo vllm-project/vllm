@@ -1697,11 +1697,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ), self.maybe_get_kv_connector_output(
                 scheduler_output) as kv_connector_output:
 
-            extra_kwargs: dict = {}
             if (self.model_config.is_encoder_decoder
                     and scheduler_output.scheduled_encoder_inputs):
                 encoder_inputs = self._extract_encoder_inputs(scheduler_output)
-                extra_kwargs.update(encoder_inputs)
+                model_kwargs.update(encoder_inputs)
 
             model_output = self.model(
                 input_ids=input_ids,
