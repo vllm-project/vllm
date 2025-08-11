@@ -41,7 +41,7 @@ class TorchCompileWrapperWithCustomDispatcher:
             # compiling the forward method
 
             backend = vllm_config.compilation_config.init_backend(vllm_config)
-            options = None
+            #options = {"guard_filter_fn": }
             if isinstance(backend, str) and backend == "inductor":
                 options = get_current_vllm_config(
                 ).compilation_config.inductor_compile_config

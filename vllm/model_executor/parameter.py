@@ -373,6 +373,42 @@ class BlockQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
     pass
 
 
+class ShardedModelWeightParameter(torch.nn.Parameter):
+    """
+    Unlike other sharding, this sharding allows for shared memory
+    """
+
+    def __new__(cls, data: torch.Tensor = torch.empty(0), **kwargs):
+        return super().__new__(cls, data=data, requires_grad=False)
+    
+    def __init__(self):
+        self.shards: dict[int | str, BasevLLMParameter] = {}
+
+    def weight_loader(self, param: BasevLLMParameter,
+                         loaded_weight: torch.Tensor,
+                         loaded_shard_id: Optional[int | str] = None):
+
+        if isinstance(loaded_shard_id, str):
+            loaded_shard_id = {"q": 0, "k": 1, "v": 2}.get(loaded_shard_id)
+
+
+        loaded_shard_id = 0 if loaded_shard_id is None else loaded_shard_id
+        self.shards[loaded_shard_id].weight_loader(self.shards[loaded_shard_id], loaded_weight)
+        print(f"weight loaded {self.shards[loaded_shard_id].data.shape} {loaded_weight.shape} {loaded_shard_id}")
+
+    def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
+        raise NotImplementedError()
+
+    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        raise NotImplementedError()
+
+    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        raise NotImplementedError()
+
+    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+        raise NotImplementedError()
+
+
 def permute_param_layout_(param: BasevLLMParameter, input_dim: int,
                           output_dim: int, **kwargs) -> BasevLLMParameter:
     """

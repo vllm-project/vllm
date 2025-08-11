@@ -238,6 +238,7 @@ class LinearBase(torch.nn.Module):
         quant_config: Quantization configure.
         return_bias: If true, return bias together with outputs in forward pass.
     """
+
     # most parameters are created by `LinearMethodBase.create_weights`
     #bias: Optional[torch.nn.Parameter] = None
 
@@ -570,7 +571,9 @@ class ColumnParallelLinear(LinearBase):
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 
-        assert param_data.shape == loaded_weight.shape, (param_data.shape, loaded_weight.shape, self.prefix)
+        assert param_data.shape == loaded_weight.shape, (param_data.shape,
+                                                         loaded_weight.shape,
+                                                         self.prefix)
         param_data.copy_(loaded_weight)
 
     def weight_loader_v2(self, param: Parameter, loaded_weight: torch.Tensor):
@@ -710,7 +713,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     param_data, loaded_weight = adjust_scalar_to_fused_array(
                         param_data, loaded_weight, 0)
 
-                assert param_data.shape == loaded_weight.shape, (param_data.shape, loaded_weight.shape, self.prefix)
+                assert param_data.shape == loaded_weight.shape, (
+                    param_data.shape, loaded_weight.shape, self.prefix)
                 param_data.copy_(loaded_weight)
                 return
             current_shard_offset = 0
@@ -808,7 +812,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         print(f"loaded_shard_id: {loaded_shard_id}")
         print(f"loaded_weight.shape: {loaded_weight.shape}")
-        assert param_data.shape == loaded_weight.shape, (param_data.shape, loaded_weight.shape, self.prefix)
+        assert param_data.shape == loaded_weight.shape, (param_data.shape,
+                                                         loaded_weight.shape,
+                                                         self.prefix)
         param_data.copy_(loaded_weight)
 
     def _load_fused_module_from_checkpoint(self, param: BasevLLMParameter,
@@ -853,7 +859,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 param.load_merged_column_weight(loaded_weight=loaded_weight,
                                                 shard_id=0)
                 return
-            elif type(param) in (RowvLLMParameter, BasevLLMParameter):
+            elif isinstance(param, RowvLLMParameter, BasevLLMParameter):
                 param.load_merged_column_weight(loaded_weight=loaded_weight)
                 return
             # TODO: @dsikka - move to parameter.py
@@ -1102,7 +1108,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                     param_data, loaded_weight = adjust_scalar_to_fused_array(
                         param_data, loaded_weight, 0)
 
-                assert param_data.shape == loaded_weight.shape, (param_data.shape, loaded_weight.shape, self.prefix)
+                assert param_data.shape == loaded_weight.shape, (
+                    param_data.shape, loaded_weight.shape, self.prefix)
                 param_data.copy_(loaded_weight)
                 return
             shard_offsets = [
@@ -1230,7 +1237,9 @@ class QKVParallelLinear(ColumnParallelLinear):
                     "QKVParallelLinear, assume the weight is the same "
                     "for all partitions.")
 
-        assert param_data.shape == loaded_weight.shape, (param_data.shape, loaded_weight.shape, self.prefix)
+        assert param_data.shape == loaded_weight.shape, (param_data.shape,
+                                                         loaded_weight.shape,
+                                                         self.prefix)
         param_data.copy_(loaded_weight)
 
 
@@ -1357,7 +1366,9 @@ class RowParallelLinear(LinearBase):
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 
-        assert param_data.shape == loaded_weight.shape, (param_data.shape, loaded_weight.shape, self.prefix)
+        assert param_data.shape == loaded_weight.shape, (param_data.shape,
+                                                         loaded_weight.shape,
+                                                         self.prefix)
         param_data.copy_(loaded_weight)
 
     def weight_loader_v2(self, param: BasevLLMParameter,
