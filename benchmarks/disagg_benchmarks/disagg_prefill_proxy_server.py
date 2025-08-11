@@ -188,5 +188,5 @@ async def handle_request():
 
 
 if __name__ == "__main__":
-    # Start the Quart server with host 0.0.0.0
+    # Start the Quart server with host 0.0.0.0 port 8000
     app.run(port=8000, host="0.0.0.0")
