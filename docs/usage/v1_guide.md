@@ -59,12 +59,12 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 
 ### Hardware
 
-| Hardware   | Status                             |
-|------------|------------------------------------|
-| **NVIDIA** | <nobr>🚀</nobr>                   |
-| **AMD**    | <nobr>🟢</nobr>                   |
-| **TPU**    | <nobr>🟢</nobr>                   |
-| **CPU**    | <nobr>🟢 (x86) 🟡 (MacOS) </nobr> |
+| Hardware   | Status                                        |
+|------------|-----------------------------------------------|
+| **NVIDIA** | <nobr>🚀</nobr>                               |
+| **AMD**    | <nobr>🟢</nobr>                               |
+| **TPU**    | <nobr>🟢</nobr>                               |
+| **CPU**    | <nobr>🟢 (x86\_64/aarch64) 🟡 (MacOS) </nobr> |
 
 !!! note
 
