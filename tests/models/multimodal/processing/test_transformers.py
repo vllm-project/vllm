@@ -16,7 +16,7 @@ def test_multimodal_processor(model_id):
         model_impl="transformers",
     )
 
-    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config, )
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
 
     image_pil = ImageAsset('cherry_blossom').pil_image
     mm_data = {"image": image_pil}

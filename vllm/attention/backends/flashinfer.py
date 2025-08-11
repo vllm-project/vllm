@@ -44,9 +44,9 @@ from vllm.attention.layer import Attention
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
+from vllm.utils.flashinfer import use_trtllm_attention
 
 logger = init_logger(__name__)
 
@@ -56,7 +56,6 @@ if TYPE_CHECKING:
 
 
 class FlashInferBackend(AttentionBackend):
-    cached_sm100a_supported: Optional[bool] = None
 
     @staticmethod
     def get_name() -> str:
@@ -122,47 +121,6 @@ class FlashInferBackend(AttentionBackend):
             return torch.float8_e5m2
         else:
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
-
-    @staticmethod
-    def use_trtllm_decode_attention(
-        batch_size: int,
-        max_seq_len: int,
-        kv_cache_dtype: str,
-        num_qo_heads: Optional[int],
-        num_kv_heads: Optional[int],
-        attn_head_size: Optional[int],
-    ) -> bool:
-        if FlashInferBackend.cached_sm100a_supported is None:
-            FlashInferBackend.cached_sm100a_supported = (
-                current_platform.has_device_capability(100))
-        if not FlashInferBackend.cached_sm100a_supported:
-            return False
-        # Check if the dimensions are supported by TRTLLM decode attention
-        if (attn_head_size is None or num_qo_heads is None
-                or num_kv_heads is None or num_qo_heads // num_kv_heads > 8
-                or num_qo_heads % num_kv_heads != 0 or attn_head_size != 128):
-            return False
-        env_value = envs.VLLM_USE_TRTLLM_DECODE_ATTENTION
-        if env_value is not None:
-            logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to %s",
-                             env_value)
-            # Environment variable is set - respect it
-            # Making the conditional check for zero because
-            # the path is automatically enabled if the batch size condition
-            # is satisfied.
-            no_use_trtllm = (env_value == "0")
-            if not no_use_trtllm:
-                logger.info_once("Using TRTLLM decode attention.")
-            return not no_use_trtllm
-        else:
-            # Environment variable not set - use auto-detection
-            use_trtllm = (FlashInferBackend.cached_sm100a_supported
-                          and batch_size <= 256 and max_seq_len < 131072
-                          and kv_cache_dtype == "auto")
-            if use_trtllm:
-                logger.warning_once(
-                    "Using TRTLLM decode attention (auto-detected).")
-        return use_trtllm
 
 
 @dataclass
@@ -1156,7 +1114,7 @@ class FlashInferImpl(AttentionImpl):
             assert decode_meta.decode_wrapper._sm_scale == softmax_scale
             # TODO: @pavanimajety Remove this once the switch happens
             # inside flashinfer.
-            if not FlashInferBackend.use_trtllm_decode_attention(
+            if not use_trtllm_attention(
                     num_decode_tokens, attn_metadata.max_decode_seq_len,
                     kv_cache_dtype, attn_metadata.num_qo_heads,
                     attn_metadata.num_kv_heads, attn_metadata.head_dim):

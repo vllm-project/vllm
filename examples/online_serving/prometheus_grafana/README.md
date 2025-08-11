@@ -13,8 +13,7 @@ Prometheus metric logging is enabled by default in the OpenAI-compatible server.
 
 ```bash
 vllm serve mistralai/Mistral-7B-v0.1 \
-    --max-model-len 2048 \
-    --disable-log-requests
+    --max-model-len 2048
 ```
 
 Launch Prometheus and Grafana servers with `docker compose`:

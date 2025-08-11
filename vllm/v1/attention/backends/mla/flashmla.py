@@ -18,6 +18,7 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
+from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -54,7 +55,8 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = True  # Decode-only
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.PURE_DECODE_ONLY
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -168,7 +170,9 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         if needs_padding:
             raise ValueError("oops")
         else:
-            q = q.reshape((batch_size, q.shape[0] // batch_size, *q.shape[1:])) # (batch_size, q_len_per_request, num_heads, head_dim_qk)
+            q = q.reshape(
+                (batch_size, q.shape[0] // batch_size, *q.shape[1:]
+                 ))  # (batch_size, q_len_per_request, num_heads, head_dim_qk)
 
         o, _ = flash_mla_with_kvcache(
             q=q,

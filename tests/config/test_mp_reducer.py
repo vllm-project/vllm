@@ -28,7 +28,6 @@ def test_mp_reducer(monkeypatch):
             max_model_len=32,
             gpu_memory_utilization=0.1,
             disable_log_stats=True,
-            disable_log_requests=True,
         )
 
         async_llm = AsyncLLM.from_engine_args(

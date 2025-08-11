@@ -37,8 +37,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature
-from transformers.models.glm4v.configuration_glm4v import (Glm4vConfig,
-                                                           Glm4vVisionConfig)
+from transformers.models.glm4v.configuration_glm4v import Glm4vVisionConfig
 from transformers.models.glm4v.image_processing_glm4v import (
     Glm4vImageProcessor, smart_resize)
 from transformers.models.glm4v.video_processing_glm4v import (
@@ -801,7 +800,7 @@ class Glm4vVisionTransformer(nn.Module):
 class Glm4vProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self):
-        return self.ctx.get_hf_config(Glm4vConfig)
+        return self.ctx.get_hf_config()
 
     def get_tokenizer(self):
         return self.ctx.tokenizer
@@ -809,11 +808,11 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": 1}
 
-    def get_image_processor(self) -> Glm4vImageProcessor:
-        return self.get_hf_processor().image_processor
+    def get_image_processor(self, **kwargs: object) -> Glm4vImageProcessor:
+        return self.get_hf_processor(**kwargs).image_processor
 
-    def get_video_processor(self) -> Glm4vVideoProcessor:
-        return self.get_hf_processor().video_processor
+    def get_video_processor(self, **kwargs: object) -> Glm4vVideoProcessor:
+        return self.get_hf_processor(**kwargs).video_processor
 
     def _get_vision_info(
         self,
@@ -937,7 +936,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
                               total_frames: int) -> list[int]:
         video_processor = self.get_video_processor()
 
-        video_fps = metadata.get("fps", 2.0)
+        video_fps = metadata.get("fps", video_processor.fps)
         meta_frames = metadata.get("total_num_frames", total_frames)
         max_frame_idx = meta_frames - 1
         duration = metadata.get("duration",
@@ -1120,11 +1119,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     video_placeholder,
                 )
 
-                grid_t = len(video_outputs["video_grid_thw"])
-                _, grid_h, grid_w = video_outputs["video_grid_thw"][0]
-                grid_thw = torch.tensor([[grid_t, grid_h, grid_w]])
-
-                video_grid_thw_lst.append(grid_thw)
+                video_grid_thw_lst.append(video_outputs["video_grid_thw"])
                 pixel_values_videos_lst.append(
                     video_outputs["pixel_values_videos"])
             video_outputs = dict(
@@ -1257,7 +1252,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config: Glm4vConfig = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
@@ -1271,12 +1266,18 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             prefix=maybe_prefix(prefix, "visual"),
         )
 
+        if config.model_type == "glm4v":
+            architectures = ["Glm4ForCausalLM"]
+        elif config.model_type == "glm4v_moe":
+            architectures = ["Glm4MoeForCausalLM"]
+        else:
+            architectures = None
+
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, ""),
-            architectures=["Glm4ForCausalLM"],
-            hf_config=self.config.get_text_config(),
-        )
+            hf_config=config.text_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+            architectures=architectures)
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)

@@ -46,15 +46,16 @@ class _Backend(enum.Enum):
     ROCM_FLASH = enum.auto()
     ROCM_AITER_MLA = enum.auto()  # Supported by V1
     ROCM_AITER_MLA_VLLM_V1 = enum.auto()
+    ROCM_AITER_FA = enum.auto()  # used for ViT attn backend
     TORCH_SDPA = enum.auto()
     FLASHINFER = enum.auto()
     FLASHINFER_VLLM_V1 = enum.auto()
-    FLASHINFER_MLA_VLLM_V1 = enum.auto()
+    FLASHINFER_MLA = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
     TRITON_MLA_VLLM_V1 = enum.auto()
     FLASHMLA_VLLM_V1 = enum.auto()
     FLASHMLA = enum.auto()  # Supported by V1
-    CUTLASS_MLA_VLLM_V1 = enum.auto()
+    CUTLASS_MLA = enum.auto()
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
@@ -62,6 +63,7 @@ class _Backend(enum.Enum):
     DIFFERENTIAL_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
     FLEX_ATTENTION = enum.auto()
+    TREE_ATTN = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
@@ -186,6 +188,10 @@ class Platform:
             return int(physical_device_id)
         else:
             return device_id
+
+    @classmethod
+    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
+        return _Backend.TORCH_SDPA
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,

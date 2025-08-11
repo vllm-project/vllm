@@ -190,7 +190,7 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union
+from typing import Generic, Optional, TypeVar, Union
 
 import torch
 
@@ -209,10 +209,12 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                UnquantizedLinearMethod)
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
-from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata,
-    get_per_layer_parameters, infer_global_hyperparameters,
-    reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
+from vllm.utils.flashinfer import has_nvidia_artifactory
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata,
+                                              get_per_layer_parameters,
+                                              infer_global_hyperparameters,
+                                              split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 try:
@@ -231,10 +233,6 @@ try:
     flashinfer_available = True
 except ImportError:
     flashinfer_available = False
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
 
 logger = init_logger(__name__)
 
@@ -380,18 +378,17 @@ M = TypeVar("M", bound=MLACommonMetadata)
 
 
 def use_flashinfer_prefill() -> bool:
+    # For blackwell default to flashinfer prefill if its available since
+    # it is faster than FA2.
     return False
-    if flashinfer_available and not envs.VLLM_USE_CUDNN_PREFILL:
-        # For blackwell default to flashinfer prefill if its available since
-        #  its faster than FA2.
-        return current_platform.has_device_capability(100)
-    return False
+    return (flashinfer_available and not envs.VLLM_USE_CUDNN_PREFILL
+            and current_platform.is_device_capability(100))
 
 
 def use_cudnn_prefill() -> bool:
-    if flashinfer_available and envs.VLLM_USE_CUDNN_PREFILL:
-        return current_platform.has_device_capability(100)
-    return False
+    return (flashinfer_available and envs.VLLM_USE_CUDNN_PREFILL
+            and current_platform.is_device_capability(100)
+            and has_nvidia_artifactory())
 
 
 # Currently 394MB, this can be tuned based on GEMM sizes used.
@@ -405,6 +402,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    def get_reorder_batch_threshold(self) -> int | None:
+        return self._reorder_batch_threshold
 
     def __init__(self,
                  kv_cache_spec: AttentionSpec,
@@ -424,7 +424,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         if vllm_config.speculative_config is not None:
             self.num_speculative_tokens = \
                 vllm_config.speculative_config.num_speculative_tokens
-        self.decode_threshold = 1 + self.num_speculative_tokens
+        self._reorder_batch_threshold = 1 + self.num_speculative_tokens
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
         self.num_heads = self.model_config.get_num_attention_heads(
             parallel_config)
@@ -566,13 +566,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         prefill.prefill_main = self._fi_prefill_main
         prefill.prefill_chunks = self._fi_prefill_chunks
 
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(
-            input_batch,
-            scheduler_output,
-            decode_threshold=self.decode_threshold)
-
     def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor):
         return MLACommonDecodeMetadata(
@@ -620,10 +613,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         num_computed_tokens_cpu = (common_attn_metadata.seq_lens_cpu -
                                    query_seq_lens_cpu)
 
+        decode_threshold = self.get_reorder_batch_threshold()
+        assert decode_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.decode_threshold)
+                decode_threshold=decode_threshold)
 
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens

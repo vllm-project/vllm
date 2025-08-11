@@ -859,6 +859,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     'are supported.'
                 )
 
+            # if tool_choice is "required" but the "tools" list is empty,
+            # override the data to behave like "none" to align with
+            # OpenAI’s behavior.
+            if data["tool_choice"] == "required" and isinstance(
+                    data["tools"], list) and len(data["tools"]) == 0:
+                data["tool_choice"] = "none"
+                del data["tools"]
+                return data
+
             # ensure that if "tool_choice" is specified as an object,
             # it matches a valid tool
             correct_usage_message = 'Correct usage: `{"type": "function",' \
@@ -1265,11 +1274,13 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
             "not set it, a random_uuid will be generated. This id is used "
             "through out the inference process and return in response."),
     )
+    normalize: Optional[bool] = None
 
     # --8<-- [end:embedding-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions)
+        return PoolingParams(dimensions=self.dimensions,
+                             normalize=self.normalize)
 
 
 class EmbeddingChatRequest(OpenAIBaseModel):
@@ -1323,6 +1334,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "not set it, a random_uuid will be generated. This id is used "
             "through out the inference process and return in response."),
     )
+    normalize: Optional[bool] = None
     # --8<-- [end:chat-embedding-extra-params]
 
     @model_validator(mode="before")
@@ -1335,7 +1347,8 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         return data
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions)
+        return PoolingParams(dimensions=self.dimensions,
+                             normalize=self.normalize)
 
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
@@ -1366,10 +1379,12 @@ class ScoreRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."),
     )
 
+    activation: Optional[bool] = None
+
     # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams()
+        return PoolingParams(activation=self.activation)
 
 
 class RerankRequest(OpenAIBaseModel):
@@ -1394,10 +1409,12 @@ class RerankRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."),
     )
 
+    activation: Optional[bool] = None
+
     # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams()
+        return PoolingParams(activation=self.activation)
 
 
 class RerankDocument(BaseModel):
@@ -1544,10 +1561,12 @@ class ClassificationRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."),
     )
 
+    activation: Optional[bool] = None
+
     # --8<-- [end:classification-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams()
+        return PoolingParams(activation=self.activation)
 
 
 class ClassificationData(OpenAIBaseModel):

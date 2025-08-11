@@ -22,7 +22,7 @@ class FlashInferMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHINFER_MLA_VLLM_V1"
+        return "FLASHINFER_MLA"
 
     @staticmethod
     def get_impl_cls() -> type["FlashInferMLAImpl"]:
@@ -30,7 +30,7 @@ class FlashInferMLABackend(MLACommonBackend):
 
     @staticmethod
     def decode_supports_qlen_padding() -> bool:
-        return False
+        return True
 
 
 g_fi_workspace = torch.empty(
@@ -89,7 +89,6 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
         batch_size = attn_metadata.decode.block_table.shape[0]
-        max_seq_len = attn_metadata.max_seq_len
 
         # (batch_size * q_len_per_request, num_heads, head_dim_qk)
         q = torch.cat([q_nope, q_pe], dim=-1)
@@ -110,7 +109,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             qk_rope_head_dim=self.qk_rope_head_dim,
             block_tables=attn_metadata.decode.block_table,
             seq_lens=attn_metadata.decode.seq_lens,
-            max_seq_len=max_seq_len,
+            max_seq_len=attn_metadata.max_seq_len,
             bmm1_scale=self.scale,
         )
 
