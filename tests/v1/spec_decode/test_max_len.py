@@ -40,6 +40,9 @@ def test_eagle_max_len(monkeypatch: pytest.MonkeyPatch,
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
+        if attn_backend == "TREE_ATTN":
+            pytest.skip("TREE_ATTN is skipped on current platform")
+
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
         if (attn_backend == "TRITON_ATTN_VLLM_V1"
