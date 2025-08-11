@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import copy
 import time
 from collections import Counter as collectionsCounter
 from collections import deque
@@ -36,15 +35,12 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.logits_process import get_bad_words_logits_processors
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.guided_decoding import (
-    get_local_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
@@ -223,7 +219,6 @@ class LLMEngine:
         self.load_config = vllm_config.load_config
         self.decoding_config = vllm_config.decoding_config or DecodingConfig(  # noqa
         )
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config  # noqa
         self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
         )
 
@@ -238,14 +233,14 @@ class LLMEngine:
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
 
-        if not self.model_config.skip_tokenizer_init:
-            self.tokenizer = self._init_tokenizer()
-            self.detokenizer = Detokenizer(self.tokenizer)
-            tokenizer_group = self.get_tokenizer_group()
-        else:
+        if self.model_config.skip_tokenizer_init:
             self.tokenizer = None
             self.detokenizer = None
             tokenizer_group = None
+        else:
+            self.tokenizer = self._init_tokenizer()
+            self.detokenizer = Detokenizer(self.tokenizer)
+            tokenizer_group = self.get_tokenizer_group()
 
         # Ensure that the function doesn't contain a reference to self,
         # to avoid engine GC issues
@@ -294,8 +289,6 @@ class LLMEngine:
                     # Feature flags
                     "enable_lora":
                     bool(self.lora_config),
-                    "enable_prompt_adapter":
-                    bool(self.prompt_adapter_config),
                     "enable_prefix_caching":
                     self.cache_config.enable_prefix_caching,
                     "enforce_eager":
@@ -542,9 +535,6 @@ class LLMEngine:
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
-        if self.prompt_adapter_config:
-            self.prompt_adapter_config.verify_with_model_config(
-                self.model_config)
 
     def _add_processed_request(
         self,
@@ -553,7 +543,6 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
-        prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
     ) -> Optional[SequenceGroup]:
@@ -569,7 +558,6 @@ class LLMEngine:
                 arrival_time=arrival_time,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
             )
             return None
@@ -583,11 +571,10 @@ class LLMEngine:
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
 
         seq = Sequence(seq_id, decoder_inputs, block_size, eos_token_id,
-                       lora_request, prompt_adapter_request)
+                       lora_request)
 
         encoder_seq = (None if encoder_inputs is None else Sequence(
-            seq_id, encoder_inputs, block_size, eos_token_id, lora_request,
-            prompt_adapter_request))
+            seq_id, encoder_inputs, block_size, eos_token_id, lora_request))
 
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):
@@ -598,7 +585,6 @@ class LLMEngine:
                 arrival_time=arrival_time,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
                 encoder_seq=encoder_seq,
                 priority=priority)
         elif isinstance(params, PoolingParams):
@@ -608,7 +594,6 @@ class LLMEngine:
                 params,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
-                prompt_adapter_request=prompt_adapter_request,
                 encoder_seq=encoder_seq,
                 priority=priority)
         else:
@@ -637,7 +622,6 @@ class LLMEngine:
         lora_request: Optional[LoRARequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
         """Add a request to the engine's request pool.
@@ -658,7 +642,6 @@ class LLMEngine:
                 the current monotonic time.
             lora_request: The LoRA request to add.
             trace_headers: OpenTelemetry trace headers.
-            prompt_adapter_request: The prompt adapter request to add.
             priority: The priority of the request.
                 Only applicable with priority scheduling.
 
@@ -700,11 +683,10 @@ class LLMEngine:
                              "Priority scheduling is not enabled.")
 
         if isinstance(params, SamplingParams) \
-            and (params.guided_decoding or params.logits_processors) \
+            and params.logits_processors \
             and self.scheduler_config.num_scheduler_steps > 1:
             raise ValueError(
-                "Guided decoding and logits processors are not supported "
-                "in multi-step decoding")
+                "Logits processors are not supported in multi-step decoding")
 
         if arrival_time is None:
             arrival_time = time.time()
@@ -719,7 +701,6 @@ class LLMEngine:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
         )
 
         self._add_processed_request(
@@ -728,7 +709,6 @@ class LLMEngine:
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
             priority=priority,
         )
@@ -741,7 +721,6 @@ class LLMEngine:
         arrival_time: float,
         lora_request: Optional[LoRARequest],
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         encoder_seq: Optional[Sequence] = None,
         priority: int = 0,
     ) -> SequenceGroup:
@@ -769,17 +748,15 @@ class LLMEngine:
         if self.vllm_config.speculative_config is not None:
             draft_size = \
                 self.vllm_config.speculative_config.num_speculative_tokens + 1
-        seq_group = SequenceGroup(
-            request_id=request_id,
-            seqs=[seq],
-            arrival_time=arrival_time,
-            sampling_params=sampling_params,
-            lora_request=lora_request,
-            trace_headers=trace_headers,
-            prompt_adapter_request=prompt_adapter_request,
-            encoder_seq=encoder_seq,
-            priority=priority,
-            draft_size=draft_size)
+        seq_group = SequenceGroup(request_id=request_id,
+                                  seqs=[seq],
+                                  arrival_time=arrival_time,
+                                  sampling_params=sampling_params,
+                                  lora_request=lora_request,
+                                  trace_headers=trace_headers,
+                                  encoder_seq=encoder_seq,
+                                  priority=priority,
+                                  draft_size=draft_size)
 
         return seq_group
 
@@ -790,7 +767,6 @@ class LLMEngine:
         pooling_params: PoolingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest],
-        prompt_adapter_request: Optional[PromptAdapterRequest],
         encoder_seq: Optional[Sequence] = None,
         priority: int = 0,
     ) -> SequenceGroup:
@@ -798,15 +774,13 @@ class LLMEngine:
         # Defensive copy of PoolingParams, which are used by the pooler
         pooling_params = pooling_params.clone()
         # Create the sequence group.
-        seq_group = SequenceGroup(
-            request_id=request_id,
-            seqs=[seq],
-            arrival_time=arrival_time,
-            lora_request=lora_request,
-            pooling_params=pooling_params,
-            prompt_adapter_request=prompt_adapter_request,
-            encoder_seq=encoder_seq,
-            priority=priority)
+        seq_group = SequenceGroup(request_id=request_id,
+                                  seqs=[seq],
+                                  arrival_time=arrival_time,
+                                  lora_request=lora_request,
+                                  pooling_params=pooling_params,
+                                  encoder_seq=encoder_seq,
+                                  priority=priority)
         return seq_group
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
@@ -871,7 +845,8 @@ class LLMEngine:
 
     def reset_mm_cache(self) -> bool:
         """Reset the multi-modal cache."""
-        return self.input_preprocessor.mm_registry.reset_processor_cache()
+        return self.input_preprocessor.mm_registry.reset_processor_cache(
+            self.model_config)
 
     def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         """Reset prefix cache for all devices."""
@@ -1248,7 +1223,7 @@ class LLMEngine:
         engine = LLMEngine.from_engine_args(engine_args)
         example_inputs = [(0, "What is LLM?",
         SamplingParams(temperature=0.0))]
-    
+
         # Start the engine with an event loop
         while True:
             if example_inputs:
@@ -1834,16 +1809,6 @@ class LLMEngine:
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_executor.pin_lora(lora_id)
 
-    def add_prompt_adapter(
-            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        return self.model_executor.add_prompt_adapter(prompt_adapter_request)
-
-    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        return self.model_executor.remove_prompt_adapter(prompt_adapter_id)
-
-    def list_prompt_adapters(self) -> List[int]:
-        return self.model_executor.list_prompt_adapters()
-
     def start_profile(self) -> None:
         self.model_executor.start_profile()
 
@@ -1898,8 +1863,14 @@ class LLMEngine:
                 context=trace_context,
                 start_time=arrival_time_nano_seconds) as seq_span:
             metrics = seq_group.metrics
-            ttft = metrics.first_token_time - metrics.arrival_time
-            e2e_time = metrics.finished_time - metrics.arrival_time
+
+            # Handle potential None values for cancelled/aborted requests
+            ttft = (metrics.first_token_time - metrics.arrival_time
+                    if metrics.first_token_time is not None else None)
+
+            e2e_time = (metrics.finished_time - metrics.arrival_time
+                        if metrics.finished_time is not None else None)
+
             seq_span.set_attribute(SpanAttributes.GEN_AI_RESPONSE_MODEL,
                                    self.model_config.model)
             seq_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID,
@@ -1922,11 +1893,18 @@ class LLMEngine:
                     seq.get_output_len()
                     for seq in seq_group.get_finished_seqs()
                 ]))
-            seq_span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE,
-                                   metrics.time_in_queue)
-            seq_span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
-            seq_span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E, e2e_time)
+
+            # Only set timing attributes if the values are available
+            if metrics.time_in_queue is not None:
+                seq_span.set_attribute(
+                    SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE,
+                    metrics.time_in_queue)
+            if ttft is not None:
+                seq_span.set_attribute(
+                    SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
+            if e2e_time is not None:
+                seq_span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E,
+                                       e2e_time)
             if metrics.scheduler_time is not None:
                 seq_span.set_attribute(
                     SpanAttributes.GEN_AI_LATENCY_TIME_IN_SCHEDULER,
@@ -2015,42 +1993,12 @@ class LLMEngine:
     def _build_logits_processors(
             self, sampling_params: SamplingParams,
             lora_request: Optional[LoRARequest]) -> SamplingParams:
-        """Constructs logits processors based on the guided_decoding,
-        logits_bias, and allowed_token_ids fields in sampling_params. Deletes
-        those fields and adds the constructed logits processors to the
-        logits_processors field. Returns the modified sampling params."""
+        """Constructs logits processors based on the logits_bias, and
+        allowed_token_ids fields in sampling_params. Deletes those fields and
+        adds the constructed logits processors to the logits_processors field.
+        Returns the modified sampling params."""
 
         logits_processors = []
-
-        if sampling_params.guided_decoding is not None:
-            # Defensively copy sampling params since guided decoding logits
-            # processors can have different state for each request
-            sampling_params = copy.copy(sampling_params)
-            guided_decoding = sampling_params.guided_decoding
-
-            logger.debug(
-                "Building guided decoding logits processor in "
-                "LLMEngine. Params: %s", guided_decoding)
-
-            tokenizer = self.get_tokenizer(lora_request=lora_request)
-            guided_decoding.backend = guided_decoding.backend or \
-                self.decoding_config.backend
-
-            if self.decoding_config.reasoning_backend:
-                logger.debug("Building with reasoning backend %s",
-                             self.decoding_config.reasoning_backend)
-
-            processor = get_local_guided_decoding_logits_processor(
-                guided_params=guided_decoding,
-                tokenizer=tokenizer,
-                model_config=self.model_config,
-                reasoning_backend=self.decoding_config.reasoning_backend,
-            )
-            if processor:
-                logits_processors.append(processor)
-
-            # Unset so this doesn't get passed down to the model
-            sampling_params.guided_decoding = None
 
         if (sampling_params.logit_bias or sampling_params.allowed_token_ids):
             tokenizer = self.get_tokenizer(lora_request=lora_request)

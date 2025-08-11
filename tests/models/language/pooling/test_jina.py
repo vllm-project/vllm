@@ -84,7 +84,7 @@ def test_matryoshka(
         hf_outputs = matryoshka_fy(hf_outputs, dimensions)
 
     with vllm_runner(model_info.name,
-                     task="embed",
+                     runner="pooling",
                      dtype=dtype,
                      max_model_len=None) as vllm_model:
         assert vllm_model.llm.llm_engine.model_config.is_matryoshka

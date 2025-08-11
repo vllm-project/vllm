@@ -96,6 +96,25 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# Gemma3N
+def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "google/gemma-3n-E2B-it"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=2048,
+        max_num_batched_tokens=2048,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+        enforce_eager=True,
+    )
+    prompt = f"<start_of_turn>user\n<audio_soft_token>{question}"
+    "<end_of_turn>\n<start_of_turn>model\n"
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # Granite Speech
 def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
     # NOTE - the setting in this example are somehat different than what is
@@ -176,6 +195,37 @@ def run_phi4mm(question: str, audio_count: int) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_path,
         trust_remote_code=True,
+        max_model_len=12800,
+        max_num_seqs=2,
+        enable_lora=True,
+        max_lora_rank=320,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompts,
+        lora_requests=[LoRARequest("speech", 1, speech_lora_path)],
+    )
+
+
+def run_phi4_multimodal(question: str, audio_count: int) -> ModelRequestData:
+    """
+    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    show how to process audio inputs.
+    """
+    model_path = snapshot_download(
+        "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
+    )
+    # Since the vision-lora and speech-lora co-exist with the base model,
+    # we have to manually specify the path of the lora weights.
+    speech_lora_path = os.path.join(model_path, "speech-lora")
+    placeholders = "<|audio|>" * audio_count
+
+    prompts = f"<|user|>{placeholders}{question}<|end|><|assistant|>"
+
+    engine_args = EngineArgs(
+        model=model_path,
         max_model_len=12800,
         max_num_seqs=2,
         enable_lora=True,
@@ -300,9 +350,11 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 
 model_example_map = {
     "voxtral": run_voxtral,
+    "gemma3n": run_gemma3n,
     "granite_speech": run_granite_speech,
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,
+    "phi4_multimodal": run_phi4_multimodal,
     "qwen2_audio": run_qwen2_audio,
     "qwen2_5_omni": run_qwen2_5_omni,
     "ultravox": run_ultravox,

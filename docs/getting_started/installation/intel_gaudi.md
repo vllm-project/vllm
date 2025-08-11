@@ -339,13 +339,13 @@ Each described step is logged by vLLM server, as follows (negative values corres
 
 - `VLLM_{phase}_{dim}_BUCKET_{param}` - collection of 12 environment variables configuring ranges of bucketing mechanism
 
-    * `{phase}` is either `PROMPT` or `DECODE`
+    - `{phase}` is either `PROMPT` or `DECODE`
 
-    * `{dim}` is either `BS`, `SEQ` or `BLOCK`
+    - `{dim}` is either `BS`, `SEQ` or `BLOCK`
 
-    * `{param}` is either `MIN`, `STEP` or `MAX`
+    - `{param}` is either `MIN`, `STEP` or `MAX`
 
-    * Default values:
+    - Default values:
 
 | `{phase}` | Parameter | Env Variable | Value Expression |
 |-----------|-----------|--------------|------------------|

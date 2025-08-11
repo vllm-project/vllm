@@ -3,7 +3,7 @@
 # benchmark the overhead of disaggregated prefill.
 # methodology:
 # - send all request to prefill vLLM instance. It will buffer KV cache.
-# - then send all request to decode instance. 
+# - then send all request to decode instance.
 # - The TTFT of decode instance is the overhead.
 
 set -ex
@@ -12,6 +12,8 @@ kill_gpu_processes() {
   # kill all processes on GPU.
   pgrep pt_main_thread | xargs -r kill -9
   pgrep python3 | xargs -r kill -9
+  # vLLM now names the process with VLLM prefix after https://github.com/vllm-project/vllm/pull/21445
+  pgrep VLLM | xargs -r kill -9
   sleep 10
 
   # remove vllm config file
@@ -61,7 +63,7 @@ benchmark() {
     --gpu-memory-utilization 0.6 \
     --kv-transfer-config \
     '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":5e9}' &
-    
+
 
   CUDA_VISIBLE_DEVICES=1 python3 \
     -m vllm.entrypoints.openai.api_server \
@@ -76,38 +78,38 @@ benchmark() {
   wait_for_server 8200
 
   # let the prefill instance finish prefill
-  python3 ../benchmark_serving.py \
-          --backend vllm \
-          --model $model \
-          --dataset-name $dataset_name \
-          --dataset-path $dataset_path \
-          --sonnet-input-len $input_len \
-          --sonnet-output-len "$output_len" \
-          --sonnet-prefix-len $prefix_len \
-          --num-prompts $num_prompts \
-          --port 8100 \
-          --save-result \
-          --result-dir $results_folder \
-          --result-filename disagg_prefill_tp1.json \
-          --request-rate "inf"
+  vllm bench serve \
+    --backend vllm \
+    --model $model \
+    --dataset-name $dataset_name \
+    --dataset-path $dataset_path \
+    --sonnet-input-len $input_len \
+    --sonnet-output-len "$output_len" \
+    --sonnet-prefix-len $prefix_len \
+    --num-prompts $num_prompts \
+    --port 8100 \
+    --save-result \
+    --result-dir $results_folder \
+    --result-filename disagg_prefill_tp1.json \
+    --request-rate "inf"
 
 
   # send the request to decode.
   # The TTFT of this command will be the overhead of disagg prefill impl.
-  python3 ../benchmark_serving.py \
-          --backend vllm \
-          --model $model \
-          --dataset-name $dataset_name \
-          --dataset-path $dataset_path \
-          --sonnet-input-len $input_len \
-          --sonnet-output-len "$output_len" \
-          --sonnet-prefix-len $prefix_len \
-          --num-prompts $num_prompts \
-          --port 8200 \
-          --save-result \
-          --result-dir $results_folder \
-          --result-filename disagg_prefill_tp1_overhead.json \
-          --request-rate "$qps"
+  vllm bench serve \
+    --backend vllm \
+    --model $model \
+    --dataset-name $dataset_name \
+    --dataset-path $dataset_path \
+    --sonnet-input-len $input_len \
+    --sonnet-output-len "$output_len" \
+    --sonnet-prefix-len $prefix_len \
+    --num-prompts $num_prompts \
+    --port 8200 \
+    --save-result \
+    --result-dir $results_folder \
+    --result-filename disagg_prefill_tp1_overhead.json \
+    --request-rate "$qps"
   kill_gpu_processes
 
 }
