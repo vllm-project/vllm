@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import atexit
 import contextlib
 import logging
 import math
@@ -553,8 +554,31 @@ class NixlConnectorWorker:
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
 
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_called = False
+        atexit.register(self._shutdown)
+
     def __del__(self):
         """Cleanup background threads on destruction."""
+        self._shutdown()
+
+    def _shutdown(self):
+        """Cleanup resources on shutdown."""
+        # It's possible that __init__ fails and these attributes are not set.
+        if not hasattr(self, "_shutdown_lock"):
+            return
+        with self._shutdown_lock:
+            if getattr(self, "_shutdown_called", False):
+                return
+            self._shutdown_called = True
+        self.nixl_wrapper.release_dlist_handle(self.src_xfer_side_handle)
+        for dst_xfer_side_handle in self.dst_xfer_side_handles.values():
+            self.nixl_wrapper.release_dlist_handle(dst_xfer_side_handle)
+        for remote_agents in self._remote_agents.values():
+            for agent_name in remote_agents.values():
+                self.nixl_wrapper.remove_remote_agent(agent_name)
+        for desc in self._registered_descs:
+            self.nixl_wrapper.deregister_memory(desc)
         self._handshake_initiation_executor.shutdown(wait=False)
         if self._nixl_handshake_listener_t:
             self._nixl_handshake_listener_t.join(timeout=0)
