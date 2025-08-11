@@ -1337,18 +1337,15 @@ class HiddenStates(msgspec.Struct, array_like=True,
         # may be "paused" then "resumed" later. This should only prune sequences
         # which are confirmed to be aborted.
         seq_ids = get_all_seq_ids(seq_group_metadata_list)
+        orig_seq_len = len(seq_ids)
+
         # Only keep sequence IDs that exist in self._seq_ids
         seq_ids = [seq_id for seq_id in seq_ids if seq_id in self._seq_ids]
-        if seq_ids != self._seq_ids:
-            # Batch contents changed - prune removed sequences.
-            if len(seq_ids) < len(self._seq_ids):
-                index = [self._seq_ids.index(seq_id) for seq_id in seq_ids]
-            else:
-                # This path is added for use_padding_aware_scheduling
-                index = [
-                    self._seq_ids.index(seq_id)
-                    if seq_id in self._seq_ids else 0 for seq_id in seq_ids
-                ]
+        index = [self._seq_ids.index(seq_id) for seq_id in seq_ids]
+
+        is_paddingaware_scheduling = orig_seq_len > len(self._seq_ids)
+        if seq_ids != self._seq_ids or is_paddingaware_scheduling:
+            index = index + ([-1] * (orig_seq_len - len(index)))
             self.hidden_states = self.hidden_states[index]
             if self.second_last_token_hidden_states is not None:
                 self.second_last_token_hidden_states = self\
