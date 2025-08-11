@@ -2031,10 +2031,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
+        # when DBO is enabled, `num_tokens_after_padding`
+        # represents the per-ubatch DP token count.
+        dp_tokens_for_forward = num_tokens_after_padding
+        if ubatch_slices is not None and num_tokens_after_padding is not None:
+            dp_tokens_for_forward = num_tokens_after_padding * len(
+                ubatch_slices)
+
         with set_forward_context(attn_metadata,
                                  vllm_config=self.vllm_config,
                                  num_tokens=num_input_tokens or 1,
-                                 num_tokens_across_dp=num_tokens_after_padding,
+                                 num_tokens_across_dp=dp_tokens_for_forward,
                                  skip_cuda_graphs=skip_cuda_graphs):
             self.maybe_setup_kv_connector(scheduler_output)
         model_output = self._run_model(
@@ -2693,8 +2700,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert num_tokens % 2 == 0
             num_tokens_per_ubatch = num_tokens // 2
             dp_size = self.vllm_config.parallel_config.data_parallel_size
-            num_tokens_across_dp = torch.tensor([num_tokens_per_ubatch] * dp_size,
-                                                device="cpu", 
+            num_tokens_across_dp = torch.tensor([num_tokens_per_ubatch] *
+                                                dp_size,
+                                                device="cpu",
                                                 dtype=torch.int32)
             ubatch_slices = [(slice(0,
                                     num_reqs // 2), slice(0, num_tokens // 2)),
