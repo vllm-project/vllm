@@ -1682,6 +1682,8 @@ class FlexibleArgumentParser(ArgumentParser):
         # Set the default "formatter_class" to SortedHelpFormatter
         if "formatter_class" not in kwargs:
             kwargs["formatter_class"] = SortedHelpFormatter
+        # Pop kwarg "add_json_tip" to control whether to add the JSON tip
+        self.add_json_tip = kwargs.pop("add_json_tip", True)
         super().__init__(*args, **kwargs)
 
     if sys.version_info < (3, 13):
@@ -1726,7 +1728,8 @@ class FlexibleArgumentParser(ArgumentParser):
     def format_help(self) -> str:
         # Add tip about JSON arguments to the epilog
         epilog = self.epilog or ""
-        if not epilog.startswith(FlexibleArgumentParser._json_tip):
+        if (self.add_json_tip
+                and not epilog.startswith(FlexibleArgumentParser._json_tip)):
             self.epilog = FlexibleArgumentParser._json_tip + epilog
         return super().format_help()
 
