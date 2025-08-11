@@ -1,0 +1,129 @@
+[
+    {
+        "test_name": "serving_llama8B_tp1_sharegpt",
+        "qps_list": [1, 4, 16, "inf"],
+        "max_concurrency_list": [32, 64, 128, 256],
+        "server_environment_variables": {
+	    "PT_HPU_LAZY_MODE": 1,
+	    "EXPERIMENTAL_WEIGHT_SHARING": 0,
+	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN":1.0,
+	    "VLLM_DECODE_BLOCK_BUCKET_MAX": 8128,
+	    "VLLM_DECODE_BLOCK_BUCKET_STEP": 256,
+	    "VLLM_DECODE_BS_BUCKET_STEP": 32,
+	    "VLLM_DELAYED_SAMPLING": 1,
+            "VLLM_GRAPH_PROMPT_RATIO": 0.7,
+            "VLLM_GRAPH_RESERVED_MEM": 0.06,
+            "VLLM_PROMPT_BS_BUCKET_STEP": 32,
+            "VLLM_PROMPT_SEQ_BUCKET_MAX": 32512,
+            "VLLM_PROMPT_SEQ_BUCKET_STEP": 256,
+            "VLLM_SKIP_WARMUP": 0
+        },
+        "server_parameters": {
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "tensor_parallel_size": 1,
+	    "dtype": "bfloat16",
+	    "block_size": 128,
+	    "max_model_len": 32512,
+	    "gpu_memory_util": 0.99,
+	    "use_paddling_aware_scheduling": "",
+	    "max_num_seqs": 32,
+	    "max_num_prefill_seqs": 16,
+	    "num_scheduler_steps": 1,
+            "swap_space": 16,
+            "disable_log_stats": "",
+            "load_format": "dummy"
+        },
+        "client_parameters": {
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "backend": "vllm",
+            "dataset_name": "sharegpt",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 256
+        }
+    },
+    {
+        "test_name": "serving_llama70B_tp4_sharegpt",
+        "qps_list": [1, 4, 16, "inf"],
+        "max_concurrency_list": [32, 64, 128, 256],
+        "server_environment_variables": {
+	    "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+	    "PT_HPU_LAZY_MODE": 1,
+	    "EXPERIMENTAL_WEIGHT_SHARING": 0,
+	    "VLLM_DECODE_BLOCK_BUCKET_MAX": 8256,
+	    "VLLM_DECODE_BLOCK_BUCKET_STEP": 256,
+	    "VLLM_DECODE_BS_BUCKET_STEP": 32,
+	    "VLLM_DELAYED_SAMPLING": 1,
+            "VLLM_GRAPH_PROMPT_RATIO": 0.6,
+            "VLLM_GRAPH_RESERVED_MEM": 0.08,
+            "VLLM_PROMPT_BS_BUCKET_STEP": 32,
+            "VLLM_PROMPT_SEQ_BUCKET_MAX": 33024,
+            "VLLM_PROMPT_SEQ_BUCKET_STEP": 256,
+            "VLLM_SKIP_WARMUP": 0
+        },
+        "server_parameters": {
+            "model": "meta-llama/Llama-3.1-70B-Instruct",
+            "tensor_parallel_size": 4,
+	    "dtype": "bfloat16",
+	    "block_size": 128,
+	    "max_model_len": 33024,
+	    "gpu_memory_util": 0.98,
+	    "use_paddling_aware_scheduling": "",
+	    "max_num_seqs": 32,
+	    "max_num_prefill_seqs": 16,
+	    "num_scheduler_steps": 1,
+            "swap_space": 16,
+            "disable_log_stats": "",
+            "load_format": "dummy"
+        },
+        "client_parameters": {
+            "model": "meta-llama/Llama-3.1-70B-Instruct",
+            "backend": "vllm",
+            "dataset_name": "sharegpt",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 256
+        }
+    },
+    {
+        "test_name": "serving_mixtral8x7B_tp2_sharegpt",
+        "qps_list": [1, 4, 16, "inf"],
+        "max_concurrency_list": [32, 64, 128, 256],
+        "server_environment_variables": {
+	    "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+	    "PT_HPU_LAZY_MODE": 1,
+	    "EXPERIMENTAL_WEIGHT_SHARING": 0,
+	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN":1.0,
+	    "VLLM_DECODE_BLOCK_BUCKET_MAX": 16256,
+	    "VLLM_DECODE_BLOCK_BUCKET_STEP": 256,
+	    "VLLM_DECODE_BS_BUCKET_STEP": 32,
+	    "VLLM_DELAYED_SAMPLING": 1,
+            "VLLM_GRAPH_PROMPT_RATIO": 0.6,
+            "VLLM_GRAPH_RESERVED_MEM": 0.09,
+            "VLLM_PROMPT_BS_BUCKET_STEP": 32,
+            "VLLM_PROMPT_SEQ_BUCKET_MAX": 32512,
+            "VLLM_PROMPT_SEQ_BUCKET_STEP": 256,
+            "VLLM_SKIP_WARMUP": 0
+        },
+        "server_parameters": {
+            "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+            "tensor_parallel_size": 2,
+	    "dtype": "bfloat16",
+	    "block_size": 128,
+	    "max_model_len": 32512,
+	    "gpu_memory_util": 0.98,
+	    "use_paddling_aware_scheduling": "",
+	    "max_num_seqs": 64,
+	    "max_num_prefill_seqs": 16,
+	    "num_scheduler_steps": 1,
+            "swap_space": 16,
+            "disable_log_stats": "",
+            "load_format": "dummy"
+        },
+        "client_parameters": {
+            "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+            "backend": "vllm",
+            "dataset_name": "sharegpt",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 256
+        }
+    }
+]
