@@ -127,8 +127,8 @@ def test_ignore_torch_compile_decorator():
 
 # Only enable torch.compile if
 # vllm_config.cache_config.kv_sharing_fast_prefill=True
-@support_torch_compile(compile_cond=lambda vllm_config: vllm_config.
-                       cache_config.kv_sharing_fast_prefill)
+@support_torch_compile(enable_if=lambda vllm_config: vllm_config.cache_config.
+                       kv_sharing_fast_prefill)
 class B(nn.Module):
 
     def __init__(self,
@@ -149,7 +149,7 @@ class B(nn.Module):
 
 # Only enable torch.compile if
 # vllm_config.cache_config.kv_sharing_fast_prefill=False
-@support_torch_compile(compile_cond=lambda vllm_config: not vllm_config.
+@support_torch_compile(enable_if=lambda vllm_config: not vllm_config.
                        cache_config.kv_sharing_fast_prefill)
 class A(nn.Module):
 
@@ -171,7 +171,7 @@ class A(nn.Module):
         return x
 
 
-def test_support_torch_compile_cond():
+def test_conditional_compile_enable_if():
     vllm_config = VllmConfig(cache_config=CacheConfig(
         kv_sharing_fast_prefill=True, ),
                              compilation_config=CompilationConfig(
@@ -184,8 +184,8 @@ def test_support_torch_compile_cond():
     with set_current_vllm_config(vllm_config):
         mod_A = A(vllm_config=vllm_config, prefix='').eval().cuda()
 
-    # A has support_torch_compile but compile_cond is not satisified
-    # compile_cond will be satisified for B, so we expect mod1 and mod2
+    # A has support_torch_compile but enable_if fn returns False
+    # enalbe_if will be True for B, so we expect mod1 and mod2
     # to be compiled
     with compilation_counter.expect(
             num_graphs_seen=2,
