@@ -2417,7 +2417,12 @@ class HPUModelRunner:
                     else:
                         value_cache = None
                     kv_caches[layer_name] = (key_cache, value_cache)
-                    logger.debug(f"buke initialize_kv_cache: {key_cache.data_ptr()=}|{value_cache.data_ptr()=}")
+                    if value_cache is not None:
+                        logger.debug(f"buke initialize_kv_cache: {key_cache.data_ptr()=}|{value_cache.data_ptr()=}")
+                    else:
+                        logger.debug(f"buke initialize_kv_cache: {key_cache.data_ptr()=}|value_cache=None")
+
+                    #logger.debug(f"buke initialize_kv_cache: {key_cache.data_ptr()=}|{value_cache.data_ptr()=}")
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
@@ -2434,6 +2439,13 @@ class HPUModelRunner:
         self._PAD_SLOT_ID = num_blocks * self.block_size
 
         if has_kv_transfer_group():
+            #import remote_pdb; remote_pdb.set_trace()           
+            kv_caches = {}
+            for layer, (key_cache, value_cache) in kv_caches.items():
+                if value_cache is not None:
+                    kv_caches[layer] = torch.stack((key_cache, value_cache))
+                else:
+                    kv_caches[layer] = key_cache  
             #kv_caches = { layer: torch.stack((tup[0], tup[1])) for layer,tup in kv_caches.items()}
             get_kv_transfer_group().register_kv_caches(kv_caches)
             get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
