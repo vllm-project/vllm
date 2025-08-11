@@ -837,27 +837,35 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.vision_model = Step3VisionTransformer(config.vision_config,
-                                                   None,
-                                                   prefix=maybe_prefix(
-                                                       prefix, "vision_model"))
-        self.vit_downsampler = nn.Conv2d(
-            config.vision_config.hidden_size,
-            config.vision_config.output_hidden_size,
-            kernel_size=2,
-            stride=config.understand_projector_stride)
-        self.vit_downsampler2 = nn.Conv2d(
-            config.vision_config.output_hidden_size,
-            config.vision_config.output_hidden_size * 2,
-            kernel_size=3,
-            stride=2,
-            padding=1,
-        )
-        self.vit_large_projector = nn.Linear(
-            config.vision_config.output_hidden_size * 2,
-            config.hidden_size,
-            bias=config.projector_bias,
-        )
+        if multimodal_config.get_limit_per_prompt("image"):
+            self.vision_model = Step3VisionTransformer(config.vision_config,
+                                                       None,
+                                                       prefix=maybe_prefix(
+                                                           prefix,
+                                                           "vision_model"))
+            self.vit_downsampler = nn.Conv2d(
+                config.vision_config.hidden_size,
+                config.vision_config.output_hidden_size,
+                kernel_size=2,
+                stride=config.understand_projector_stride)
+            self.vit_downsampler2 = nn.Conv2d(
+                config.vision_config.output_hidden_size,
+                config.vision_config.output_hidden_size * 2,
+                kernel_size=3,
+                stride=2,
+                padding=1,
+            )
+            self.vit_large_projector = nn.Linear(
+                config.vision_config.output_hidden_size * 2,
+                config.hidden_size,
+                bias=config.projector_bias,
+            )
+        else:
+            self.vision_model = None
+            self.vit_downsampler = None
+            self.vit_downsampler2 = None
+            self.vit_large_projector = None
+
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
@@ -1046,7 +1054,15 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
+
+        skip_prefixes = []
+        if self.vision_model is None and self.vit_large_projector is None:
+            skip_prefixes = [
+                "vision_model.", "vit_downsampler.", "vit_downsampler2.",
+                "vit_large_projector."
+            ]
+
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         loaded_weights = loader.load_weights(weights,
                                              mapper=self.hf_to_vllm_mapper)
         return loaded_weights
