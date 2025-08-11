@@ -122,6 +122,10 @@ class FusedMoEQuantConfig:
         return self.a1.shape == GroupShape.PER_TOKEN
 
     @property
+    def per_out_ch_quant(self) -> bool:
+        return self.a2.shape == GroupShape.PER_TOKEN
+
+    @property
     def is_per_tensor(self) -> bool:
         return self.a1.shape == GroupShape.PER_TENSOR
 

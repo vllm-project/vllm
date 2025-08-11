@@ -9,7 +9,7 @@ from tests.kernels.quant_utils import per_block_cast_to_int8
 from tests.kernels.quantization.nvfp4_utils import (FLOAT4_E2M1_MAX,
                                                     FLOAT8_E4M3_MAX)
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize, BatchedTritonExperts, NaiveBatchedExperts)
@@ -325,8 +325,8 @@ def make_test_quant_config(
         a1_gscale=a1_gscale,
         a2_gscale=a2_gscale,
         # TODO: make sure this is handled properly
-        g1_alphas=(1 / w1_gs),
-        g2_alphas=(1 / w2_gs),
+        g1_alphas=(1 / w1_gs) if w1_gs is not None else None,
+        g2_alphas=(1 / w2_gs) if w2_gs is not None else None,
     )
 
 
@@ -341,12 +341,12 @@ def fused_moe(
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+    topk_weights, topk_ids, _ = fused_topk(hidden_states, score.float(), topk, renormalize)
     return fused_experts(
-        a,
+        hidden_states,
         w1,
         w2,
-        topk_weight,
+        topk_weights,
         topk_ids,
         global_num_experts=global_num_experts,
         expert_map=expert_map,
