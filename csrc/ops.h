@@ -92,6 +92,11 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
+void apply_repetition_penalties_(torch::Tensor& logits,
+                                 const torch::Tensor& prompt_mask,
+                                 const torch::Tensor& output_mask,
+                                 const torch::Tensor& repetition_penalties);
+
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,
                                double epsilon);
@@ -231,7 +236,8 @@ void cutlass_moe_mm(
     torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides, torch::Tensor const& c_strides);
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
+    bool per_act_token, bool per_out_ch);
 
 void cutlass_fp4_group_mm(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
@@ -243,7 +249,16 @@ void get_cutlass_moe_mm_data(
     const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
-    const int64_t num_experts, const int64_t n, const int64_t k);
+    const int64_t num_experts, const int64_t n, const int64_t k,
+    const std::optional<torch::Tensor>& blockscale_offsets);
+
+void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
+                                  torch::Tensor& problem_sizes1,
+                                  torch::Tensor& problem_sizes2,
+                                  const torch::Tensor& expert_num_tokens,
+                                  const int64_t num_local_experts,
+                                  const int64_t padded_m, const int64_t n,
+                                  const int64_t k);
 
 void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& b,
@@ -272,6 +287,16 @@ void scaled_fp4_experts_quant(
     torch::Tensor const& input, torch::Tensor const& input_global_scale,
     torch::Tensor const& input_offset_by_experts,
     torch::Tensor const& output_scale_offset_by_experts);
+
+void per_token_group_quant_fp8(const torch::Tensor& input,
+                               torch::Tensor& output_q, torch::Tensor& output_s,
+                               int64_t group_size, double eps, double fp8_min,
+                               double fp8_max, bool scale_ue8m0);
+
+void per_token_group_quant_int8(const torch::Tensor& input,
+                                torch::Tensor& output_q,
+                                torch::Tensor& output_s, int64_t group_size,
+                                double eps, double int8_min, double int8_max);
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
@@ -311,22 +336,6 @@ void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const std::optional<torch::Tensor>& has_initial_state,
                         const torch::Tensor& ssm_states, int64_t pad_slot_id);
 
-void causal_conv1d_update(const at::Tensor& x, const at::Tensor& conv_state,
-                          const at::Tensor& weight,
-                          const std::optional<at::Tensor>& bias_,
-                          bool silu_activation,
-                          const std::optional<at::Tensor>& cache_seqlens_,
-                          const std::optional<at::Tensor>& conv_state_indices_,
-                          int64_t pad_slot_id);
-
-void causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
-                       const std::optional<at::Tensor>& bias_,
-                       const std::optional<at::Tensor>& conv_states,
-                       const std::optional<at::Tensor>& query_start_loc,
-                       const std::optional<at::Tensor>& cache_indices,
-                       const std::optional<at::Tensor>& has_initial_state,
-                       bool silu_activation, int64_t pad_slot_id);
-
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
                       torch::Tensor& rank_data, int64_t rank,
@@ -345,3 +354,14 @@ std::tuple<int64_t, torch::Tensor> allocate_shared_buffer_and_handle(
     int64_t size);
 int64_t open_mem_handle(torch::Tensor& mem_handle);
 void free_shared_buffer(int64_t buffer);
+
+#ifdef USE_ROCM
+fptr_t init_custom_qr(int64_t rank, int64_t world_size,
+                      std::optional<int64_t> qr_max_size = std::nullopt);
+void qr_destroy(fptr_t _fa);
+torch::Tensor qr_get_handle(fptr_t _fa);
+void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
+void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
+                   int64_t quant_level, bool cast_bf2half = false);
+int64_t qr_max_size();
+#endif

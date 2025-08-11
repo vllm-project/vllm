@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the Pallas MOE implementation.
 
 Run `pytest tests/kernels/moe/test_moe_pallas.py`.
@@ -26,7 +27,7 @@ TOP_KS = [2, 6]
 # The Pallas GMM kernel requires num_tokens * topk to be a multiple of 16
 @pytest.mark.parametrize("m", [8, 16, 64, 2048])
 @pytest.mark.parametrize("n", [128, 1024, 2048])
-@pytest.mark.parametrize("k", [128, 512, 1024])
+@pytest.mark.parametrize("k", [128, 511, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("ep_size", EP_SIZE)

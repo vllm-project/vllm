@@ -1,24 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 from typing import Optional
 
 import pytest
-from packaging.version import Version
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 import vllm
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
-
-
-@pytest.fixture(autouse=not current_platform.is_cpu())
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 @dataclass
@@ -191,10 +182,6 @@ def test_qwen2vl_lora_beam_search(qwen2vl_lora_files):
 @pytest.mark.xfail(
     current_platform.is_rocm(),
     reason="Qwen2.5-VL dependency xformers incompatible with ROCm",
-)
-@pytest.mark.skipif(
-    Version(TRANSFORMERS_VERSION) < Version("4.49.0"),
-    reason="Qwen2.5-VL require transformers version no lower than 4.49.0",
 )
 def test_qwen25vl_lora(qwen25vl_lora_files):
     """Test Qwen 2.5 VL model with LoRA"""

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Literal, Optional, TypedDict, Union
@@ -458,17 +459,6 @@ def cat_with_pad(tensors, dim, padding_value=0):
 
 class Phi4MMProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_processor(
-        self,
-        *,
-        dynamic_hd: Optional[int] = None,
-        **kwargs: object,
-    ) -> ProcessorMixin:
-        if dynamic_hd is not None:
-            kwargs["dynamic_hd"] = dynamic_hd
-
-        return self.ctx.get_hf_processor(**kwargs)
-
     @property
     def image_tokens(self) -> list[str]:
         return [f"<|image_{i+1}|>" for i in range(100)]
@@ -486,8 +476,9 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         image_processor = processor.image_processor
         return image_processor.dynamic_hd
 
-    def get_feature_extractor(self) -> SequenceFeatureExtractor:
-        return self.get_hf_processor().audio_processor
+    def get_feature_extractor(self,
+                              **kwargs: object) -> SequenceFeatureExtractor:
+        return self.get_hf_processor(**kwargs).audio_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None, "image": None}
@@ -761,18 +752,19 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             prompt_ids = self.info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
-        sr = self.info.get_feature_extractor().sampling_rate
+        sr = self.info.get_feature_extractor(**mm_kwargs).sampling_rate
         if (audio_data := mm_data.get("audios", [])):
             mm_data['audios'] = [(data, sr) for data in audio_data]
 
         processed_outputs = super()._call_hf_processor(prompt, mm_data,
-                                                       mm_kwargs)
+                                                       mm_kwargs, tok_kwargs)
 
         num_img_tokens = [
             self.info.get_num_image_tokens(image_width=img_size[0],
@@ -814,7 +806,8 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
     ) -> Sequence[PromptUpdate]:
         image_tokens: list[str] = self.info.image_tokens  # type: ignore
         audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
-        feature_extractor = self.info.get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor(
+            **hf_processor_mm_kwargs)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         def get_image_replacement_phi4mm(item_idx: int):
@@ -899,6 +892,15 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             "model.embed_tokens_extend.image_embed.": "vision_encoder.",
         },
     )
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return f"<|image_{i}|>"
+        if modality.startswith("audio"):
+            return f"<|audio_{i}|>"
+
+        raise ValueError("Only image or audio modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1111,11 +1113,12 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                                            image_attention_mask)
         return image_embeds
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
 
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
+            return []
             return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
@@ -1146,7 +1149,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.model.embed_tokens(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None and len(
+                multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 [_IMAGE_PLACEHOLDER_TOKEN_ID, _AUDIO_PLACEHOLDER_TOKEN_ID])

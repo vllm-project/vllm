@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from openai import APIConnectionError, OpenAI
 from openai.pagination import SyncPage
 from openai.types.model import Model

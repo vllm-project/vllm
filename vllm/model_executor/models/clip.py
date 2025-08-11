@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Minimal implementation of CLIPVisionModel intended to be only used
 within a vision language model."""
 from collections.abc import Iterable
@@ -106,7 +107,6 @@ class CLIPAttention(nn.Module):
                 f"(got `embed_dim`: {self.embed_dim} and `num_heads`:"
                 f" {self.num_heads}).")
         self.scale = self.head_dim**-0.5
-        self.dropout = config.attention_dropout
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size=self.embed_dim,
@@ -128,10 +128,6 @@ class CLIPAttention(nn.Module):
 
         self.attn = MultiHeadAttention(self.num_heads_per_partition,
                                        self.head_dim, self.scale)
-
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads,
-                           self.head_dim).transpose(1, 2).contiguous()
 
     def forward(
         self,

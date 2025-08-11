@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Run `pytest tests/entrypoints/openai/test_embedding_dimensions.py`.
 """
@@ -41,8 +42,8 @@ def dtype(request):
 @pytest.fixture(scope="module")
 def server(model_info, dtype: str):
     args = [
-        "--task",
-        "embed",
+        "--runner",
+        "pooling",
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         dtype,

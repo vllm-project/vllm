@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Demonstrates how to generate prompt embeddings using
 Hugging Face Transformers  and use them as input to vLLM

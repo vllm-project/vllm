@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
 import base64
@@ -91,7 +92,7 @@ def dse_qwen2_vl(inp: dict):
 def parse_args():
     parser = argparse.ArgumentParser(
         "Script to call a specified VLM through the API. Make sure to serve "
-        "the model with --task embed before running this."
+        "the model with `--runner pooling` before running this."
     )
     parser.add_argument(
         "--model",

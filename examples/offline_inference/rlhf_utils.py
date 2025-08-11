@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
 
@@ -44,7 +45,8 @@ class WorkerExtension:
             self.device,
         )
 
-    def update_weight(self, name, dtype, shape):
+    def update_weight(self, name, dtype_name, shape):
+        dtype = getattr(torch, dtype_name)
         weight = torch.empty(shape, dtype=dtype, device="cuda")
         self.model_update_group.broadcast(
             weight, src=0, stream=torch.cuda.current_stream()
