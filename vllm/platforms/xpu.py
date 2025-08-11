@@ -105,13 +105,14 @@ class XPUPlatform(Platform):
             and not cls.device_support_bf16():
             model_config.dtype = torch.float16
 
-        if vllm_config.compilation_config.cudagraph_mode.max_cudagraph_mode() \
-            != CUDAGraphMode.FULL:
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.cudagraph_mode is None and \
+                compilation_config.cudagraph_mode.max_cudagraph_mode() \
+                    != CUDAGraphMode.FULL:
             logger.warning(
                 "CUDA graph is not supported on XPU, disabling cudagraphs "
                 "mode.")
-            vllm_config.compilation_config.cudagraph_mode = \
-                CUDAGraphMode.NONE
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
