@@ -227,6 +227,20 @@ def test_get_pooling_config_from_args():
     assert asdict(pooling_config) == asdict(override_pooler_config)
 
 
+@pytest.mark.parametrize(
+    ("model_id", "default_pooling_type", "pooling_type"),
+    [
+        ("tomaarsen/Qwen3-Reranker-0.6B-seq-cls", "LAST", "LAST"),  # LLM
+        ("intfloat/e5-small", "CLS", "MEAN"),  # BertModel
+        ("Qwen/Qwen2.5-Math-RM-72B", "ALL", "ALL"),  # reward
+        ("Qwen/Qwen2.5-Math-PRM-7B", "STEP", "STEP")  # step reward
+    ])
+def test_default_pooling_type(model_id, default_pooling_type, pooling_type):
+    model_config = ModelConfig(model_id)
+    assert model_config._model_info.default_pooling_type == default_pooling_type
+    assert model_config.pooler_config.pooling_type == pooling_type
+
+
 @pytest.mark.skipif(current_platform.is_rocm(),
                     reason="Xformers backend is not supported on ROCm.")
 def test_get_bert_tokenization_sentence_transformer_config():
