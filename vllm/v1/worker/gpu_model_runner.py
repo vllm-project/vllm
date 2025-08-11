@@ -1676,7 +1676,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not self.speculative_config:
             # Speculative decoding is not enabled.
             spec_token_ids = None
-            valid_sampled_token_ids = sampler_output.sampled_token_ids
+            valid_sampled_token_ids = self.get_valid_sampled_token_ids(
+                sampler_output.sampled_token_ids,
+                discard_sampled_tokens_req_indices)
         else:
             assert spec_decode_common_attn_metadata is not None
             spec_token_ids, valid_sampled_token_ids = \
@@ -1751,8 +1753,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def propose_draft_token_ids(
         self, scheduler_output: "SchedulerOutput",
-        sampled_token_ids: torch.Tensor, sampling_metadata: SamplingMetadata,
-        hidden_states: torch.Tensor, sample_hidden_states: torch.Tensor,
+        sampled_token_ids: torch.Tensor | list[list[int]],
+        sampling_metadata: SamplingMetadata, hidden_states: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
         aux_hidden_states: Optional[torch.Tensor],
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         common_attn_metadata: CommonAttentionMetadata,
@@ -1762,15 +1765,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config.method == "ngram":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, NgramProposer)
-            sampled_token_ids = self.get_valid_sampled_token_ids(
-                sampled_token_ids, discard_sampled_tokens_req_indices)
             spec_token_ids = self.propose_ngram_draft_token_ids(
                 sampled_token_ids)
         elif self.speculative_config.method == "medusa":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, MedusaProposer)
-            sampled_token_ids = self.get_valid_sampled_token_ids(
-                sampled_token_ids, discard_sampled_tokens_req_indices)
 
             if sample_hidden_states.shape[0] == len(sampled_token_ids):
                 # The input to the target model does not include draft tokens.
@@ -1791,6 +1790,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
         elif self.speculative_config.use_eagle():
+            assert isinstance(sampled_token_ids, torch.Tensor)
             assert isinstance(self.drafter, EagleProposer)
             assert discard_sampled_tokens_req_indices is not None
 
