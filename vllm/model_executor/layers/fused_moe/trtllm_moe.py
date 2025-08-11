@@ -12,8 +12,8 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import extract_required_args
 from vllm.utils import next_power_of_2
 
-if (envs.VLLM_USE_FLASHINFER_MXFP4_MOE
-        or envs.VLLM_USE_FLASHINFER_MXFP4_BF16_MOE):
+if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+        or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
     # from flashinfer.fused_moe import cutlass_fused_moe
     from flashinfer import mxfp8_quantize, trtllm_fp4_block_scale_routed_moe
 
@@ -127,6 +127,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.view(
             torch.int16).to(torch.int32)
+
         if envs.VLLM_USE_FLASHINFER_MXFP4_BF16_MOE:
             assert hidden_states.dtype == torch.bfloat16
             x_quant = hidden_states

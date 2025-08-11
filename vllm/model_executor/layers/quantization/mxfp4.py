@@ -8,8 +8,10 @@ from torch.nn.parameter import Parameter
 from vllm import envs
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
+from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-    triton_kernel_moe_forward)
+    BatchedOAITritonExperts, triton_kernel_moe_forward)
+from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -372,6 +374,37 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
 
         return tile_tokens_dim
+
+    def select_gemm_impl(
+        self,
+        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+        moe: FusedMoEConfig,
+    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        if (prepare_finalize.activation_format ==
+                mk.FusedMoEActivationFormat.BatchedExperts):
+            max_num_tokens_per_rank = (
+                prepare_finalize.max_num_tokens_per_rank())
+            assert max_num_tokens_per_rank is not None
+            return BatchedOAITritonExperts(
+                None,
+                max_num_tokens=max_num_tokens_per_rank,
+                num_dispatchers=prepare_finalize.num_dispatchers(),
+                w1_precision=self.w13_precision_config,
+                w2_precision=self.w2_precision_config,
+            )
+        else:
+            #pass
+
+            if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+                    or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+                # B200 code ??
+                # Quant config shouldn't be None !!
+                return TrtLlmGenExperts(None)
+            else:
+                # H100 code ??
+                # you use matmul_ogs kernel here!
+                raise NotImplementedError(
+                    "Mxfp4 does not support non-batched experts format for EP")
 
     def apply(
         self,
