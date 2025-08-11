@@ -37,7 +37,6 @@ python client.py
 |------|-------------|
 | `service.sh` | Server startup script with chunked processing enabled |
 | `client.py` | Comprehensive test client for long text embedding |
-| <gh-file:examples/online_serving/openai_embedding_client.py> | Basic embedding client (updated with chunked processing info) |
 
 ## ⚙️ Configuration
 
@@ -165,12 +164,6 @@ INFO: Input length 150000 exceeds max_position_embeddings 4096, will use chunked
 INFO: Split input of 150000 tokens into 37 chunks (max_chunk_size: 4096)
 ```
 
-## 📚 Additional Resources
-
-- [Pooling Models Documentation](../models/pooling_models.md#chunked-processing-for-long-text)
-- [Supported Models List](../models/supported_models.md#text-embedding)
-- [Original Feature Documentation](../../README_CHUNKED_PROCESSING.md)
-
 ## 🤝 Contributing
 
 To extend chunked processing support to other embedding models:
@@ -192,7 +185,4 @@ The new `max_embed_len` parameter provides:
 - **Clear Error Messages**: Better feedback when inputs exceed limits
 - **Backward Compatibility**: Existing configurations continue to work
 
----
 
-!!! note
-    Chunked processing is currently supported for specific embedding models. See the [supported models documentation](../models/supported_models.md#chunked-processing-for-long-text) for the complete list.
