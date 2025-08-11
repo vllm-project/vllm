@@ -217,7 +217,7 @@ def _support_torch_compile(
             # collect all relevant files traced by Dynamo,
             # so that the compilation cache can trigger re-compilation
             # properly when any of these files change.
-            
+
             # 1. the file containing the top-level forward function
             self.vllm_config.compilation_config.traced_files.add(
                 self.original_code_object.co_filename)
