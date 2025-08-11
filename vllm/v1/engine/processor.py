@@ -51,7 +51,7 @@ class Processor:
                                                     mm_registry)
 
         self.mm_input_cache_client = MultiModalInputCacheClient(
-            self.model_config)
+            self.model_config, mm_registry)
 
     @property
     def mm_registry(self):

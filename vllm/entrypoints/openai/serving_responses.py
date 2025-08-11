@@ -4,14 +4,18 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
-from typing import Callable, Final, Optional, Union
+from typing import Any, Callable, Final, Optional, Union
 
 import jinja2
 from fastapi import Request
 from openai.types.responses import (ResponseFunctionToolCall,
-                                    ResponseOutputMessage, ResponseOutputText)
+                                    ResponseOutputItem, ResponseOutputMessage,
+                                    ResponseOutputText, ResponseReasoningItem)
+from openai.types.responses.response_reasoning_item import (
+    Content as ResponseReasoningTextContent)
 from openai_harmony import Message as OpenAIHarmonyMessage
 
 from vllm import envs
@@ -19,26 +23,28 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption)
-from vllm.entrypoints.context import ConversationContext, SimpleContext
+from vllm.entrypoints.context import (ConversationContext, HarmonyContext,
+                                      SimpleContext, StreamingHarmonyContext)
 from vllm.entrypoints.harmony_utils import (
     get_developer_message, get_stop_tokens_for_assistant_actions,
-    get_system_message, get_user_message, parse_response_input,
-    render_for_completion)
+    get_system_message, get_user_message, parse_output_message,
+    parse_remaining_state, parse_response_input, render_for_completion)
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ErrorResponse,
-                                              PromptTokenUsageInfo,
+                                              InputTokensDetails,
+                                              OutputTokensDetails,
                                               RequestResponseMetadata,
-                                              ResponseReasoningItem,
                                               ResponsesRequest,
-                                              ResponsesResponse, UsageInfo)
+                                              ResponsesResponse, ResponseUsage)
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
+from vllm.outputs import CompletionOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -132,9 +138,6 @@ class OpenAIServingResponses(OpenAIServing):
                 "\"auto\" tool choice has been enabled please note that while"
                 " the parallel_tool_calls client option is preset for "
                 "compatibility reasons, it will be ignored.")
-            if not self.use_harmony:
-                raise NotImplementedError("Auto tool choice is not supported "
-                                          "yet unless using Harmony")
 
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
@@ -212,8 +215,8 @@ class OpenAIServingResponses(OpenAIServing):
                     await self._make_request(request, prev_response,
                                              tokenizer))
 
-        except (ValueError, TypeError, RuntimeError,
-                jinja2.TemplateError) as e:
+        except (ValueError, TypeError, RuntimeError, jinja2.TemplateError,
+                NotImplementedError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
 
@@ -224,88 +227,125 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[ConversationContext, None]] = []
-        try:
-            for i, engine_prompt in enumerate(engine_prompts):
-                default_max_tokens = self.max_model_len - len(
-                    engine_prompt["prompt_token_ids"])
-                sampling_params = request.to_sampling_params(
-                    default_max_tokens, self.default_sampling_params)
 
-                trace_headers = (None if raw_request is None else await
-                                 self._get_trace_headers(raw_request.headers))
+        builtin_tool_list: list[str] = []
+        if self.use_harmony and self.tool_server is not None:
+            if self.tool_server.has_tool("browser"):
+                builtin_tool_list.append("browser")
+            if self.tool_server.has_tool("python"):
+                builtin_tool_list.append("python")
+        async with AsyncExitStack() as exit_stack:
+            try:
+                if self.tool_server is not None:
+                    # TODO: initialize tool sessions lazily when the session
+                    # is actually used.
+                    tool_session_ctxs: dict[str, Any] = {
+                        tool_name:
+                        exit_stack.enter_async_context(
+                            self.tool_server.new_session(tool_name))
+                        for tool_name in builtin_tool_list
+                    }
+                    tool_sessions = {}
+                    for tool_name in builtin_tool_list:
+                        tool_sessions[tool_name] = (
+                            await tool_session_ctxs[tool_name])
+                else:
+                    assert len(builtin_tool_list) == 0
+                    tool_sessions = {}
+                for i, engine_prompt in enumerate(engine_prompts):
+                    default_max_tokens = self.max_model_len - len(
+                        engine_prompt["prompt_token_ids"])
+                    sampling_params = request.to_sampling_params(
+                        default_max_tokens, self.default_sampling_params)
 
-                context = SimpleContext()
-                generator = self._generate_with_builtin_tools(
-                    request_id=request.request_id,
-                    request_prompt=request_prompts[i],
-                    engine_prompt=engine_prompt,
-                    sampling_params=sampling_params,
-                    context=context,
-                    lora_request=lora_request,
-                    priority=request.priority,
-                    trace_headers=trace_headers,
+                    trace_headers = (None if raw_request is None else await
+                                     self._get_trace_headers(
+                                         raw_request.headers))
+
+                    context: ConversationContext
+                    if self.use_harmony:
+                        if request.stream:
+                            context = StreamingHarmonyContext(
+                                messages, tool_sessions)
+                        else:
+                            context = HarmonyContext(messages, tool_sessions)
+                    else:
+                        context = SimpleContext()
+                    generator = self._generate_with_builtin_tools(
+                        request_id=request.request_id,
+                        request_prompt=request_prompts[i],
+                        engine_prompt=engine_prompt,
+                        sampling_params=sampling_params,
+                        context=context,
+                        lora_request=lora_request,
+                        priority=request.priority,
+                        trace_headers=trace_headers,
+                    )
+                    generators.append(generator)
+            except ValueError as e:
+                # TODO: Use a vllm-specific Validation Error
+                return self.create_error_response(str(e))
+
+            assert len(generators) == 1
+            result_generator, = generators
+
+            # Store the input messages.
+            if request.store:
+                self.msg_store[request.request_id] = messages
+
+            if request.background:
+                created_time = int(time.time())
+                response = ResponsesResponse.from_request(
+                    request,
+                    sampling_params,
+                    model_name=model_name,
+                    created_time=created_time,
+                    output=[],
+                    status="queued",
+                    usage=None,
                 )
-                generators.append(generator)
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+                async with self.response_store_lock:
+                    self.response_store[response.id] = response
 
-        assert len(generators) == 1
-        result_generator, = generators
+                # Run the request in the background.
+                task = asyncio.create_task(
+                    self._run_background_request(
+                        request,
+                        sampling_params,
+                        result_generator,
+                        context,
+                        model_name,
+                        tokenizer,
+                        request_metadata,
+                        created_time,
+                    ),
+                    name=f"create_{response.id}",
+                )
 
-        # Store the input messages.
-        if request.store:
-            self.msg_store[request.request_id] = messages
+                # For cleanup.
+                response_id = response.id
+                self.background_tasks[response_id] = task
+                task.add_done_callback(
+                    lambda _: self.background_tasks.pop(response_id, None))
+                return response
 
-        if request.background:
-            created_time = int(time.time())
-            response = ResponsesResponse.from_request(
-                request,
-                sampling_params,
-                model_name=model_name,
-                created_time=created_time,
-                output=[],
-                status="queued",
-                usage=None,
-            )
-            async with self.response_store_lock:
-                self.response_store[response.id] = response
+            if request.stream:
+                raise NotImplementedError(
+                    "Streaming responses are not supported")
 
-            # Run the request in the background.
-            task = asyncio.create_task(
-                self._run_background_request(
+            try:
+                return await self.responses_full_generator(
                     request,
                     sampling_params,
                     result_generator,
+                    context,
                     model_name,
                     tokenizer,
                     request_metadata,
-                    created_time,
-                ),
-                name=f"create_{response.id}",
-            )
-
-            # For cleanup.
-            response_id = response.id
-            self.background_tasks[response_id] = task
-            task.add_done_callback(
-                lambda _: self.background_tasks.pop(response_id, None))
-            return response
-
-        if request.stream:
-            raise NotImplementedError("Streaming responses are not supported")
-
-        try:
-            return await self.responses_full_generator(
-                request,
-                sampling_params,
-                result_generator,
-                model_name,
-                tokenizer,
-                request_metadata,
-            )
-        except Exception as e:
-            return self.create_error_response(str(e))
+                )
+            except Exception as e:
+                return self.create_error_response(str(e))
+        return self.create_error_response("Should not reach here")
 
     async def _make_request(
         self,
@@ -313,6 +353,9 @@ class OpenAIServingResponses(OpenAIServing):
         prev_response: Optional[ResponsesResponse],
         tokenizer: AnyTokenizer,
     ):
+        if len(request.tools) > 0:
+            raise NotImplementedError(
+                "Tool use is not supported in Responses API without Harmony")
         # Construct the input messages.
         messages = self._construct_input_messages(request, prev_response)
         _, request_prompts, engine_prompts = await self._preprocess_chat(
@@ -344,6 +387,7 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         sampling_params: SamplingParams,
         result_generator: AsyncIterator[ConversationContext],
+        context: ConversationContext,
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
@@ -352,9 +396,8 @@ class OpenAIServingResponses(OpenAIServing):
         if created_time is None:
             created_time = int(time.time())
 
-        context: Optional[ConversationContext] = None
         try:
-            async for context in result_generator:
+            async for _ in result_generator:
                 pass
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
@@ -362,64 +405,40 @@ class OpenAIServingResponses(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        assert context is not None
-        assert isinstance(context, SimpleContext)
-        final_res = context.last_output
-        assert final_res is not None
-        assert len(final_res.outputs) == 1
-        final_output = final_res.outputs[0]
-
-        if self.reasoning_parser:
-            try:
-                reasoning_parser = self.reasoning_parser(tokenizer)
-            except RuntimeError as e:
-                logger.exception("Error in reasoning parser creation.")
-                return self.create_error_response(str(e))
-
-            reasoning_content, content = (
-                reasoning_parser.extract_reasoning_content(final_output.text,
-                                                           request=request))
+        if self.use_harmony:
+            assert isinstance(context, HarmonyContext)
+            output = self._make_response_output_items_with_harmony(context)
+            # TODO: these are all 0 for now!
+            num_prompt_tokens = context.num_prompt_tokens
+            num_generated_tokens = context.num_output_tokens
+            num_cached_tokens = context.num_cached_tokens
+            num_reasoning_tokens = context.num_reasoning_tokens
         else:
-            reasoning_content = None
-            content = final_output.text
+            assert isinstance(context, SimpleContext)
+            final_res = context.last_output
+            assert final_res is not None
+            assert len(final_res.outputs) == 1
+            final_output = final_res.outputs[0]
 
-        output = []
-        if reasoning_content:
-            reasoning_item = ResponseReasoningItem(
-                text=reasoning_content,
-                status=None,  # NOTE: Only the last output item has status.
-            )
-            output.append(reasoning_item)
-        if content:
-            output_text = ResponseOutputText(
-                text=content,
-                annotations=[],  # TODO
-                type="output_text",
-                logprobs=None,  # TODO
-            )
-            message = ResponseOutputMessage(
-                id=f"msg_{random_uuid()}",
-                content=[output_text],
-                role="assistant",
-                status="completed",
-                type="message",
-            )
-            output.append(message)
+            output = self._make_response_output_items(request, final_output,
+                                                      tokenizer)
 
-        # Calculate usage.
-        assert final_res.prompt_token_ids is not None
-        num_prompt_tokens = len(final_res.prompt_token_ids)
-        num_generated_tokens = len(final_output.token_ids)
-        usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            completion_tokens=num_generated_tokens,
+            # Calculate usage.
+            assert final_res.prompt_token_ids is not None
+            num_prompt_tokens = len(final_res.prompt_token_ids)
+            num_generated_tokens = len(final_output.token_ids)
+            num_cached_tokens = final_res.num_cached_tokens
+            num_reasoning_tokens = 0
+
+        usage = ResponseUsage(
+            input_tokens=num_prompt_tokens,
+            output_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
+            input_tokens_details=InputTokensDetails(
+                cached_tokens=num_cached_tokens),
+            output_tokens_details=OutputTokensDetails(
+                reasoning_tokens=num_reasoning_tokens),
         )
-        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
-            usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens)
-        request_metadata.final_usage_info = usage
-
         response = ResponsesResponse.from_request(
             request,
             sampling_params,
@@ -429,6 +448,35 @@ class OpenAIServingResponses(OpenAIServing):
             status="completed",
             usage=usage,
         )
+
+        if request.store:
+            async with self.response_store_lock:
+                stored_response = self.response_store.get(response.id)
+                # If the response is already cancelled, don't update it.
+                if (stored_response is None
+                        or stored_response.status != "cancelled"):
+                    self.response_store[response.id] = response
+        return response
+
+    def _make_response_output_items(
+        self,
+        request: ResponsesRequest,
+        final_output: CompletionOutput,
+        tokenizer: AnyTokenizer,
+    ) -> list[ResponseOutputItem]:
+        if self.reasoning_parser:
+            try:
+                reasoning_parser = self.reasoning_parser(tokenizer)
+            except RuntimeError as e:
+                logger.exception("Error in reasoning parser creation.")
+                raise e
+
+            reasoning_content, content = (
+                reasoning_parser.extract_reasoning_content(final_output.text,
+                                                           request=request))
+        else:
+            reasoning_content = None
+            content = final_output.text
 
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
@@ -448,14 +496,49 @@ class OpenAIServingResponses(OpenAIServing):
                     delta=False,
                 )
 
-        if request.store:
-            async with self.response_store_lock:
-                stored_response = self.response_store.get(response.id)
-                # If the response is already cancelled, don't update it.
-                if (stored_response is None
-                        or stored_response.status != "cancelled"):
-                    self.response_store[response.id] = response
-        return response
+        output = []
+        if reasoning_content:
+            reasoning_item = ResponseReasoningItem(
+                id=f"rs_{random_uuid()}",
+                summary=[],
+                type="reasoning",
+                content=[
+                    ResponseReasoningTextContent(text=reasoning_content,
+                                                 type="reasoning_text")
+                ],
+                status=None,  # NOTE: Only the last output item has status.
+            )
+            output.append(reasoning_item)
+        if content:
+            output_text = ResponseOutputText(
+                text=content,
+                annotations=[],  # TODO
+                type="output_text",
+                logprobs=None,  # TODO
+            )
+            message = ResponseOutputMessage(
+                id=f"msg_{random_uuid()}",
+                content=[output_text],
+                role="assistant",
+                status="completed",
+                type="message",
+            )
+            output.append(message)
+        return output
+
+    def _make_response_output_items_with_harmony(
+        self,
+        context: HarmonyContext,
+    ) -> list[ResponseOutputItem]:
+        output_items = []
+        num_init_messages = context.num_init_messages
+        for msg in context.messages[num_init_messages:]:
+            output_items.extend(parse_output_message(msg))
+        # Handle the generation stopped in the middle (if any).
+        last_items = parse_remaining_state(context.parser)
+        if last_items:
+            output_items.extend(last_items)
+        return output_items
 
     def _construct_input_messages(
         self,

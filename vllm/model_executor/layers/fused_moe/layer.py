@@ -36,7 +36,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import (direct_register_custom_op, has_deep_ep, has_pplx,
-                        round_up)
+                        has_triton_kernels, is_torch_equal_or_newer, round_up)
 from vllm.utils.flashinfer import has_flashinfer
 
 if current_platform.is_cuda_alike():
@@ -255,7 +255,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.fused_experts = fused_experts  # type: ignore
         self.topk_indices_dtype = None
         self.moe = moe
-
+        self.has_bias = self.moe.has_bias
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
         if self.rocm_aiter_moe_enabled:
             from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
@@ -291,7 +291,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
-
+        if self.has_bias:
+            w13_bias = torch.nn.Parameter(torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                dtype=params_dtype),
+                                          requires_grad=False)
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
         # down_proj (row parallel)
         w2_weight = torch.nn.Parameter(torch.empty(
             num_experts,
@@ -301,6 +308,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
+        if self.has_bias:
+            w2_bias = torch.nn.Parameter(torch.zeros(num_experts,
+                                                     hidden_size,
+                                                     dtype=params_dtype),
+                                         requires_grad=False)
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
@@ -465,6 +479,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
+                w1_bias=layer.w13_bias if self.has_bias else None,
+                w2_bias=layer.w2_bias if self.has_bias else None,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
@@ -702,6 +718,7 @@ class FusedMoE(torch.nn.Module):
         activation: str = "silu",
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
+        has_bias: bool = False,
     ):
         super().__init__()
         if params_dtype is None:
@@ -723,10 +740,17 @@ class FusedMoE(torch.nn.Module):
         self.global_num_experts = num_experts + num_redundant_experts
 
         # we padding globally so EP buffer allocation works
-        if quant_config and quant_config.get_name() == "mxfp4" and (
-                envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
-            hidden_size = round_up(hidden_size, 256)
+        if quant_config and quant_config.get_name() == "mxfp4":
+            if not is_torch_equal_or_newer("2.8.0"):
+                raise RuntimeError("Mxfp4 on hopper requires torch >= 2.8.0")
+            if current_platform.is_device_capability(
+                    90) and not has_triton_kernels():
+                raise NotImplementedError(
+                    "Triton kernels must be installed for mxfp4 on hopper")
+            if (current_platform.is_rocm()
+                    or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+                    or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+                hidden_size = round_up(hidden_size, 256)
 
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config
@@ -786,16 +810,15 @@ class FusedMoE(torch.nn.Module):
             # since model_config is not set in the pytest test.
             model_dtype = params_dtype
 
-        moe = FusedMoEConfig.make(
-            num_experts=self.global_num_experts,
-            experts_per_token=top_k,
-            hidden_dim=hidden_size,
-            num_local_experts=self.local_num_experts,
-            moe_parallel_config=self.moe_parallel_config,
-            in_dtype=model_dtype,
-            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
-            quant_config=quant_config,
-        )
+        moe = FusedMoEConfig.make(num_experts=self.global_num_experts,
+                                  experts_per_token=top_k,
+                                  hidden_dim=hidden_size,
+                                  num_local_experts=self.local_num_experts,
+                                  moe_parallel_config=self.moe_parallel_config,
+                                  in_dtype=model_dtype,
+                                  max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
+                                  quant_config=quant_config,
+                                  has_bias=has_bias)
         self.moe_config = moe
         self.quant_config = quant_config
 
@@ -1570,18 +1593,19 @@ class FusedMoE(torch.nn.Module):
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
         moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
         num_tokens = full_hidden_states.size(0)
-        for chunk_start_ in range(0, max_tokens_across_dp,
-                                  moe_dp_chunk_size_per_rank):
+        for chunk_idx, chunk_start_ in enumerate(
+                range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank)):
             chunk_start = chunk_start_
             chunk_end = min(chunk_start + moe_dp_chunk_size_per_rank,
                             max_tokens_across_dp)
             # clamp start and end
             chunk_start = min(chunk_start, num_tokens - 1)
             chunk_end = min(chunk_end, num_tokens)
-
-            process_chunk(chunk_start,
-                          chunk_end,
-                          skip_result_store=chunk_start_ >= num_tokens)
+            with ctx.dp_metadata.chunked_sizes(moe_dp_chunk_size_per_rank,
+                                               chunk_idx):
+                process_chunk(chunk_start,
+                              chunk_end,
+                              skip_result_store=chunk_start_ >= num_tokens)
 
         return full_final_hidden_states
 
