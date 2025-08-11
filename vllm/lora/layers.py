@@ -1218,6 +1218,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def _inject_lora_into_fused_moe(self):
         base_layer = self.base_layer
         base_layer._lora = {}
+        top_k = base_layer.top_k
 
         def fwd_decorator(layer, func):
 
@@ -1241,11 +1242,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             def wrapper(*args, **kwargs):
                 hidden_states = layer._lora["hidden_states"]
                 topk_weights = layer._lora["topk_weights"]
-                #TODO chunk
                 curr_topk_ids = layer._lora["topk_ids"]
                 global_num_experts = layer._lora["global_num_experts"]
                 expert_map = layer._lora["expert_map"]
-                top_k = 6
 
                 (token_lora_mapping, _, _, _, _,
                  _) = layer.punica_wrapper.token_mapping_meta.meta_args(
@@ -1311,9 +1310,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
                 hidden_states = layer._lora["hidden_states"]
                 topk_weights = layer._lora["topk_weights"]
-                #TODO chunk
                 curr_topk_ids = layer._lora["topk_ids"]
-                top_k = 6
 
                 config_dtype = get_config_dtype_str(use_fp8_w8a8=False,
                                                     use_int8_w8a16=False,
