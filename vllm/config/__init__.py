@@ -1205,17 +1205,7 @@ class ModelConfig:
             self.enforce_eager = True
 
     def _verify_with_expert_parallelism(self) -> None:
-        num_expert_names = [
-            "moe_num_experts",  # Dbrx
-            "num_experts",  # Jamba
-            "n_routed_experts",  # DeepSeek
-            "num_local_experts",  # Mixtral
-        ]
-        num_experts = 0
-        for name in num_expert_names:
-            num_experts = getattr(self.hf_text_config, name, 0)
-            if num_experts > 0:
-                break
+        num_experts = self.get_num_experts()
         if num_experts < 1:
             raise ValueError(
                 "Number of experts in the model must be greater than 0 "
@@ -1428,6 +1418,21 @@ class ModelConfig:
                                 parallel_config: "ParallelConfig") -> int:
         num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
         return num_heads // parallel_config.tensor_parallel_size
+
+    def get_num_experts(self) -> int:
+        """Returns the number of experts in the model."""
+        num_expert_names = [
+            "moe_num_experts",  # Dbrx
+            "num_experts",  # Jamba
+            "n_routed_experts",  # DeepSeek
+            "num_local_experts",  # Mixtral
+        ]
+        num_experts = 0
+        for name in num_expert_names:
+            num_experts = getattr(self.hf_text_config, name, 0)
+            if num_experts > 0:
+                break
+        return num_experts
 
     def get_layers_start_end_indices(
             self, parallel_config: "ParallelConfig") -> tuple[int, int]:
