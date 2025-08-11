@@ -34,9 +34,8 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              KimiVLConfig, MedusaConfig,
                                              MllamaConfig, MLPSpeculatorConfig,
                                              Nemotron_Nano_VL_Config,
-                                             NemotronConfig, NVLM_D_Config,
-                                             OvisConfig, RWConfig,
-                                             SpeculatorsConfig,
+                                             NemotronConfig, OvisConfig,
+                                             RWConfig, SpeculatorsConfig,
                                              Step3TextConfig, Step3VLConfig,
                                              UltravoxConfig)
 # yapf: enable
@@ -85,7 +84,6 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "eagle": EAGLEConfig,
     "speculators": SpeculatorsConfig,
     "nemotron": NemotronConfig,
-    "NVLM_D": NVLM_D_Config,
     "ovis": OvisConfig,
     "ultravox": UltravoxConfig,
     "step3_vl": Step3VLConfig,
@@ -313,7 +311,6 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
         if hasattr(config, old_attr):
             if not hasattr(config, new_attr):
                 config.update({new_attr: getattr(config, old_attr)})
-            delattr(config, old_attr)
             logger.debug("Remapped config attribute '%s' to '%s'", old_attr,
                          new_attr)
     return config
