@@ -1138,6 +1138,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     i, target_slice] = valid_sampled_token_ids[i]
                 req_state.output_token_ids.extend(valid_sampled_token_ids[i])
 
+        kv_connector_output = None if (
+            finished_sending is None
+            and finished_recving is None) else KVConnectorOutput(
+                finished_sending=finished_sending,
+                finished_recving=finished_recving,
+            )
+
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -1146,10 +1153,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
-            kv_connector_output=KVConnectorOutput(
-                finished_sending=finished_sending,
-                finished_recving=finished_recving,
-            ))
+            kv_connector_output=kv_connector_output,
+        )
 
         # Check there are no new graphs compiled - all the graphs should be
         # captured and compiled during warm up.
