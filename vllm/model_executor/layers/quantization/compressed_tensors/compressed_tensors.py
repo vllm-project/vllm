@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, cast
 
-import math
 import torch
 from compressed_tensors.config import (CompressionFormat,
                                        SparsityCompressionConfig,
@@ -17,7 +17,6 @@ from compressed_tensors.transform import (TransformArgs, TransformBase,
                                           TransformLocation, TransformScheme,
                                           apply_transform_weight)
 from pydantic import BaseModel
-from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -42,10 +41,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported)
+from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.parameter import ModelWeightParameter, ShardedModelWeightParameter
+from vllm.model_executor.parameter import ShardedModelWeightParameter
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -501,7 +501,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         # This will get a cutlass scheme if applicable
         # if quantized + transform, attach the scheme like normal but get a
         # TransformedLinearMethod which subclasses/wraps CTLinearMethod
-
         """
         compressed-tensors supports non uniform in the following way:
 
@@ -554,7 +553,6 @@ class CompressedTensorsConfig(QuantizationConfig):
                     f"config groups for the layer {layer_name}")
 
             return new or original
-        
 
         def get_shard_id_of_matches(layer_name, targets, fused):
             if fused is not None:
@@ -563,9 +561,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                         name_stripped = name.removesuffix(fused_suffix)
                         return any(
                             _match_name(name_stripped + shard_suffix, target)
-                            for shard_suffix in fused[fused_suffix]
-                        )
-
+                            for shard_suffix in fused[fused_suffix])
 
         input_tfm = None
         output_tfm = None
@@ -577,17 +573,23 @@ class CompressedTensorsConfig(QuantizationConfig):
                                 args.targets,
                                 args.ignore,
                                 fused=self.packed_modules_mapping):
-                        
+
                         shard_ids = set()
                         for ending in self.packed_modules_mapping:
                             if layer_name.endswith(ending):
-                                for shard_id, shard_ending in enumerate(self.packed_modules_mapping[ending]):
-                                    thing = layer_name.removesuffix(ending) + shard_ending
-                                    if is_match(thing, layer, args.targets, args.ignore):
-                                        print(f"matched {thing} {args.targets}")
+                                for shard_id, shard_ending in enumerate(
+                                        self.packed_modules_mapping[ending]):
+                                    thing = layer_name.removesuffix(
+                                        ending) + shard_ending
+                                    if is_match(thing, layer, args.targets,
+                                                args.ignore):
+                                        print(
+                                            f"matched {thing} {args.targets}")
                                         shard_ids.add(shard_id)
                                     else:
-                                        print(f"NO matched {thing} {args.targets}")
+                                        print(
+                                            f"NO matched {thing} {args.targets}"
+                                        )
 
                         if len(shard_ids) == 0:
                             shard_ids.add(0)
@@ -750,13 +752,13 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
         # prob need to use output_partition_sizes, input_size_per_partition
         # if input size, use (input_size_per_partition, input_size_per_partition)
 
-        # Maybe parameter with multiple datas? It's one parameter, so the weight loader will choose it for loading
-        # but it has mutliple datas, which can be shared tensors
-        
+        # Maybe parameter with multiple data? It's one parameter, so the weight loader will choose it for loading
+        # but it has mutliple data, which can be shared tensors
+
         # trying to create multiple parameters for a fused layer seems like a bad time
         # and might require having to edit the weight loader of every model
 
-        # at runtime, we can detect if the multiple datas are identical, if so save some computation
+        # at runtime, we can detect if the multiple data are identical, if so save some computation
         # otherwise, do some slicing and perform ops in linear.
 
         # Since I think the weight loading is as optimal as it can get, we can consider optimizing the application later
@@ -779,7 +781,8 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
                 if args.location == TransformLocation.INPUT:
                     # there's an optimization to be done if the input tensors are exactly the same
                     # also stacking
-                    weight_shape = (input_size_per_partition, input_size_per_partition)
+                    weight_shape = (input_size_per_partition,
+                                    input_size_per_partition)
 
                 elif args.location == TransformLocation.OUTPUT:
                     weight_shape = (output_shape, output_shape)
@@ -792,9 +795,9 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
 
             else:
                 raise ValueError()
-            
+
             # TODO: do not create if args are not targeting this shard
-            key = (weight_shape, )
+            key = (id(scheme), weight_shape, )
             if key not in registry:
                 registry[key] = torch.eye(  # TODO: change back to empty
                     weight_shape[0],
@@ -802,20 +805,19 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
                     device=layer.weight.device,
                     #dtype=asdf_args.get("params_dtype"),
                 )
-            
+
             p = torch.nn.Parameter(
                 data=registry[key],
                 #input_dim=1,
                 #output_dim=0,
                 #weight_loader=default_weight_loader
-
                 requires_grad=False,
             )
-            
+
             # TODO: use set_weight_attrs
             p.input_dim = 1
             p.output_dim = 0
-            # p.weight_loader = lambda *args, **kwargs: None 
+            # p.weight_loader = lambda *args, **kwargs: None
             p.weight_loader = default_weight_loader
             #set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
 
