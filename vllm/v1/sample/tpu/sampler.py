@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sampler layer implementing TPU supported operations."""
 
 import torch
@@ -14,6 +15,7 @@ _SAMPLING_EPS = 1e-5
 class Sampler(nn.Module):
 
     def __init__(self):
+        # TODO(houseroad): Add support for logprobs_mode.
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler()
 

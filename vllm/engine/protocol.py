@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 from abc import ABC, abstractmethod
@@ -15,7 +16,6 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Device, collect_from_async_generator, random_uuid
@@ -54,7 +54,6 @@ class EngineClient(ABC):
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
@@ -87,9 +86,18 @@ class EngineClient(ABC):
         if processed_inputs["type"] == "embeds":
             raise NotImplementedError
 
-        prompt_token_ids = processed_inputs["prompt_token_ids"]
+        # This is a workaround to fix multimodal beam search; this is a
+        # bandaid fix for 2 small problems:
+        # 1. Multi_modal_data on the processed_inputs currently resolves to
+        #    `None`.
+        # 2. preprocessing above expands the multimodal placeholders. However,
+        #    this happens again in generation, so the double expansion causes
+        #    a mismatch.
+        # TODO - would be ideal to handle this more gracefully.
+        prompt_token_ids = prompt.get("prompt_token_ids")
+        multi_modal_data = prompt.get("multi_modal_data")
+
         prompt_text = processed_inputs.get("prompt")
-        multi_modal_data = processed_inputs.get("multi_modal_data")
         mm_processor_kwargs = processed_inputs.get("mm_processor_kwargs")
 
         tokenized_length = len(prompt_token_ids)
@@ -314,3 +322,9 @@ class EngineClient(ABC):
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""
         ...
+
+    async def scale_elastic_ep(self,
+                               new_data_parallel_size: int,
+                               drain_timeout: int = 300) -> None:
+        """Scale the engine"""
+        raise NotImplementedError

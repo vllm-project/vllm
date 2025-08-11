@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 from dataclasses import dataclass
@@ -14,8 +15,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.neuron import get_neuron_model
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalKwargs)
+from vllm.multimodal import BatchedTensorInputs, MultiModalKwargs
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
@@ -86,10 +86,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         self.lora_config = vllm_config.lora_config
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
-
-        # Multi-modal data support
-        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
-            .create_input_mapper(self.model_config)
 
         # Lazy initialization.
         self.model: nn.Module  # initialize after load_model.
@@ -169,6 +165,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
             mm_kwargs = seq_group_metadata.multi_modal_data
             if mm_kwargs:
+                mm_kwargs = self.process_multi_modal_data_neuron(mm_kwargs)
                 multi_modal_kwargs_list.append(mm_kwargs)
 
         max_seq_len = max(seq_lens)
@@ -273,6 +270,14 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 sampling_params.top_k = top_k
                 sampling_params.top_p = top_p
                 sampling_params.temperature = temperature
+
+        # we need multi_modal_data for later tokens as well
+        multi_modal_kwargs_list: List[MultiModalKwargs] = []
+        for seq_group_metadata in seq_group_metadata_list:
+            mm_data = seq_group_metadata.multi_modal_data
+            if mm_data:
+                multi_modal_kwargs_list.append(mm_data)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
@@ -385,7 +390,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 adapter_ids=model_input.adapter_ids,
                 **MultiModalKwargs.as_kwargs(
                     model_input.multi_modal_kwargs or {},
-                    dtype=self.model_config.dtype,
                     device=self.device,
                 ),
             )
@@ -398,7 +402,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 input_block_ids=model_input.input_block_ids,
                 **MultiModalKwargs.as_kwargs(
                     model_input.multi_modal_kwargs or {},
-                    dtype=self.model_config.dtype,
                     device=self.device,
                 ),
             )
@@ -421,6 +424,10 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
+
+    def process_multi_modal_data_neuron(self, mm_data):
+        # this is a no-op for NeuronModelRunner
+        return mm_data
 
     def remove_all_loras(self):
         raise NotImplementedError(

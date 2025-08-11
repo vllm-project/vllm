@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import openai  # use the official client for correctness check
 import pytest
@@ -25,8 +26,6 @@ def server():
         "--enable-chunked-prefill",
         "--max-num-batched-tokens",
         "1000",
-        # large prompts create a lot of output
-        "--disable-log-requests",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

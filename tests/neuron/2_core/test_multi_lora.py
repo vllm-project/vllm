@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from huggingface_hub import snapshot_download
 
@@ -13,7 +14,6 @@ def test_llama_single_lora():
               tensor_parallel_size=2,
               max_num_seqs=4,
               max_model_len=512,
-              use_v2_block_manager=True,
               override_neuron_config={
                   "sequence_parallel_enabled": False,
                   "skip_warmup": True,
@@ -56,7 +56,6 @@ def test_llama_multiple_lora():
               tensor_parallel_size=2,
               max_num_seqs=4,
               max_model_len=512,
-              use_v2_block_manager=True,
               override_neuron_config={
                   "sequence_parallel_enabled":
                   False,

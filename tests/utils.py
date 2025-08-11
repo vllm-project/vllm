@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import copy
 import functools
+import importlib
 import os
 import signal
 import subprocess
@@ -15,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Union
 
 import cloudpickle
+import httpx
 import openai
 import pytest
 import requests
@@ -86,10 +89,12 @@ class RemoteOpenAIServer:
                 raise ValueError("You have manually specified the port "
                                  "when `auto_port=True`.")
 
-            # Don't mutate the input args
-            vllm_serve_args = vllm_serve_args + [
-                "--port", str(get_open_port())
-            ]
+            # No need for a port if using unix sockets
+            if "--uds" not in vllm_serve_args:
+                # Don't mutate the input args
+                vllm_serve_args = vllm_serve_args + [
+                    "--port", str(get_open_port())
+                ]
         if seed is not None:
             if "--seed" in vllm_serve_args:
                 raise ValueError("You have manually specified the seed "
@@ -102,8 +107,13 @@ class RemoteOpenAIServer:
         subparsers = parser.add_subparsers(required=False, dest="subparser")
         parser = ServeSubcommand().subparser_init(subparsers)
         args = parser.parse_args(["--model", model, *vllm_serve_args])
-        self.host = str(args.host or 'localhost')
-        self.port = int(args.port)
+        self.uds = args.uds
+        if args.uds:
+            self.host = None
+            self.port = None
+        else:
+            self.host = str(args.host or 'localhost')
+            self.port = int(args.port)
 
         self.show_hidden_metrics = \
             args.show_hidden_metrics_for_version is not None
@@ -148,9 +158,11 @@ class RemoteOpenAIServer:
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check
         start = time.time()
+        client = (httpx.Client(transport=httpx.HTTPTransport(
+            uds=self.uds)) if self.uds else requests)
         while True:
             try:
-                if requests.get(url).status_code == 200:
+                if client.get(url).status_code == 200:
                     break
             except Exception:
                 # this exception can only be raised by requests.get,
@@ -168,7 +180,8 @@ class RemoteOpenAIServer:
 
     @property
     def url_root(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        return (f"http://{self.uds.split('/')[-1]}"
+                if self.uds else f"http://{self.host}:{self.port}")
 
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)
@@ -666,42 +679,54 @@ def get_physical_device_indices(devices):
 
 
 @_nvml()
-def wait_for_gpu_memory_to_clear(devices: list[int],
-                                 threshold_bytes: int,
+def wait_for_gpu_memory_to_clear(*,
+                                 devices: list[int],
+                                 threshold_bytes: Optional[int] = None,
+                                 threshold_ratio: Optional[float] = None,
                                  timeout_s: float = 120) -> None:
+    assert threshold_bytes is not None or threshold_ratio is not None
     # Use nvml instead of pytorch to reduce measurement error from torch cuda
     # context.
     devices = get_physical_device_indices(devices)
     start_time = time.time()
     while True:
         output: dict[int, str] = {}
-        output_raw: dict[int, float] = {}
+        output_raw: dict[int, tuple[float, float]] = {}
         for device in devices:
             if current_platform.is_rocm():
                 dev_handle = amdsmi_get_processor_handles()[device]
                 mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
                 gb_used = mem_info["vram_used"] / 2**10
+                gb_total = mem_info["vram_total"] / 2**10
             else:
                 dev_handle = nvmlDeviceGetHandleByIndex(device)
                 mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
                 gb_used = mem_info.used / 2**30
-            output_raw[device] = gb_used
-            output[device] = f'{gb_used:.02f}'
+                gb_total = mem_info.total / 2**30
+            output_raw[device] = (gb_used, gb_total)
+            output[device] = f'{gb_used:.02f}/{gb_total:.02f}'
 
-        print('gpu memory used (GB): ', end='')
+        print('gpu memory used/total (GiB): ', end='')
         for k, v in output.items():
             print(f'{k}={v}; ', end='')
         print('')
 
+        if threshold_bytes is not None:
+            is_free = lambda used, total: used <= threshold_bytes / 2**30
+            threshold = f"{threshold_bytes/2**30} GiB"
+        else:
+            is_free = lambda used, total: used / total <= threshold_ratio
+            threshold = f"{threshold_ratio:.2f}"
+
         dur_s = time.time() - start_time
-        if all(v <= (threshold_bytes / 2**30) for v in output_raw.values()):
+        if all(is_free(used, total) for used, total in output_raw.values()):
             print(f'Done waiting for free GPU memory on devices {devices=} '
-                  f'({threshold_bytes/2**30=}) {dur_s=:.02f}')
+                  f'({threshold=}) {dur_s=:.02f}')
             break
 
         if dur_s >= timeout_s:
             raise ValueError(f'Memory of devices {devices=} not free after '
-                             f'{dur_s=:.02f} ({threshold_bytes/2**30=})')
+                             f'{dur_s=:.02f} ({threshold=})')
 
         time.sleep(5)
 
@@ -805,14 +830,15 @@ def create_new_process_for_each_test(
 
     Args:
         method: The process creation method. Can be either "spawn" or "fork". 
-               If not specified,
-               it defaults to "spawn" on ROCm platforms and "fork" otherwise.
+               If not specified, it defaults to "spawn" on ROCm and XPU
+               platforms and "fork" otherwise.
 
     Returns:
         A decorator to run test functions in separate processes.
     """
     if method is None:
-        method = "spawn" if current_platform.is_rocm() else "fork"
+        use_spawn = current_platform.is_rocm() or current_platform.is_xpu()
+        method = "spawn" if use_spawn else "fork"
 
     assert method in ["spawn",
                       "fork"], "Method must be either 'spawn' or 'fork'"
@@ -960,3 +986,30 @@ def get_client_text_logprob_generations(
     return [(text_generations, text,
              (None if x.logprobs is None else x.logprobs.top_logprobs))
             for completion in completions for x in completion.choices]
+
+
+def has_module_attribute(module_name, attribute_name):
+    """
+    Helper function to check if a module has a specific attribute.
+    """
+    try:
+        module = importlib.import_module(module_name)
+        return hasattr(module, attribute_name)
+    except ImportError:
+        return False
+
+
+def get_attn_backend_list_based_on_platform() -> list[str]:
+    if current_platform.is_cuda():
+        return ["FLASH_ATTN_VLLM_V1", "TRITON_ATTN_VLLM_V1", "TREE_ATTN"]
+    elif current_platform.is_rocm():
+        attn_backend_list = ["TRITON_ATTN_VLLM_V1"]
+        try:
+            import aiter  # noqa: F401
+            attn_backend_list.append("FLASH_ATTN_VLLM_V1")
+        except Exception:
+            print("Skip FLASH_ATTN_VLLM_V1 on ROCm as aiter is not installed")
+
+        return attn_backend_list
+    else:
+        raise ValueError("Unsupported platform")

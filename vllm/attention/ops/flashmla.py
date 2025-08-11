@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # adapted from: https://github.com/deepseek-ai/FlashMLA/blob/main/flash_mla/flash_mla_interface.py
 from typing import Optional, Tuple
 
@@ -90,7 +91,6 @@ def flash_mla_with_kvcache(
     out, softmax_lse = torch.ops._flashmla_C.fwd_kvcache_mla(
         q,
         k_cache,
-        None,
         head_dim_v,
         cache_seqlens,
         block_table,

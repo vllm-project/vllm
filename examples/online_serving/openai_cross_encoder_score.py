@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Example online usage of Score API.
 
-Run `vllm serve <model> --task score` to start up the server in vLLM.
+Run `vllm serve <model> --runner pooling` to start up the server in vLLM.
 """
 
 import argparse

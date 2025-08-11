@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility methods for model layers."""
 from typing import Callable, Optional
 
@@ -7,6 +8,28 @@ import torch
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op
+
+
+def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
+    # Shuffle weight along the last dimension so that
+    # we folded the weights to adjance location
+    # Example:
+    # input:
+    #       [[1, 2, 3, 4, 5, 6],
+    #        [7, 8, 9, 10, 11, 12]]
+    # output:
+    #       [[1, 4, 2, 5, 3, 6],
+    #        [7, 10, 8, 11, 9, 12]]
+    # This will be used together with triton swiglu kernel
+    shape = w.shape
+    N = shape[-1]
+    first = w[..., :N // 2]
+    second = w[..., N // 2:]
+
+    stacked = torch.stack((first, second), dim=-1)
+    w_shuffled = stacked.reshape(shape)
+    return w_shuffled
 
 
 def get_token_bin_counts_and_mask(
@@ -49,16 +72,11 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
                                                    vocab_size, num_seqs)
     output_bin_counts, output_mask = get_token_bin_counts_and_mask(
         output_tokens_tensor, vocab_size, num_seqs)
-    repetition_penalties = repetition_penalties.unsqueeze(dim=1).repeat(
-        1, vocab_size)
 
-    # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
-    penalties = torch.where(prompt_mask | output_mask, repetition_penalties,
-                            1.0)
-
-    # If logits are positive, divide by penalty, otherwise multiply by penalty.
-    scaling = torch.where(logits > 0, 1.0 / penalties, penalties)
-    logits *= scaling
+    # Apply repetition penalties as a custom op
+    from vllm._custom_ops import apply_repetition_penalties
+    apply_repetition_penalties(logits, prompt_mask, output_mask,
+                               repetition_penalties)
 
     # We follow the definition in OpenAI API.
     # Refer to https://platform.openai.com/docs/api-reference/parameter-details
@@ -67,12 +85,20 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
     return logits
 
 
-def rocm_unquantized_gemm(x: torch.Tensor,
-                          weight: torch.Tensor,
-                          bias: Optional[torch.Tensor] = None):
-    from vllm.platforms.rocm import on_mi250_mi300
+def default_unquantized_gemm(layer: torch.nn.Module,
+                             x: torch.Tensor,
+                             weight: torch.Tensor,
+                             bias: Optional[torch.Tensor] = None):
+    return torch.nn.functional.linear(x, weight, bias)
+
+
+def rocm_unquantized_gemm_impl(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    from vllm.platforms.rocm import on_gfx9
     k = weight.shape[1]
-    use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and on_mi250_mi300() and \
+    use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and on_gfx9() and \
                     x.dtype in [torch.float16, torch.bfloat16] \
                     and k % 8 == 0 and bias is None)
 
@@ -93,7 +119,43 @@ def rocm_unquantized_gemm(x: torch.Tensor,
     return torch.nn.functional.linear(x, weight, bias)
 
 
+def rocm_unquantized_gemm_impl_fake(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
+
+
+def rocm_unquantized_gemm(layer: torch.nn.Module,
+                          x: torch.Tensor,
+                          weight: torch.Tensor,
+                          bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    return torch.ops.vllm.rocm_unquantized_gemm_impl(x, weight, bias)
+
+
+direct_register_custom_op(
+    op_name="rocm_unquantized_gemm_impl",
+    op_func=rocm_unquantized_gemm_impl,
+    mutates_args=[],
+    fake_impl=rocm_unquantized_gemm_impl_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
+
+
+def cpu_unquantized_gemm(layer: torch.nn.Module,
+                         x: torch.Tensor,
+                         weight: torch.Tensor,
+                         bias: Optional[torch.Tensor] = None):
+    if getattr(layer, "use_cpu_sgl", False):
+        return torch.ops._C.weight_packed_linear(x, weight, bias, True)
+    else:
+        return torch.nn.functional.linear(x, weight, bias)
+
+
 def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
     if current_platform.is_rocm():
         return rocm_unquantized_gemm
-    return torch.nn.functional.linear
+    elif current_platform.is_cpu():
+        return cpu_unquantized_gemm
+    else:
+        return default_unquantized_gemm
