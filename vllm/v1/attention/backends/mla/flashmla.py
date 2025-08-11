@@ -6,9 +6,7 @@ from typing import ClassVar, Optional
 
 import torch
 
-from vllm.attention.backends.abstract import (AttentionLayer,
-                                              AttentionType,
-                                              is_quantized_kv_cache)
+from vllm.attention.backends.abstract import AttentionLayer, AttentionType
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
                                          is_flashmla_supported)
@@ -189,8 +187,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             num_splits=attn_metadata.decode.num_splits,
             softmax_scale=self.scale,
             causal=True,
-            descale_q=layer._q_scale,
-            descale_k=layer._k_scale,
+            descale_q=layer._q_scale.reshape(1),
+            descale_k=layer._k_scale.reshape(1),
         )
 
         return self._v_up_proj(o)
