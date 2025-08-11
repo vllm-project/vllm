@@ -61,14 +61,14 @@ def _can_support_mxfp4(use_grouped_topk: bool = False,
                        e_score_correction_bias: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        scoring_func: str = "softmax",
-                       activation: str = "silu",
+                       activation: str = "swiglu_oai",
                        expert_load_view: Optional[torch.Tensor] = None,
                        logical_to_physical_map: Optional[torch.Tensor] = None,
                        logical_replica_count: Optional[torch.Tensor] = None):
     return not (use_grouped_topk or topk_group or num_expert_group
                 or expert_map or custom_routing_function
                 or e_score_correction_bias or apply_router_weight_on_input
-                or scoring_func != "softmax" or activation != "silu"
+                or scoring_func != "softmax" or activation != "swiglu_oai"
                 or expert_load_view or logical_to_physical_map
                 or logical_replica_count)
 
