@@ -309,8 +309,8 @@ def _quant_flags_to_group_shape(
 def fp8_w8a8_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    a1_scale: Optional[torch.Tensor],
-    a2_scale: Optional[torch.Tensor],
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
     block_shape: Optional[list[int]] = None,

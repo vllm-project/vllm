@@ -623,10 +623,10 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_config: Optional[FusedMoEQuantConfig] = None,
     ):
         super().__init__(quant_config)
-        assert not self.use_int8_w8a8, "NYI"
-        assert not self.use_int8_w8a16, "NYI"
-        assert not self.use_int4_w4a16, "NYI"
-        assert not self.use_mxfp4_w4a4, "NYI"
+        assert not self.quant_config.use_int8_w8a8, "NYI"
+        assert not self.quant_config.use_int8_w8a16, "NYI"
+        assert not self.quant_config.use_int4_w4a16, "NYI"
+        assert not self.quant_config.use_mxfp4_w4a4, "NYI"
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -820,10 +820,10 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_config: Optional[FusedMoEQuantConfig] = None,
     ):
         super().__init__(quant_config)
-        assert not self.use_int8_w8a8, "NYI"
-        assert not self.use_int8_w8a16, "NYI"
-        assert not self.use_int4_w4a16, "NYI"
-        assert not self.use_mxfp4_w4a4, "NYI"
+        assert not self.quant_config.use_int8_w8a8, "NYI"
+        assert not self.quant_config.use_int8_w8a16, "NYI"
+        assert not self.quant_config.use_int4_w4a16, "NYI"
+        assert not self.quant_config.use_mxfp4_w4a4, "NYI"
         assert max_num_tokens > 0
         assert num_dispatchers > 0
         self.max_num_tokens = max_num_tokens
@@ -885,7 +885,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         apply_router_weight_on_input: bool,
     ):
         # Check constraints.
-        if self.use_int4_w4a16:
+        if self.quant_config.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), (
                 "Hidden size mismatch")
         else:
@@ -940,7 +940,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         intermediate_cache2 = _resize_cache(workspace2,
                                             (E, max_num_tokens, N // 2))
 
-        if self.use_fp8_w8a8:
+        if self.quant_config.use_fp8_w8a8:
             intermediate_cache1.fill_(0)
 
         a1q_scale = normalize_batched_scales_shape(a1q_scale, E)
@@ -954,10 +954,10 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             compute_type=compute_type,
             A_scale=a1q_scale,
             B_scale=self.w1_scale,
-            B_zp=self.w1_zp,
-            use_fp8_w8a8=self.use_fp8_w8a8,
-            use_int8_w8a16=self.use_int8_w8a16,
-            use_int4_w4a16=self.use_int4_w4a16,
+            B_zp=self.quant_config.w1_zp,
+            use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
+            use_int8_w8a16=self.quant_config.use_int8_w8a16,
+            use_int4_w4a16=self.quant_config.use_int4_w4a16,
             config=config,
             per_act_token_quant=self.per_act_token_quant,
             block_shape=self.block_shape)
@@ -981,10 +981,10 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             compute_type=compute_type,
             A_scale=a2q_scale,
             B_scale=self.w2_scale,
-            B_zp=self.w2_zp,
-            use_fp8_w8a8=self.use_fp8_w8a8,
-            use_int8_w8a16=self.use_int8_w8a16,
-            use_int4_w4a16=self.use_int4_w4a16,
+            B_zp=self.quant_config.w2_zp,
+            use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
+            use_int8_w8a16=self.quant_config.use_int8_w8a16,
+            use_int4_w4a16=self.quant_config.use_int4_w4a16,
             config=config,
             per_act_token_quant=self.per_act_token_quant,
             block_shape=self.block_shape)
