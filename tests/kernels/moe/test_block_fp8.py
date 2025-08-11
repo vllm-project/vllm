@@ -181,8 +181,8 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
             a,
             w1,
             w2,
-            w1_s,
-            w2_s,
+            quant_config.w1_scale,
+            quant_config.w2_scale,
             topk_weights,
             topk_ids,
             block_size,
@@ -194,20 +194,14 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
             w2,
             topk_weights,
             topk_ids,
-            use_fp8_w8a8=True,
-            w1_scale=w1_s,
-            w2_scale=w2_s,
-            block_shape=block_size,
-        )
+            quant_config=quant_config)
 
         m_out = m_fused_moe(
             a,
             w1,
             w2,
             topk_weights,
-            topk_ids,
-            w1_scale=w1_s,
-            w2_scale=w2_s,
+            topk_ids
         )
 
     # 0.039 only needed for [40000-4608-7168-2-1-block_size852-dtype852-0]

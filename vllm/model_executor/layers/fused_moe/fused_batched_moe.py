@@ -910,7 +910,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert w1.size(0) == E
         assert w2.size(0) == E
 
-        config_dtype = self.quant_config.config_name()
+        config_dtype = self.quant_config.config_name(hidden_states.dtype)
 
         config = try_get_optimal_moe_config(
             w1.size(),

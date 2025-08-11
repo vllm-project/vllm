@@ -113,11 +113,15 @@ class FusedMoEQuantConfig:
 
     @property
     def is_per_act_token(self) -> bool:
-        assert self.a1.shape == GroupShape.PER_TOKEN
+        return self.a1.shape == GroupShape.PER_TOKEN
+
+    @property
+    def per_act_token_quant(self) -> bool:
+        return self.a1.shape == GroupShape.PER_TOKEN
 
     @property
     def is_per_tensor(self) -> bool:
-        assert self.a1.shape == GroupShape.PER_TENSOR
+        return self.a1.shape == GroupShape.PER_TENSOR
 
     @property
     def block_shape(self) -> Optional[list[int]]:
@@ -211,7 +215,6 @@ class FusedMoEQuantConfig:
     def use_nvfp4_w4a4(self) -> bool:
         return self.quant_dtype == "nvfp4"
 
-    @property
     def config_name(self, dtype: torch.dtype) -> Optional[str]:
         return _get_config_dtype_str(
             use_fp8_w8a8=self.use_fp8_w8a8,
