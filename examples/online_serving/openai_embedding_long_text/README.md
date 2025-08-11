@@ -184,5 +184,3 @@ The new `max_embed_len` parameter provides:
 - **Extreme Length Support**: Process documents with millions of tokens
 - **Clear Error Messages**: Better feedback when inputs exceed limits
 - **Backward Compatibility**: Existing configurations continue to work
-
-
