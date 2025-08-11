@@ -355,6 +355,9 @@ def check_accuracy(a, b, atol, rtol, percent):
 @pytest.mark.parametrize("alpha,beta,limit", [(1.0, 1.0, None),
                                               (1.702, 1.0, 7.0)])
 @pytest.mark.parametrize("act_type", ['mxfp8', 'bf16'])
+@pytest.mark.skipif(
+    not TRTLLM_GEN_MXFP4_AVAILABLE,
+    reason="nvidia gpu and compute capability sm100 is required for this test")
 def test_trtllm_gen_mxfp4_fused_moe(
     topk: int,
     num_experts: int,
@@ -366,9 +369,6 @@ def test_trtllm_gen_mxfp4_fused_moe(
     limit: Optional[float],
     act_type: str,
 ):
-    if not TRTLLM_GEN_MXFP4_AVAILABLE:
-        pytest.skip(
-            "This test requires nvidia gpu and compute capability sm100")
     seed = 42
     torch.manual_seed(seed)
     hidden_states = torch.randn(num_tokens,
