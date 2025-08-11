@@ -1012,7 +1012,6 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                           topk_weights: torch.Tensor,
                           topk_ids: torch.Tensor,
                           activation: str = "silu",
-                          is_act_and_mul: bool = True,
                           apply_router_weight_on_input: bool = False,
                           use_fp8_w8a8: bool = False,
                           use_int8_w8a8: bool = False,
@@ -1063,7 +1062,7 @@ def inplace_fused_experts_fake(
         w1_bias: Optional[torch.Tensor] = None,
         w2_bias: Optional[torch.Tensor] = None) -> None:
     fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
-                       activation, is_act_and_mul,
+                       activation,
                        apply_router_weight_on_input, use_fp8_w8a8,
                        use_int8_w8a8, use_int8_w8a16, use_int4_w4a16,
                        use_mxfp4_w4a4, per_channel_quant, global_num_experts,
@@ -1077,7 +1076,6 @@ def inplace_fused_experts_fake(hidden_states: torch.Tensor,
                                topk_weights: torch.Tensor,
                                topk_ids: torch.Tensor,
                                activation: str = "silu",
-                               is_act_and_mul: bool = True,
                                apply_router_weight_on_input: bool = False,
                                use_fp8_w8a8: bool = False,
                                use_int8_w8a8: bool = False,
@@ -1381,15 +1379,21 @@ def fused_experts(
         quant_config: Optional[FusedMoEQuantConfig] = None,
         allow_deep_gemm: bool = False,
         allow_cutlass_block_scaled_grouped_gemm: bool = False) -> torch.Tensor:
+
+    if quant_config is None:
+        quant_config = FusedMoEQuantConfig.make()
+    use_fp8_w8a8 = quant_config.use_fp8_w8a8
+
     # For now, disable DeepGemm for small N (<= 512) until better
     # permute/unpermute ops are available.
     # However, on B200, we use DeepGemm for all cases because they only support
     # E8M0 scale, which means we requantize the weight and input to the specific
     # scale. Fallen back to cutlass or triton for some cases would cause
     # accuracy issue.
-    if (allow_deep_gemm and quant_config.use_fp8_w8a8
+    if (allow_deep_gemm and use_fp8_w8a8
             and (is_blackwell_deep_gemm_e8m0_used()
                  or _valid_deep_gemm(hidden_states, w1, w2))):
+        assert quant_config is not None
         assert apply_router_weight_on_input is False
         return deep_gemm_moe_fp8(
             hidden_states=hidden_states,
@@ -1407,10 +1411,11 @@ def fused_experts(
             a2_scale=quant_config.a2_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
-    elif (allow_cutlass_block_scaled_grouped_gemm and quant_config.use_fp8_w8a8
+    elif (allow_cutlass_block_scaled_grouped_gemm and use_fp8_w8a8
           and _valid_cutlass_block_scaled_grouped_gemm(
               w1, w2, inplace, activation, apply_router_weight_on_input,
               expert_map)):
+        assert quant_config is not None
         return run_cutlass_block_scaled_fused_experts(
             a=hidden_states,
             w1=w1,
