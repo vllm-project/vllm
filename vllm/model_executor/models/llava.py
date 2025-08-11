@@ -16,7 +16,6 @@ from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
 from vllm.inputs import InputProcessingContext
-from vllm.jsontree import json_map_leaves
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -33,6 +32,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
