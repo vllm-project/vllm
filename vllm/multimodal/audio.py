@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
 from io import BytesIO
 from pathlib import Path
@@ -81,6 +82,16 @@ class AudioResampler:
 
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__()
+
+        # `kwargs` contains custom arguments from
+        # --media-io-kwargs for this modality.
+        # They can be passed to the underlying
+        # media loaders (e.g. custom implementations)
+        # for flexible control.
+        self.kwargs = kwargs
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
         return librosa.load(BytesIO(data), sr=None)

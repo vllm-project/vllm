@@ -1,22 +1,27 @@
----
-title: Supported Hardware
----
-[](){ #quantization-supported-hardware }
+# Supported Hardware
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:
 
-| Implementation        | Volta   | Turing   | Ampere   | Ada   | Hopper   | AMD GPU   | Intel GPU   | x86 CPU   | AWS Neuron   | Google TPU   |
-|-----------------------|---------|----------|----------|-------|----------|-----------|-------------|-----------|------------------|--------------|
-| AWQ                   | ❌       | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ✅︎          | ✅︎        | ❌                | ❌            |
-| GPTQ                  | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ✅︎          | ✅︎        | ❌                | ❌            |
-| Marlin (GPTQ/AWQ/FP8) | ❌       | ❌        | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌           | ❌         | ❌                | ❌            |
-| INT8 (W8A8)           | ❌       | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌           | ✅︎        | ✅︎                | ✅︎           |
-| FP8 (W8A8)            | ❌       | ❌        | ❌        | ✅︎    | ✅︎       | ✅︎        | ❌           | ❌         | ✅︎                | ❌            |
-| BitBLAS (GPTQ)        | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌           | ❌         | ❌                | ❌            |
-| AQLM                  | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌           | ❌         | ❌                | ❌            |
-| bitsandbytes          | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌           | ❌         | ❌                | ❌            |
-| DeepSpeedFP           | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌           | ❌         | ❌                | ❌            |
-| GGUF                  | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ✅︎        | ❌           | ❌         | ❌                | ❌            |
+<style>
+th {
+  white-space: nowrap;
+  min-width: 0 !important;
+}
+</style>
+
+| Implementation        | Volta   | Turing   | Ampere   | Ada   | Hopper   | AMD GPU   | Intel GPU   | Intel Gaudi | x86 CPU   | AWS Neuron   | Google TPU   |
+|-----------------------|---------|----------|----------|-------|----------|-----------|-------------|-------------|-----------|--------------|--------------|
+| AWQ                   | ❌      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ✅︎          | ❌         | ✅︎        | ❌          | ❌           |
+| GPTQ                  | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ✅︎          | ❌         | ✅︎        | ❌          | ❌           |
+| Marlin (GPTQ/AWQ/FP8) | ❌      | ❌       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌         | ❌        | ❌          | ❌           |
+| INT8 (W8A8)           | ❌      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌         | ✅︎        | ✅︎          | ✅︎           |
+| FP8 (W8A8)            | ❌      | ❌       | ❌       | ✅︎    | ✅︎       | ✅︎         | ❌          | ❌         | ❌        | ✅︎          | ❌           |
+| BitBLAS (GPTQ)        | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌         | ❌        | ❌          | ❌           |
+| AQLM                  | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌         | ❌        | ❌          | ❌           |
+| bitsandbytes          | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌         | ❌        | ❌          | ❌           |
+| DeepSpeedFP           | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌         | ❌        | ❌          | ❌           |
+| GGUF                  | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ✅︎         | ❌          | ❌         | ❌        | ❌          | ❌           |
+| INC (W8A8)            | ❌      | ❌       | ❌       | ❌    | ❌       | ❌         | ❌          | ✅︎         | ❌        | ❌          | ❌           |
 
 - Volta refers to SM 7.0, Turing to SM 7.5, Ampere to SM 8.0/8.6, Ada to SM 8.9, and Hopper to SM 9.0.
 - ✅︎ indicates that the quantization method is supported on the specified hardware.

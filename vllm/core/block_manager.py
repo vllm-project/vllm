@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A block manager that manages token blocks."""
 from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
@@ -268,6 +269,10 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         # Free table/blocks
         self.block_tables[seq_id].free()
         del self.block_tables[seq_id]
+
+    def remove_seq_from_computed_blocks_tracker(self, seq: Sequence) -> None:
+        seq_id = seq.seq_id
+        self._computed_blocks_tracker.remove_seq(seq_id)
 
     def free_cross(self, seq_group: SequenceGroup) -> None:
         request_id = seq_group.request_id

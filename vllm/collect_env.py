@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # ruff: noqa
 # code borrowed from https://github.com/pytorch/pytorch/blob/main/torch/utils/collect_env.py
@@ -6,13 +7,14 @@
 import datetime
 import locale
 import os
-import re
 import subprocess
 import sys
 # Unlike the rest of the PyTorch this file must be python2 compliant.
 # This script outputs relevant system environment info
 # Run it with `python collect_env.py` or `python -m torch.utils.collect_env`
 from collections import namedtuple
+
+import regex as re
 
 from vllm.envs import environment_variables
 
@@ -94,25 +96,30 @@ DEFAULT_PIP_PATTERNS = {
 def run(command):
     """Return (return-code, stdout, stderr)."""
     shell = True if type(command) is str else False
-    p = subprocess.Popen(command,
-                         stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE,
-                         shell=shell)
-    raw_output, raw_err = p.communicate()
-    rc = p.returncode
-    if get_platform() == 'win32':
-        enc = 'oem'
-    else:
-        enc = locale.getpreferredencoding()
-    output = raw_output.decode(enc)
-    if command == 'nvidia-smi topo -m':
-        # don't remove the leading whitespace of `nvidia-smi topo -m`
-        #   because they are meaningful
-        output = output.rstrip()
-    else:
-        output = output.strip()
-    err = raw_err.decode(enc)
-    return rc, output, err.strip()
+    try:
+        p = subprocess.Popen(command,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE,
+                             shell=shell)
+        raw_output, raw_err = p.communicate()
+        rc = p.returncode
+        if get_platform() == 'win32':
+            enc = 'oem'
+        else:
+            enc = locale.getpreferredencoding()
+        output = raw_output.decode(enc)
+        if command == 'nvidia-smi topo -m':
+            # don't remove the leading whitespace of `nvidia-smi topo -m`
+            #   because they are meaningful
+            output = output.rstrip()
+        else:
+            output = output.strip()
+        err = raw_err.decode(enc)
+        return rc, output, err.strip()
+
+    except FileNotFoundError:
+        cmd_str = command if isinstance(command, str) else command[0]
+        return 127, '', f"Command not found: {cmd_str}"
 
 
 def run_and_read_all(run_lambda, command):
@@ -146,7 +153,7 @@ def get_conda_packages(run_lambda, patterns=None):
     if patterns is None:
         patterns = DEFAULT_CONDA_PATTERNS
     conda = os.environ.get('CONDA_EXE', 'conda')
-    out = run_and_read_all(run_lambda, "{} list".format(conda))
+    out = run_and_read_all(run_lambda, [conda, 'list'])
     if out is None:
         return out
 

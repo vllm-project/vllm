@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
 import openai
@@ -28,8 +29,8 @@ input = """Immerse yourself in the enchanting chronicle of calculus, a
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task",
-        "embed",
+        "--runner",
+        "pooling",
         "--dtype",
         "bfloat16",
         "--enforce-eager",

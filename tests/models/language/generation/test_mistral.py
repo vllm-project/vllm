@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 import json
 
-import jsonschema
-import jsonschema.exceptions
 import pytest
 
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolCall, MistralToolParser)
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams
+from vllm.transformers_utils.tokenizer import MistralTokenizer
 
 from ...utils import check_logprobs_close
 
@@ -236,8 +236,8 @@ def test_mistral_symbolic_languages(vllm_runner, model: str,
                      load_format="mistral") as vllm_model:
         for prompt in SYMBOLIC_LANG_PROMPTS:
             msg = {"role": "user", "content": prompt}
-            outputs = vllm_model.model.chat([msg],
-                                            sampling_params=SAMPLING_PARAMS)
+            outputs = vllm_model.llm.chat([msg],
+                                          sampling_params=SAMPLING_PARAMS)
             assert "�" not in outputs[0].outputs[0].text.strip()
 
 
@@ -251,11 +251,11 @@ def test_mistral_function_calling(vllm_runner, model: str, dtype: str) -> None:
                      load_format="mistral") as vllm_model:
 
         msgs = copy.deepcopy(MSGS)
-        outputs = vllm_model.model.chat(msgs,
-                                        tools=TOOLS,
-                                        sampling_params=SAMPLING_PARAMS)
+        outputs = vllm_model.llm.chat(msgs,
+                                      tools=TOOLS,
+                                      sampling_params=SAMPLING_PARAMS)
 
-        tokenizer = vllm_model.model.get_tokenizer()
+        tokenizer = vllm_model.llm.get_tokenizer()
         tool_parser = MistralToolParser(tokenizer)
 
         model_output = outputs[0].outputs[0].text.strip()
@@ -272,48 +272,51 @@ def test_mistral_function_calling(vllm_runner, model: str, dtype: str) -> None:
         assert parsed_message.content is None
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("guided_backend",
-                         ["outlines", "lm-format-enforcer", "xgrammar"])
-def test_mistral_guided_decoding(
-    monkeypatch: pytest.MonkeyPatch,
-    vllm_runner,
-    model: str,
-    guided_backend: str,
-) -> None:
-    with monkeypatch.context() as m:
-        # Guided JSON not supported in xgrammar + V1 yet
-        m.setenv("VLLM_USE_V1", "0")
+def test_mistral_function_call_nested_json():
+    """Ensure that the function-name regex captures the entire outer-most
+    JSON block, including nested braces."""
 
-        with vllm_runner(
-                model,
-                dtype='bfloat16',
-                tokenizer_mode="mistral",
-                guided_decoding_backend=guided_backend,
-        ) as vllm_model:
-            guided_decoding = GuidedDecodingParams(json=SAMPLE_JSON_SCHEMA)
-            params = SamplingParams(max_tokens=512,
-                                    temperature=0.7,
-                                    guided_decoding=guided_decoding)
+    # Create a minimal stub tokenizer that provides the few attributes the
+    # parser accesses (`version` and `get_vocab`).
+    class _StubMistralTokenizer(MistralTokenizer):
+        version = 11  # Satisfy the version check
 
-            messages = [{
-                "role": "system",
-                "content": "you are a helpful assistant"
-            }, {
-                "role":
-                "user",
-                "content":
-                f"Give an example JSON for an employee profile that "
-                f"fits this schema: {SAMPLE_JSON_SCHEMA}"
-            }]
-            outputs = vllm_model.model.chat(messages, sampling_params=params)
+        def __init__(self):
+            pass
 
-        generated_text = outputs[0].outputs[0].text
-        json_response = json.loads(generated_text)
-        assert outputs is not None
+        @staticmethod
+        def get_vocab():
+            # Provide the special TOOL_CALLS token expected by the parser.
+            return {"[TOOL_CALLS]": 0}
 
-        try:
-            jsonschema.validate(instance=json_response,
-                                schema=SAMPLE_JSON_SCHEMA)
-        except jsonschema.exceptions.ValidationError:
-            pytest.fail("Generated response is not valid with JSON schema")
+    tokenizer = _StubMistralTokenizer()
+    parser = MistralToolParser(tokenizer)
+
+    # Craft a model output featuring nested JSON inside the arguments.
+    args_dict = {
+        "city": "Dallas",
+        "state": "TX",
+        "unit": "fahrenheit",
+        "sub_dict": {
+            "foo": "bar",
+            "inner": {
+                "x": 1,
+                "y": 2
+            }
+        },
+    }
+
+    model_output = (
+        f"{parser.bot_token}get_current_weather{json.dumps(args_dict)}")
+
+    parsed = parser.extract_tool_calls(model_output, None)
+
+    # Assertions: the tool call is detected and the full nested JSON is parsed
+    # without truncation.
+    assert parsed.tools_called
+
+    assert MistralToolCall.is_valid_id(parsed.tool_calls[0].id)
+    assert parsed.tool_calls[0].function.name == "get_current_weather"
+    assert json.loads(parsed.tool_calls[0].function.arguments) == args_dict
+    # No additional content outside the tool call should be returned.
+    assert parsed.content is None

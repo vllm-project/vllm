@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/selective_state_update.py
@@ -107,7 +108,7 @@ def _selective_scan_update_kernel(
     # is the same as the batch id.
     if HAS_STATE_BATCH_INDICES:
         state_batch_indices_ptr += pid_b
-        state_batch_idx = tl.load(state_batch_indices_ptr)
+        state_batch_idx = tl.load(state_batch_indices_ptr).to(tl.int64)
         state_ptr += (state_batch_idx * stride_state_batch +
                       pid_h * stride_state_head)
     else:
@@ -204,7 +205,8 @@ def selective_state_update(state,
                            dt_bias=None,
                            dt_softplus=False,
                            state_batch_indices=None,
-                           pad_slot_id=PAD_SLOT_ID):
+                           pad_slot_id=PAD_SLOT_ID,
+                           out=None):
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
@@ -222,10 +224,9 @@ def selective_state_update(state,
             for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id] 
             in this case, the kernel will not process entries at 
             indices 0 and 3
-    Return:
-        out: (batch, dim) or (batch, nheads, dim)
+        out: Preallocated ssm output tensor. Assume same shape as x. 
+             In-place updated.
     """
-    has_heads = state.dim() > 3
     if state.dim() == 3:
         state = state.unsqueeze(1)
     if x.dim() == 2:
@@ -244,6 +245,8 @@ def selective_state_update(state,
         z = z.unsqueeze(1)
     if dt_bias is not None and dt_bias.dim() == 1:
         dt_bias = dt_bias.unsqueeze(0)
+    if out.dim() == 2:
+        out = out.unsqueeze(1)
 
     _, nheads, dim, dstate = state.shape
     batch = x.shape[0]
@@ -263,7 +266,8 @@ def selective_state_update(state,
         assert dt_bias.shape == (nheads, dim)
     if state_batch_indices is not None:
         assert state_batch_indices.shape == (batch, )
-    out = torch.empty_like(x)
+    assert out.shape == x.shape
+
     grid = lambda META: (triton.cdiv(dim, META['BLOCK_SIZE_M']), batch, nheads)
     z_strides = ((z.stride(0), z.stride(1), z.stride(2)) if z is not None else
                  (0, 0, 0))
@@ -327,9 +331,6 @@ def selective_state_update(state,
             BLOCK_SIZE_M,
             num_warps=num_warps,
         )
-    if not has_heads:
-        out = out.squeeze(1)
-    return out
 
 
 def selective_scan_fn(u,

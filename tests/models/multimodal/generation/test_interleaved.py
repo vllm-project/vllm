@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
@@ -47,7 +48,7 @@ def test_models(vllm_runner, model, dtype: str, max_tokens: int) -> None:
     ]
 
     with vllm_runner(model,
-                     task="generate",
+                     runner="generate",
                      dtype=dtype,
                      limit_mm_per_prompt={"image": 2},
                      max_model_len=32768,

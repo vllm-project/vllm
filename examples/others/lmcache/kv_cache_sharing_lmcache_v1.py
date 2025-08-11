@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This file demonstrates the example usage of remote KV cache sharing
 with LMCache.
@@ -16,8 +17,8 @@ import subprocess
 import time
 from multiprocessing import Event, Process
 
-from lmcache.experimental.cache_engine import LMCacheEngineBuilder
 from lmcache.integration.vllm.utils import ENGINE_NAME
+from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
@@ -104,7 +105,7 @@ def run_retrieve(store_done, prompts, timeout=1):
 
 def run_lmcache_server(port):
     server_proc = subprocess.Popen(
-        ["python", "-m", "lmcache.experimental.server", "localhost", str(port)]
+        ["python", "-m", "lmcache.v1.server", "localhost", str(port)]
     )
     return server_proc
 

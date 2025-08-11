@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
 import time
@@ -34,7 +35,7 @@ def _ref_convert_id_to_token(
     Returns:
       String representation of input token id
     """
-    return tokenizer.convert_ids_to_tokens(token_id) or ""
+    return tokenizer.decode([token_id]) or ""
 
 
 @pytest.mark.parametrize(
@@ -58,13 +59,15 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
                           eos_token_id=None,
                           lora_request=None,
                           cache_salt=None,
+                          data_parallel_rank=None,
                           sampling_params=SamplingParams(
                               skip_special_tokens=False,
                               spaces_between_special_tokens=False,
                               output_kind=request_output_kind,
                               stop=[],
                               include_stop_str_in_output=False,
-                          ))
+                          ),
+                          pooling_params=None)
         for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
 
@@ -405,6 +408,7 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
                           eos_token_id=None,
                           lora_request=None,
                           cache_salt=None,
+                          data_parallel_rank=None,
                           sampling_params=SamplingParams(
                               skip_special_tokens=False,
                               spaces_between_special_tokens=False,
@@ -413,7 +417,8 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
                               include_stop_str_in_output=False,
                               logprobs=num_sample_logprobs,
                               prompt_logprobs=num_prompt_logprobs,
-                          ))
+                          ),
+                          pooling_params=None)
         for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
 
@@ -568,6 +573,7 @@ def test_stop_token(include_stop_str_in_output: bool,
         eos_token_id=eos_token_id,
         lora_request=None,
         cache_salt=None,
+        data_parallel_rank=None,
         sampling_params=SamplingParams(
             skip_special_tokens=False,
             spaces_between_special_tokens=False,
@@ -578,7 +584,8 @@ def test_stop_token(include_stop_str_in_output: bool,
             logprobs=num_sample_logprobs,
             prompt_logprobs=None,
             ignore_eos=ignore_eos,
-        ))
+        ),
+        pooling_params=None)
 
     # Add request to the detokenizer.
     output_processor.add_request(request, prompt_string)
@@ -665,6 +672,7 @@ def test_stop_string(include_stop_str_in_output: bool,
             eos_token_id=None,
             lora_request=None,
             cache_salt=None,
+            data_parallel_rank=None,
             sampling_params=SamplingParams(
                 skip_special_tokens=False,
                 spaces_between_special_tokens=False,
@@ -673,7 +681,8 @@ def test_stop_string(include_stop_str_in_output: bool,
                 include_stop_str_in_output=include_stop_str_in_output,
                 logprobs=num_sample_logprobs,
                 prompt_logprobs=None,
-            ))
+            ),
+            pooling_params=None)
         for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
 
@@ -779,7 +788,9 @@ def test_iteration_stats(dummy_test_vectors):
             eos_token_id=None,
             lora_request=None,
             cache_salt=None,
+            data_parallel_rank=None,
             sampling_params=SamplingParams(),
+            pooling_params=None,
         ) for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]
 
