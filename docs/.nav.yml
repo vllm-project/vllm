@@ -11,7 +11,7 @@ nav:
     - Quick Links:
       - User Guide: usage/README.md
       - Developer Guide: contributing/README.md
-      - API Reference: api/summary.md
+      - API Reference: api/README.md
       - CLI Reference: cli/README.md
     - Timeline:
       - Roadmap: https://roadmap.vllm.ai
@@ -58,11 +58,9 @@ nav:
     - CI: contributing/ci
     - Design Documents: design
   - API Reference:
-    - Summary: api/summary.md
-    - Contents:
-      - api/vllm/*
-  - CLI Reference:
-    - Summary: cli/README.md
+    - api/README.md
+    - api/vllm/*
+  - CLI Reference: cli
   - Community:
     - community/*
     - Blog: https://blog.vllm.ai
