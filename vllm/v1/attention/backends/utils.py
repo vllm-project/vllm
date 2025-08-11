@@ -36,7 +36,7 @@ class CommonAttentionMetadata:
     """
     Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.
-    
+
     For many of the tensors we keep both GPU and CPU versions.
     """
 
@@ -76,7 +76,7 @@ def slice_query_start_locs(
     request_slice: slice,
 ) -> torch.Tensor:
     """
-    Creates a new query_start_loc that corresponds to the requests in 
+    Creates a new query_start_loc that corresponds to the requests in
     request_slice.
 
     Note: This function creates a new tensor to hold the new query_start_locs.
@@ -90,7 +90,7 @@ def _make_metadata_with_slice(
         ubatch_slice: UbatchSlice,
         attn_metadata: CommonAttentionMetadata) -> CommonAttentionMetadata:
     """
-    This function creates a new CommonAttentionMetadata that corresponds to 
+    This function creates a new CommonAttentionMetadata that corresponds to
     the requests included in ubatch_slice
     """
 
@@ -138,7 +138,7 @@ def split_attn_metadata(
     common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
     """
-    Creates a new CommonAttentionMetadata instance that corresponds to the 
+    Creates a new CommonAttentionMetadata instance that corresponds to the
     requests for each UbatchSlice in ubatch_slices.
 
     Note: This function does not modify common_attn_metadata
@@ -189,7 +189,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         """
         Central method that builds attention metadata.
         Some builders (MLA) require reorder_batch to be called prior to build.
-        
+
         Args:
             common_prefix_len: The length of the common prefix of the batch.
             common_attn_metadata: The common attention metadata.
@@ -220,10 +220,11 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         self,
         common_attn_metadata: CommonAttentionMetadata,
         draft_index: int,
+        fast_build: bool = True,
     ) -> M:
         """
         Build attention metadata for draft model. Uses build by default.
-        
+
         Args:
             common_attn_metadata: The common attention metadata.
             draft_index: The index of the current draft operation.
@@ -234,7 +235,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         """
         return self.build(common_prefix_len=0,
                           common_attn_metadata=common_attn_metadata,
-                          fast_build=True)
+                          fast_build=fast_build)
 
     def use_cascade_attention(
         self,
@@ -629,7 +630,7 @@ def reorder_batch_to_split_decodes_and_prefills(
     """
     Reorders the batch to split into prefill and decode requests; places all
     requests with <= decode_threshold tokens at the front of the batch.
-    
+
     Returns:
         True if the batch was modified, False otherwise.
     """

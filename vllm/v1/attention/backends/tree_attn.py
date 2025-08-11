@@ -228,6 +228,7 @@ class TreeAttentionMetadataBuilder(
         self,
         common_attn_metadata: CommonAttentionMetadata,
         draft_index: int,
+        fast_build: bool = True,
     ) -> TreeAttentionMetadata:
         # Cache the original tree attention bias.
         orig_tree_attn_bias = self.tree_attn_bias
@@ -243,7 +244,9 @@ class TreeAttentionMetadataBuilder(
                                                       start:end].contiguous()
 
         # Build attention bias.
-        attn_metadata = self.build(0, common_attn_metadata, fast_build=True)
+        attn_metadata = self.build(0,
+                                   common_attn_metadata,
+                                   fast_build=fast_build)
 
         # Reset the tree attention bias to the original value.
         self.tree_attn_bias = orig_tree_attn_bias
