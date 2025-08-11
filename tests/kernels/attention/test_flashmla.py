@@ -22,6 +22,10 @@ def cal_diff(x: torch.Tensor, y: torch.Tensor, name: str) -> None:
 FLASH_MLA_UNSUPPORTED_REASON = is_flashmla_supported()[1] \
     if not is_flashmla_supported()[0] else "FlashMLA is supported"
 
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
+
 
 @pytest.mark.skipif(not is_flashmla_supported()[0],
                     reason=FLASH_MLA_UNSUPPORTED_REASON)
@@ -35,20 +39,20 @@ FLASH_MLA_UNSUPPORTED_REASON = is_flashmla_supported()[1] \
 @pytest.mark.parametrize("block_size", [64])
 @pytest.mark.parametrize("causal", [True])
 @pytest.mark.parametrize("varlen", [False, True])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal,
-                   varlen):
-    # TODO: parametrize using pytest
-    dtype = torch.bfloat16
-    device = torch.device("cuda:0")
+                   varlen, dtype, device):
     torch.set_default_dtype(dtype)
     torch.set_default_device(device)
     torch.cuda.set_device(device)
     torch.manual_seed(0)
     random.seed(0)
 
-    print(f"{b=}, {s_q=}, {mean_sk=}, {h_q=}, {h_kv=}, "
-          f"{d=}, {dv=}, {causal=}, {varlen=}")
+    print(
+        f"{b=}, {s_q=}, {mean_sk=}, {h_q=}, {h_kv=}, "
+        f"{d=}, {dv=}, {causal=}, {varlen=}", f"{dtype=}, {device=}")
 
     cache_seqlens = torch.full((b, ), mean_sk, dtype=torch.int32)
     if varlen:
