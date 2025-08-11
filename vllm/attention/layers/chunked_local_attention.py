@@ -40,7 +40,7 @@ class ChunkedLocalAttention(Attention):
                                                        kv_cache_dtype,
                                                        block_size)
 
-            prefix = \
+            backend_prefix = \
                 f"ChunkedLocalAttention_{attention_chunk_size}_{block_size}_"
 
             def build_preprocess_fn(cm: CommonAttentionMetadata):
@@ -48,7 +48,7 @@ class ChunkedLocalAttention(Attention):
                     attention_chunk_size, cm, block_size)
 
             attn_backend = create_custom_attention_backend(
-                prefix, underlying_attn_backend, build_preprocess_fn)
+                backend_prefix, underlying_attn_backend, build_preprocess_fn)
         else:
             # in v0 the local attention is handled inside the backends
             attn_backend = None

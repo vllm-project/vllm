@@ -566,7 +566,7 @@ class Gemma3nSelfDecoder(nn.Module):
         self.decoder_layers = decoder_layers
         self.layer_idx_start = layer_idx_start
         self.per_layer_model_projection = per_layer_model_projection
-        self.config = vllm_config.model_config.hf_config.text_config
+        self.config = vllm_config.model_config.hf_config
         self.embed_scale_per_layer = embed_scale_per_layer
         self.embed_tokens_per_layer = embed_tokens_per_layer
         self.per_layer_projection_norm = per_layer_projection_norm
@@ -590,13 +590,9 @@ class Gemma3nSelfDecoder(nn.Module):
 
     def get_per_layer_inputs(
         self,
-        input_ids: torch.Tensor,
         hidden_states_0: torch.Tensor,
+        per_layer_inputs: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        per_layer_inputs = self.get_per_layer_input_embeddings(input_ids)
-        per_layer_inputs = per_layer_inputs.reshape(
-            -1, self.config.num_hidden_layers,
-            self.config.hidden_size_per_layer_input)
         per_layer_projection = self.per_layer_model_projection(hidden_states_0)
         per_layer_projection = per_layer_projection.reshape(
             *hidden_states_0.shape[:-1],
@@ -605,8 +601,12 @@ class Gemma3nSelfDecoder(nn.Module):
         )
         per_layer_projection = self.per_layer_projection_norm(
             per_layer_projection)
-        per_layer_inputs = per_layer_projection + per_layer_inputs
-        per_layer_inputs *= self.per_layer_input_scale
+        if per_layer_inputs is not None:
+            # Profiling run does not compute per_layer_inputs
+            per_layer_inputs = per_layer_projection + per_layer_inputs
+            per_layer_inputs *= self.per_layer_input_scale
+        else:
+            per_layer_inputs = per_layer_projection
         return per_layer_inputs
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -632,6 +632,7 @@ class Gemma3nSelfDecoder(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
+        per_layer_inputs: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if inputs_embeds is not None:
@@ -639,8 +640,8 @@ class Gemma3nSelfDecoder(nn.Module):
         else:
             hidden_states_0 = self.get_input_embeddings(input_ids)
 
-        per_layer_inputs = self.get_per_layer_inputs(input_ids,
-                                                     hidden_states_0)
+        adjusted_per_layer_inputs = self.get_per_layer_inputs(
+            hidden_states_0, per_layer_inputs)
         hidden_states = self.altup_embed(hidden_states_0)
 
         # [altnum_inputs, num_tokens, hidden_size]
@@ -652,14 +653,14 @@ class Gemma3nSelfDecoder(nn.Module):
             hidden_states = layer(
                 positions=positions,
                 hidden_states=hidden_states,
-                per_layer_input=per_layer_inputs[:, layer_idx, :],
+                per_layer_input=adjusted_per_layer_inputs[:, layer_idx, :],
                 **kwargs,
             )
 
         # [num_tokens, hidden_size, altnum_inputs]
         hidden_states = hidden_states.permute(1, 2, 0)
 
-        return hidden_states, per_layer_inputs
+        return hidden_states, adjusted_per_layer_inputs
 
 
 # This enables torch.compile if --kv-sharing-fast-prefill passed
@@ -853,6 +854,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
+        per_layer_inputs: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         logits_indices_padded, num_logits_indices = None, None
@@ -873,13 +875,14 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         # Copy inputs for cudagraph
         batch_size = positions.size(0)
         self.positions[:batch_size].copy_(positions)
-        # input_ids and inputs_embeds are allocated in model runner
-        self_decoder_hidden_states, per_layer_inputs = self.self_decoder(
-            input_ids=input_ids,
-            positions=self.positions[:batch_size],
-            inputs_embeds=inputs_embeds,
-            **kwargs,
-        )
+        self_decoder_hidden_states, per_layer_inputs_adjusted = \
+            self.self_decoder(
+                input_ids=input_ids,
+                positions=self.positions[:batch_size],
+                inputs_embeds=inputs_embeds,
+                per_layer_inputs=per_layer_inputs,
+                **kwargs,
+            )
 
         if logits_indices_padded is None:
             logits_indices_padded = torch.arange(
@@ -903,7 +906,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         self.hidden_states[:num_padded_logits_indices].copy_(
             self_decoder_hidden_states[logits_indices_padded])
         self.per_layer_inputs[:num_padded_logits_indices].copy_(
-            per_layer_inputs[logits_indices_padded])
+            per_layer_inputs_adjusted[logits_indices_padded])
         cross_decoder_hidden_states = self.cross_decoder(
             positions=self.positions[:num_padded_logits_indices],
             hidden_states=self.hidden_states[:num_padded_logits_indices],
@@ -926,12 +929,14 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
+        per_layer_inputs: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         hidden_states, per_layer_inputs = self.self_decoder(
             input_ids=input_ids,
             positions=positions,
             inputs_embeds=inputs_embeds,
+            per_layer_inputs=per_layer_inputs,
             **kwargs,
         )
         hidden_states = self.cross_decoder(
@@ -966,18 +971,17 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
+        per_layer_inputs: Optional[torch.Tensor] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # Per layer inputs.
-        if input_ids is None:
-            raise ValueError("Passing None for input ids is not supported.")
-
         if self.fast_prefill_enabled:
             hidden_states = self.fast_prefill_forward(
                 input_ids,
                 positions,
                 inputs_embeds,
+                per_layer_inputs,
                 **kwargs,
             )
         else:
@@ -985,6 +989,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
                 input_ids,
                 positions,
                 inputs_embeds,
+                per_layer_inputs,
                 **kwargs,
             )
         hidden_states = self.altup_unembed(hidden_states)
