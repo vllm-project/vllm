@@ -1,7 +1,4 @@
----
-title: Streamlit
----
-[](){ #deployment-streamlit }
+# Streamlit
 
 [Streamlit](https://github.com/streamlit/streamlit) lets you transform Python scripts into interactive web apps in minutes, instead of weeks. Build dashboards, generate reports, or create chat apps.
 
@@ -15,13 +12,13 @@ It can be quickly integrated with vLLM as a backend API server, enabling powerfu
 
 - Start the vLLM server with the supported chat completion model, e.g.
 
-```console
+```bash
 vllm serve qwen/Qwen1.5-0.5B-Chat
 ```
 
 - Install streamlit and openai:
 
-```console
+```bash
 pip install streamlit openai
 ```
 
@@ -29,7 +26,7 @@ pip install streamlit openai
 
 - Start the streamlit web UI and start to chat:
 
-```console
+```bash
 streamlit run streamlit_openai_chatbot_webserver.py
 
 # or specify the VLLM_API_BASE or VLLM_API_KEY

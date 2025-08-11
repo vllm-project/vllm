@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from typing import Optional, Union
 
-from vllm.config import VllmConfig
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
 
@@ -30,6 +30,16 @@ class RayPrometheusMetric:
 
             self.metric.set_default_tags(labelskwargs)
 
+        if labels:
+            if len(labels) != len(self.metric._tag_keys):
+                raise ValueError(
+                    "Number of labels must match the number of tag keys. "
+                    f"Expected {len(self.metric._tag_keys)}, got {len(labels)}"
+                )
+
+            self.metric.set_default_tags(
+                dict(zip(self.metric._tag_keys, labels)))
+
         return self
 
 
@@ -40,7 +50,13 @@ class RayGaugeWrapper(RayPrometheusMetric):
     def __init__(self,
                  name: str,
                  documentation: Optional[str] = "",
-                 labelnames: Optional[list[str]] = None):
+                 labelnames: Optional[list[str]] = None,
+                 multiprocess_mode: Optional[str] = ""):
+
+        # All Ray metrics are keyed by WorkerId, so multiprocess modes like
+        # "mostrecent", "all", "sum" do not apply. This logic can be manually
+        # implemented at the observability layer (Prometheus/Grafana).
+        del multiprocess_mode
         labelnames_tuple = tuple(labelnames) if labelnames else None
         self.metric = ray_metrics.Gauge(name=name,
                                         description=documentation,
@@ -110,9 +126,6 @@ class RayPrometheusStatLogger(PrometheusStatLogger):
     _counter_cls = RayCounterWrapper
     _histogram_cls = RayHistogramWrapper
     _spec_decoding_cls = RaySpecDecodingProm
-
-    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
-        super().__init__(vllm_config, engine_index)
 
     @staticmethod
     def _unregister_vllm_metrics():

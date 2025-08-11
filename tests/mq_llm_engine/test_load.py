@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test that the MQLLMEngine is able to handle 10k concurrent requests."""
 
 import asyncio
@@ -15,7 +16,7 @@ NUM_EXPECTED_TOKENS = 10
 NUM_REQUESTS = 10000
 
 # Scenarios to test for num generated token.
-ENGINE_ARGS = AsyncEngineArgs(model=MODEL, disable_log_requests=True)
+ENGINE_ARGS = AsyncEngineArgs(model=MODEL)
 
 
 @pytest.fixture(scope="function")

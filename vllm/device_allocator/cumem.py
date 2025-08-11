@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # cumem-based pytorch pluggable allocator to implement sleep mode.
 # other approaches tried but failed:

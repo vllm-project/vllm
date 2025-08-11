@@ -33,7 +33,7 @@ Quantized models take less memory at the cost of lower precision.
 Statically quantized models can be downloaded from HF Hub (some popular ones are available at [Red Hat AI](https://huggingface.co/RedHatAI))
 and used directly without extra configuration.
 
-Dynamic quantization is also supported via the `quantization` option -- see [here][quantization-index] for more details.
+Dynamic quantization is also supported via the `quantization` option -- see [here](../features/quantization/README.md) for more details.
 
 ## Context length and batch size
 
@@ -57,19 +57,21 @@ By default, we optimize model inference using CUDA graphs which take up extra me
 
 You can adjust `compilation_config` to achieve a better balance between inference speed and memory usage:
 
-```python
-from vllm import LLM
-from vllm.config import CompilationConfig, CompilationLevel
+??? code
 
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    compilation_config=CompilationConfig(
-        level=CompilationLevel.PIECEWISE,
-        # By default, it goes up to max_num_seqs
-        cudagraph_capture_sizes=[1, 2, 4, 8, 16],
-    ),
-)
-```
+    ```python
+    from vllm import LLM
+    from vllm.config import CompilationConfig, CompilationLevel
+
+    llm = LLM(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        compilation_config=CompilationConfig(
+            level=CompilationLevel.PIECEWISE,
+            # By default, it goes up to max_num_seqs
+            cudagraph_capture_sizes=[1, 2, 4, 8, 16],
+        ),
+    )
+    ```
 
 You can disable graph capturing completely via the `enforce_eager` flag:
 
@@ -84,7 +86,7 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct",
 
 If you run out of CPU RAM, try the following options:
 
-- (Multi-modal models only) you can set the size of multi-modal input cache using `VLLM_MM_INPUT_CACHE_GIB` environment variable (default 4 GiB).
+- (Multi-modal models only) you can set the size of multi-modal processor cache by setting `mm_processor_cache_gb` engine argument (default 4 GiB per API process + 4 GiB per engine core process)
 - (CPU backend only) you can set the size of KV cache using `VLLM_CPU_KVCACHE_SPACE` environment variable (default 4 GiB).
 
 ## Multi-modal input limits

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark the latency of processing a single batch of requests."""
 
 import argparse
@@ -12,9 +13,8 @@ import numpy as np
 from tqdm import tqdm
 
 import vllm.envs as envs
-from vllm import LLM, SamplingParams
-from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
-                                   write_to_json)
+from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
+                                       write_to_json)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
 from vllm.sampling_params import BeamSearchParams
@@ -78,12 +78,14 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
-    print(args)
     if args.profile and not envs.VLLM_TORCH_PROFILER_DIR:
         raise OSError(
             "The environment variable 'VLLM_TORCH_PROFILER_DIR' is not set. "
             "Please set it to a valid path to use torch profiler.")
     engine_args = EngineArgs.from_cli_args(args)
+
+    # Lazy import to avoid importing LLM when the bench command is not selected.
+    from vllm import LLM, SamplingParams
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
@@ -101,7 +103,6 @@ def main(args: argparse.Namespace):
         max_tokens=args.output_len,
         detokenize=not args.disable_detokenize,
     )
-    print(sampling_params)
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
                                                      args.input_len))

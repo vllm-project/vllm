@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Example for starting a Gradio Webserver
 Start vLLM API server:
     python -m vllm.entrypoints.api_server \

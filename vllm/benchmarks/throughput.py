@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark offline inference throughput."""
 import argparse
 import dataclasses
@@ -20,11 +21,9 @@ from vllm.benchmarks.datasets import (AIMODataset, BurstGPTDataset,
                                       InstructCoderDataset, RandomDataset,
                                       SampleRequest, ShareGPTDataset,
                                       SonnetDataset, VisionArenaDataset)
-from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
-                                   write_to_json)
+from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
+                                       write_to_json)
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
-from vllm.entrypoints.openai.api_server import (
-    build_async_engine_client_from_engine_args)
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -83,7 +82,7 @@ def run_vllm(
         assert lora_requests is None, "BeamSearch API does not support LoRA"
         prompts = [request.prompt for request in requests]
         # output_len should be the same for all requests.
-        output_len = requests[0][2]
+        output_len = requests[0].expected_output_len
         for request in requests:
             assert request.expected_output_len == output_len
         start = time.perf_counter()
@@ -145,9 +144,13 @@ async def run_vllm_async(
     disable_detokenize: bool = False,
 ) -> float:
     from vllm import SamplingParams
+    from vllm.entrypoints.openai.api_server import (
+        build_async_engine_client_from_engine_args)
 
     async with build_async_engine_client_from_engine_args(
-            engine_args, disable_frontend_multiprocessing) as llm:
+        engine_args,
+        disable_frontend_multiprocessing=disable_frontend_multiprocessing,
+    ) as llm:
         model_config = await llm.get_model_config()
         assert all(
             model_config.max_model_len >= (request.prompt_len +
@@ -527,7 +530,6 @@ def main(args: argparse.Namespace):
     validate_args(args)
     if args.seed is None:
         args.seed = 0
-    print(args)
     random.seed(args.seed)
     # Sample the requests.
     tokenizer = AutoTokenizer.from_pretrained(

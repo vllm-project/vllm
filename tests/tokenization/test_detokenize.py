@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Generator
 from typing import Any, Optional
@@ -67,9 +68,11 @@ def _run_incremental_decode(tokenizer,
                                 None,
                                 params,
                                 None,
+                                None,
                                 0.0,
                                 None,
-                                cache_salt=None)
+                                cache_salt=None,
+                                data_parallel_rank=None)
 
     if fast is None:
         detokenizer = IncrementalDetokenizer.from_new_request(
@@ -390,7 +393,7 @@ def test_decode_prompt_logprobs_chunked_prefill(
                                               logprobs=5,
                                               prompt_logprobs=5,
                                               temperature=0.0)
-        vllm_results = vllm_model.model.generate(
+        vllm_results = vllm_model.llm.generate(
             example_prompts, sampling_params=vllm_sampling_params)
 
         for idx, result in enumerate(vllm_results):

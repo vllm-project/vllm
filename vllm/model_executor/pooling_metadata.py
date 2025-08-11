@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
 from typing import Any
@@ -36,6 +37,13 @@ class PoolingMetadata:
                 f"seq_groups={self.seq_groups}, "
                 f"seq_data={self.seq_data}, "
                 f"prompt_lens={self.prompt_lens})")
+
+    def __getitem__(self, indices: slice):
+        return PoolingMetadata(
+            seq_groups=self.seq_groups[indices],
+            seq_data=dict(list(self.seq_data.items())[indices]),
+            prompt_lens=self.prompt_lens[indices],
+        )
 
 
 @dataclass
