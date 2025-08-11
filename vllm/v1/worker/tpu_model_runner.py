@@ -745,7 +745,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_kv_update_slices = slot_mapping_metadata.shape[0]
         padded_num_slices = _get_padded_num_kv_cache_update_slices(
             padded_total_num_scheduled_tokens, self.max_num_reqs,
-            self.block_size, self._num_slices_per_kv_cache_update_block)
+            self.block_size)
         slot_mapping_metadata = np.pad(
             slot_mapping_metadata,
             [[0, padded_num_slices - len(slot_mapping_metadata)], [0, 0]],
@@ -1138,6 +1138,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     i, target_slice] = valid_sampled_token_ids[i]
                 req_state.output_token_ids.extend(valid_sampled_token_ids[i])
 
+        kv_connector_output = None if (
+            finished_sending is None
+            and finished_recving is None) else KVConnectorOutput(
+                finished_sending=finished_sending,
+                finished_recving=finished_recving,
+            )
+
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -1146,10 +1153,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
-            kv_connector_output=KVConnectorOutput(
-                finished_sending=finished_sending,
-                finished_recving=finished_recving,
-            ))
+            kv_connector_output=kv_connector_output,
+        )
 
         # Check there are no new graphs compiled - all the graphs should be
         # captured and compiled during warm up.
@@ -1244,8 +1249,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         position_ids = torch.zeros(num_tokens,
                                    dtype=torch.int32).to(self.device)
         padded_num_slices = _get_padded_num_kv_cache_update_slices(
-            num_tokens, self.max_num_reqs, self.block_size,
-            self._num_slices_per_kv_cache_update_block)
+            num_tokens, self.max_num_reqs, self.block_size)
         num_kv_update_slices = torch.tensor([padded_num_slices],
                                             dtype=torch.int32).to(self.device)
         slot_mapping = torch.zeros((3, padded_num_slices),
@@ -1963,17 +1967,17 @@ def copy_kv_blocks(
         _copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
 
 
-def _get_padded_num_kv_cache_update_slices(
-        num_tokens: int, max_num_reqs: int, page_size: int,
-        num_slices_per_kv_cache_update_block: int) -> int:
+def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
+                                           page_size: int) -> int:
     """Calculates the padded number of KV cache update slices to avoid
     recompilation."""
+    # NOTE(chengjiyao): let's say R_i is the token num for i-th request,
+    # so it occupies most 2 + R_i // page_size pages. The total maximum
+    # possible number of pages needed is sum(2 + R_i // page_size), which
+    # is <= 2 * max_num_reqs + sum(R_i) // page_size
+    # = 2 * max_num_reqs + num_tokens // page_size
     padded_num_slices = 2 * max_num_reqs + num_tokens // page_size
     padded_num_slices = min(padded_num_slices, num_tokens)
-    padded_num_slices = (
-        padded_num_slices + num_slices_per_kv_cache_update_block - 1
-    ) // num_slices_per_kv_cache_update_block * \
-        num_slices_per_kv_cache_update_block
     return padded_num_slices
 
 
