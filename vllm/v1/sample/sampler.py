@@ -24,6 +24,8 @@ class Sampler(nn.Module):
     """
     A layer that samples the next tokens from the model's outputs
     with the following steps in order:
+
+    \b
     1. If logprobs are requested:
         a) If `logprobs_mode` is `raw_logprobs`, compute logprobs
            as the final logprobs to return.
