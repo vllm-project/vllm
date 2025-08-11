@@ -93,5 +93,4 @@ def test_reranker_models(
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
 def test_rerank_models_mteb(hf_runner, vllm_runner,
                             model_info: RerankModelInfo) -> None:
-    pytest.skip("ModernBert cannot pass the mteb test for now.")
     mteb_test_rerank_models(hf_runner, vllm_runner, model_info)
