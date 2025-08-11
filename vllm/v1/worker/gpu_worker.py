@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
-import copy, time
+import copy
 import gc
 import os
+import time
 from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -64,9 +65,9 @@ class Worker(WorkerBase):
 
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
-        
+
         # executed cuda graph
-        self._token_compiled_cudagraphs: set[int] = set() 
+        self._token_compiled_cudagraphs: set[int] = set()
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
@@ -364,20 +365,37 @@ class Worker(WorkerBase):
         #     logger.info("DIEGO: CUDAgraph in execution time for %d input tokens", scheduler_output.total_num_scheduled_tokens)
         #     self._token_compiled_cudagraphs.add(scheduler_output.total_num_scheduled_tokens)
         #     self.model_runner.capture_model(scheduler_output.total_num_scheduled_tokens)
-        
+
+        # ATTENTION: This code is duplicated in compile_or_warm_up_model method
+        # so we should clean this part before creating the vllm PR
+        # warm up sizes that are not in cudagraph capture sizes,
+        # but users still want to compile for better performance,
+        # e.g. for the max-num-batched token size in chunked prefill.
+        warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
+        if not self.model_config.enforce_eager:
+            warmup_sizes = [
+                x for x in warmup_sizes if x not in
+                self.vllm_config.compilation_config.cudagraph_capture_sizes
+            ]
+
         # Just compilation with dummy run
-        if scheduler_output.total_num_scheduled_tokens not in self._token_compiled_cudagraphs and scheduler_output.total_num_scheduled_tokens != 0:
-            logger.info("DIEGO: CUDAgraph in execution time for %d input tokens", scheduler_output.total_num_scheduled_tokens)
-            self._token_compiled_cudagraphs.add(scheduler_output.total_num_scheduled_tokens)
+        if scheduler_output.total_num_scheduled_tokens not in self._token_compiled_cudagraphs and scheduler_output.total_num_scheduled_tokens in warmup_sizes and scheduler_output.total_num_scheduled_tokens != 0:
+            logger.info(
+                "DIEGO: CUDAgraph in execution time for %d input tokens",
+                scheduler_output.total_num_scheduled_tokens)
+            self._token_compiled_cudagraphs.add(
+                scheduler_output.total_num_scheduled_tokens)
             gc.freeze()
             start_time = time.perf_counter()
-            self.model_runner._dummy_run(scheduler_output.total_num_scheduled_tokens, capture_attn_cudagraph=False, skip_eplb=True)
+            self.model_runner._dummy_run(
+                scheduler_output.total_num_scheduled_tokens,
+                capture_attn_cudagraph=False,
+                skip_eplb=True)
             end_time = time.perf_counter()
             gc.unfreeze()
             elapsed_time = end_time - start_time
             logger.info("Graph capturing finished in %.3f secs", elapsed_time)
-            
-        
+
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
 
