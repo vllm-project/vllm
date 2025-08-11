@@ -97,6 +97,12 @@ _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
 }
 
+_AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
+    "NVLM_D": {
+        "has_no_defaults_at_init": True
+    },
+}
+
 
 class ConfigFormat(str, enum.Enum):
     AUTO = "auto"
@@ -291,6 +297,16 @@ def is_interleaved(config: PretrainedConfig) -> bool:
     return False
 
 
+def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], *,
+                                     model_type: str):
+    """
+    Override default has_no_defaults_at_init for AutoConfig based on model_type
+    """
+    if model_type in _AUTO_CONFIG_KWARGS_OVERRIDES:
+        kwargs.update(_AUTO_CONFIG_KWARGS_OVERRIDES[model_type])
+    return kwargs
+
+
 def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     """Remap config attributes to match the expected names."""
     for old_attr, new_attr in _CONFIG_ATTRS_MAPPING.items():
@@ -408,15 +424,14 @@ def get_config(
             )
         else:
             try:
+                kwargs = _maybe_update_auto_config_kwargs(
+                    kwargs, model_type=model_type)
                 config = AutoConfig.from_pretrained(
                     model,
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
                     token=_get_hf_token(),
-                    # some old custom model's config needs
-                    # `has_no_defaults_at_init=True` to work.
-                    has_no_defaults_at_init=trust_remote_code,
                     **kwargs,
                 )
             except ValueError as e:
