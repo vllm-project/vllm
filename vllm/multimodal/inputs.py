@@ -316,10 +316,10 @@ class BaseMultiModalField(ABC):
             raise ValueError(f"Cannot merge different {field_types=}")
 
         validated_data = list[NestedTensors]()
-        for i, item in enumerate(elems):
-            assert item.data is not None, (
+        for i, elem in enumerate(elems):
+            assert elem.data is not None, (
                 f"Cannot merge with empty `elems[{i}]`")
-            validated_data.append(item.data)
+            validated_data.append(elem.data)
 
         return self._reduce_data(validated_data, pin_memory=pin_memory)
 
