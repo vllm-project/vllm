@@ -1869,6 +1869,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             token_indices_to_sample = None
 
+            if spec_decode_metadata is None or not self.supports_qlen_padding:
+                sampled_token_ids = self.get_valid_sampled_token_ids(
+                    sampled_token_ids, discard_sampled_tokens_req_indices)
+
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
                 target_token_ids = self.input_ids[:num_scheduled_tokens]
@@ -1899,8 +1903,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         common_attn_metadata.query_start_loc[1:] - 1 \
                             - _num_rejected_tokens_gpu
                 else:
-                    sampled_token_ids = self.get_valid_sampled_token_ids(
-                        sampled_token_ids, discard_sampled_tokens_req_indices)
                     # TODO(woosuk): Refactor this.
                     num_draft_tokens = spec_decode_metadata.num_draft_tokens
                     num_rejected_tokens = [
