@@ -871,6 +871,10 @@ class ModelConfig:
                     if getattr(pooler_config, k) is None:
                         setattr(pooler_config, k, v)
 
+            default_pooling_type = self._model_info.default_pooling_type
+            if pooler_config.pooling_type is None:
+                pooler_config.pooling_type = default_pooling_type
+
             return pooler_config
 
         return None
@@ -3856,6 +3860,10 @@ class VllmConfig:
             if pooling_type is None or pooling_type.lower() != "last":
                 disable_chunked_prefill_reasons.append(
                     "Only \"last\" pooling supports chunked "
+                    "prefill and prefix caching; disabling both.")
+            elif not getattr(self.model_config.hf_config, "is_causal", True):
+                disable_chunked_prefill_reasons.append(
+                    "Only models using causal attention supports chunked "
                     "prefill and prefix caching; disabling both.")
 
         if disable_chunked_prefill_reasons:

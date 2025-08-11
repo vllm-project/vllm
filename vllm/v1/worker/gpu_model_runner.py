@@ -1273,7 +1273,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not is_pooling_model(model):
             return []
 
-        return list(model.pooler.get_supported_tasks())
+        supported_tasks = list(model.pooler.get_supported_tasks())
+
+        if (self.scheduler_config.chunked_prefill_enabled
+                and "encode" in supported_tasks):
+            supported_tasks.remove("encode")
+
+            logger.info_once("Chunked prefill is not supported with "
+                             "encode task which using ALL pooling. "
+                             "Please turn off chunked prefill by "
+                             "`--no-enable-chunked-prefill` before using it.")
+
+        return supported_tasks
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks = list[SupportedTask]()

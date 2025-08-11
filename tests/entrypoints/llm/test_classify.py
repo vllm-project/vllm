@@ -65,3 +65,9 @@ def test_pooling_params(llm: LLM):
     assert torch.allclose(
         softmax(wo_activation), w_activation, atol=1e-2
     ), "w_activation should be close to activation(wo_activation)."
+
+
+def test_encode_api(llm: LLM):
+    err_msg = "pooling_task must be one of.+"
+    with pytest.raises(ValueError, match=err_msg):
+        llm.encode(prompts, use_tqdm=False)
