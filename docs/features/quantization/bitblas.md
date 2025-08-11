@@ -1,18 +1,15 @@
----
-title: BitBLAS
----
-[](){ #bitblas }
+# BitBLAS
 
 vLLM now supports [BitBLAS](https://github.com/microsoft/BitBLAS) for more efficient and flexible model inference. Compared to other quantization frameworks, BitBLAS provides more precision combinations.
 
 !!! note
     Ensure your hardware supports the selected `dtype` (`torch.bfloat16` or `torch.float16`).
     Most recent NVIDIA GPUs support `float16`, while `bfloat16` is more common on newer architectures like Ampere or Hopper.
-    For details see [supported hardware](https://docs.vllm.ai/en/latest/features/quantization/supported_hardware.html).
+    For details see [supported hardware](supported_hardware.md).
 
 Below are the steps to utilize BitBLAS with vLLM.
 
-```console
+```bash
 pip install bitblas>=0.1.0
 ```
 
@@ -43,17 +40,19 @@ llm = LLM(
 
 ## Read gptq format checkpoint
 
-```python
-from vllm import LLM
-import torch
+??? code
 
-# "hxbgsyxh/llama-13b-4bit-g-1" is a pre-quantized checkpoint.
-model_id = "hxbgsyxh/llama-13b-4bit-g-1"
-llm = LLM(
-    model=model_id,
-    dtype=torch.float16,
-    trust_remote_code=True,
-    quantization="bitblas",
-    max_model_len=1024
-)
-```
+    ```python
+    from vllm import LLM
+    import torch
+
+    # "hxbgsyxh/llama-13b-4bit-g-1" is a pre-quantized checkpoint.
+    model_id = "hxbgsyxh/llama-13b-4bit-g-1"
+    llm = LLM(
+        model=model_id,
+        dtype=torch.float16,
+        trust_remote_code=True,
+        quantization="bitblas",
+        max_model_len=1024
+    )
+    ```

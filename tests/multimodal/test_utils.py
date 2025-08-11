@@ -39,7 +39,7 @@ TEST_IMAGE_URLS = [
 
 TEST_VIDEO_URLS = [
     "https://www.bogotobogo.com/python/OpenCV_Python/images/mean_shift_tracking/slow_traffic_small.mp4",
-    "https://filesamples.com/samples/video/avi/sample_640x360.avi",
+    "https://github.com/opencv/opencv/raw/refs/tags/4.12.0/samples/data/vtest.avi",
 ]
 
 
@@ -167,12 +167,15 @@ async def test_fetch_image_error_conversion():
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
 @pytest.mark.parametrize("num_frames", [-1, 32, 1800])
 async def test_fetch_video_http(video_url: str, num_frames: int):
-    connector = MediaConnector()
+    connector = MediaConnector(
+        media_io_kwargs={"video": {
+            "num_frames": num_frames,
+        }})
 
-    video_sync = connector.fetch_video(video_url, num_frames=num_frames)
-    video_async = await connector.fetch_video_async(video_url,
-                                                    num_frames=num_frames)
+    video_sync, metadata_sync = connector.fetch_video(video_url)
+    video_async, metadata_async = await connector.fetch_video_async(video_url)
     assert np.array_equal(video_sync, video_async)
+    assert metadata_sync == metadata_async
 
 
 # Used for the next two tests related to `merge_and_sort_multimodal_metadata`.

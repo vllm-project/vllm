@@ -6,12 +6,14 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.platforms import current_platform
+from vllm.v1.sample.logits_processor import LogitsProcessorManager
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (PLACEHOLDER_TOKEN_ID,
                                               RejectionSampler)
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
 
 
 @pytest.fixture
@@ -21,7 +23,7 @@ def rejection_sampler():
 
 def create_logits_tensor(output_token_ids: list[list[int]],
                          vocab_size: int = 100) -> torch.Tensor:
-    """Helper function to create logits tensor that 
+    """Helper function to create logits tensor that
        will produce desired token ids on argmax"""
     token_ids = [tokens[:-1] for tokens in output_token_ids]
     num_total_tokens = sum(len(tokens) for tokens in token_ids)
@@ -41,8 +43,8 @@ def create_sampling_metadata(
     top_p: Optional[torch.Tensor] = None,
     generators: Optional[dict[int, Any]] = None,
 ) -> SamplingMetadata:
-    """Create a v1 sampling metadata object with all_greedy set 
-        to the given value. Either all greedy or all random sampling 
+    """Create a v1 sampling metadata object with all_greedy set
+        to the given value. Either all greedy or all random sampling
         is used.
     """
     generators = generators or {}
@@ -57,7 +59,6 @@ def create_sampling_metadata(
         all_random=not all_greedy,
         top_p=top_p,
         top_k=top_k,
-        min_p=torch.empty(1, ),
         generators=generators,
         max_num_logprobs=0,
         no_penalties=False,
@@ -66,10 +67,9 @@ def create_sampling_metadata(
         presence_penalties=torch.tensor([]),
         repetition_penalties=torch.tensor([]),
         output_token_ids=[],
-        min_tokens={},
-        logit_bias=[None],
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
+        logitsprocs=LogitsProcessorManager(),
     )
 
 

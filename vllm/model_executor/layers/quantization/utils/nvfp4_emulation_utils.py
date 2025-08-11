@@ -4,7 +4,11 @@ import torch
 
 from vllm.scalar_type import scalar_types
 
-__all__ = ["break_fp4_bytes", "dequantize_to_dtype", "ref_nvfp4_quant"]
+__all__ = [
+    "break_fp4_bytes",
+    "dequantize_to_dtype",
+    "ref_nvfp4_quant",
+]
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 
@@ -102,3 +106,32 @@ def ref_nvfp4_quant(x, global_scale, block_size):
     clipped_x = torch.clamp(scaled_x, -6.0, 6.0).reshape(m, n)
     # both outputs are float32
     return cast_to_fp4(clipped_x), scale.squeeze(-1)
+
+
+def run_nvfp4_emulations(x: torch.Tensor, input_global_scale: torch.Tensor,
+                         weight: torch.Tensor,
+                         weight_scale_swizzled: torch.Tensor,
+                         weight_global_scale: torch.Tensor):
+    group_size = 16
+    x_m, x_k = x.shape
+    output_dtype = x.dtype
+
+    # quantize input to (FP4 and interleaved block scale)
+    x_fp4, x_blockscale = ref_nvfp4_quant(x, input_global_scale, group_size)
+
+    # dequantize input
+    x_fp4 = x_fp4.reshape(x_m, x_k // group_size, group_size)
+    x_blockscale = x_blockscale.unsqueeze(-1) / input_global_scale
+    x_dq = (x_fp4 * x_blockscale).reshape(x_m, x_k).to(output_dtype)
+    del x_fp4, x_blockscale
+
+    # dequantize weight
+    w_fp4 = weight.data.view(torch.uint8)
+    w_dq = dequantize_to_dtype(w_fp4, weight_scale_swizzled.data,
+                               weight_global_scale, output_dtype, x.device,
+                               group_size)
+
+    # matmul
+    out = torch.matmul(x_dq, w_dq.t())
+    del w_dq, x_dq
+    return out

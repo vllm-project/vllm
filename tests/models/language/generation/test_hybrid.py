@@ -3,11 +3,15 @@
 
 import pytest
 
+from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.utils import multi_gpu_test
 from vllm.engine.arg_utils import EngineArgs
 from vllm.sampling_params import SamplingParams
 
 from ...utils import check_logprobs_close, check_outputs_equal
+
+# Mark all tests as hybrid
+pytestmark = pytest.mark.hybrid_model
 
 # NOTE: The first model in each list is taken as the primary model,
 # meaning that it will be used in all tests in this file
@@ -16,23 +20,38 @@ from ...utils import check_logprobs_close, check_outputs_equal
 SSM_MODELS = [
     "state-spaces/mamba-130m-hf",
     "tiiuae/falcon-mamba-tiny-dev",
-    # TODO: Compare to a Mamba2 model. The HF transformers implementation of
-    # Mamba2 is buggy for Codestral as it doesn't handle n_groups.
-    # See https://github.com/huggingface/transformers/pull/35943
-    # "mistralai/Mamba-Codestral-7B-v0.1",
+    "yujiepan/mamba2-codestral-v0.1-tiny-random",
 ]
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    # NOTE: ibm-granite/granite-4.0-tiny-preview are skipped currently as
-    # it is not yet available in huggingface transformers
-    # "ibm-granite/granite-4.0-tiny-preview",
-    # NOTE: Running Plamo2 in transformers implementation requires to install
-    # causal-conv1d package, which is not listed as a test dependency as it's
-    # not compatible with pip-compile.
-    "pfnet/plamo-2-1b",
+    # skipping until vLLM implementation issues are resolved
+    # "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
     "hmellor/tiny-random-BambaForCausalLM",
+    "ibm-granite/granite-4.0-tiny-preview",
+    "tiiuae/Falcon-H1-0.5B-Base",
+]
+
+HF_UNSUPPORTED_MODELS = [
+    # The HF transformers implementation of
+    # Mamba2 is buggy for Codestral as it doesn't handle n_groups, so the test
+    # doesn't compare vLLM output with HF output.
+    # See https://github.com/huggingface/transformers/pull/35943
+    "yujiepan/mamba2-codestral-v0.1-tiny-random",
+    # transformers 4.55 is still producing garbage for this model
+    # TODO(tdoublep): follow-up on transformers side
+    "ibm-granite/granite-4.0-tiny-preview"
+]
+
+V1_SUPPORTED_MODELS = [
+    "state-spaces/mamba-130m-hf",
+    "ai21labs/Jamba-tiny-dev",
+    "yujiepan/mamba2-codestral-v0.1-tiny-random",
+    "Zyphra/Zamba2-1.2B-instruct",
+    "hmellor/tiny-random-BambaForCausalLM",
+    "ibm-granite/granite-4.0-tiny-preview",
+    "tiiuae/Falcon-H1-0.5B-Base",
 ]
 
 # Avoid OOM
@@ -46,24 +65,64 @@ def test_models(
     hf_runner,
     vllm_runner,
     example_prompts,
+    monkeypatch,
     model: str,
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
+
+    try:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+        model_info.check_available_online(on_fail="skip")
+        hf_version_check = model_info.check_transformers_version(
+            on_fail="return")
+    except ValueError:
+        hf_version_check = None
+
+    if hf_version_check is not None:
+        print(f"Skipping transformers comparison because: {hf_version_check}")
+
     with hf_runner(model) as hf_model:
-        hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts, max_tokens, num_logprobs)
+        if model not in HF_UNSUPPORTED_MODELS and hf_version_check is None:
+            hf_outputs = hf_model.generate_greedy_logprobs_limit(
+                example_prompts, max_tokens, num_logprobs)
+        else:
+            hf_outputs = None
 
     with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy_logprobs(
+        vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
-    check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-    )
+    if model in V1_SUPPORTED_MODELS:
+        with monkeypatch.context() as m:
+            m.setenv("VLLM_USE_V1", "1")
+            if model in HYBRID_MODELS:
+                # required due to reorder_batch behaviour
+                m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
+            with vllm_runner(model,
+                             max_num_seqs=MAX_NUM_SEQS,
+                             enable_prefix_caching=False) as vllm_model:
+                vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
+                    example_prompts, max_tokens, num_logprobs)
+    else:
+        vllm_v1_outputs = None
+
+    if hf_outputs is not None:
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=vllm_v0_outputs,
+            name_0="hf",
+            name_1="vllm-v0",
+        )
+
+    if model in V1_SUPPORTED_MODELS:
+        ref_outputs = hf_outputs if hf_outputs is not None else vllm_v0_outputs
+        check_logprobs_close(
+            outputs_0_lst=ref_outputs,
+            outputs_1_lst=vllm_v1_outputs,
+            name_0="hf" if hf_outputs is not None else "vllm-v0",
+            name_1="vllm-v1",
+        )
 
 
 @pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
@@ -76,6 +135,14 @@ def test_batching(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
+
+    try:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+        model_info.check_available_online(on_fail="skip")
+        model_info.check_transformers_version(on_fail="skip")
+    except ValueError:
+        pass
+
     for_loop_outputs = []
     with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
         for prompt in example_prompts:
@@ -204,7 +271,7 @@ def test_models_preemption_recompute(
     Tests that outputs are identical with and w/o preemptions (recompute).
     """
     with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-        scheduler = vllm_model.model.llm_engine.scheduler[0]
+        scheduler = vllm_model.llm.llm_engine.scheduler[0]
         scheduler.ENABLE_ARTIFICIAL_PREEMPT = True
         preempt_vllm_outputs = vllm_model.generate_greedy(
             example_prompts, max_tokens)
@@ -316,4 +383,64 @@ def test_distributed_correctness(
         outputs_1_lst=vllm_outputs_tp_2,
         name_0="vllm_tp_1",
         name_1="vllm_tp_2",
+    )
+
+
+@pytest.mark.parametrize("model", ["Zyphra/Zamba2-1.2B-instruct"])
+@pytest.mark.parametrize("max_tokens", [64])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_full_cuda_graph(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    monkeypatch,
+    model: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
+
+    try:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+        model_info.check_available_online(on_fail="skip")
+        model_info.check_transformers_version(on_fail="skip")
+    except ValueError:
+        pass
+
+    with hf_runner(model) as hf_model:
+        if model not in HF_UNSUPPORTED_MODELS:
+            hf_outputs = hf_model.generate_greedy_logprobs_limit(
+                example_prompts, max_tokens, num_logprobs)
+        else:
+            hf_outputs = None
+
+    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        if model in HYBRID_MODELS:
+            # required due to reorder_batch behaviour
+            m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
+        with vllm_runner(model,
+                         max_num_seqs=MAX_NUM_SEQS,
+                         compilation_config={'full_cuda_graph': True},
+                         enable_prefix_caching=False) as vllm_model:
+            vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens, num_logprobs)
+
+    if hf_outputs is not None:
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=vllm_v0_outputs,
+            name_0="hf",
+            name_1="vllm-v0",
+        )
+
+    ref_outputs = hf_outputs if hf_outputs is not None else vllm_v0_outputs
+    check_logprobs_close(
+        outputs_0_lst=ref_outputs,
+        outputs_1_lst=vllm_v1_outputs,
+        name_0="hf" if hf_outputs is not None else "vllm-v0",
+        name_1="vllm-v1",
     )

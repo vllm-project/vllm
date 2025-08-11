@@ -3,9 +3,11 @@
 
 import json
 import os
+from importlib import util
 from pathlib import Path
 
 import pandas as pd
+import psutil
 from tabulate import tabulate
 
 results_folder = Path("results/")
@@ -29,11 +31,11 @@ throughput_results = []
 throughput_results_column_mapping = {
     "test_name": "Test name",
     "gpu_type": "GPU",
-    # "num_requests": "# of req.",
-    # "total_num_tokens": "Total # of tokens",
-    # "elapsed_time": "Elapsed time (s)",
+    "num_requests": "# of req.",
+    "total_num_tokens": "Total # of tokens",
+    "elapsed_time": "Elapsed time (s)",
     "requests_per_second": "Tput (req/s)",
-    # "tokens_per_second": "Tput (tok/s)",
+    "tokens_per_second": "Tput (tok/s)",
 }
 
 # serving results and the keys that will be printed into markdown
@@ -41,16 +43,19 @@ serving_results = []
 serving_column_mapping = {
     "test_name": "Test name",
     "gpu_type": "GPU",
-    # "completed": "# of req.",
+    "completed": "# of req.",
+    "max_concurrency": "# of max concurrency.",
     "request_throughput": "Tput (req/s)",
-    # "input_throughput": "Input Tput (tok/s)",
-    # "output_throughput": "Output Tput (tok/s)",
+    "total_token_throughput": "Total Token Tput (tok/s)",
+    "output_throughput": "Output Tput (tok/s)",
+    "total_input_tokens": "Total input tokens",
+    "total_output_tokens": "Total output tokens",
     "mean_ttft_ms": "Mean TTFT (ms)",
     "median_ttft_ms": "Median TTFT (ms)",
     "p99_ttft_ms": "P99 TTFT (ms)",
-    # "mean_tpot_ms": "Mean TPOT (ms)",
-    # "median_tpot_ms": "Median",
-    # "p99_tpot_ms": "P99",
+    "mean_tpot_ms": "Mean TPOT (ms)",
+    "median_tpot_ms": "Median",
+    "p99_tpot_ms": "P99",
     "mean_itl_ms": "Mean ITL (ms)",
     "median_itl_ms": "Median ITL (ms)",
     "p99_itl_ms": "P99 ITL (ms)",
@@ -75,6 +80,20 @@ def results_to_json(latency, throughput, serving):
     )
 
 
+def get_size_with_unit(bytes, suffix="B"):
+    """
+    Scale bytes to its proper format
+    e.g:
+        1253656 => '1.20MB'
+        1253656678 => '1.17GB'
+    """
+    factor = 1024
+    for unit in ["", "K", "M", "G", "T", "P"]:
+        if bytes < factor:
+            return f"{bytes:.2f}{unit}{suffix}"
+        bytes /= factor
+
+
 if __name__ == "__main__":
     # collect results
     for test_file in results_folder.glob("*.json"):
@@ -82,7 +101,7 @@ if __name__ == "__main__":
             raw_result = json.loads(f.read())
 
         if "serving" in str(test_file):
-            # this result is generated via `benchmark_serving.py`
+            # this result is generated via `vllm bench serve` command
 
             # attach the benchmarking command to raw_result
             try:
@@ -102,7 +121,7 @@ if __name__ == "__main__":
             continue
 
         elif "latency" in f.name:
-            # this result is generated via `benchmark_latency.py`
+            # this result is generated via `vllm bench latency` command
 
             # attach the benchmarking command to raw_result
             try:
@@ -130,7 +149,7 @@ if __name__ == "__main__":
             continue
 
         elif "throughput" in f.name:
-            # this result is generated via `benchmark_throughput.py`
+            # this result is generated via `vllm bench throughput` command
 
             # attach the benchmarking command to raw_result
             try:
@@ -154,6 +173,27 @@ if __name__ == "__main__":
     latency_results = pd.DataFrame.from_dict(latency_results)
     serving_results = pd.DataFrame.from_dict(serving_results)
     throughput_results = pd.DataFrame.from_dict(throughput_results)
+
+    svmem = psutil.virtual_memory()
+    platform_data = {
+        "Physical cores": [psutil.cpu_count(logical=False)],
+        "Total cores": [psutil.cpu_count(logical=True)],
+        "Total Memory": [get_size_with_unit(svmem.total)],
+    }
+
+    if util.find_spec("numa") is not None:
+        from numa import info
+
+        platform_data["Total NUMA nodes"] = [info.get_num_configured_nodes()]
+
+    if util.find_spec("cpuinfo") is not None:
+        from cpuinfo import get_cpu_info
+
+        platform_data["CPU Brand"] = [get_cpu_info()["brand_raw"]]
+
+    platform_results = pd.DataFrame.from_dict(
+        platform_data, orient="index", columns=["Platform Info"]
+    )
 
     raw_results_json = results_to_json(
         latency_results, throughput_results, serving_results
@@ -200,6 +240,9 @@ if __name__ == "__main__":
     throughput_md_table = tabulate(
         throughput_results, headers="keys", tablefmt="pipe", showindex=False
     )
+    platform_md_table = tabulate(
+        platform_results, headers="keys", tablefmt="pipe", showindex=True
+    )
 
     # document the result
     with open(results_folder / "benchmark_results.md", "w") as f:
@@ -211,6 +254,7 @@ if __name__ == "__main__":
             latency_tests_markdown_table=latency_md_table,
             throughput_tests_markdown_table=throughput_md_table,
             serving_tests_markdown_table=serving_md_table,
+            platform_markdown_table=platform_md_table,
             benchmarking_results_in_json_string=processed_results_json,
         )
         f.write(results)

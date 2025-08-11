@@ -7,10 +7,7 @@ from torch import Tensor
 
 import vllm._custom_ops as ops
 from vllm.platforms import current_platform
-
-
-def cdiv(a, b):
-    return (a + b - 1) // b
+from vllm.utils import cdiv
 
 
 def ref_mla(

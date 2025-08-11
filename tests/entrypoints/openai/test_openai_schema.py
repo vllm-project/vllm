@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 from typing import Final
 
 import pytest
@@ -20,7 +21,7 @@ LONG_TIMEOUT_SECONDS: Final[int] = 60
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task",
+        "--runner",
         "generate",
         "--max-model-len",
         "2048",
@@ -29,7 +30,7 @@ def server():
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
-        f"image={MAXIMUM_IMAGES}",
+        json.dumps({"image": MAXIMUM_IMAGES}),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -95,6 +96,10 @@ def test_openapi_stateless(case: schemathesis.Case):
         case.operation.method.upper(),
         case.operation.path,
     )
+    if case.operation.path.startswith("/v1/responses"):
+        # Skip responses API as it is meant to be stateful.
+        return
+
     timeout = {
         # requires a longer timeout
         ("POST", "/v1/chat/completions"):

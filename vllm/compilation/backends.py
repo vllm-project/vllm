@@ -7,6 +7,7 @@ import os
 import pprint
 import time
 from collections.abc import Sequence
+from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
 import torch
@@ -31,7 +32,7 @@ logger = init_logger(__name__)
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
     if compilation_config.use_inductor:
         if envs.VLLM_USE_STANDALONE_COMPILE and is_torch_equal_or_newer(
-                "2.8.0"):
+                "2.8.0.dev"):
             logger.debug("Using InductorStandaloneAdaptor")
             return InductorStandaloneAdaptor()
         else:
@@ -66,7 +67,25 @@ class CompilerManager:
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
 
-    def initialize_cache(self, cache_dir: str, disable_cache: bool = False):
+    def initialize_cache(self,
+                         cache_dir: str,
+                         disable_cache: bool = False,
+                         prefix: str = ""):
+        """
+        Initialize the cache directory for the compiler.
+
+        The organization of the cache directory is as follows:
+        cache_dir=/path/to/hash_str/rank_i_j/prefix/
+        inside cache_dir, there will be:
+        - vllm_compile_cache.py
+        - computation_graph.py
+        - transformed_code.py
+
+        for multiple prefixes, they can share the same
+        base cache dir of /path/to/hash_str/rank_i_j/ ,
+        to store some common compilation artifacts.
+        """
+
         self.disable_cache = disable_cache
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, "vllm_compile_cache.py")
@@ -80,7 +99,8 @@ class CompilerManager:
                 self.cache = ast.literal_eval(f.read())
 
         self.compiler.initialize_cache(cache_dir=cache_dir,
-                                       disable_cache=disable_cache)
+                                       disable_cache=disable_cache,
+                                       prefix=prefix)
 
     def save_to_file(self):
         if self.disable_cache or not self.is_cache_updated:
@@ -100,10 +120,15 @@ class CompilerManager:
         handle = self.cache[(runtime_shape, graph_index, self.compiler.name)]
         compiled_graph = self.compiler.load(handle, graph, example_inputs,
                                             graph_index, runtime_shape)
-        logger.debug(
-            "Directly load the %s-th graph for shape %s from %s via "
-            "handle %s", graph_index, str(runtime_shape), self.compiler.name,
-            handle)
+        if runtime_shape is None:
+            logger.debug(
+                "Directly load the %s-th graph for dynamic shape from %s via "
+                "handle %s", graph_index, self.compiler.name, handle)
+        else:
+            logger.debug(
+                "Directly load the %s-th graph for shape %s from %s via "
+                "handle %s", graph_index, str(runtime_shape),
+                self.compiler.name, handle)
         return compiled_graph
 
     def compile(self,
@@ -132,9 +157,15 @@ class CompilerManager:
                 # there can be multiple graphs due to piecewise compilation.
                 now = time.time()
                 elapsed = now - compilation_start_time
-                logger.info(
-                    "Directly load the compiled graph(s) for shape %s "
-                    "from the cache, took %.3f s", str(runtime_shape), elapsed)
+                if runtime_shape is None:
+                    logger.info(
+                        "Directly load the compiled graph(s) for dynamic shape "
+                        "from the cache, took %.3f s", elapsed)
+                else:
+                    logger.info(
+                        "Directly load the compiled graph(s) for shape %s "
+                        "from the cache, took %.3f s", str(runtime_shape),
+                        elapsed)
             return compiled_graph
 
         # no compiler cached the graph, or the cache is disabled,
@@ -152,17 +183,28 @@ class CompilerManager:
         assert compiled_graph is not None, "Failed to compile the graph"
 
         # store the artifact in the cache
-        if handle is not None:
+        if not envs.VLLM_DISABLE_COMPILE_CACHE and handle is not None:
             self.cache[(runtime_shape, graph_index,
                         self.compiler.name)] = handle
+            compilation_counter.num_cache_entries_updated += 1
             self.is_cache_updated = True
             if graph_index == 0:
                 # adds some info logging for the first graph
-                logger.info("Cache the graph of shape %s for later use",
-                            str(runtime_shape))
-            logger.debug(
-                "store the %s-th graph for shape %s from %s via handle %s",
-                graph_index, str(runtime_shape), self.compiler.name, handle)
+                if runtime_shape is None:
+                    logger.info(
+                        "Cache the graph for dynamic shape for later use")
+                else:
+                    logger.info("Cache the graph of shape %s for later use",
+                                str(runtime_shape))
+            if runtime_shape is None:
+                logger.debug(
+                    "Store the %s-th graph for dynamic shape from %s via "
+                    "handle %s", graph_index, self.compiler.name, handle)
+            else:
+                logger.debug(
+                    "Store the %s-th graph for shape %s from %s via handle %s",
+                    graph_index, str(runtime_shape), self.compiler.name,
+                    handle)
 
         # after compiling the last graph, record the end time
         if graph_index == num_graphs - 1:
@@ -170,7 +212,7 @@ class CompilerManager:
             elapsed = now - compilation_start_time
             compilation_config.compilation_time += elapsed
             if runtime_shape is None:
-                logger.info("Compiling a graph for general shape takes %.2f s",
+                logger.info("Compiling a graph for dynamic shape takes %.2f s",
                             elapsed)
             else:
                 logger.info("Compiling a graph for shape %s takes %.2f s",
@@ -288,7 +330,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
             global compilation_start_time
-            compiled_graph_for_general_shape = self.vllm_backend.\
+            compiled_graph_for_dynamic_shape = self.vllm_backend.\
                 compiler_manager.compile(
                 submod,
                 args,
@@ -303,11 +345,30 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             self.module.__dict__[target] = piecewise_backend(
                 submod, self.vllm_config, self.graph_pool, index,
                 len(self.compile_submod_names), sym_shape_indices,
-                compiled_graph_for_general_shape, self.vllm_backend)
+                compiled_graph_for_dynamic_shape, self.vllm_backend)
 
             compilation_counter.num_piecewise_capturable_graphs_seen += 1
 
         return output
+
+
+# the tag for the part of model being compiled,
+# e.g. backbone/eagle_head
+model_tag: str = "backbone"
+
+
+@contextmanager
+def set_model_tag(tag: str):
+    """Context manager to set the model tag."""
+    global model_tag
+    assert tag != model_tag, \
+        f"Model tag {tag} is the same as the current tag {model_tag}."
+    old_tag = model_tag
+    model_tag = tag
+    try:
+        yield
+    finally:
+        model_tag = old_tag
 
 
 class VllmBackend:
@@ -341,7 +402,17 @@ class VllmBackend:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ):
+
+        # if the model is initialized with a non-empty prefix,
+        # then usually it's enough to use that prefix,
+        # e.g. launguage_model, vision_model, etc.
+        # when multiple parts are initialized as independent
+        # models, we need to use the model_tag to distinguish
+        # them, e.g. backbone (default), eagle_head, etc.
+        self.prefix = prefix or model_tag
+
         global global_graph_pool
         if global_graph_pool is None:
             global_graph_pool = current_platform.graph_pool_handle()
@@ -441,16 +512,13 @@ class VllmBackend:
             )
             self.compilation_config.cache_dir = cache_dir
 
-        if compilation_counter.num_graphs_seen > 0:
-            cache_dir = self.compilation_config.cache_dir + \
-                f'-{compilation_counter.num_graphs_seen}'
-        else:
-            cache_dir = self.compilation_config.cache_dir
+        cache_dir = self.compilation_config.cache_dir
         os.makedirs(cache_dir, exist_ok=True)
         self.compilation_config.cache_dir = cache_dir
         rank = vllm_config.parallel_config.rank
         dp_rank = vllm_config.parallel_config.data_parallel_rank
-        local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
+        local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}",
+                                       self.prefix)
         os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
 
@@ -462,7 +530,8 @@ class VllmBackend:
             logger.info("Using cache directory: %s for vLLM's torch.compile",
                         local_cache_dir)
 
-        self.compiler_manager.initialize_cache(local_cache_dir, disable_cache)
+        self.compiler_manager.initialize_cache(local_cache_dir, disable_cache,
+                                               self.prefix)
 
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done

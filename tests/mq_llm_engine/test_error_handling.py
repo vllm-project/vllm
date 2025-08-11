@@ -66,7 +66,7 @@ async def test_evil_forward(tmp_socket):
         with pytest.raises(MQEngineDeadError):
             async for _ in client.generate(prompt="Hello my name is",
                                            sampling_params=SamplingParams(),
-                                           request_id=uuid.uuid4()):
+                                           request_id=str(uuid.uuid4())):
                 pass
         assert client.errored
 
@@ -115,7 +115,7 @@ async def test_failed_health_check(tmp_socket):
         with pytest.raises(MQEngineDeadError):
             async for _ in client.generate(prompt="Hello my name is",
                                            sampling_params=SamplingParams(),
-                                           request_id=uuid.uuid4()):
+                                           request_id=str(uuid.uuid4())):
                 pass
 
         client.close()
@@ -157,7 +157,7 @@ async def test_failed_abort(tmp_socket):
             async for _ in client.generate(
                     prompt="Hello my name is",
                     sampling_params=SamplingParams(max_tokens=10),
-                    request_id=uuid.uuid4()):
+                    request_id=str(uuid.uuid4())):
                 pass
         assert "KeyError" in repr(execinfo.value)
         assert client.errored
@@ -189,7 +189,7 @@ async def test_batch_error(tmp_socket):
             params = SamplingParams(min_tokens=2048, max_tokens=2048)
             async for _ in client.generate(prompt="Hello my name is",
                                            sampling_params=params,
-                                           request_id=uuid.uuid4()):
+                                           request_id=str(uuid.uuid4())):
                 pass
 
         tasks = [asyncio.create_task(do_generate(client)) for _ in range(10)]
@@ -289,7 +289,7 @@ async def test_engine_process_death(tmp_socket):
         with pytest.raises(MQEngineDeadError):
             async for _ in client.generate(prompt="Hello my name is",
                                            sampling_params=SamplingParams(),
-                                           request_id=uuid.uuid4()):
+                                           request_id=str(uuid.uuid4())):
                 pass
 
         # And the health check should show the engine is dead

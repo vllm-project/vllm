@@ -7,6 +7,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.utils import cdiv
+
 
 class BlockDiagonalCausalFromBottomRightMask:
 
@@ -398,11 +400,8 @@ def test_contexted_kv_attention(
         assert (large_tile_size >= B_P_SIZE
                 ), f"Expect {large_tile_size=} to be larger than {B_P_SIZE=}"
 
-        def ceil_div(a, b):
-            return (a + b - 1) // b
-
         def pad_to_multiple(a, b):
-            return ceil_div(a, b) * b
+            return cdiv(a, b) * b
 
         def pad_to_next_power_of_2(a):
             assert a > 0
@@ -411,7 +410,7 @@ def test_contexted_kv_attention(
         # calculate input shapes
         max_num_queries = pad_to_next_power_of_2(sum(query_lens))
         context_lens = torch.tensor(seq_lens) - torch.tensor(query_lens)
-        num_active_blocks = ceil_div(context_lens, block_size).sum().item()
+        num_active_blocks = cdiv(context_lens, block_size).sum().item()
         num_active_blocks = pad_to_multiple(num_active_blocks,
                                             large_tile_size // block_size)
         context_kv_len = num_active_blocks * block_size

@@ -15,9 +15,11 @@ import torch
 from torch import nn
 from transformers import Zamba2Config
 
+from vllm import envs
 from vllm.attention.layer import Attention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -29,8 +31,9 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba2_metadata import (
     Mamba2Metadata, prepare_mamba2_metadata)
-from vllm.model_executor.layers.mamba.mamba_mixer2 import (
-    MambaMixer2, extra_groups_for_head_shards)
+from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateShapeCalculator)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -41,7 +44,7 @@ from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import HasInnerState, IsHybrid, SupportsV0Only
+from .interfaces import HasInnerState, IsHybrid
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -58,6 +61,7 @@ class Zamba2LoRA(nn.Module):
         rank: int,
         output_dim: Union[int, list[int]],
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         """Initialize the attention layer.
         
@@ -283,6 +287,7 @@ class Zamba2MLP(nn.Module):
         bare_block_idx: int,
         num_hybrid_layers: dict[int, int],
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         """Initialize the MLP layer.
         
@@ -471,11 +476,10 @@ class Zamba2MambaDecoderLayer(nn.Module):
     computation depending on configuration.
     """
 
-    def __init__(
-        self,
-        config: Zamba2Config,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
+    def __init__(self,
+                 config: Zamba2Config,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         """Initialize the Mamba decoder layer.
         
         Args:
@@ -486,20 +490,20 @@ class Zamba2MambaDecoderLayer(nn.Module):
 
         # Initialize Mamba mixer with expanded intermediate size
         intermediate_size = config.mamba_expand * config.hidden_size
-        self.mamba = MambaMixer2(
-            hidden_size=config.hidden_size,
-            ssm_state_size=config.mamba_d_state,
-            conv_kernel_size=config.mamba_d_conv,
-            intermediate_size=intermediate_size,
-            use_conv_bias=config.use_conv_bias,
-            use_bias=config.add_bias_linear,
-            n_groups=config.mamba_ngroups,
-            num_heads=config.n_mamba_heads,
-            head_dim=intermediate_size // config.n_mamba_heads,
-            rms_norm_eps=config.rms_norm_eps,
-            activation="silu",
-            quant_config=quant_config,
-        )
+        self.mamba = MambaMixer2(hidden_size=config.hidden_size,
+                                 ssm_state_size=config.mamba_d_state,
+                                 conv_kernel_size=config.mamba_d_conv,
+                                 intermediate_size=intermediate_size,
+                                 use_conv_bias=config.use_conv_bias,
+                                 use_bias=config.add_bias_linear,
+                                 n_groups=config.mamba_ngroups,
+                                 num_heads=config.n_mamba_heads,
+                                 head_dim=intermediate_size //
+                                 config.n_mamba_heads,
+                                 rms_norm_eps=config.rms_norm_eps,
+                                 activation="silu",
+                                 quant_config=quant_config,
+                                 prefix=f"{prefix}.mixer")
 
         # Input normalization
         self.input_layernorm = RMSNorm(config.hidden_size,
@@ -546,14 +550,16 @@ class Zamba2MambaDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Process through Mamba mixer
-        hidden_states = self.mamba(
+        output = torch.empty_like(hidden_states)
+        self.mamba(
             hidden_states,
+            output,
             mamba_cache_params=mamba_cache_params,
             mamba2_metadata=mamba2_metadata,
         )
 
         # residual connection after mamba
-        hidden_states = residual + hidden_states
+        hidden_states = residual + output
 
         return hidden_states
 
@@ -573,6 +579,7 @@ class Zamba2HybridLayer(nn.Module):
         config: Zamba2Config,
         block_idx: int,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         """Initialize the hybrid layer.
         
@@ -589,7 +596,8 @@ class Zamba2HybridLayer(nn.Module):
                                        bias=False,
                                        quant_config=quant_config)
         self.mamba_decoder = Zamba2MambaDecoderLayer(config,
-                                                     quant_config=quant_config)
+                                                     quant_config=quant_config,
+                                                     prefix=prefix)
 
     def forward(
         self,
@@ -642,6 +650,7 @@ class Zamba2HybridLayer(nn.Module):
         return layer_outputs
 
 
+@support_torch_compile
 class Zamba2Model(nn.Module):
     """Core Zamba2 model combining transformer and Mamba architectures.
     
@@ -699,14 +708,23 @@ class Zamba2Model(nn.Module):
         # Initialize layers according to block type configuration
         layers = []
         for layer_idx, layer_type in enumerate(config.layers_block_type):
+            # tdoublep: avoid layers getting same index
+            # somewhat hacky but correct (I think)
+            prefix = str(len(layer2block_map) + layer_idx)
             if layer_type == "hybrid":
                 block = next(blocks)
                 block_idx = layer2block_map[layer_idx]
                 layers.append(
-                    Zamba2HybridLayer(block, config, block_idx, quant_config))
+                    Zamba2HybridLayer(block,
+                                      config,
+                                      block_idx,
+                                      quant_config,
+                                      prefix=prefix))
             else:
                 layers.append(
-                    Zamba2MambaDecoderLayer(config, quant_config=quant_config))
+                    Zamba2MambaDecoderLayer(config,
+                                            quant_config=quant_config,
+                                            prefix=prefix))
         self.layers = nn.ModuleList(layers)
 
         # Final layer normalization
@@ -751,19 +769,30 @@ class Zamba2Model(nn.Module):
 
         attn_metadata = get_forward_context().attn_metadata
 
-        mamba2_metadata = prepare_mamba2_metadata(
-            chunk_size=self.config.chunk_size,
-            attn_metadata=attn_metadata,
-        )
+        if not envs.VLLM_USE_V1:
+            mamba2_metadata = prepare_mamba2_metadata(
+                chunk_size=self.config.chunk_size,
+                attn_metadata=attn_metadata,
+            )
+        else:
+            # v1 get mamba2_metadata from forward_context
+            mamba2_metadata = None
 
         # Process through layers
         original_hidden_states = torch.clone(hidden_states)
         for layer_idx, layer in enumerate(self.layers):
+
+            layer_mamba_cache_params = None
+            if (isinstance(layer, (Zamba2HybridLayer, Zamba2MambaDecoderLayer))
+                    and mamba_cache_params):
+                layer_mamba_cache_params = mamba_cache_params.at_layer_idx(
+                    layer_idx)
+
             layer_outputs = layer(
                 hidden_states,
                 original_hidden_states=original_hidden_states,
                 positions=positions,
-                mamba_cache_params=mamba_cache_params.at_layer_idx(layer_idx),
+                mamba_cache_params=layer_mamba_cache_params,
                 mamba2_metadata=mamba2_metadata,
             )
             hidden_states = layer_outputs
@@ -803,7 +832,7 @@ class Zamba2Model(nn.Module):
         return loaded_params
 
 
-class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
+class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     """Zamba2 model with causal language modeling head.
     
     This class wraps the core Zamba2 model and adds:
@@ -818,6 +847,39 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
         "0.weight": "A.weight",
         "1.weight": "B.weight",
     })
+
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+        use_v1: bool = True,
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        """Calculate shapes for Mamba's convolutional and state caches.
+
+        Args:
+            vllm_config: vLLM config
+            use_v1: Get shapes for V1 (or V0)
+
+        Returns:
+            Tuple containing:
+            - conv_state_shape: Shape for convolutional state cache
+            - temporal_state_shape: Shape for state space model cache
+        """
+
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_config
+        intermediate_size = hf_config.mamba_expand * hf_config.hidden_size
+
+        return MambaStateShapeCalculator.mamba2_state_shape(
+            intermediate_size=intermediate_size,
+            tp_world_size=parallel_config.tensor_parallel_size,
+            n_groups=hf_config.mamba_ngroups,
+            num_heads=hf_config.n_mamba_heads,
+            head_dim=hf_config.mamba_headdim,
+            state_size=hf_config.mamba_d_state,
+            conv_kernel=hf_config.mamba_d_conv,
+            use_v1=use_v1,
+        )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         """Initialize the Zamba2 model for causal language modeling.
@@ -897,14 +959,20 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
             Output hidden states
         """
         # Initialize Mamba cache if needed
-        if self.mamba_cache is None:
-            num_mamba_layers = self.config.num_hidden_layers
-            self.mamba_cache = MambaCacheManager(
-                self.vllm_config, self.lm_head.weight.dtype, num_mamba_layers,
-                *self._get_mamba_cache_shape())
+        mamba_cache_params = None
+        if not envs.VLLM_USE_V1:
+            if self.mamba_cache is None:
+                num_mamba_layers = self.config.num_hidden_layers
+                mamba_state_shape = \
+                    self.get_mamba_state_shape_from_config(
+                        self.vllm_config, use_v1=False)
+                self.mamba_cache = MambaCacheManager(self.vllm_config,
+                                                     self.lm_head.weight.dtype,
+                                                     num_mamba_layers,
+                                                     *mamba_state_shape)
 
-        # Get cache parameters for current run
-        mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
+            # Get cache parameters for current run
+            mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
         # Forward pass through model
         hidden_states = self.model(
@@ -941,49 +1009,6 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
             Dictionary of capture inputs
         """
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
-
-    def _get_mamba_cache_shape(
-            self) -> tuple[tuple[int, int], tuple[int, int]]:
-        """Calculate shapes for Mamba's convolutional and state caches.
-        
-        Returns:
-            Tuple containing:
-            - conv_state_shape: Shape for convolutional state cache
-            - temporal_state_shape: Shape for state space model cache
-        """
-        world_size = get_tensor_model_parallel_world_size()
-
-        intermediate_size = self.config.mamba_expand * self.config.hidden_size
-
-        # Extend groups if needed to ensure all groups needed by a head
-        # are sharded together
-
-        # if n_groups is not divisible by world_size, need to extend the shards
-        # to ensure all groups needed by a head is sharded along with it
-        n_groups = (self.config.mamba_ngroups + extra_groups_for_head_shards(
-            self.config.mamba_ngroups, world_size))
-
-        # Calculate conv state shape (includes groups)
-        # - heads and n_groups are TP-ed
-        conv_dim = (intermediate_size +
-                    2 * n_groups * self.config.mamba_d_state)
-        conv_state_shape = (
-            divide(conv_dim, world_size),
-            self.config.mamba_d_conv - 1,
-        )
-
-        # Calculate temporal state shape (per-head states)
-        # These are not TP-ed as they depend on A, dt_bias, D
-        # - they are typically small
-        #   e.g., (h_heads, d_head, d_state) = (128, 64, 128)
-        temporal_state_shape = (
-            divide(divide(intermediate_size, self.config.mamba_headdim),
-                   world_size),
-            self.config.mamba_headdim,
-            self.config.mamba_d_state,
-        )
-
-        return conv_state_shape, temporal_state_shape
 
     def compute_logits(
         self,

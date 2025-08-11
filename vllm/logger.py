@@ -54,6 +54,12 @@ DEFAULT_LOGGING_CONFIG = {
 
 
 @lru_cache
+def _print_debug_once(logger: Logger, msg: str, *args: Hashable) -> None:
+    # Set the stacklevel to 2 to print the original caller's line info
+    logger.debug(msg, *args, stacklevel=2)
+
+
+@lru_cache
 def _print_info_once(logger: Logger, msg: str, *args: Hashable) -> None:
     # Set the stacklevel to 2 to print the original caller's line info
     logger.info(msg, *args, stacklevel=2)
@@ -74,6 +80,13 @@ class _VllmLogger(Logger):
         `intel_extension_for_pytorch.utils._logger`.
     """
 
+    def debug_once(self, msg: str, *args: Hashable) -> None:
+        """
+        As [`debug`][logging.Logger.debug], but subsequent calls with
+        the same message are silently dropped.
+        """
+        _print_debug_once(self, msg, *args)
+
     def info_once(self, msg: str, *args: Hashable) -> None:
         """
         As [`info`][logging.Logger.info], but subsequent calls with
@@ -87,6 +100,14 @@ class _VllmLogger(Logger):
         the same message are silently dropped.
         """
         _print_warning_once(self, msg, *args)
+
+
+# Pre-defined methods mapping to avoid repeated dictionary creation
+_METHODS_TO_PATCH = {
+    "debug_once": _print_debug_once,
+    "info_once": _print_info_once,
+    "warning_once": _print_warning_once,
+}
 
 
 def _configure_vllm_root_logger() -> None:
@@ -131,12 +152,7 @@ def init_logger(name: str) -> _VllmLogger:
 
     logger = logging.getLogger(name)
 
-    methods_to_patch = {
-        "info_once": _print_info_once,
-        "warning_once": _print_warning_once,
-    }
-
-    for method_name, method in methods_to_patch.items():
+    for method_name, method in _METHODS_TO_PATCH.items():
         setattr(logger, method_name, MethodType(method, logger))
 
     return cast(_VllmLogger, logger)

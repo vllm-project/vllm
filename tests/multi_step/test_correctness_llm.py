@@ -8,6 +8,7 @@ from typing import Optional
 
 import pytest
 
+from vllm.platforms import current_platform
 from vllm.utils import STR_BACKEND_ENV_VAR
 
 from ..models.utils import check_logprobs_close, check_outputs_equal
@@ -71,6 +72,12 @@ def test_multi_step_llm(
       num_logprobs: corresponds to the `logprobs` argument to the OpenAI
                     completions endpoint; `None` -> 1 logprob returned.
     """
+    if current_platform.is_rocm() and \
+        (attention_backend == "FLASHINFER" or enable_chunked_prefill):
+        pytest.skip(
+            "Multi-Step with FLASHINFER or Chunked-Prefill is not supported"
+            "on ROCm")
+
     with monkeypatch.context() as m:
         m.setenv(STR_BACKEND_ENV_VAR, attention_backend)
 
@@ -221,6 +228,9 @@ def test_multi_step_llm_w_prompt_logprobs(
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
 @pytest.mark.parametrize("num_logprobs", [None, 5])
 @pytest.mark.parametrize("attention_backend", ["FLASH_ATTN"])
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="Multi-Step + Chunked-Prefill not supported on ROCm")
 def test_multi_step_llm_chunked_prefill_prefix_cache(
     vllm_runner,
     example_prompts,

@@ -6,10 +6,16 @@ from unittest import mock
 import pytest
 import torch
 
+from tests.utils import get_attn_backend_list_based_on_platform
+from tests.v1.attention.utils import (BatchSpec, _Backend,
+                                      create_common_attn_metadata,
+                                      create_standard_kv_cache_spec,
+                                      get_attention_backend)
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VllmConfig)
 from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer
 
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
@@ -19,13 +25,8 @@ eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 
 def _create_proposer(method: str, k: int) -> EagleProposer:
     model_config = ModelConfig(model=model_dir,
-                               task="generate",
-                               max_model_len=100,
-                               tokenizer=model_dir,
-                               tokenizer_mode="auto",
-                               dtype="auto",
-                               seed=None,
-                               trust_remote_code=False)
+                               runner="generate",
+                               max_model_len=100)
 
     # Choose model directory based on method
     draft_model_dir = eagle_dir if method == "eagle" else eagle3_dir
@@ -38,15 +39,17 @@ def _create_proposer(method: str, k: int) -> EagleProposer:
         num_speculative_tokens=k,
     )
 
-    vllm_config = VllmConfig(model_config=model_config,
-                             cache_config=CacheConfig(),
-                             speculative_config=speculative_config,
-                             device_config=DeviceConfig(device="cuda"),
-                             parallel_config=ParallelConfig(),
-                             load_config=LoadConfig(),
-                             scheduler_config=SchedulerConfig())
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        cache_config=CacheConfig(),
+        speculative_config=speculative_config,
+        device_config=DeviceConfig(device=current_platform.device_type),
+        parallel_config=ParallelConfig(),
+        load_config=LoadConfig(),
+        scheduler_config=SchedulerConfig())
 
-    return EagleProposer(vllm_config=vllm_config, device='cuda')
+    return EagleProposer(vllm_config=vllm_config,
+                         device=current_platform.device_type)
 
 
 def test_prepare_inputs():
@@ -59,15 +62,21 @@ def test_prepare_inputs():
                     a, a + 1, ..., a + b - n2 - 1,
                     a + b, a + b + 1, ..., a + b + c - n3 - 1]
     """
-    device = torch.device('cuda')
+    device = torch.device(current_platform.device_type)
 
-    # a = 4, b = 7, c = 5
+    # q1 = 4, q2 = 7, q3 = 5
     # n1 = 1, n2 = 3, n3 = 2
 
-    # Cumulative lengths: [0, 4, 11, 16]
-    cu_target_query_lens = torch.tensor([0, 4, 11, 16],
-                                        dtype=torch.int32,
-                                        device=device)
+    batch_spec = BatchSpec(
+        seq_lens=[4, 7, 5],
+        query_lens=[4, 7, 5],
+    )
+
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=16,
+        device=device,
+    )
 
     # Rejected tokens per request: [1, 3, 2]
     num_rejected_tokens = torch.tensor([1, 3, 2],
@@ -101,30 +110,39 @@ def test_prepare_inputs():
         ],
         dtype=torch.int32,
         device=device)
+    proposer = _create_proposer("eagle", 1)
 
-    # n1 + n2 + n3 - a - b -c
-    num_tokens = cu_target_query_lens[-1].item() - num_rejected_tokens.sum(
-    ).item()
+    updated_metadata, token_indices = proposer.prepare_inputs(
+        common_attn_metadata, num_rejected_tokens.cpu())
 
-    cu_num_tokens, token_indices = EagleProposer.prepare_inputs(
-        cu_target_query_lens, num_rejected_tokens, num_tokens)
-
-    assert torch.equal(cu_num_tokens, expected_cu_num_tokens)
+    assert torch.equal(updated_metadata.query_start_loc,
+                       expected_cu_num_tokens)
     assert token_indices.shape[0] == expected_cu_num_tokens[-1].item()
     assert torch.equal(token_indices, expected_token_indices)
 
 
-@pytest.mark.parametrize("method,proposer_helper", [
-    ("eagle", lambda k: _create_proposer("eagle", k)),
-    ("eagle3", lambda k: _create_proposer("eagle3", k)),
-])
+@pytest.mark.parametrize("method", ["eagle", "eagle3"])
+@pytest.mark.parametrize("attn_backend",
+                         get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("use_distinct_embed_tokens", [True, False])
 @mock.patch('vllm.v1.spec_decode.eagle.get_pp_group')
 @mock.patch('vllm.v1.spec_decode.eagle.get_layers_from_vllm_config')
 @mock.patch('vllm.v1.spec_decode.eagle.get_model')
 def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
-                    proposer_helper, pp_size, use_distinct_embed_tokens):
+                    attn_backend, pp_size, use_distinct_embed_tokens,
+                    monkeypatch):
+
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
+
+    if (attn_backend == "TRITON_ATTN_VLLM_V1"
+            and not current_platform.is_rocm()):
+        pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
+                    "multi-token eagle spec decode on current platform")
+
+    if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+
     # Setup draft model mock
     mock_model = mock.MagicMock()
     if use_distinct_embed_tokens:
@@ -171,7 +189,7 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
         target_model.lm_head = mock.MagicMock()
 
     # Create proposer using the helper function
-    proposer = proposer_helper(k=8)
+    proposer = _create_proposer(method, k=8)
 
     # Call the method under test
     proposer.load_model(target_model)
@@ -195,10 +213,24 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
             target_model.model.embed_tokens
 
 
+@pytest.mark.parametrize("method", ["eagle", "eagle3"])
+@pytest.mark.parametrize("attn_backend",
+                         get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
-def test_propose(num_speculative_tokens):
+def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
+
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
+
+    if (attn_backend == "TRITON_ATTN_VLLM_V1"
+            and not current_platform.is_rocm()):
+        pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
+                    "multi-token eagle spec decode on current platform")
+
+    if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+
     # Use GPU device
-    device = torch.device('cuda')
+    device = torch.device(current_platform.device_type)
 
     # Setup test parameters
     batch_size = 2
@@ -206,6 +238,7 @@ def test_propose(num_speculative_tokens):
     seq_len_2 = 3
     total_tokens = seq_len_1 + seq_len_2
     vocab_size = 100
+    seq_lens = [seq_len_1, seq_len_2]
 
     # Create proposer first so we can use its actual hidden_size
     proposer = _create_proposer("eagle", num_speculative_tokens)
@@ -267,9 +300,16 @@ def test_propose(num_speculative_tokens):
     proposer.attn_layer_names = ["layer.0"]
 
     # Create input tensors
-    cu_num_tokens = torch.tensor([0, seq_len_1, total_tokens],
-                                 dtype=torch.int32,
-                                 device=device)
+    batch_spec = BatchSpec(
+        seq_lens=seq_lens,
+        query_lens=seq_lens,
+    )
+
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=16,
+        device=device,
+    )
 
     target_token_ids = torch.randint(0,
                                      vocab_size, (total_tokens, ),
@@ -281,25 +321,41 @@ def test_propose(num_speculative_tokens):
     target_hidden_states = torch.randn(total_tokens,
                                        hidden_size,
                                        device=device)
-    target_slot_mapping = torch.randint(0,
-                                        100, (total_tokens, ),
-                                        device=device)
     next_token_ids = torch.randint(0,
                                    vocab_size, (batch_size, ),
                                    dtype=torch.int32,
                                    device=device)
-    block_table = torch.randint(0, 10, (batch_size, 10), device=device)
-
     sampling_metadata = mock.MagicMock()
 
-    # Call the method under test
+    if attn_backend == "FLASH_ATTN_VLLM_V1":
+        attn_metadata_builder_cls, _ = get_attention_backend(
+            _Backend.FLASH_ATTN_VLLM_V1)
+    elif attn_backend == "TRITON_ATTN_VLLM_V1":
+        attn_metadata_builder_cls, _ = get_attention_backend(
+            _Backend.TRITON_ATTN_VLLM_V1)
+    elif attn_backend == "TREE_ATTN":
+        attn_metadata_builder_cls, _ = get_attention_backend(
+            _Backend.TREE_ATTN)
+    else:
+        raise ValueError(f"Unsupported attention backend: {attn_backend}")
+
+    attn_metadata_builder = attn_metadata_builder_cls(
+        kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
+        layer_names=proposer.attn_layer_names,
+        vllm_config=proposer.vllm_config,
+        device=device,
+    )
+
+    # Mock runner for attention metadata building
+    proposer.runner = mock.MagicMock()
+    proposer.runner.attn_groups.append([mock.MagicMock()])
+    proposer.runner.attn_groups[0][0].metadata_builder = attn_metadata_builder
+
     result = proposer.propose(target_token_ids=target_token_ids,
                               target_positions=target_positions,
                               target_hidden_states=target_hidden_states,
-                              target_slot_mapping=target_slot_mapping,
                               next_token_ids=next_token_ids,
-                              cu_num_tokens=cu_num_tokens,
-                              block_table=block_table,
+                              common_attn_metadata=common_attn_metadata,
                               sampling_metadata=sampling_metadata)
 
     assert result.shape == (batch_size, num_speculative_tokens)

@@ -15,8 +15,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.neuron import get_neuron_model
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalKwargs)
+from vllm.multimodal import BatchedTensorInputs, MultiModalKwargs
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
@@ -87,10 +86,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         self.lora_config = vllm_config.lora_config
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
-
-        # Multi-modal data support
-        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
-            .create_input_mapper(self.model_config)
 
         # Lazy initialization.
         self.model: nn.Module  # initialize after load_model.

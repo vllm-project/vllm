@@ -167,18 +167,11 @@ class LlamaAttention(nn.Module):
                               rope_scaling=rope_scaling,
                               quant_config=quant_config)
 
-        if hasattr(config, "interleaved_sliding_window"):
-            interleaved_sliding_window = config.interleaved_sliding_window
-            if isinstance(interleaved_sliding_window, int):
-                sliding_window = interleaved_sliding_window
-            elif isinstance(interleaved_sliding_window, list):
-                sw_idx = layer_idx % len(interleaved_sliding_window)
-                sliding_window = interleaved_sliding_window[sw_idx]
-            else:
-                raise ValueError(
-                    f"{type(interleaved_sliding_window)} is not supported.")
-        else:
-            sliding_window = None
+        sliding_window = None
+        if layer_types := getattr(config, "layer_types", None):
+            is_sliding = layer_types[layer_idx] == "sliding_attention"
+            if is_sliding:
+                sliding_window = config.sliding_window
 
         self.attn = Attention(
             self.num_heads,
@@ -491,6 +484,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "qscale_act": "input_scale",
         "qscale_weight": "weight_scale",
         "kv_fake_quantizer.qscale_act": "kv_scale",
+        "q_fake_quantizer.qscale_act": "attn.q_scale",
+        "k_fake_quantizer.qscale_act": "k_scale",
+        "v_fake_quantizer.qscale_act": "v_scale",
         "wq": "q_proj",
         "wk": "k_proj",
         "wv": "v_proj",

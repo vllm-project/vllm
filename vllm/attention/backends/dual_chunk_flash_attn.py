@@ -287,7 +287,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
@@ -295,7 +294,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         dual_chunk_attention_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing is not supported in V0.")
+            raise NotImplementedError("KV sharing is not supported in V0 "
+                                      "DUAL_CHUNK_FLASH_ATTN backend.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -307,7 +307,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                                if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         if sliding_window is not None:
             # NOTE(woosuk): flash-attn's sliding window does not work with
@@ -370,6 +369,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: DualChunkFlashAttentionMetadata,
+        output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with DualChunkFlashAttention.
         Args:
@@ -383,6 +384,13 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        assert output is None, "Output tensor not supported for DualChunk"
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for FlashAttentionImpl")
+
         (
             query,
             query_succ,
@@ -1047,7 +1055,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     v_states_intra,
                     softmax_scale=softmax_scale,
                     causal=True,
-                    block_table=block_table,
                     stage="intra",
                     vertical_indices=vertical_buffer,
                     slash_indices=slash_buffer,
@@ -1062,7 +1069,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     v_states_intra,
                     softmax_scale=softmax_scale,
                     causal=True,
-                    block_table=block_table,
                     stage="intra",
                     vertical_indices=intra_vertical_indices,
                     slash_indices=intra_slash_indices,
@@ -1077,7 +1083,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         v_states_succ,
                         softmax_scale=softmax_scale,
                         causal=False,
-                        block_table=block_table,
                         stage="succ",
                         vertical_indices=succ_vertical_buffer,
                         slash_indices=succ_slash_buffer,
@@ -1092,7 +1097,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         v_states_succ,
                         softmax_scale=softmax_scale,
                         causal=False,
-                        block_table=block_table,
                         stage="succ",
                         vertical_indices=succ_vertical_indices,
                         slash_indices=succ_slash_indices,
@@ -1107,7 +1111,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         v_states_inter,
                         softmax_scale=softmax_scale,
                         causal=False,
-                        block_table=block_table,
                         stage="inter",
                         vertical_indices=inter_vertical_buffer,
                         slash_indices=inter_slash_buffer,
@@ -1122,7 +1125,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                         v_states_inter,
                         softmax_scale=softmax_scale,
                         causal=False,
-                        block_table=block_table,
                         stage="inter",
                         vertical_indices=inter_vertical_indices,
                         slash_indices=inter_slash_indices,
@@ -1143,7 +1145,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         value_states: torch.Tensor,
         softmax_scale: float,
         causal: bool = True,
-        block_table: torch.Tensor = None,
         max_seqlen_k: Optional[int] = None,
         stage: str = "intra",
         vertical_indices: Optional[torch.Tensor] = None,
@@ -1222,7 +1223,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                                       device=query_states.device),
             max_seqlen_k=max_seqlen_k,
             causal=causal,
-            block_table=block_table.unsqueeze(0),
             return_softmax_lse=True,
         )
         softmax_lse = softmax_lse.view(q_len, q_heads, 1).transpose(0,

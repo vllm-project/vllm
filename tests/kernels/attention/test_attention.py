@@ -10,6 +10,7 @@ import torch
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
+from vllm.attention.layer import Attention, MultiHeadAttention
 from vllm.platforms import current_platform
 from vllm.utils import get_max_shared_memory_bytes
 
@@ -449,7 +450,8 @@ def test_multi_query_kv_attention(
             start += seq_len
         # xformers.AttentionBias to Tensor for use in reference impl.
         alibi_bias = [
-            b.materialize(b.shape, device=device).squeeze() for b in attn_bias
+            b.materialize((1, num_query_heads, i, i), device=device).squeeze()
+            for b, i in zip(attn_bias, seq_lens)
         ]
     else:
         attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
@@ -506,3 +508,18 @@ def test_multi_query_kv_attention_with_alibi(
         device,
         use_alibi=True,
     )
+
+
+@pytest.mark.parametrize("attention_cls", [Attention, MultiHeadAttention])
+def test_num_heads_not_divisble_by_num_kv_heads(attention_cls: type) -> None:
+    head_size = 64
+    scale = float(1.0 / (head_size**0.5))
+    num_heads = 16
+    num_kv_heads = 5
+    with pytest.raises(AssertionError):
+        _ = attention_cls(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+        )

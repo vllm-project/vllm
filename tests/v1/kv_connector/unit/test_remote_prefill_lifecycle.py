@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 from vllm.v1.request import FinishReason, RequestStatus
 
 from .utils import (assert_scheduler_empty, create_model_runner_output,
@@ -36,7 +36,7 @@ def test_basic_lifecycle():
     # Nothing running and empty scheduler output.
     assert len(scheduler.running) == 0
     assert len(scheduler_output.scheduled_new_reqs) == 0
-    assert len(scheduler_output.scheduled_cached_reqs) == 0
+    assert scheduler_output.scheduled_cached_reqs.num_reqs == 0
     assert len(scheduler_output.num_scheduled_tokens) == 0
     assert scheduler_output.total_num_scheduled_tokens == 0
 
@@ -72,7 +72,8 @@ def test_basic_lifecycle():
 
     # (2b): forward(): request finishes recv.
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
-    model_runner_output.finished_recving = [request_id]
+    model_runner_output.kv_connector_output = KVConnectorOutput(
+        finished_recving=[request_id])
 
     # (2c): update_from_output():
     engine_core_outputs = scheduler.update_from_output(scheduler_output,
@@ -158,7 +159,7 @@ def test_interleaved_lifecycle():
     assert len(scheduler.running) == 2
     assert len(scheduler.waiting) == 1
     assert len(scheduler_output.scheduled_new_reqs) == 1
-    assert len(scheduler_output.scheduled_cached_reqs) == 1
+    assert scheduler_output.scheduled_cached_reqs.num_reqs == 1
 
     model_runner_output = create_model_runner_output(
         [request_local_a, request_local_b])
@@ -169,7 +170,7 @@ def test_interleaved_lifecycle():
     assert len(scheduler.running) == 2
     assert len(scheduler.waiting) == 1
     assert len(scheduler_output.scheduled_new_reqs) == 0
-    assert len(scheduler_output.scheduled_cached_reqs) == 2
+    assert scheduler_output.scheduled_cached_reqs.num_reqs == 2
 
     model_runner_output = create_model_runner_output(
         reqs=[request_local_a, request_local_b])
@@ -177,14 +178,14 @@ def test_interleaved_lifecycle():
     assert len(scheduler.running) == 2
     assert len(scheduler.waiting) == 1
     assert len(scheduler_output.scheduled_new_reqs) == 0
-    assert len(scheduler_output.scheduled_cached_reqs) == 2
+    assert scheduler_output.scheduled_cached_reqs.num_reqs == 2
 
     # STEP 4: KVs arrive.
     scheduler_output = scheduler.schedule()
     assert len(scheduler.running) == 2
     assert len(scheduler.waiting) == 1
     assert len(scheduler_output.scheduled_new_reqs) == 0
-    assert len(scheduler_output.scheduled_cached_reqs) == 2
+    assert scheduler_output.scheduled_cached_reqs.num_reqs == 2
 
     model_runner_output = create_model_runner_output(
         [request_local_a, request_local_b],
@@ -196,7 +197,7 @@ def test_interleaved_lifecycle():
     assert len(scheduler.running) == 3
     assert len(scheduler.waiting) == 0
     assert len(scheduler_output.scheduled_new_reqs) == 1
-    assert len(scheduler_output.scheduled_cached_reqs) == 2
+    assert scheduler_output.scheduled_cached_reqs.num_reqs == 2
 
     model_runner_output = create_model_runner_output(
         [request_local_a, request_local_b, request_remote])
@@ -309,7 +310,8 @@ def test_full_block_prompt():
     # # STEP (2): Recv.
     scheduler_output = scheduler.schedule()
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
-    model_runner_output.finished_recving = [request_id]
+    model_runner_output.kv_connector_output = KVConnectorOutput(
+        finished_recving=[request_id])
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.waiting) == 1
     assert (request_id in scheduler.finished_recving_kv_req_ids)

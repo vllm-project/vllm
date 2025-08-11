@@ -25,7 +25,7 @@ TEST_VIDEO_URLS = [
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task",
+        "--runner",
         "generate",
         "--max-model-len",
         "32768",
@@ -50,7 +50,7 @@ async def client(server):
 @pytest.fixture(scope="session")
 def base64_encoded_video() -> dict[str, str]:
     return {
-        video_url: encode_video_base64(fetch_video(video_url))
+        video_url: encode_video_base64(fetch_video(video_url)[0])
         for video_url in TEST_VIDEO_URLS
     }
 

@@ -392,21 +392,7 @@ class H2OVLProcessor(BaseInternVLProcessor):
 
 class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
 
-    def get_hf_processor(
-        self,
-        *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        **kwargs: object,
-    ) -> H2OVLProcessor:
-        if min_dynamic_patch is not None:
-            kwargs["min_dynamic_patch"] = min_dynamic_patch
-        if max_dynamic_patch is not None:
-            kwargs["max_dynamic_patch"] = max_dynamic_patch
-        if dynamic_image_size is not None:
-            kwargs["dynamic_image_size"] = dynamic_image_size
-
+    def get_hf_processor(self, **kwargs: object) -> H2OVLProcessor:
         return self.ctx.init_processor(
             H2OVLProcessor,
             config=self.get_hf_config(),
@@ -490,6 +476,7 @@ class H2OVLMultiModalProcessor(
         prompt: Union[str, list[int]],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
         *,
         return_mm_hashes: bool,
     ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
@@ -502,6 +489,7 @@ class H2OVLMultiModalProcessor(
                 prompt=prompt,
                 mm_data_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                tokenization_kwargs=tokenization_kwargs,
                 return_mm_hashes=return_mm_hashes,
             )
 
@@ -509,6 +497,7 @@ class H2OVLMultiModalProcessor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
             return_mm_hashes=return_mm_hashes,
         )
 

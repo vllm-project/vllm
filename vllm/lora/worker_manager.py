@@ -111,10 +111,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
             # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
             # to ensure correct loading of lora weights.
             model = self._adapter_manager.model
-            hf_to_vllm_mapper = None
-            if (hasattr(model, "hf_to_vllm_mapper")
-                    and model.hf_to_vllm_mapper is not None):
-                hf_to_vllm_mapper = model.hf_to_vllm_mapper
+            hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
 
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_path,
@@ -157,7 +154,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
                 lora_request.lora_int_id)
         else:
             dummy_lora = self._adapter_manager.create_dummy_lora(
-                lora_request.lora_int_id, rank, 1, self.embedding_modules)
+                lora_request.lora_int_id, rank, self.embedding_modules)
             if self._cached_dummy_lora is None:
                 self._cached_dummy_lora = dummy_lora
         return self._adapter_manager.add_adapter(dummy_lora)

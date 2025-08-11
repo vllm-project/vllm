@@ -20,6 +20,18 @@ from vllm.model_executor.model_loader.utils import (get_model_architecture,
 
 logger = init_logger(__name__)
 
+BLACKLISTED_TENSORIZER_ARGS = {
+    "device",  # vLLM decides this
+    "dtype",  # vLLM decides this
+    "mode",  # Not meant to be configurable by the user
+}
+
+
+def validate_config(config: dict):
+    for k, v in config.items():
+        if v is not None and k in BLACKLISTED_TENSORIZER_ARGS:
+            raise ValueError(f"{k} is not an allowed Tensorizer argument.")
+
 
 class TensorizerLoader(BaseModelLoader):
     """Model loader using CoreWeave's tensorizer library."""
@@ -29,8 +41,9 @@ class TensorizerLoader(BaseModelLoader):
         if isinstance(load_config.model_loader_extra_config, TensorizerConfig):
             self.tensorizer_config = load_config.model_loader_extra_config
         else:
+            validate_config(load_config.model_loader_extra_config)
             self.tensorizer_config = TensorizerConfig(
-                **load_config.model_loader_extra_config)
+                **load_config.model_loader_extra_config["tensorizer_config"])
 
     def _verify_config(self, model_config: ModelConfig,
                        parallel_config: ParallelConfig):
@@ -104,8 +117,12 @@ class TensorizerLoader(BaseModelLoader):
 
         if is_vllm_tensorized(self.tensorizer_config):
             tensorizer_config = self._patch_tensorizer_config(model_config)
-            model = init_tensorizer_model(tensorizer_config=tensorizer_config,
-                                          vllm_config=vllm_config)
+            device_config = vllm_config.device_config
+            with set_default_torch_dtype(model_config.dtype):
+                with torch.device(device_config.device):
+                    model = init_tensorizer_model(
+                        tensorizer_config=tensorizer_config,
+                        vllm_config=vllm_config)
             self.load_weights(model, model_config)
             return model
         return self._load_model_serialized_cpu(vllm_config=vllm_config)
@@ -114,10 +131,12 @@ class TensorizerLoader(BaseModelLoader):
     def save_model(
         model: torch.nn.Module,
         tensorizer_config: Union[TensorizerConfig, dict],
+        model_config: ModelConfig,
     ) -> None:
         if isinstance(tensorizer_config, dict):
             tensorizer_config = TensorizerConfig(**tensorizer_config)
         serialize_vllm_model(
             model=model,
             tensorizer_config=tensorizer_config,
+            model_config=model_config,
         )

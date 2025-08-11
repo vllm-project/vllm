@@ -118,7 +118,7 @@ def run_test(
     # default to enforce_eager=True if enforce_eager
     # is left unspecified. However, the
     # VllmRunner test fixture (which wraps around the LLM class) defaults to
-    # enforce_eager=False (a behavior which a number of already-exisitng
+    # enforce_eager=False (a behavior which a number of already-existing
     # decoder-only unit tests expect), so when testing an encoder/decoder
     # model we must explicitly specify enforce_eager=True in the VllmRunner
     # constructor.

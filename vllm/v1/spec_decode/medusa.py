@@ -48,9 +48,11 @@ class MedusaProposer:
         return [list(row) for row in zip(*draft_tokens)]
 
     def load_model(self, target_model: nn.Module) -> None:
-        self.model = get_model(vllm_config=self.vllm_config,
-                               model_config=self.vllm_config.
-                               speculative_config.draft_model_config)
+        from vllm.compilation.backends import set_model_tag
+        with set_model_tag("medusa_head"):
+            self.model = get_model(vllm_config=self.vllm_config,
+                                   model_config=self.vllm_config.
+                                   speculative_config.draft_model_config)
 
     @torch.inference_mode()
     def dummy_run(self, num_tokens: int) -> None:

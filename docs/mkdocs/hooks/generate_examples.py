@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 import regex as re
 
+logger = logging.getLogger("mkdocs")
+
 ROOT_DIR = Path(__file__).parent.parent.parent.parent
 ROOT_DIR_RELATIVE = '../../../../..'
 EXAMPLE_DIR = ROOT_DIR / "examples"
 EXAMPLE_DOC_DIR = ROOT_DIR / "docs/examples"
-print(ROOT_DIR.resolve())
-print(EXAMPLE_DIR.resolve())
-print(EXAMPLE_DOC_DIR.resolve())
 
 
 def fix_case(text: str) -> str:
@@ -105,7 +105,7 @@ class Example:
         return fix_case(self.path.stem.replace("_", " ").title())
 
     def generate(self) -> str:
-        content = f"---\ntitle: {self.title}\n---\n\n"
+        content = f"# {self.title}\n\n"
         content += f"Source <gh-file:{self.path.relative_to(ROOT_DIR)}>.\n\n"
 
         # Use long code fence to avoid issues with
@@ -135,6 +135,11 @@ class Example:
 
 
 def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
+    logger.info("Generating example documentation")
+    logger.debug("Root directory: %s", ROOT_DIR.resolve())
+    logger.debug("Example directory: %s", EXAMPLE_DIR.resolve())
+    logger.debug("Example document directory: %s", EXAMPLE_DOC_DIR.resolve())
+
     # Create the EXAMPLE_DOC_DIR if it doesn't exist
     if not EXAMPLE_DOC_DIR.exists():
         EXAMPLE_DOC_DIR.mkdir(parents=True)
@@ -156,8 +161,8 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
     for example in sorted(examples, key=lambda e: e.path.stem):
         example_name = f"{example.path.stem}.md"
         doc_path = EXAMPLE_DOC_DIR / example.category / example_name
-        print(doc_path)
         if not doc_path.parent.exists():
             doc_path.parent.mkdir(parents=True)
         with open(doc_path, "w+") as f:
             f.write(example.generate())
+        logger.debug("Example generated: %s", doc_path.relative_to(ROOT_DIR))

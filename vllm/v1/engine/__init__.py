@@ -7,10 +7,12 @@ from collections.abc import Sequence
 from typing import Any, Optional, Union
 
 import msgspec
+import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.inputs import PlaceholderRange
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
@@ -50,7 +52,8 @@ class EngineCoreRequest(
     mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]]
     mm_hashes: Optional[list[str]]
     mm_placeholders: Optional[list[PlaceholderRange]]
-    sampling_params: SamplingParams
+    sampling_params: Optional[SamplingParams]
+    pooling_params: Optional[PoolingParams]
     eos_token_id: Optional[int]
     arrival_time: float
     lora_request: Optional[LoRARequest]
@@ -65,6 +68,7 @@ class EngineCoreRequest(
     # belong to, to cover a race condition where the request is sent before
     # a wave finished notification is received.
     current_wave: int = 0
+    priority: int = 0
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -104,6 +108,8 @@ class EngineCoreOutput(
     new_logprobs: Optional[LogprobsLists] = None
     new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
 
+    pooling_output: Optional[torch.Tensor] = None
+
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
     events: Optional[list[EngineCoreEvent]] = None
@@ -117,6 +123,13 @@ class EngineCoreOutput(
         return self.finish_reason is not None
 
 
+class UtilityResult:
+    """Wrapper for special handling when serializing/deserializing."""
+
+    def __init__(self, r: Any = None):
+        self.result = r
+
+
 class UtilityOutput(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]
@@ -126,7 +139,7 @@ class UtilityOutput(
 
     # Non-None implies the call failed, result should be None.
     failure_message: Optional[str] = None
-    result: Any = None
+    result: Optional[UtilityResult] = None
 
 
 class EngineCoreOutputs(
@@ -171,3 +184,19 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b'\x03'
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b'\x04'
+
+
+class ReconfigureDistributedRequest(msgspec.Struct):
+    new_data_parallel_size: int
+    new_data_parallel_rank: int
+    new_data_parallel_rank_local: int
+    new_data_parallel_master_ip: str
+    new_data_parallel_master_port: int
+
+
+class ReconfigureRankType(enum.IntEnum):
+    """
+    Rank type for reconfiguring distributed request.
+    """
+    KEEP_CURRENT_RANK = -1
+    SHUTDOWN_CURRENT_RANK = -2

@@ -270,6 +270,10 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         self.block_tables[seq_id].free()
         del self.block_tables[seq_id]
 
+    def remove_seq_from_computed_blocks_tracker(self, seq: Sequence) -> None:
+        seq_id = seq.seq_id
+        self._computed_blocks_tracker.remove_seq(seq_id)
+
     def free_cross(self, seq_group: SequenceGroup) -> None:
         request_id = seq_group.request_id
         if request_id not in self.cross_block_tables:
