@@ -158,7 +158,7 @@ adjustments). As a result, the returned logprobs do not reflect the final adjust
 probabilities used during sampling.
 
 You can adjust this behavior by setting the `--logprobs-mode` flag.
-We support 5 modes: `raw_logprobs`, `processed_logprobs`, `final_logprobs`, `raw_logits`, `processed_logits`.
+We support 5 modes: `raw_logprobs` (default), `processed_logprobs`, `final_logprobs`, `raw_logits`, `processed_logits`.
 Raw means the values before applying any logit processors, like bad words.
 Processed means the values after applying all processors, except argmax invariant processors (e.g. min_p),
 temperature and top_k/top_p. Final means after applying all logit processors.
