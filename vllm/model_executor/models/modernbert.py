@@ -93,12 +93,15 @@ class ModernBertAttention(nn.Module):
         )
 
         if layer_id % config.global_attn_every_n_layers != 0:
-            sliding_window = config.local_attention
-            rope_theta = config.local_rope_theta
+            self.local_attention = (config.local_attention // 2,
+                                    config.local_attention // 2)
         else:
-            sliding_window = None
-            rope_theta = config.global_rope_theta
+            self.local_attention = (-1, -1)
 
+        rope_theta = config.global_rope_theta
+        if self.local_attention != (
+                -1, -1) and config.local_rope_theta is not None:
+            rope_theta = config.local_rope_theta
         self.rotary_emb = ModernBertRotaryEmbedding(config=config,
                                                     head_size=self.head_dim,
                                                     dim=self.head_dim,
@@ -106,7 +109,6 @@ class ModernBertAttention(nn.Module):
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
-                              per_layer_sliding_window=sliding_window,
                               prefix=f"{layer_id}.attn",
                               attn_type=AttentionType.ENCODER_ONLY)
         self.Wo = RowParallelLinear(config.hidden_size,
