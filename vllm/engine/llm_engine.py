@@ -845,7 +845,8 @@ class LLMEngine:
 
     def reset_mm_cache(self) -> bool:
         """Reset the multi-modal cache."""
-        return self.input_preprocessor.mm_registry.reset_processor_cache()
+        return self.input_preprocessor.mm_registry.reset_processor_cache(
+            self.model_config)
 
     def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         """Reset prefix cache for all devices."""

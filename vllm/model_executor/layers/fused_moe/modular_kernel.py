@@ -369,6 +369,8 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         expert_tokens_meta: Optional[ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        w1_bias: Optional[torch.Tensor] = None,
+        w2_bias: Optional[torch.Tensor] = None,
     ):
         """
         This function computes the intermediate result of a Mixture of Experts
@@ -666,28 +668,28 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         return fused_out
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        inplace: bool = False,
-        activation: str = "silu",
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        w1_scale: Optional[torch.Tensor] = None,
-        w2_scale: Optional[torch.Tensor] = None,
-        w1_zp: Optional[torch.Tensor] = None,
-        w2_zp: Optional[torch.Tensor] = None,
-        a1_scale: Optional[torch.Tensor] = None,
-        a2_scale: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        extra_expert_args: Optional[dict] = None,
-        extra_prepare_args: Optional[dict] = None,
-        extra_finalize_args: Optional[dict] = None,
-    ) -> torch.Tensor:
+    def forward(self,
+                hidden_states: torch.Tensor,
+                w1: torch.Tensor,
+                w2: torch.Tensor,
+                topk_weights: torch.Tensor,
+                topk_ids: torch.Tensor,
+                inplace: bool = False,
+                activation: str = "silu",
+                global_num_experts: int = -1,
+                expert_map: Optional[torch.Tensor] = None,
+                w1_scale: Optional[torch.Tensor] = None,
+                w2_scale: Optional[torch.Tensor] = None,
+                w1_zp: Optional[torch.Tensor] = None,
+                w2_zp: Optional[torch.Tensor] = None,
+                a1_scale: Optional[torch.Tensor] = None,
+                a2_scale: Optional[torch.Tensor] = None,
+                apply_router_weight_on_input: bool = False,
+                extra_expert_args: Optional[dict] = None,
+                extra_prepare_args: Optional[dict] = None,
+                extra_finalize_args: Optional[dict] = None,
+                w1_bias: Optional[torch.Tensor] = None,
+                w2_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         This function computes a Mixture of Experts (MoE) layer using two sets
         of weights, w1 and w2, and top-k gating mechanism.
