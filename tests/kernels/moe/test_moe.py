@@ -340,10 +340,10 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
         e_map = None
 
     if weight_bits == 4:
-        quant_confg_builder = int4_w4a16_moe_quant_config
+        quant_config_builder = int4_w4a16_moe_quant_config
     else:
         assert weight_bits == 8
-        quant_confg_builder = int8_w8a16_moe_quant_config
+        quant_config_builder = int8_w8a16_moe_quant_config
 
     quant_config = quant_config_builder(
         w1_scale=w1_scales,
@@ -360,7 +360,8 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
                                   topk,
                                   renormalize=False,
                                   global_num_experts=e,
-                                  expert_map=e_map)
+                                  expert_map=e_map,
+                                  quant_config=quant_config)
         torch_output = torch_moe(a,
                                  w1_ref,
                                  w2_ref,
