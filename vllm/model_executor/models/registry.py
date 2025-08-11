@@ -25,8 +25,8 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.dynamic_module import (
     try_get_class_from_dynamic_module)
 
-from .interfaces import (has_inner_state, has_noops, is_attention_free,
-                         is_hybrid, supports_cross_encoding,
+from .interfaces import (get_default_pooling_type, has_inner_state, has_noops,
+                         is_attention_free, is_hybrid, supports_cross_encoding,
                          supports_multimodal, supports_multimodal_raw_input,
                          supports_pp, supports_transcription, supports_v0_only)
 from .interfaces_base import is_pooling_model, is_text_generation_model
@@ -259,7 +259,8 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
-    "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
+    # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
+    # "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "MedusaModel": ("medusa", "Medusa"),
@@ -305,6 +306,7 @@ class _ModelInfo:
     architecture: str
     is_text_generation_model: bool
     is_pooling_model: bool
+    default_pooling_type: str
     supports_cross_encoding: bool
     supports_multimodal: bool
     supports_multimodal_raw_input: bool
@@ -323,6 +325,7 @@ class _ModelInfo:
             architecture=model.__name__,
             is_text_generation_model=is_text_generation_model(model),
             is_pooling_model=is_pooling_model(model),
+            default_pooling_type=get_default_pooling_type(model),
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
             supports_multimodal_raw_input=supports_multimodal_raw_input(model),

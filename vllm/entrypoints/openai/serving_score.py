@@ -7,6 +7,7 @@ from typing import Any, Optional, Union
 
 from fastapi import Request
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
@@ -17,11 +18,15 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse, RerankDocument,
                                               ScoreResponseData, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam,
                                           _cosine_similarity,
                                           _validate_score_input_lens,
+                                          compress_token_type_ids,
                                           get_score_prompt)
+# yapf: enable
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
@@ -158,6 +163,8 @@ class ServingScores(OpenAIServing):
             tokenizer=tokenizer,
             tokenization_kwargs=tokenization_kwargs,
         )
+        self._validate_input(request, engine_prompt["prompt_token_ids"],
+                             full_prompt)
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
 
@@ -188,64 +195,27 @@ class ServingScores(OpenAIServing):
 
         input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
 
-        if self.model_config.is_multimodal_model:
+        preprocess_async = make_async(self._preprocess_score,
+                                      executor=self._tokenizer_executor)
 
-            preprocess_async = make_async(self._preprocess_score,
-                                          executor=self._tokenizer_executor)
+        preprocessed_prompts = await asyncio.gather(
+            *(preprocess_async(request=request,
+                               tokenizer=tokenizer,
+                               tokenization_kwargs=tokenization_kwargs,
+                               data_1=t1,
+                               data_2=t2) for t1, t2 in input_pairs))
 
-            preprocessed_prompts = await asyncio.gather(
-                *(preprocess_async(request=request,
-                                   tokenizer=tokenizer,
-                                   tokenization_kwargs=tokenization_kwargs,
-                                   data_1=t1,
-                                   data_2=t2) for t1, t2 in input_pairs))
-
-            for full_prompt, engine_prompt in preprocessed_prompts:
-                request_prompts.append(full_prompt)
-                engine_prompts.append(engine_prompt)
-
-        else:
-            tokenize_async = make_async(tokenizer.__call__,
-                                        executor=self._tokenizer_executor)
-            use_pad_token = self.model_config.use_pad_token
-
-            if use_pad_token:
-                # cross_encoder models defaults to using pad_token.
-                tokenized_prompts = await asyncio.gather(*(
-                    tokenize_async(
-                        text=t1,  # type: ignore[arg-type]
-                        text_pair=t2,  # type: ignore[arg-type]
-                        **tokenization_kwargs) for t1, t2 in input_pairs))
-            else:
-                # `llm as reranker` models defaults to not using pad_token.
-                tokenized_prompts = await asyncio.gather(*(
-                    tokenize_async(
-                        text=t1 +  # type: ignore[operator]
-                        t2,
-                        **tokenization_kwargs) for t1, t2 in input_pairs))
-
-            for prompt_inputs, (t1, t2) in zip(tokenized_prompts, input_pairs):
-                sep_token = tokenizer.sep_token if (tokenizer.sep_token
-                                                    and use_pad_token) else ''
-                request_prompt = f"{t1}{sep_token}{t2}"
-
-                input_ids = prompt_inputs["input_ids"]
-                text_token_prompt = \
-                    self._validate_input(request, input_ids, request_prompt)
-                engine_prompt = TokensPrompt(
-                    prompt_token_ids=text_token_prompt["prompt_token_ids"],
-                    token_type_ids=prompt_inputs.get("token_type_ids"))
-
-                request_prompts.append(request_prompt)
-                engine_prompts.append(engine_prompt)
+        for full_prompt, engine_prompt in preprocessed_prompts:
+            request_prompts.append(full_prompt)
+            engine_prompts.append(engine_prompt)
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        pooling_params = request.to_pooling_params()
+        default_pooling_params = request.to_pooling_params()
 
         try:
-            pooling_params.verify("score", self.model_config)
+            default_pooling_params.verify("score", self.model_config)
         except ValueError as e:
             return self.create_error_response(str(e))
 
@@ -254,8 +224,18 @@ class ServingScores(OpenAIServing):
 
             self._log_inputs(request_id_item,
                              request_prompts[i],
-                             params=pooling_params,
+                             params=default_pooling_params,
                              lora_request=lora_request)
+
+            if envs.VLLM_USE_V1 and (token_type_ids := engine_prompt.pop(
+                    "token_type_ids", None)):
+                pooling_params = default_pooling_params.clone()
+                compressed = compress_token_type_ids(token_type_ids)
+                pooling_params.extra_kwargs = {
+                    "compressed_token_type_ids": compressed
+                }
+            else:
+                pooling_params = (default_pooling_params)
 
             generator = self.engine_client.encode(
                 engine_prompt,
