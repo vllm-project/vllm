@@ -269,7 +269,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.has_bias = self.moe.has_bias
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
         if self.rocm_aiter_moe_enabled:
             from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
@@ -305,7 +304,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
-        if self.has_bias:
+        if self.moe.has_bias:
             w13_bias = torch.nn.Parameter(torch.zeros(
                 num_experts,
                 2 * intermediate_size_per_partition,
@@ -322,7 +321,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
-        if self.has_bias:
+        if self.moe.has_bias:
             w2_bias = torch.nn.Parameter(torch.zeros(num_experts,
                                                      hidden_size,
                                                      dtype=params_dtype),
@@ -446,7 +445,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
-        return None
+        if self.moe.has_bias:
+            return biased_moe_quant_config(
+                layer.w13_bias,
+                layer.w2_bias,
+            )
+        else:
+            return None
 
     def forward_cuda(
         self,
@@ -523,8 +528,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
-                w1_bias=layer.w13_bias if self.has_bias else None,
-                w2_bias=layer.w2_bias if self.has_bias else None,
+                w1_bias=layer.w13_bias if self.moe.has_bias else None,
+                w2_bias=layer.w2_bias if self.moe.has_bias else None,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
@@ -948,6 +953,7 @@ class FusedMoE(CustomOp):
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=model_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
+            has_bias=has_bias,
         )
         self.moe_config = moe
         self.quant_config = quant_config
