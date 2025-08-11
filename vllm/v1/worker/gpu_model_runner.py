@@ -2031,7 +2031,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
-        self.maybe_setup_kv_connector(scheduler_output)
+        with set_forward_context(attn_metadata,
+                                 vllm_config=self.vllm_config,
+                                 num_tokens=num_input_tokens or 1,
+                                 num_tokens_across_dp=num_tokens_after_padding,
+                                 skip_cuda_graphs=skip_cuda_graphs):
+            self.maybe_setup_kv_connector(scheduler_output)
         model_output = self._run_model(
             attn_metadata=attn_metadata,
             num_scheduled_tokens=num_input_tokens,
