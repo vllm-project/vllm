@@ -510,12 +510,8 @@ class OpenAIServing:
             if (isinstance(message, dict) and "content" in message
                     and isinstance(message["content"], list)):
                 for content_dict in message["content"]:
-                    # Use Any type to handle dynamic dict access safely
-                    if (isinstance(content_dict, dict)
-                            and "type" in content_dict):
-                        content_type = cast(Any, content_dict).get("type")
-                        if isinstance(content_type, str):
-                            message_types.add(content_type.split("_")[0])
+                    if "type" in content_dict:
+                        message_types.add(content_dict["type"].split("_")[0])
         return message_types
 
     async def _normalize_prompt_text_to_input(
@@ -892,25 +888,12 @@ class OpenAIServing:
                 **_chat_template_kwargs,
             )
         else:
-            # Cast tokenizer to compatible type for apply_hf_chat_template
-            from transformers import (PreTrainedTokenizer,
-                                      PreTrainedTokenizerFast)
-            if isinstance(tokenizer,
-                          (PreTrainedTokenizer, PreTrainedTokenizerFast)):
-                request_prompt = apply_hf_chat_template(
-                    tokenizer=tokenizer,
-                    conversation=conversation,
-                    model_config=model_config,
-                    **_chat_template_kwargs,
-                )
-            else:
-                # Fallback for other tokenizer types
-                request_prompt = apply_hf_chat_template(
-                    tokenizer=cast(PreTrainedTokenizer, tokenizer),
-                    conversation=conversation,
-                    model_config=model_config,
-                    **_chat_template_kwargs,
-                )
+            request_prompt = apply_hf_chat_template(
+                tokenizer=tokenizer,
+                conversation=conversation,
+                model_config=model_config,
+                **_chat_template_kwargs,
+            )
 
         mm_data = await mm_data_future
 
@@ -947,14 +930,9 @@ class OpenAIServing:
             # For MistralTokenizer
             assert is_list_of(request_prompt, int), (
                 "Prompt has to be either a string or a list of token ids")
-            # Ensure tokenizer has decode method
-            if hasattr(tokenizer, 'decode'):
-                decoded_prompt = tokenizer.decode(request_prompt)
-            else:
-                # Fallback for tokenizers without decode method
-                decoded_prompt = str(request_prompt)
-            prompt_inputs = TextTokensPrompt(prompt=decoded_prompt,
-                                             prompt_token_ids=request_prompt)
+            prompt_inputs = TextTokensPrompt(
+                prompt=tokenizer.decode(request_prompt),
+                prompt_token_ids=request_prompt)
 
         engine_prompt = EngineTokensPrompt(
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
@@ -1121,12 +1099,7 @@ class OpenAIServing:
 
         if logprob.decoded_token is not None:
             return logprob.decoded_token
-        # Ensure tokenizer has decode method
-        if hasattr(tokenizer, 'decode'):
-            return tokenizer.decode(token_id)
-        else:
-            # Fallback for tokenizers without decode method
-            return f"token_id:{token_id}"
+        return tokenizer.decode(token_id)
 
     def _is_model_supported(self, model_name: Optional[str]) -> bool:
         if not model_name:
