@@ -246,6 +246,7 @@ class CompilationConfig:
     """files that are traced for compilation"""
     compilation_time: float = field(default=0.0, init=False)
     """time taken for compilation"""
+    load_dynamo_cache: bool = False
 
     static_forward_context: dict[str, Any] = field(default_factory=dict,
                                                    init=False)

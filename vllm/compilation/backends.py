@@ -12,6 +12,7 @@ from typing import Any, Callable, Optional
 
 import torch
 import torch.fx as fx
+import torch.utils._pytree as pytree
 from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
@@ -321,7 +322,34 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                     args: tuple[torch.fx.node.Argument,
                                 ...], kwargs: dict[str, Any]) -> Any:
         assert isinstance(target, str)
-        output = super().call_module(target, args, kwargs)
+        submod = self.fetch_attr(target)
+        output = None
+        if isinstance(
+                submod, torch.fx.GraphModule
+        ) and self.vllm_config.compilation_config.load_dynamo_cache:
+            # No need to recompute the result when they
+            # are cached on example value already.
+            output_node = next(
+                iter(reversed(self.fetch_attr(target).graph.nodes)))
+            assert output_node.op == "output"
+            has_value = True
+
+            def _example_value(node):
+                nonlocal has_value
+                if isinstance(node, torch.fx.Node):
+                    if "example_value" in node.meta:
+                        return node.meta["example_value"]
+                else:
+                    return node
+                has_value = False
+                return None
+
+            output = pytree.tree_map(_example_value, output_node.args[0])
+            if not has_value:
+                output = None
+
+        if output is None:
+            output = super().call_module(target, args, kwargs)
 
         if target in self.compile_submod_names:
             index = self.compile_submod_names.index(target)

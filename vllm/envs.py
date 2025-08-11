@@ -353,6 +353,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_STANDALONE_COMPILE":
     lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "1") == "1",
 
+    "VLLM_USE_TORCH_DYNAMO_CACHING":
+    lambda: os.environ.get("VLLM_USE_TORCH_DYNAMO_CACHING", "0") == "1",
+
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK":
