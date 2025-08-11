@@ -475,9 +475,9 @@ class LlamaModel(nn.Module):
             if not hasattr(parameter, "shards"):
                 assert not torch.all(parameter.data == 0), (name, parameter.data.shape)
             else:
-                for shard in parameter.shards.values():
+                for shard_id, shard in parameter.shards.items():
                     assert not torch.all(shard.data == 0), (name, shard.data.shape)
-                    print((name, shard.data, shard.data.shape))
+                    print((name, shard.data, shard.data.shape, shard_id))
 
         print("looks good")
 

@@ -554,6 +554,18 @@ class CompressedTensorsConfig(QuantizationConfig):
                     f"config groups for the layer {layer_name}")
 
             return new or original
+        
+
+        def get_shard_id_of_matches(layer_name, targets, fused):
+            if fused is not None:
+                for fused_suffix in fused:
+                    if name.endswith(fused_suffix):
+                        name_stripped = name.removesuffix(fused_suffix)
+                        return any(
+                            _match_name(name_stripped + shard_suffix, target)
+                            for shard_suffix in fused[fused_suffix]
+                        )
+
 
         input_tfm = None
         output_tfm = None
@@ -565,12 +577,27 @@ class CompressedTensorsConfig(QuantizationConfig):
                                 args.targets,
                                 args.ignore,
                                 fused=self.packed_modules_mapping):
+                        
+                        shard_ids = set()
+                        for ending in self.packed_modules_mapping:
+                            if layer_name.endswith(ending):
+                                for shard_id, shard_ending in enumerate(self.packed_modules_mapping[ending]):
+                                    thing = layer_name.removesuffix(ending) + shard_ending
+                                    if is_match(thing, layer, args.targets, args.ignore):
+                                        print(f"matched {thing} {args.targets}")
+                                        shard_ids.add(shard_id)
+                                    else:
+                                        print(f"NO matched {thing} {args.targets}")
+
+                        if len(shard_ids) == 0:
+                            shard_ids.add(0)
+
                         if args.location == TransformLocation.INPUT:
                             input_tfm = replace_with_check(
-                                input_tfm, (name, scheme, args))
+                                input_tfm, (name, scheme, args, shard_ids))
                         if args.location == TransformLocation.OUTPUT:
                             output_tfm = replace_with_check(
-                                output_tfm, (name, scheme, args))
+                                output_tfm, (name, scheme, args, shard_ids))
 
         # attach transforms for later retrieval by LinearMethod, or
         if not hasattr(layer, "input_tfm"):
@@ -704,7 +731,7 @@ registry = {}
 
 class vllmTransformBase(torch.nn.Module):  # InternalModule
 
-    def __init__(self, scheme: TransformScheme, args: TransformArgs,
+    def __init__(self, scheme: TransformScheme, args: TransformArgs, shard_ids,
                  layer: torch.nn.Module, weight_loader: Callable, name: str,
                  input_size_per_partition, output_partition_sizes, asdf_args):
         super().__init__()
@@ -739,8 +766,10 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
         # essentially bringing this logic out of the parameter. Nicer typing this way
         self.weight = ShardedModelWeightParameter()
 
-        assert len(output_partition_sizes) == 1
-        for shard_id, output_shape in enumerate(output_partition_sizes):
+        #for shard_id, output_shape in enumerate(output_partition_sizes):
+        print(shard_ids)
+        for shard_id in shard_ids:
+            output_shape = output_partition_sizes[shard_id]
             # SHARD_ID is not correct. Need some way of mapping between shard_id used by mapping ("q", "k", "v")
             # and the shard id of this layer. Doesn't seem like this layer has it, so I think I need to assume the ordering of q, k, v.
             # At load time, just enforce an ordering of q = 0, k = 1, v = 2
@@ -764,11 +793,13 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
             else:
                 raise ValueError()
             
+            # TODO: do not create if args are not targeting this shard
             key = (weight_shape, )
             if key not in registry:
-                registry[key] = torch.zeros(  # TODO: change back to empty
-                    weight_shape,
-                    dtype=scheme.precision
+                registry[key] = torch.eye(  # TODO: change back to empty
+                    weight_shape[0],
+                    dtype=scheme.precision,
+                    device=layer.weight.device,
                     #dtype=asdf_args.get("params_dtype"),
                 )
             
@@ -827,21 +858,18 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
 
         # for each transform arg applied (module)
         for attr_name in ("input_tfm", "output_tfm"):
-            for (name, scheme, args) in getattr(layer, attr_name):
-                assert layer.layer_name == "model.layers.0.mlp.down_proj", layer.layer_name
-
+            for (name, scheme, args, shard_ids) in getattr(layer, attr_name):
                 # the transform module will handle any shards that get sent to it
                 # (up gate), (qkv)
                 transform_name = f"{name}_{args.location}"
                 transform = vllmTransformBase(
-                    scheme, args, layer, weight_loader,
+                    scheme, args, shard_ids, layer, weight_loader,
                     layer.layer_name + f".{name}_{args.location}",
                     input_size_per_partition, output_partition_sizes,
                     asdf_args)
 
                 # make sure this checks for duplicates?
                 layer.register_module(transform_name, transform)
-                print(f"registered transform {transform_name}")
 
                 if attr_name == "input_tfm":
                     self.input_transforms.append(transform)
@@ -858,18 +886,13 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
         weight_shards = layer.weight.split(self.output_partition_sizes, dim=0)
         # TODO: bias shards
 
-        if layer.layer_name ==  "model.layers.0.mlp.down_proj":
-            assert len(weight_shards) == 1
-            assert len(self.input_transforms) == 1
-            assert len(self.output_transforms) == 1
-            assert len(self.output_partition_sizes) == 1
-
         #assert len(self.input_transforms) == 1
         #assert len(self.output_transforms) == 1
         for i, weight_shard in enumerate(weight_shards):
             for transform in self.input_transforms:
-                assert layer.layer_name == "model.layers.0.mlp.down_proj", layer.layer_name
-                assert len(weight_shards) == 1
+                if i not in transform.weight.shards:
+                    continue
+
                 transform_shard = transform.weight.shards[i]
                 #xs[i] = dispatch_unquantized_gemm()(layer, xs[i].to(transform_shard.dtype), transform_shard, None).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
                 xs[i] = (xs[i].to(transform_shard.dtype) @ transform_shard).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
@@ -878,8 +901,9 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
             xs[i] = dispatch_unquantized_gemm()(layer, xs[i], weight_shard, bias)
 
             for transform in self.output_transforms:
-                assert layer.layer_name == "model.layers.0.mlp.down_proj", layer.layer_name
-                assert len(weight_shards) == 1
+                if i not in transform.weight.shards:
+                    continue
+
                 transform_shard = transform.weight.shards[i]
                 # TODO: inverse is hard coded right now
                 #xs[i] = dispatch_unquantized_gemm()(layer, xs[i].to(transform_shard.dtype), transform_shard, None).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
