@@ -77,20 +77,19 @@ def test_vllm_platform_used_when_tpu_commons_not_installed():
             retrieve_engine_core_proc("disaggregated_tpu")
 
 
-@pytest.mark.parametrize("disagg_enabled", [True, False])
-def test_tpu_commons_jax_backend_selected(disagg_enabled):
+@pytest.mark.parametrize("is_supported", [True, False])
+def test_tpu_commons_jax_backend_selected(is_supported):
     """
     Verify that the JAX backend from tpu_commons is selected and that the
-    disaggregated engine is registered only when enabled.
+    disaggregated engine is registered only when it is supported.
     """
     # Create a mock tpu_commons library
     mock_tpu_commons = MagicMock()
     mock_tpu_commons.platforms.tpu_jax.TpuPlatform = MagicMock(
         __name__="MockTpuJaxPlatform")
-    mock_tpu_commons.core.core_tpu.DisaggEngineCoreProc = MagicMock(
-        __name__="MockDisaggEngine")
-    mock_tpu_commons.core.disagg_utils.is_disagg_enabled = MagicMock(
-        return_value=disagg_enabled)
+    mock_disagg_engine = MagicMock(__name__="MockDisaggEngine")
+    mock_disagg_engine.is_supported.return_value = is_supported
+    mock_tpu_commons.core.core_tpu.DisaggEngineCoreProc = mock_disagg_engine
 
     # Patch sys.modules to make our mock library importable
     mock_modules = {
@@ -99,7 +98,6 @@ def test_tpu_commons_jax_backend_selected(disagg_enabled):
         'tpu_commons.platforms.tpu_jax': mock_tpu_commons.platforms.tpu_jax,
         'tpu_commons.core': mock_tpu_commons.core,
         'tpu_commons.core.core_tpu': mock_tpu_commons.core.core_tpu,
-        'tpu_commons.core.disagg_utils': mock_tpu_commons.core.disagg_utils,
     }
     with patch.dict('sys.modules', mock_modules), \
          patch('os.environ.get', return_value="jax"):
@@ -110,29 +108,24 @@ def test_tpu_commons_jax_backend_selected(disagg_enabled):
         # Check that the platform is the mocked one from tpu_commons
         assert tpu_platform_module.TpuPlatform.__name__ == "MockTpuJaxPlatform"
 
-        # Check for conditional registration
-        if disagg_enabled:
-            registered_engine = retrieve_engine_core_proc("disaggregated_tpu")
-            assert registered_engine.__name__ == "MockDisaggEngine"
-        else:
-            with pytest.raises(ValueError, match="is not registered"):
-                retrieve_engine_core_proc("disaggregated_tpu")
+        # The engine is always registered, discovery happens later.
+        registered_engine = retrieve_engine_core_proc("disaggregated_tpu")
+        assert registered_engine.__name__ == "MockDisaggEngine"
 
 
-@pytest.mark.parametrize("disagg_enabled", [True, False])
-def test_tpu_commons_torchax_backend_selected(disagg_enabled):
+@pytest.mark.parametrize("is_supported", [True, False])
+def test_tpu_commons_torchax_backend_selected(is_supported):
     """
     Verify that the torchax backend from tpu_commons is selected and that the
-    disaggregated engine is registered only when enabled.
+    disaggregated engine is registered only when it is supported.
     """
     # Create a mock tpu_commons library
     mock_tpu_commons = MagicMock()
     mock_tpu_commons.platforms.tpu_torchax.TpuPlatform = MagicMock(
         __name__="MockTpuTorchaxPlatform")
-    mock_tpu_commons.core.core_tpu.DisaggEngineCoreProc = MagicMock(
-        __name__="MockDisaggEngine")
-    mock_tpu_commons.core.disagg_utils.is_disagg_enabled = MagicMock(
-        return_value=disagg_enabled)
+    mock_disagg_engine = MagicMock(__name__="MockDisaggEngine")
+    mock_disagg_engine.is_supported.return_value = is_supported
+    mock_tpu_commons.core.core_tpu.DisaggEngineCoreProc = mock_disagg_engine
 
     # Patch sys.modules to make our mock library importable
     mock_modules = {
@@ -142,7 +135,6 @@ def test_tpu_commons_torchax_backend_selected(disagg_enabled):
         mock_tpu_commons.platforms.tpu_torchax,
         'tpu_commons.core': mock_tpu_commons.core,
         'tpu_commons.core.core_tpu': mock_tpu_commons.core.core_tpu,
-        'tpu_commons.core.disagg_utils': mock_tpu_commons.core.disagg_utils,
     }
     with patch.dict('sys.modules', mock_modules), \
          patch('os.environ.get', return_value="torchax"):
@@ -154,13 +146,9 @@ def test_tpu_commons_torchax_backend_selected(disagg_enabled):
         assert tpu_platform_module.TpuPlatform.__name__ == (
             "MockTpuTorchaxPlatform")
 
-        # Check for conditional registration
-        if disagg_enabled:
-            registered_engine = retrieve_engine_core_proc("disaggregated_tpu")
-            assert registered_engine.__name__ == "MockDisaggEngine"
-        else:
-            with pytest.raises(ValueError, match="is not registered"):
-                retrieve_engine_core_proc("disaggregated_tpu")
+        # The engine is always registered, discovery happens later.
+        registered_engine = retrieve_engine_core_proc("disaggregated_tpu")
+        assert registered_engine.__name__ == "MockDisaggEngine"
 
 
 def test_fallback_and_warning_on_backend_load_failure():
