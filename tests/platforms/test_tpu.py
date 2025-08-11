@@ -11,9 +11,8 @@ import sys
 import pytest
 import torch
 
-from vllm.config import (
-    CacheConfig, CompilationConfig, LoRAConfig, ModelConfig, ParallelConfig,
-    SchedulerConfig, VllmConfig)
+from vllm.config import (CacheConfig, CompilationConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, VllmConfig)
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 
@@ -139,7 +138,7 @@ def vllm_config() -> VllmConfig:
                       speculative_config=None,
                       lora_config=None,
                       compilation_config=CompilationConfig(level="DYNAMO_ONCE",
-                                                         backend=""))
+                                                           backend=""))
 
 
 def test_check_and_update_config_forces_bfloat16(vllm_config: VllmConfig):
