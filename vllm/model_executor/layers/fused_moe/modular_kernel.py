@@ -691,7 +691,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             s = chunk_idx * CHUNK_SIZE
             e = min(s + CHUNK_SIZE, M)
             return (a1q[s:e], _chunk_scales(a1q_scale, s, e),
-                    _chunk_scales(self.a2_scale, s,
+                    _chunk_scales(self.fused_experts.a2_scale, s,
                                   e), topk_ids[s:e], topk_weights[s:e])
 
         def slice_output_tensor(chunk_idx: int) -> torch.Tensor:

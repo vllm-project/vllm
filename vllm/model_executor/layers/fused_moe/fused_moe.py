@@ -1485,7 +1485,7 @@ def fused_experts(
             use_int8_w8a16=quant_config.use_int8_w8a16,
             use_int4_w4a16=quant_config.use_int4_w4a16,
             use_mxfp4_w4a4=quant_config.use_mxfp4_w4a4,
-            per_channel_quant=quant_config.per_channel_quant,
+            per_channel_quant=quant_config.per_act_token_quant,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             w1_scale=quant_config.w1_scale,
@@ -1872,8 +1872,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             intermediate_cache2, self.a2_scale, self.quant_dtype,
             self.per_act_token_quant, self.block_shape)
 
-        assert not 
-
         invoke_fused_moe_kernel(
             qintermediate_cache2,
             w2,
@@ -1902,23 +1900,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 def modular_triton_fused_moe(
-    use_fp8_w8a8: bool,
-    use_int8_w8a8: bool,
-    use_int8_w8a16: bool,
-    use_int4_w4a16: bool,
-    use_mxfp4_w4a4: bool,
-    per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
+    quant_config: FusedMoEQuantConfig
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        TritonExperts(
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a8=use_int8_w8a8,
-            use_int8_w8a16=use_int8_w8a16,
-            use_int4_w4a16=use_int4_w4a16,
-            use_mxfp4_w4a4=use_mxfp4_w4a4,
-            per_act_token_quant=per_act_token_quant,
-            block_shape=block_shape,
-        ),
+        TritonExperts(quant_config),
     )

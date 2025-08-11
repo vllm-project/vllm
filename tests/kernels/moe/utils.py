@@ -342,6 +342,15 @@ def fused_moe(
     expert_map: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+    return fused_experts(
+        a,
+        w1,
+        w2,
+        topk_weight,
+        topk_ids,
+        global_num_experts=global_num_experts,
+        expert_map=expert_map,
+        quant_config=quant_config)
 
 
 # CustomOp?
