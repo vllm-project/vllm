@@ -26,7 +26,7 @@
 """Inference-only XCode model compatible with HuggingFace weights."""
 from collections.abc import Iterable
 from typing import Any, Optional, Union
-
+import os
 import torch
 from torch import nn
 from transformers import Qwen2Config, PretrainedConfig, AutoConfig
@@ -233,6 +233,16 @@ class XCodeAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
+class DummyDecoderLayer(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return hidden_states, residual
 
 class XCodeDecoderLayer(nn.Module):
 
@@ -293,6 +303,7 @@ class XCodeDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
+        print(f"Positions: {positions}")
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -362,6 +373,13 @@ class XCodeDecModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
+        if len(self.layers) == 0:
+            self.start_layer = 0
+            self.end_layer = 1
+            self.layers = nn.ModuleList(
+                [DummyDecoderLayer()]
+            )
+
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
@@ -393,20 +411,47 @@ class XCodeDecModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-    
+        # hidden_states_list = []
+        # residual_list = []
         for layer in self.layers[self.start_layer:self.end_layer]:
+            print(f"Layer: {layer}")
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
             )
-   
+    
+            # if not torch.cuda.is_current_stream_capturing():
+            #     hidden_states_list.append(hidden_states.cpu().clone())
+            #     residual_list.append(residual.cpu().clone())
+        # if not torch.cuda.is_current_stream_capturing():
+        #     hidden_states_save = torch.stack(hidden_states_list, dim=0)
+        #     residual_save = torch.stack(residual_list, dim=0)
+        #     # Save the hidden states and residuals
+        #     if os.path.exists("./saved_states") is False:
+        #         os.makedirs("./saved_states", exist_ok=True)
+        #     # The file will be in format: dec_hidden_states_{i}.pt, where i = 0 if no files, otherwise, increase by 1 of the last file (max i)
+        #     if not os.path.exists("./saved_states/dec_hidden_states_0.pt"):
+        #         torch.save(hidden_states_save, "./saved_states/dec_hidden_states_0.pt")
+        #         torch.save(residual_save, "./saved_states/dec_residual_0.pt")
+        #     else:
+        #         # Get max i from the files
+        #         i = 0
+        #         while os.path.exists(f"./saved_states/dec_hidden_states_{i}.pt"):
+        #             i += 1
+        #         torch.save(hidden_states_save, f"./saved_states/dec_hidden_states_{i}.pt")
+        #         torch.save(residual_save, f"./saved_states/dec_residual_{i}.pt")
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
                 "residual": residual
             })
-        hidden_states, _ = self.norm(hidden_states, residual)
+        try:
+            hidden_states, _ = self.norm(hidden_states, residual)
+        except Exception as e:
+            print(f"Error in RMSNorm: {e}. Skipping RMSNorm.")
+            hidden_states = self.norm(hidden_states, residual)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -531,12 +576,16 @@ class XCodeEncModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        hidden_states_list = []
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
         
                 hidden_states = self.get_input_embeddings(input_ids)
+                if not torch.cuda.is_current_stream_capturing():
+                    hidden_states_list.append(hidden_states.cpu().clone())
+                
               
             residual = None
             # residual = torch.load()
@@ -544,14 +593,35 @@ class XCodeEncModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-    
+        residual_list = []
         for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
             )
-   
+
+            if not torch.cuda.is_current_stream_capturing():
+                hidden_states_list.append(hidden_states.cpu().clone())
+                residual_list.append(residual.cpu().clone())
+        if not torch.cuda.is_current_stream_capturing():
+            hidden_states_save = torch.stack(hidden_states_list, dim=0)
+            residual_save = torch.stack(residual_list, dim=0)
+            # Save the hidden states and residuals
+            if os.path.exists("./saved_states") is False:
+                os.makedirs("./saved_states", exist_ok=True)
+            # The file will be in format: enc_hidden_states_{i}.pt, where i = 0 if no files, otherwise, increase by 1 of the last file (max i)
+            if not os.path.exists("./saved_states/enc_hidden_states_0.pt"):
+                torch.save(hidden_states_save, "./saved_states/enc_hidden_states_0.pt")
+                torch.save(residual_save, "./saved_states/enc_residual_0.pt")
+            else:
+                # Get max i from the files
+                i = 0
+                while os.path.exists(f"./saved_states/enc_hidden_states_{i}.pt"):
+                    i += 1
+                torch.save(hidden_states_save, f"./saved_states/enc_hidden_states_{i}.pt")
+                torch.save(residual_save, f"./saved_states/enc_residual_{i}.pt")
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,

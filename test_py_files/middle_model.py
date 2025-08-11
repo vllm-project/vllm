@@ -26,7 +26,7 @@
 """Inference-only XCode model compatible with HuggingFace weights."""
 from collections.abc import Iterable
 from typing import Any, Optional, Union
-
+import os
 import torch
 from torch import nn
 # from transformers import Qwen2Config
@@ -278,6 +278,7 @@ class XCodeDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
+        # print(f"Positions: {positions}")
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -335,15 +336,6 @@ class XCodeModel(nn.Module):
         self.quant_config = quant_config
         self.vocab_size = config.vocab_size
 
-        # if get_pp_group().is_first_rank or (config.tie_word_embeddings
-        #                                     and get_pp_group().is_last_rank):
-        #     self.embed_tokens = VocabParallelEmbedding(
-        #         config.vocab_size,
-        #         config.hidden_size,
-        #         quant_config=quant_config,
-        #         prefix=f"{prefix}.embed_tokens",
-        #     )
-        # else:
         self.embed_tokens = PPMissingLayer()
         # Use the provided decoder layer type or default to XCodeDecoderLayer
         decoder_layer_type = decoder_layer_type or XCodeDecoderLayer
@@ -359,11 +351,7 @@ class XCodeModel(nn.Module):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
-        # if get_pp_group().is_last_rank:
-        #     self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        # else:
         self.norm = PPMissingLayer()
-
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -374,58 +362,61 @@ class XCodeModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        hidden_states_list = []
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
-                # if not torch.cuda.is_current_stream_capturing():
-                #     print("Using inputs_embeds in XCodeModel forward")
-                #     print(f"inputs_embeds shape: {inputs_embeds.shape}")
-                #     print(f"inputs_embeds sample: {inputs_embeds[:3, :5]}")
+          
                 hidden_states = inputs_embeds
                 if intermediate_tensors is not None:
                     hidden_states = intermediate_tensors["hidden_states"]
                     residual = intermediate_tensors["residual"]
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
+                if not torch.cuda.is_current_stream_capturing():
+                    hidden_states_list.append(hidden_states.cpu().clone())
+                
             residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
         
-        # print(f"Number of layers: {len(self.layers)}")
-        # if not torch.cuda.is_current_stream_capturing() and residual is None:
-        #     residual = torch.load("test_py_files/enc_residual_tensor.pt").to(hidden_states.device)
-        # hidden_states_list = []
+
+        residual_list = []
+
         for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
             )
-            # Append hidden states for debugging
-            # if not torch.cuda.is_current_stream_capturing():
-            #     # Clone to CPU to avoid memory issues
-            #     hidden_states_list.append(hidden_states.clone().cpu())
-        
 
-        
-        # Print hidden states for debugging
-        # if not torch.cuda.is_current_stream_capturing():
-        #     # print(hidden_states_list)
-        #     # Save hidden_state_list to a file for debugging
-        #     # Turn tuple to tensor for saving
-        #     hidden_states_tensor = torch.stack(hidden_states_list, dim=0)
-        #     # print(f"Hidden states tensor shape: {hidden_states_tensor.shape}")
-        #     # print(f"Hidden states tensor sample: {hidden_states_tensor[:3, :5]}")
-        #     torch.save(hidden_states_tensor, "test_py_files/middle_hidden_states_tensor.pt")
-        #     torch.save(residual, "test_py_files/middle_residual_tensor.pt")
+            if not torch.cuda.is_current_stream_capturing():
+                hidden_states_list.append(hidden_states.cpu().clone())
+                residual_list.append(residual.cpu().clone())
+        if not torch.cuda.is_current_stream_capturing():
+            hidden_states_save = torch.stack(hidden_states_list, dim=0)
+            residual_save = torch.stack(residual_list, dim=0)    
+            # Save the hidden states and residuals
+            if os.path.exists("./saved_states") is False:
+                os.makedirs("./saved_states", exist_ok=True)
+            # The file will be in format: cloud_hidden_states_{i}.pt, where i = 0 if no files, otherwise, increase by 1 of the last file (max i)
+            if not os.path.exists("./saved_states/cloud_hidden_states_0.pt"):
+                torch.save(hidden_states_save, "./saved_states/cloud_hidden_states_0.pt")
+                torch.save(residual_save, "./saved_states/cloud_residual_0.pt")
+            else:
+                # Get max i from the files
+                i = 0
+                while os.path.exists(f"./saved_states/cloud_hidden_states_{i}.pt"):
+                    i += 1
+                torch.save(hidden_states_save, f"./saved_states/cloud_hidden_states_{i}.pt")
+                torch.save(residual_save, f"./saved_states/cloud_residual_{i}.pt")
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
                 "residual": residual
             })
-        # hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -533,25 +524,12 @@ class XCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # if not torch.cuda.is_current_stream_capturing():
-        #     print("Forwarding XCodeForCausalLM")
-        #     print(f"input ids: {input_ids}")
-        #     print(f"positions: {positions}")
-        #     print(f"intermediate tensors: {intermediate_tensors}")
-        #     print(f"inputs embeds: {inputs_embeds}")
-        #     if inputs_embeds is not None:
-        #         print(f"inputs_embeds shape: {inputs_embeds.shape}")
-        #         print(f"inputs_embeds sample: {inputs_embeds[:3, :5]}")
+
         hidden_states = self.middle(input_ids, 
                                     positions,
                                     intermediate_tensors,
                                     inputs_embeds)
-        # if not torch.cuda.is_current_stream_capturing():
-        #     print(f"Hidden states after middle: {hidden_states}")
-        #     if isinstance(hidden_states, torch.Tensor):
-        #         print(f"Hidden states shape: {hidden_states.shape}")
-        #         print(f"Hidden states sample: {hidden_states[:3, :5]}")
-        # print(f"Hidden states after middle: {hidden_states}")
+
         return hidden_states
 
     def compute_logits(

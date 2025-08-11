@@ -36,14 +36,14 @@ register()
 
 
 middle_model = LLM(
-    model="/project/phan/kt477/OppyAI_backend/qwen7b_middle_clean_no_att_on_client",
+    model="/project/phan/kt477/OppyAI_backend/qwen7b_middle_clean_no_att_on_client_dec",
     # model="Qwen/Qwen2.5-Coder-32B-Instruct",
     tokenizer="Qwen/Qwen2.5-Coder-7B-Instruct",
     skip_tokenizer_init=True,
     # task="reward",
     enable_prompt_embeds=True,
     model_part="middle",  # Set to False for encoder
-    gpu_memory_utilization=0.2,
+    gpu_memory_utilization=0.5,
     max_model_len=1024,
     tensor_parallel_size=1,
     enforce_eager=True
@@ -85,7 +85,9 @@ def send_intermediate_states(_, __, output, prefix = "client"):
     print("In send_intermediate_states")
     if os.path.exists("test_py_files") is False:
         os.makedirs("test_py_files")
-    
+            
+    print(f"Residual sample data: {residual}")
+    print(f"Hidden states sample data: {hidden_states}")
 
     torch.save(hidden_states, f"test_py_files/{prefix}_hidden_states_tensor.pt")
     torch.save(residual, f"test_py_files/{prefix}_residual_tensor.pt")
@@ -121,6 +123,8 @@ def recv_intermediate_states(_, input, prefix = "client"):
         try:
             hidden_states = torch.load(f"test_py_files/{prefix}_hidden_states_tensor.pt").to(device)
             residual = torch.load(f"test_py_files/{prefix}_residual_tensor.pt").to(device)
+            print(f"Residual sample data: {residual}")
+            print(f"Hidden states sample data: {hidden_states}")
             break
         except Exception as e:
             print(f"Error loading tensors: {e}. Retrying...")
@@ -142,7 +146,6 @@ def recv_intermediate_states(_, input, prefix = "client"):
     # logger.debug(f"Got hidden_states: {hidden_states.shape} ({len(serialized_hidden_states)} bytes sent), residual: {residual.shape} ({len(serialized_residual)} bytes sent) and positions {positions.shape}")
 
     return positions, hidden_states, residual
-
 
 
 middle_engine.model_executor.driver_worker.model_runner.model.middle.layers[-1].register_forward_hook(partial(send_intermediate_states, prefix="cloud"))
