@@ -215,7 +215,7 @@ try:
 
     TPU_BACKEND_TYPE = os.environ.get("TPU_BACKEND_TYPE", "jax").lower()
     try:
-        TpuPlatform = get_tpu_platform_cls(TPU_BACKEND_TYPE)
+        TpuPlatform = get_tpu_platform_cls(TPU_BACKEND_TYPE)  # type: ignore
     except (ImportError, ValueError) as e:
         warnings.warn(
             f"tpu_commons is installed, but failed to load backend "
