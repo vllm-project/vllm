@@ -26,7 +26,7 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 
-from .interfaces import SupportsCrossEncoding, SupportsV0Only
+from .interfaces import SupportsCrossEncoding
 from .utils import WeightsMapper, maybe_prefix
 
 
@@ -277,6 +277,7 @@ class ModernBertPooler(Pooler):
         return self.pooling.get_pooling_updates(task)
 
     def _head(self, pooled_output: torch.Tensor):
+        pooled_output = pooled_output.to(self.dense.weight.dtype)
         return self.norm(self.act(self.dense(pooled_output)))
 
     def forward(
@@ -294,8 +295,7 @@ class ModernBertPooler(Pooler):
         return pooled_output
 
 
-class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
-                                          SupportsCrossEncoding):
+class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
     is_pooling_model = True
 
@@ -306,6 +306,7 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
         self.model = ModernBertModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "modernbert"))
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        self.pooling = ModernBertPooler(config)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -315,14 +316,14 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
             Pooler.for_encode(pooler_config),
             "classify":
             ClassifierPooler(
-                pooling=ModernBertPooler(config),
+                pooling=self.pooling,
                 classifier=self.classifier,
                 act_fn=ClassifierPooler.act_fn_for_seq_cls(
                     vllm_config.model_config),
             ),
             "score":
             ClassifierPooler(
-                pooling=ModernBertPooler(config),
+                pooling=self.pooling,
                 classifier=self.classifier,
                 act_fn=ClassifierPooler.act_fn_for_cross_encoder(
                     vllm_config.model_config),
@@ -351,7 +352,7 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
             if name.startswith("head"):
-                param = params_dict["_pooler.pooler." + name[len("head") + 1:]]
+                param = params_dict["pooling." + name[len("head") + 1:]]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
@@ -366,5 +367,5 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
         return self.model(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
-            position_ids=positions,
+            positions=positions,
         )
