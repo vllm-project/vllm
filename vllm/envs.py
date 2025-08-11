@@ -484,7 +484,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, vllm will force use Triton compressed tensor MOE kernel;
     # otherwise it will use the cutlass based one.
     "VLLM_TRITON_COMPRESSED_TENSORS_MOE_KERNEL":
-    lambda: os.getenv("VLLM_TRITON_COMPRESSED_TENSORS_MOE_KERNEL", "0").lower() in ("1", "true"),
+    lambda: bool(
+        int(os.getenv("VLLM_TRITON_COMPRESSED_TENSORS_MOE_KERNEL", "0"))),
 
     # If set, vllm will force flashinfer to use tensor cores;
     # otherwise will use heuristic based on model architecture.
