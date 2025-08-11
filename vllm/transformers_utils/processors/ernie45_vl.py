@@ -111,7 +111,7 @@ def smart_resize(
 IDS_TYPE_FLAG = {"text": 0, "image": 1, "video": 2, "audio": 3}
 
 
-class Ernie_4_5_VLProcessor(ProcessorMixin):
+class Ernie4_5_VLProcessor(ProcessorMixin):
     """
     Processes multimodal chat messages into model-ready inputs,
     handling text, images, and videos with 3D positional embeddings.
@@ -204,11 +204,11 @@ class Ernie_4_5_VLProcessor(ProcessorMixin):
 
     def __call__(
         self,
-        text: List[str],
-        images: List[Image.Image],
-        videos: List[List[Image.Image]],
+        text: Union[str, List[str]],
+        images: List[Image.Image] = [],
+        videos: List[List[Image.Image]] = [],
         **kwargs,
-    ) -> Dict[str, Union[np.ndarray, List[np.ndarray], None]]:
+    ) -> BatchFeature:
         """
         Convert chat messages into model inputs.
         Returns a dict with input_ids, token_type_ids, position_ids, images, grid_thw, image_type_ids, labels.
@@ -224,6 +224,13 @@ class Ernie_4_5_VLProcessor(ProcessorMixin):
             "pic_cnt": 0,
             "video_cnt": 0,
         }
+        if not isinstance(text, list):
+            text = [text]
+        
+        if len(text) == 0:
+            raise ValueError("Processor no text is provided")
+        
+        # only support single element
         texts = text[0]
 
         new_video_seg = True
@@ -407,4 +414,4 @@ class Ernie_4_5_VLProcessor(ProcessorMixin):
         return list(tokenizer_input_names) + list(image_processor_input_names)
 
 
-__all__ = ["Ernie_4_5_VLProcessor"]
+__all__ = ["Ernie4_5_VLProcessor"]

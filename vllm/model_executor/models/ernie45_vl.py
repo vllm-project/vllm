@@ -24,7 +24,7 @@
 """Inference-only Erine VL model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Any, Callable, Literal, Optional, TypedDict, Union
+from typing import Any, Callable, Literal, Optional, TypedDict
 
 import torch
 import torch.nn as nn
@@ -32,7 +32,7 @@ import torch.nn.functional as F
 import numpy as np
 from einops import rearrange, repeat
 from transformers import BatchFeature
-from vllm.transformers_utils.processors.ernie45_vl import (Ernie_4_5_VLProcessor,
+from vllm.transformers_utils.processors.ernie45_vl import (Ernie4_5_VLProcessor,
                                                           smart_resize)
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
@@ -45,8 +45,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.layernorm import RMSNorm
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQMarlinConfig)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -732,10 +730,6 @@ class VariableResolutionResamplerModel(nn.Module):
             batch_offset[0] = 0
             batch_offset[1:] = tokens_per_img_or_vid.cumsum()[:-1]
 
-            assert (
-                    self.temporal_conv_size == 2
-            ), f"Hard Code: temporal_conv_size==2, got:{self.temporal_conv_size}"
-
             slice_offsets = []
             for temporoal_size, spatial_size, b_offset in zip(
                     grid_t, grid_hw_after_conv, batch_offset
@@ -832,8 +826,8 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.model_config.hf_config
 
-    def get_hf_processor(self, **kwargs: object) -> Ernie_4_5_VLProcessor:
-        return self.ctx.get_hf_processor(Ernie_4_5_VLProcessor,
+    def get_hf_processor(self, **kwargs: object) -> Ernie4_5_VLProcessor:
+        return self.ctx.get_hf_processor(Ernie4_5_VLProcessor,
                                         #  use_fast=True,
                                          **kwargs)
 
@@ -898,7 +892,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int = 1,
         do_resize: bool = True,
-        image_processor: Optional[Ernie_4_5_VLProcessor],
+        image_processor: Optional[Ernie4_5_VLProcessor],
     ) -> tuple[ImageSize, int]:
         if image_processor is None:
             image_processor = self.get_image_processor()
@@ -937,7 +931,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        image_processor: Optional[Ernie_4_5_VLProcessor],
+        image_processor: Optional[Ernie4_5_VLProcessor],
     ) -> int:
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
@@ -952,7 +946,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         num_frames: int,
-        image_processor: Optional[Ernie_4_5_VLProcessor],
+        image_processor: Optional[Ernie4_5_VLProcessor],
     ) -> int:
         _, num_video_tokens = self._get_vision_info(
             image_width=image_width,
@@ -1343,12 +1337,18 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             pixel_values = (
                              pixel_values - self.image_processor.image_mean_tensor
                      ) / self.image_processor.image_std_tensor
-            pixel_values = pixel_values.to(torch.bfloat16)
+            pixel_values = pixel_values.to(self.vision_model.dtype)
         else:
             assert pixel_values.dtype == torch.bfloat16, pixel_values.dtype
 
         if grid_thw is not None:
-            grid_thw = grid_thw[grid_thw > 0].reshape([-1, 3])
+            grid_thw = grid_thw[grid_thw > 0]
+            if grid_thw.numel() % 3 != 0:
+                raise ValueError(
+                    f"grid_thw has {grid_thw.numel()} elements after filtering, "
+                    "which is not divisible by 3."
+                )
+            grid_thw = grid_thw.reshape(-1, 3)
             grid_thw = F.pad(
                 torch.repeat_interleave(grid_thw[:, 1:], grid_thw[:, 0], 0),
                 [1, 0, 0, 0],
@@ -1389,10 +1389,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Ernie4_5_VLImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
-        image_embeds = kwargs.pop("image_embeds", None)
         image_grid_thw = kwargs.pop("image_grid_thw", None)
 
-        if pixel_values is None and image_embeds is None:
+        if pixel_values is None:
             return None
 
         if pixel_values is not None:
@@ -1413,10 +1412,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
     def _parse_and_validate_video_input(
             self, **kwargs: object) -> Optional[Ernie4_5_VLVideoInputs]:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
-        video_embeds = kwargs.pop("video_embeds", None)
         video_grid_thw = kwargs.pop("video_grid_thw", None)
 
-        if pixel_values_videos is None and video_embeds is None:
+        if pixel_values_videos is None:
             return None
 
         if pixel_values_videos is not None:

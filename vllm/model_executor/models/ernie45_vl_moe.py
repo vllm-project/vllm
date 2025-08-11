@@ -530,7 +530,7 @@ class Ernie4_5_VLModel(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states, residual = layer(positions, hidden_states, residual, visual_token_mask, **kwargs) # TODO 传入vl_moe_meta
+            hidden_states, residual = layer(positions, hidden_states, residual, visual_token_mask, **kwargs)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
