@@ -353,6 +353,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       CUDA_ARCHS "${MARLIN_ARCHS}")
 
     list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_KERNEL_SRC})
+    set_source_files_properties(${MARLIN_TEMPLATE_KERNEL_SRC}
+      PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
 
     set(MARLIN_SRCS
        "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
@@ -856,6 +858,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
 
     list(APPEND VLLM_MOE_EXT_SRC ${MOE_WNAA16_MARLIN_SRC})
+    set_source_files_properties(${MOE_WNAA16_MARLIN_SRC}
+      PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
 
     message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
   else()
