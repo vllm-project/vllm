@@ -4,7 +4,7 @@ This directory contains examples for using vLLM's **chunked processing** feature
 
 ## 🚀 Quick Start
 
-### 1. Start the Server
+### Start the Server
 
 Use the provided script to start a vLLM server with chunked processing enabled:
 
@@ -23,7 +23,7 @@ MAX_EMBED_LEN=3072000 \
 ./service.sh
 ```
 
-### 2. Test Long Text Embedding
+### Test Long Text Embedding
 
 Run the comprehensive test client:
 
@@ -37,7 +37,7 @@ python client.py
 |------|-------------|
 | `service.sh` | Server startup script with chunked processing enabled |
 | `client.py` | Comprehensive test client for long text embedding |
-| `../openai_embedding_client.py` | Basic embedding client (updated with chunked processing info) |
+| <gh-file:examples/online_serving/openai_embedding_client.py> | Basic embedding client (updated with chunked processing info) |
 
 ## ⚙️ Configuration
 
@@ -54,7 +54,8 @@ The key parameters for chunked processing are in the `--override-pooler-config`:
 }
 ```
 
-**Note**: `pooling_type` sets the model's own pooling strategy for processing within each chunk. The cross-chunk aggregation automatically uses MEAN strategy when input exceeds the model's native maximum length.
+!!! note
+    `pooling_type` sets the model's own pooling strategy for processing within each chunk. The cross-chunk aggregation automatically uses MEAN strategy when input exceeds the model's native maximum length.
 
 #### Chunked Processing Behavior
 
@@ -166,8 +167,8 @@ INFO: Split input of 150000 tokens into 37 chunks (max_chunk_size: 4096)
 
 ## 📚 Additional Resources
 
-- [Pooling Models Documentation](../../docs/models/pooling_models.md#chunked-processing-for-long-text)
-- [Supported Models List](../../docs/models/supported_models.md#text-embedding)
+- [Pooling Models Documentation](../models/pooling_models.md#chunked-processing-for-long-text)
+- [Supported Models List](../models/supported_models.md#text-embedding)
 - [Original Feature Documentation](../../README_CHUNKED_PROCESSING.md)
 
 ## 🤝 Contributing
@@ -193,4 +194,5 @@ The new `max_embed_len` parameter provides:
 
 ---
 
-**Note**: Chunked processing is currently supported for specific embedding models. See the [supported models documentation](../../docs/models/supported_models.md#chunked-processing-for-long-text) for the complete list.
+!!! note
+    Chunked processing is currently supported for specific embedding models. See the [supported models documentation](../models/supported_models.md#chunked-processing-for-long-text) for the complete list.
