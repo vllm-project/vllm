@@ -407,6 +407,7 @@ class HpuModelAdapter(torch.nn.Module):
             if not is_warmup:
                 self.maybe_start_load_kv()
             hidden_states = self.model(*args, **kwargs)
+            #from remote_pdb import RemotePdb; RemotePdb('0.0.0.0', 4444).set_trace()
             if not is_warmup:
                 self.maybe_wait_for_kv_save()
 
@@ -865,7 +866,7 @@ class HPUModelRunner:
         assert num_reqs > 0
 
         if scheduler_output.kv_connector_metadata:
-            requests = scheduler_output.kv_connector_metadata.reqs_to_save
+            requests = scheduler_output.kv_connector_metadata.reqs_to_save | scheduler_output.kv_connector_metadata.reqs_to_recv
         else:
             requests = None
 
@@ -1608,7 +1609,7 @@ class HPUModelRunner:
             if not has_kv_transfer_group():
                 # Return empty ModelRunnerOuptut if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
-
+            logger.debug(f'buke before kv_connector_no_forward {scheduler_output.total_num_scheduled_tokens=}|{scheduler_output=}')
             return self.kv_connector_no_forward(scheduler_output)
 
         # If necessary, swap decodes/prompts to have all decodes on the start
@@ -1638,6 +1639,7 @@ class HPUModelRunner:
                 self.event_start = self.profiler.get_timestamp_us()
                 self.profiler.start("internal", "prefill")
                 htorch.core.mark_step()
+                logger.debug(f'buke {num_prefills=}|{num_decodes=}|{scheduler_output=}')
                 self.maybe_setup_kv_connector(scheduler_output)
                 prefill_hidden_states_ts, logits_device = \
                     self._execute_model_generic(
@@ -1679,6 +1681,7 @@ class HPUModelRunner:
             self.profiler.start("internal", "decode")
             assert decode_data is not None
             htorch.core.mark_step()
+            logger.debug(f'buke {num_prefills=}|{num_decodes=}|{scheduler_output=}')
             self.maybe_setup_kv_connector(scheduler_output)
             _, logits_device = \
                 self._execute_model_generic(
@@ -1775,6 +1778,7 @@ class HPUModelRunner:
             finished_sending=finished_sending,
             finished_recving=finished_recving,
         )
+        #logger.debug(f"buke hpu_model_runner.py: {model_runner_output=}")
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
         return model_runner_output
@@ -1808,13 +1812,13 @@ class HPUModelRunner:
             # These transfers are designed to be async and the requests
             # involved may be disjoint from the running requests.
             # Do this here to save a collective_rpc.
-            
+            #logger.debug(f'buke maybe_setup_kv_connector: {scheduler_output=}')
             kv_connector.start_load_kv(scheduler_output.kv_connector_metadata)
 
-    @staticmethod
-    def maybe_wait_for_kv_save(req: Optional[NewRequestData]) -> None:
-        if has_kv_transfer_group():
-            get_kv_transfer_group().wait_for_save(req)
+    # @staticmethod
+    # def maybe_wait_for_kv_save(req: Optional[NewRequestData]) -> None:
+    #     if has_kv_transfer_group():
+    #         get_kv_transfer_group().wait_for_save(req)
 
     @staticmethod
     def get_finished_kv_transfers(
@@ -2430,22 +2434,21 @@ class HPUModelRunner:
         self._PAD_SLOT_ID = num_blocks * self.block_size
 
         if has_kv_transfer_group():
-            #import remote_pdb; remote_pdb.set_trace()
-            kv_caches = { layer: torch.stack((tup[0], tup[1])) for layer,tup in kv_caches.items()}
+            #kv_caches = { layer: torch.stack((tup[0], tup[1])) for layer,tup in kv_caches.items()}
             get_kv_transfer_group().register_kv_caches(kv_caches)
             get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
 
         htorch.hpu.synchronize()
 
-    @staticmethod
-    def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
-        # Update KVConnector with the KVConnector metadata forward().
-        if has_kv_transfer_group():
-            kv_connector = get_kv_transfer_group()
-            assert isinstance(kv_connector, KVConnectorBase_V1)
-            assert scheduler_output.kv_connector_metadata is not None
-            kv_connector.bind_connector_metadata(
-                scheduler_output.kv_connector_metadata)
+    # @staticmethod
+    # def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
+    #     # Update KVConnector with the KVConnector metadata forward().
+    #     if has_kv_transfer_group():
+    #         kv_connector = get_kv_transfer_group()
+    #         assert isinstance(kv_connector, KVConnectorBase_V1)
+    #         assert scheduler_output.kv_connector_metadata is not None
+    #         kv_connector.bind_connector_metadata(
+    #             scheduler_output.kv_connector_metadata)
 
     @staticmethod
     def get_finished_kv_transfers(
@@ -2456,16 +2459,16 @@ class HPUModelRunner:
                 scheduler_output.finished_req_ids)
         return None, None
 
-    def kv_connector_no_forward(
-            self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
-        # KV send/recv even if no work to do.
-        with set_forward_context(None, self.vllm_config):
-            self.maybe_setup_kv_connector(scheduler_output)
-            if has_kv_transfer_group():
-                kv_connector = get_kv_transfer_group()
-                kv_connector.start_load_kv(get_forward_context())
-            finished_sending, finished_recving = (
-                self.get_finished_kv_transfers(scheduler_output))
+    # def kv_connector_no_forward(
+    #         self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
+    #     # KV send/recv even if no work to do.
+    #     with set_forward_context(None, self.vllm_config):
+    #         self.maybe_setup_kv_connector(scheduler_output)
+    #         if has_kv_transfer_group():
+    #             kv_connector = get_kv_transfer_group()
+    #             kv_connector.start_load_kv(get_forward_context())
+    #         finished_sending, finished_recving = (
+    #             self.get_finished_kv_transfers(scheduler_output))
 
         if not finished_sending and not finished_recving:
             return EMPTY_MODEL_RUNNER_OUTPUT
@@ -2528,18 +2531,28 @@ def copy_kv_blocks(
        len(src_block_ids) != len(dst_block_ids):
         return
     assert len(src_block_ids) == len(dst_block_ids)
-    src_device = next(iter(src_kv_caches.values())).device
-    dst_device = next(iter(dst_kv_caches.values())).device
+    src_device = next(iter(src_kv_caches.values()))[0].device
+    dst_device = next(iter(dst_kv_caches.values()))[0].device
 
-    src_indices, dst_indices = _make_src_and_dst_indices(
-        block_size,
-        src_block_ids=src_block_ids,
-        dst_block_ids=dst_block_ids,
-        src_device=src_device,
-        dst_device=dst_device,
-        )
-    for layer, kv_layer in src_kv_caches.items():
-        k, v = kv_layer[0], kv_layer[1]
-        dst_kv_caches[layer][0][dst_indices].copy_(k[src_indices], non_blocking = False)
-        dst_kv_caches[layer][1][dst_indices].copy_(v[src_indices], non_blocking = False)
+    # src_indices, dst_indices = _make_src_and_dst_indices(
+    #     block_size,
+    #     src_block_ids=src_block_ids,
+    #     dst_block_ids=dst_block_ids,
+    #     src_device=src_device,
+    #     dst_device=dst_device,
+    #     )
+    logger.debug(f"buke copy_kv_blocks: {block_size=}|{src_block_ids=}|{dst_block_ids=}|{src_device=}|{dst_device=}|copy start {time.perf_counter()}")
+    for i, local_block_id in enumerate(src_block_ids): 
+        for layer, kv_layer in src_kv_caches.items():
+            start = block_size * local_block_id
+            end = block_size * (1+local_block_id)
+            if direction == "h2d":
+                k, v = kv_layer[0], kv_layer[1]
+            else:
+                k, v = kv_layer
+            dst_kv_caches[layer][0][start:end].copy_(k[start:end], non_blocking = False)
+            dst_kv_caches[layer][1][start:end].copy_(v[start:end], non_blocking = False)
+    logger.debug(f"buke copy_kv_blocks: {block_size=}|{src_block_ids=}|{dst_block_ids=}|{src_device=}|{dst_device=}|copy end {time.perf_counter()}")
 
+    #from remote_pdb import RemotePdb
+    #RemotePdb('0.0.0.0', 4444).set_trace()

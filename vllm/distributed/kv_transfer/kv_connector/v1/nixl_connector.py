@@ -273,7 +273,7 @@ class NixlConnectorScheduler:
             "NIXLConnector get_num_new_matched_tokens: "
             "num_computed_tokens=%s, kv_transfer_params=%s",
             num_computed_tokens, params)
-
+        logger.debug(f'buke get_num_new_matched_tokens: {vars(request)=}')
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             assert num_computed_tokens % self.block_size == 0
@@ -295,7 +295,7 @@ class NixlConnectorScheduler:
             "NIXLConnector update_state_after_alloc: "
             "num_external_tokens=%s, kv_transfer_params=%s",
             num_external_tokens, params)
-
+        logger.debug(f'buke update_state_after_alloc: {vars(request)=}')
         if not params:
             return
         if self.use_host_buffer and params.get("do_remote_decode"):
@@ -645,9 +645,16 @@ class NixlConnectorWorker:
         xfer_buffers: dict[str, torch.Tensor] = {}
         try:
             for layer_name, kv_cache in kv_caches.items():
-                kv_shape = kv_cache.shape
-                kv_dtype = kv_cache.dtype
-                xfer_buffers[layer_name] = torch.empty(kv_shape,
+                if self.device_type == "hpu":
+                    kv_shape = (2, *kv_cache[0].shape)
+                    kv_dtype = kv_cache[0].dtype
+                    xfer_buffers[layer_name] = torch.empty(kv_shape,
+                                                       dtype=kv_dtype,
+                                                       device="cpu")
+                else:
+                    kv_shape = kv_cache.shape
+                    kv_dtype = kv_cache.dtype
+                    xfer_buffers[layer_name] = torch.empty(kv_shape,
                                                        dtype=kv_dtype,
                                                        device="cpu")
         except MemoryError as e:
@@ -692,7 +699,7 @@ class NixlConnectorWorker:
         """Register the KV Cache data in nixl."""
         _, first_kv_cache = next(iter(kv_caches.items()))
         if self.device_type == "hpu":
-            kv_elem_size = first_kv_cache[0].dtype.itemsize
+            kv_elem_size = first_kv_cache[0][0].dtype.itemsize
         else:
             kv_elem_size = first_kv_cache.element_size()
 
@@ -713,7 +720,7 @@ class NixlConnectorWorker:
         # KV memory layout is HND, as opposed to the default NHD. Note that it
         # will only affects the strides. For MLA instead, we make require no
         # such thing and resort to the standard layout.
-        use_mla = len(first_kv_cache.shape) == 3
+        use_mla = len(first_kv_cache.shape) == 3 if self.device_type != "hpu" else False
         if self.device_type == "tpu":
             assert not use_mla, f"{self.kv_buffer_device} does not support MLA."
             assert self._use_pallas_v1, f"attn backend: {self.backend_name}"
@@ -753,9 +760,10 @@ class NixlConnectorWorker:
             assert block_size == self.block_size
         elif self.device_type == "hpu":
             # habana kv_cache: [2, num_blocks*block_size, kv_heads, head_dim]
-            self.num_blocks = first_kv_cache.shape[1] // self.block_size
+            #from remote_pdb import RemotePdb; RemotePdb('0.0.0.0', 4444).set_trace()
+            self.num_blocks = first_kv_cache[0].shape[0] // self.block_size
             block_rank = 3  # [block_size, kv_heads, head_dim]
-            block_shape = first_kv_cache.shape[-block_rank:]
+            block_shape = first_kv_cache[0].shape[-block_rank:]
             block_shape = list(block_shape)
             block_shape[0] = block_shape[0] // self.num_blocks
             block_shape = torch.Size(block_shape)
@@ -775,14 +783,14 @@ class NixlConnectorWorker:
             "use_host_buffer: %s, num_blocks: %s, block_shape: %s, "
             "per_layer_kv_cache_shape: %s", use_mla, self.kv_buffer_device,
             self.use_host_buffer, self.num_blocks, block_shape,
-            first_kv_cache.shape)
+            first_kv_cache[0].shape)
         self.dst_num_blocks[self.engine_id] = self.num_blocks
         self.device_kv_caches = kv_caches
         kv_caches_base_addr = []
         caches_data = []
 
         # Note(tms): I modified this from the original region setup code.
-        # K and V are now in different regions. Advantage is that we can
+        # K and V are now in different regions. Advantage is that we cans
         # elegantly support MLA and any cases where the K and V tensors
         # are non-contiguous (it's not locally guaranteed that they will be)
         # Disadvantage is that the encoded NixlAgentMetadata is now larger
@@ -1110,6 +1118,8 @@ class NixlConnectorWorker:
             for handle, _xfer_stime in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
+                    xfer_end_time = time.perf_counter()
+                    logger.debug(f"buke _pop_done_transfers: {req_id=}|{handle=}|{xfer_end_time=}|{xfer_end_time-_xfer_stime=}")
                     self.nixl_wrapper.release_xfer_handle(handle)
                 elif xfer_state == "PROC":
                     in_progress = True
