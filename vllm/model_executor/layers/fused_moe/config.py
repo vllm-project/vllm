@@ -74,6 +74,7 @@ class FusedMoEQuantDesc:
     scale: Optional[torch.Tensor] = None
     alpha_or_gscale: Optional[torch.Tensor] = None # store as 1/gs or gs?
     zp: Optional[torch.Tensor] = None
+    bias: Optional[torch.Tensor] = None
     # TODO: should be in union with other stuff?
     precision: Optional["PrecisionConfig"] = None
 
@@ -161,6 +162,14 @@ class FusedMoEQuantConfig:
     @property
     def w2_zp(self) -> Optional[torch.Tensor]:
         return self.w2.zp
+
+    @property
+    def w1_bias(self) -> Optional[torch.Tensor]:
+        return self.w1.bias
+
+    @property
+    def w2_bias(self) -> Optional[torch.Tensor]:
+        return self.w2.bias
 
     @property
     def w1_precision(self) -> Optional["PrecisionConfig"]:
@@ -374,8 +383,8 @@ def int4_w4a16_moe_quant_config(
 ) -> FusedMoEQuantConfig:
     # Activations are pre-quantized
     return FusedMoEQuantConfig(
-        a1=FusedMoEQuantDesc(None),
-        a2=FusedMoEQuantDesc(None),
+        a1=FusedMoEQuantDesc(),
+        a2=FusedMoEQuantDesc(),
         w1=FusedMoEQuantDesc("int4", None, w1_scale, None, w1_zp),
         w2=FusedMoEQuantDesc("int4", None, w2_scale, None, w2_zp),
     )
@@ -390,10 +399,22 @@ def int8_w8a16_moe_quant_config(
 ) -> FusedMoEQuantConfig:
     # Activations are pre-quantized
     return FusedMoEQuantConfig(
-        a1=FusedMoEQuantDesc(None),
-        a2=FusedMoEQuantDesc(None),
+        a1=FusedMoEQuantDesc(),
+        a2=FusedMoEQuantDesc(),
         w1=FusedMoEQuantDesc("int8", None, w1_scale, None, w1_zp),
         w2=FusedMoEQuantDesc("int8", None, w2_scale, None, w2_zp),
+    )
+
+
+def biased_moe_quant_config(
+    w1_bias: Optional[torch.Tensor],
+    w2_bias: Optional[torch.Tensor],
+) -> FusedMoEQuantConfig:
+    return FusedMoEQuantConfig(
+        a1=FusedMoEQuantDesc(),
+        a2=FusedMoEQuantDesc(),
+        w1=FusedMoEQuantDesc(bias=w1_bias),
+        w2=FusedMoEQuantDesc(bias=w2_bias),
     )
 
 
