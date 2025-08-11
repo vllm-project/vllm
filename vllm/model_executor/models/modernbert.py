@@ -293,7 +293,8 @@ class ModernBertPooler(Pooler):
         return pooled_output
 
 
-class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
+class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
+                                          SupportsCrossEncoding):
 
     is_pooling_model = True
 
