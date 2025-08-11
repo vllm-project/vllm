@@ -505,7 +505,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         Apply the model's tensor parallelization plan.
         Currently only supports linear layers.
         """
-        tp_plan = getattr(self.model.config, "base_model_tp_plan", None) or {}
+        tp_plan = getattr(self.text_config, "base_model_tp_plan", None) or {}
 
         if not tp_plan and self.tp_size > 1:
             raise ValueError(
@@ -530,7 +530,8 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 else:
                     _tensor_parallel(child_module, prefix=qual_name)
 
-        _tensor_parallel(self.model)
+        # Only apply tensor parallelization to the language model
+        _tensor_parallel(getattr(self.model, "language_model", self.model))
 
     def create_attention_instances(self) -> dict[int, Attention]:
         """
