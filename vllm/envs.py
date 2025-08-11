@@ -895,7 +895,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
     "VLLM_MARLIN_USE_ATOMIC_ADD":
-    lambda: bool(os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", None)),
+    lambda: os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1",
 
     # Whether to use marlin kernel in mxfp4 quantization method
     "VLLM_MXFP4_USE_MARLIN":

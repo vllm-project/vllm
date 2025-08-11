@@ -121,6 +121,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         intermediate_size_per_partition_after_pad = \
             intermediate_size_per_partition
         if self.use_marlin:
+            # The moe marlin kernel requires that for each linear
+            # n % 256 == 0 and k % 128 == 0.
+            # In gate_up_proj:
+            #    n = 2 * intermediate_size_per_partition_after_pad
+            #    k = hidden_size
+            # In down_proj
+            #    n = hidden_size
+            #    k = intermediate_size_per_partition_after_pad
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 128)
             hidden_size = round_up(hidden_size, 256)
@@ -134,6 +142,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
               or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
             # pad the intermediate size to be a multiple of 2 * mxfp4_block
             # for to hold non-uniform sharded tensor as well as swizzling
+            # other padding to increase performance
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 256)
             hidden_size = round_up(hidden_size, 256)
@@ -467,7 +476,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input, scoring_func, activation,
             expert_load_view, logical_to_physical_map,
             logical_replica_count), ("MXFP4 are not supported\
-                                      with this configuration."                                                                                                                                                                                                                                                                                                                           )
+                                      with this configuration."                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      )
 
         if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
                 or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
