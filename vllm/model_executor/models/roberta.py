@@ -20,8 +20,7 @@ from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
 from vllm.sequence import IntermediateTensors
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
-from .interfaces import (SupportsCrossEncoding, SupportsV0Only,
-                         default_pooling_type)
+from .interfaces import SupportsCrossEncoding, SupportsV0Only
 
 
 class RobertaEmbedding(nn.Module):
