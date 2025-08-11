@@ -2833,7 +2833,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # double check that we can support full cudagraph if they are requested
         # even after automatic downgrades
-        if cudagraph_mode.max_cudagraph_mode() == CUDAGraphMode.FULL \
+        if cudagraph_mode.has_full_cudagraphs() \
             and min_cg_support == AttentionCGSupport.NEVER:
             raise ValueError(f"CUDAGraphMode.{cudagraph_mode.name} is not "
                              f"supported with {min_cg_builder_name} backend ("
