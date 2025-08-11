@@ -64,25 +64,28 @@ class RequestQueue:
         self.semaphore = asyncio.Semaphore(max_concurrent)  # Concurrency control
         self.queue = deque()  # Request queue
         self.queue_size = 0  # Current queue size
+        self.lock = asyncio.Lock()  # Sync queue Lock
 
     async def enqueue(self, task):
         """Add a request task to the queue"""
-        if self.queue_size >= self.max_queue_size:
-            logger.warning("Request queue full, rejecting request")
-            return False
+        async with self.lock:
+            if self.queue_size >= self.max_queue_size:
+                logger.warning("Request queue full, rejecting request")
+                return False
 
-        self.queue.append(task)
-        self.queue_size += 1
-        return True
+            self.queue.append(task)
+            self.queue_size += 1
+            return True
 
     async def process(self):
         """Process queued requests using semaphore for concurrency control"""
         while True:
             if self.queue:
                 async with self.semaphore:
-                    task = self.queue.popleft()
-                    self.queue_size -= 1
-                    await task
+                    async with self.lock:
+                        task = self.queue.popleft()
+                        self.queue_size -= 1
+                        await task
             await asyncio.sleep(0.01)  # Yield control to event loop
 
 
