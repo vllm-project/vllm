@@ -657,7 +657,7 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
         assert len(modalities) == 1, f"Found different modalities={modalities}"
         self._modality = next(iter(modalities))
 
-        self._is_empty = False
+        self._is_empty = any(elem.data is None for elem in self.values())
 
     @property
     def modality(self) -> str:
@@ -672,10 +672,10 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
             return None
 
         out_data = dict[str, NestedTensors]()
-        for key, item in self.items():
-            assert item.data is not None, (
-                f"Cannot get data of empty `items[{key!r}]`")
-            out_data[key] = item.data
+        for key, elem in self.items():
+            assert elem.data is not None, (
+                f"Cannot get data of empty `elem[{key!r}]`")
+            out_data[key] = elem.data
 
         return out_data
 
