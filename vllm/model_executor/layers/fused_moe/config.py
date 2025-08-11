@@ -79,6 +79,8 @@ class FusedMoEQuantDesc:
     precision: Optional["PrecisionConfig"] = None
 
 
+# TODO: have subclasses for specific moe methods?
+# e.g. for specific arguments bias, precision, etc.
 @dataclass
 class FusedMoEQuantConfig:
     a1: FusedMoEQuantDesc
