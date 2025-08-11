@@ -34,6 +34,31 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 
 @config
 @dataclass
+class EPLBConfig:
+    """Configuration for Expert Parallel Load Balancing (EP)."""
+
+    window_size: int = 1000
+    """Window size for expert load recording."""
+    step_interval: int = 3000
+    """
+    Interval for rearranging experts in expert parallelism.
+
+    Note that if this is greater than the EPLB window size, only the metrics
+    of the last `lb_window_size` steps will be used for rearranging experts.
+    """
+
+    num_redundant_experts: int = 0
+    """Number of redundant experts to use for expert parallelism."""
+
+    log_balancedness: bool = False
+    """
+    Log the balancedness each step of expert parallelism.
+    This is turned off by default since it will cause communication overhead.
+    """
+
+
+@config
+@dataclass
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
@@ -75,22 +100,24 @@ class ParallelConfig:
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
-    num_redundant_experts: int = 0
-    """Number of redundant experts to use for expert parallelism."""
-    eplb_window_size: int = 1000
-    """Window size for expert load recording."""
-    eplb_step_interval: int = 3000
-    """
-    Interval for rearranging experts in expert parallelism.
-
-    Note that if this is greater than the EPLB window size, only the metrics
-    of the last `eplb_window_size` steps will be used for rearranging experts.
-    """
-    eplb_log_balancedness: bool = False
-    """
-    Log the balancedness each step of expert parallelism.
-    This is turned off by default since it will cause communication overhead.
-    """
+    eplb_config: EPLBConfig = field(default_factory=EPLBConfig)
+    """Expert parallelism configuration."""
+    num_redundant_experts: Optional[int] = None
+    """`num_redundant_experts` is deprecated and has been replaced with
+    `eplb_config.num_redundant_experts`. This will be removed in v0.12.0.
+    Please use `eplb_config.num_redundant_experts` instead."""
+    eplb_window_size: Optional[int] = None
+    """`eplb_window_size` is deprecated and has been replaced with
+    `eplb_config.window_size`. This will be removed in v0.12.0.
+    Please use `eplb_config.window_size` instead."""
+    eplb_step_interval: Optional[int] = None
+    """`eplb_step_interval` is deprecated and has been replaced with
+    `eplb_config.step_interval`. This will be removed in v0.12.0.
+    Please use `eplb_config.step_interval` instead."""
+    eplb_log_balancedness: Optional[bool] = None
+    """`eplb_log_balancedness` is deprecated and has been replaced with
+    `eplb_config.log_balancedness`. This will be removed in v0.12.0.
+    Please use `eplb_config.log_balancedness` instead."""
 
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
@@ -241,6 +268,38 @@ class ParallelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
+        # Forward deprecated fields to their new location
+        if self.num_redundant_experts is not None:
+            self.eplb_config.num_redundant_experts = (
+                self.num_redundant_experts)
+            logger.warning_once(
+                "num_redundant_experts is deprecated and has been replaced "
+                "with eplb_config.num_redundant_experts. This will be removed "
+                "in v0.12.0. Changing this field after initialization will "
+                "have no effect.")
+        if self.eplb_window_size is not None:
+            self.eplb_config.window_size = self.eplb_window_size
+            logger.warning_once(
+                "eplb_window_size is deprecated and has been replaced "
+                "with eplb_config.window_size. This will be removed "
+                "in v0.12.0. Changing this field after initialization will "
+                "have no effect.")
+        if self.eplb_step_interval is not None:
+            self.eplb_config.step_interval = self.eplb_step_interval
+            logger.warning_once(
+                "eplb_step_interval is deprecated and has been replaced "
+                "with eplb_config.step_interval. This will be removed "
+                "in v0.12.0. Changing this field after initialization will "
+                "have no effect.")
+        if self.eplb_log_balancedness is not None:
+            self.eplb_config.log_balancedness = self.eplb_log_balancedness
+            logger.warning_once(
+                "eplb_log_balancedness is deprecated and has been replaced "
+                "with eplb_config.log_balancedness. This will be removed "
+                "in v0.12.0. Changing this field after initialization will "
+                "have no effect.")
+
+        # Continue with the rest of the initialization
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
@@ -279,10 +338,10 @@ class ParallelConfig:
                 raise ValueError(
                     "Expert parallelism load balancing is only supported on "
                     "CUDA devices now.")
-            if self.num_redundant_experts < 0:
+            if self.eplb_config.num_redundant_experts < 0:
                 raise ValueError(
                     "num_redundant_experts must be non-negative, but got "
-                    f"{self.num_redundant_experts}.")
+                    f"{self.eplb_config.num_redundant_experts}.")
             if not self.enable_expert_parallel:
                 raise ValueError(
                     "enable_expert_parallel must be True to use EPLB.")
@@ -293,10 +352,10 @@ class ParallelConfig:
                     f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
                 )
         else:
-            if self.num_redundant_experts != 0:
+            if self.eplb_config.num_redundant_experts != 0:
                 raise ValueError(
                     "num_redundant_experts should be used with EPLB."
-                    f"{self.num_redundant_experts}.")
+                    f"{self.eplb_config.num_redundant_experts}.")
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.

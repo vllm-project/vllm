@@ -25,7 +25,7 @@ from pydantic import (ConfigDict, SkipValidation, field_validator,
                       model_validator)
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from typing_extensions import Self, assert_never,deprecated, runtime_checkable
+from typing_extensions import Self, assert_never, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
@@ -33,7 +33,8 @@ from vllm.config.cache import (BlockSize, CacheConfig, CacheDType, MambaDType,
                                PrefixCachingHashAlgo)
 from vllm.config.compilation import (CompilationConfig, CompilationLevel,
                                      CUDAGraphMode, PassConfig)
-from vllm.config.parallel import DistributedExecutorBackend, ParallelConfig
+from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
+                                  ParallelConfig)
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
