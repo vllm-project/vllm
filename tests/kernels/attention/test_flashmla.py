@@ -23,7 +23,7 @@ FLASH_MLA_UNSUPPORTED_REASON = is_flashmla_supported()[1] \
     if not is_flashmla_supported()[0] else "FlashMLA is supported"
 
 CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+    f"cuda:{i}" for i in range(min(torch.cuda.device_count(), 2))
 ]
 
 
