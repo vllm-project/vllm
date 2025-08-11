@@ -135,8 +135,6 @@ class CompilationConfig:
         [vllm.config.CompilationConfig.cudagraph_capture_sizes]
         - [`cudagraph_num_of_warmups`]
         [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
-        - [`cudagraph_separate_routine`]
-        [vllm.config.CompilationConfig.cudagraph_separate_routine]
         - [`cudagraph_copy_inputs`]
         [vllm.config.CompilationConfig.cudagraph_copy_inputs]
         - [`full_cuda_graph`][vllm.config.CompilationConfig.full_cuda_graph]

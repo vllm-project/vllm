@@ -1531,16 +1531,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                 num_input_tokens, intermediate_tensors, True)
 
-        # Note: When cudagraph_mode is FULL and
-        # compilation_config.cudagraph_separate_routine is True, this
-        # flag helps to determine the correct cudagraph routine (optimized
-        # for attention ops).
-        uniform_decode = max_query_len == self.uniform_decode_query_len and \
-            num_scheduled_tokens == self.input_batch.num_reqs*max_query_len
+        uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
+            num_scheduled_tokens == self.input_batch.num_reqs * max_query_len)
+        batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
+                                           uniform_decode=uniform_decode)
         cudagraph_runtime_mode, batch_descriptor = \
-            self.cudagraph_dispatcher.dispatch(
-                BatchDescriptor(num_tokens=num_input_tokens,
-                                uniform_decode=uniform_decode))
+            self.cudagraph_dispatcher.dispatch(batch_descriptor)
 
         # attention_cuda_graphs needed to capture full cudagraphs
         assert (cudagraph_runtime_mode != CUDAGraphMode.FULL
@@ -1984,9 +1980,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # CudagraphWraper and CudagraphDispatcher of vllm.
 
         # wrap the model with full cudagraph wrapper if needed.
-        if self.compilation_config.cudagraph_mode not in [
-                CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE
-        ]:
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.model = CUDAGraphWrapper(self.model,
                                           self.vllm_config,
                                           runtime_mode=CUDAGraphMode.FULL)
