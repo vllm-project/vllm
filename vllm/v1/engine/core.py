@@ -297,19 +297,16 @@ class EngineCore:
 
         engine_core_outputs = None
         scheduler_output = None
+        scheduled_batch = False
         # Try to schedule a new batch if the batch queue is not full, but
         # the scheduler may return an empty batch if all requests are scheduled.
         # Note that this is not blocking.
         if not self.batch_queue.full():
             scheduler_output = self.scheduler.schedule()
-            if scheduler_output.total_num_scheduled_tokens > 0 or scheduler_output.finished_req_ids:
-                future = self.model_executor.execute_model(scheduler_output)
-                self.batch_queue.put_nowait(
-                    (future, scheduler_output))  # type: ignore
-
-        scheduled_batch = (scheduler_output is not None
-                           and (scheduler_output.total_num_scheduled_tokens > 0
-                                or scheduler_output.finished_req_ids))
+            future = self.model_executor.execute_model(scheduler_output)
+            self.batch_queue.put_nowait(
+                (future, scheduler_output))  # type: ignore
+            scheduled_batch = True
 
         # If no more requests can be scheduled and the job queue is not empty,
         # block until the first batch in the job queue is finished.
