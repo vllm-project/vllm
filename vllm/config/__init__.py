@@ -2422,9 +2422,8 @@ class SpeculativeConfig:
                 # Automatically detect the method
                 if self.method in ('eagle', 'eagle3'):
                     pass
-                elif "eagle3" in self.draft_model_config.model.lower():
-                    self.method = "eagle3"
-                elif "eagle" in self.draft_model_config.model.lower():
+                elif "eagle-" in self.draft_model_config.model.lower() or \
+                        "eagle3-" in self.draft_model_config.model.lower():
                     self.method = "eagle"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
