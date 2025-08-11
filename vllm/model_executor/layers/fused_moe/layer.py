@@ -458,44 +458,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         else:
-
-            if hasattr(layer, "punica_wrapper"):
-                (token_lora_mapping, _, _, _, _,
-                 _) = layer.punica_wrapper.token_mapping_meta.meta_args(
-                     x.size(0))
-                return self.fused_experts(
-                    hidden_states=x,
-                    w1=layer.w13_weight,
-                    w2=layer.w2_weight,
-                    topk_weights=topk_weights,
-                    topk_ids=topk_ids,
-                    inplace=True,
-                    activation=activation,
-                    apply_router_weight_on_input=apply_router_weight_on_input,
-                    global_num_experts=global_num_experts,
-                    expert_map=expert_map,
-                    w1_lora_a_stacked=layer.w1_lora_a_stacked,
-                    w1_lora_b_stacked=layer.w1_lora_b_stacked,
-                    w2_lora_a_stacked=layer.w2_lora_a_stacked,
-                    w2_lora_b_stacked=layer.w2_lora_b_stacked,
-                    w3_lora_a_stacked=layer.w3_lora_a_stacked,
-                    w3_lora_b_stacked=layer.w3_lora_b_stacked,
-                    token_lora_mapping=token_lora_mapping,
-                )
-
-            else:
-                return self.fused_experts(
-                    hidden_states=x,
-                    w1=layer.w13_weight,
-                    w2=layer.w2_weight,
-                    topk_weights=topk_weights,
-                    topk_ids=topk_ids,
-                    inplace=True,
-                    activation=activation,
-                    apply_router_weight_on_input=apply_router_weight_on_input,
-                    global_num_experts=global_num_experts,
-                    expert_map=expert_map,
-                )
+            return self.fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+            )
 
     def forward_cpu(
         self,

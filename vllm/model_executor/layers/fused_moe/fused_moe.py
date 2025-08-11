@@ -1387,8 +1387,10 @@ def fused_experts(
     # E8M0 scale, which means we requantize the weight and input to the specific
     # scale. Fallen back to cutlass or triton for some cases would cause
     # accuracy issue.
-    should_use_deep_gemm = is_blackwell_deep_gemm_used() or _valid_deep_gemm(
-        hidden_states, w1, w2)
+    N = w1.size(1)
+    should_use_deep_gemm = ((N > 512
+                             and _valid_deep_gemm(hidden_states, w1, w2))
+                            or is_blackwell_deep_gemm_used())
     if (allow_deep_gemm and use_fp8_w8a8 and should_use_deep_gemm):
         assert apply_router_weight_on_input is False
         assert is_act_and_mul, (
@@ -1984,6 +1986,12 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                  global_num_experts, expert_map))
 
         invoke_fused_moe_kernel(
+            # The code `hidden_states` is not performing any specific action in
+            # the provided snippet. It seems to be a variable name or
+            # placeholder without any associated code or context.
+            # The code `hidden_states` is not performing any specific action in
+            # the provided snippet. It seems to be a variable or placeholder
+            # that has been declared but not used or assigned any value.
             hidden_states,
             w1,
             intermediate_cache1,
@@ -2035,7 +2043,11 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                 per_channel_quant=self.per_act_token_quant,
                                 block_shape=self.block_shape)
 
-        ops.moe_sum(intermediate_cache3, output)
+        # ops.moe_sum(intermediate_cache3, output)
+        self.moe_sum(intermediate_cache3, output)
+
+    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+        ops.moe_sum(input, output)
 
 
 def modular_triton_fused_moe(
