@@ -1284,8 +1284,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 w3_lora_b_stacked = layer.w3_lora_b_stacked
 
                 max_lora_rank = w1_lora_a_stacked.shape[-2]
-                w13_lora_a_stacked = (w1_lora_a_stacked, w3_lora_a_stacked)
-                w13_lora_b_stacked = (w1_lora_b_stacked, w3_lora_b_stacked)
+                w13_lora_a_stacked = [w1_lora_a_stacked, w3_lora_a_stacked]
+                w13_lora_b_stacked = [w1_lora_b_stacked, w3_lora_b_stacked]
                 expert_ids_lora = expert_ids_lora.view(curr_topk_ids.shape[-1],
                                                        -1)
                 sorted_token_ids_lora = sorted_token_ids_lora.view(
@@ -1455,8 +1455,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.w2_lora_b_stacked = self.w2_lora_b_stacked
         self.base_layer.w3_lora_a_stacked = self.w3_lora_a_stacked
         self.base_layer.w3_lora_b_stacked = self.w3_lora_b_stacked
-        # It's will be use by 'LoRALayerWeights.create_dummy_lora_weights'
-        # to create a dummy lora weights.
+        # They will be used by 'LoRALayerWeights.create_dummy_lora_weights'
+        # to create a dummy LoRA weights.
         self.lora_a_stacked = []
         self.lora_b_stacked = []
         for lora_id in range(max_loras):
