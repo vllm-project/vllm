@@ -14,13 +14,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Global configuration parameters
-AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=300)  # Timeout for backend service requests (seconds)
-MAX_CONCURRENT_REQUESTS = 10  # Maximum concurrent requests to backend services
+# Timeout for backend service requests (seconds)
+AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=300)
+# Maximum concurrent requests to backend services
+MAX_CONCURRENT_REQUESTS = 10
 REQUEST_QUEUE_SIZE = 50  # Maximum number of requests in the queue
 RATE_LIMIT = 5  # Maximum requests per second (rate limiting)
-PRE_SERVICE_URL = "http://localhost:8100/v1/completions"  # Prefill service endpoint
-DECODE_SERVICE_URL = "http://localhost:8200/v1/completions"  # Decode service endpoint
-#run this need pip install quart
+# Prefill service endpoint
+PRE_SERVICE_URL = "http://localhost:8100/v1/completions"
+# Decode service endpoint
+DECODE_SERVICE_URL = "http://localhost:8200/v1/completions"
+# run this need pip install quart
 app = Quart(__name__)
 
 
@@ -53,12 +57,15 @@ class RateLimiter:
                 wait_time = 1.0 - elapsed
             await asyncio.sleep(wait_time)
 
+
 # Request queue manager with concurrency control
 class RequestQueue:
     def __init__(self, max_concurrent, max_queue_size):
-        self.max_concurrent = max_concurrent  # Maximum concurrent requests
+        # Maximum concurrent requests
+        self.max_concurrent = max_concurrent
         self.max_queue_size = max_queue_size  # Maximum queue size
-        self.semaphore = asyncio.Semaphore(max_concurrent)  # Concurrency control
+        # Concurrency control
+        self.semaphore = asyncio.Semaphore(max_concurrent)
         self.queue = deque()  # Request queue
         self.queue_size = 0  # Current queue size
         self.lock = asyncio.Lock()  # Sync queue Lock
@@ -114,7 +121,8 @@ async def forward_request(url, data):
                 else:
                     # Handle backend service errors
                     error_text = await response.text()
-                    logger.error(f"Backend service error: {response.status} - {error_text}")
+                    logger.error(f"Backend service error:"
+                                 f" {response.status} - {error_text}")
                     yield b'{"error": "Backend service error"}'
         except aiohttp.ClientError as e:
             # Handle connection errors
@@ -185,5 +193,5 @@ async def handle_request():
 
 
 if __name__ == "__main__":
-    # Start the Quart server with host: 0.0.0.0 port: 8000
-    app.run(port=8000, host="0.0.0.0")
+    # Start the Quart server with host can be set to 0.0.0.0
+    app.run(port=8000)
