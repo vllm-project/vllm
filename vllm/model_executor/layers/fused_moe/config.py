@@ -309,6 +309,8 @@ def _quant_flags_to_group_shape(
 
     return a1_shape, a2_shape
 
+# TODO better doc
+# TODO: put block shapes in weights also?
 
 def fp8_w8a8_moe_quant_config(
     w1_scale: torch.Tensor,
@@ -391,9 +393,13 @@ def int4_w4a16_moe_quant_config(
     block_shape: Optional[list[int]] = None,
 ) -> FusedMoEQuantConfig:
     # Activations are pre-quantized
+    if block_shape is not None:
+        group_shape = GroupShape(*block_shape)
+    else:
+        group_shape=None
     return FusedMoEQuantConfig(
-        a1=FusedMoEQuantDesc(),
-        a2=FusedMoEQuantDesc(),
+        a1=FusedMoEQuantDesc(shape=group_shape),
+        a2=FusedMoEQuantDesc(shape=group_shape),
         w1=FusedMoEQuantDesc("int4", None, w1_scale, None, w1_zp),
         w2=FusedMoEQuantDesc("int4", None, w2_scale, None, w2_zp),
     )
@@ -407,6 +413,10 @@ def int8_w8a16_moe_quant_config(
     block_shape: Optional[list[int]] = None,
 ) -> FusedMoEQuantConfig:
     # Activations are pre-quantized
+    if block_shape is not None:
+        group_shape = GroupShape(*block_shape)
+    else:
+        group_shape=None
     return FusedMoEQuantConfig(
         a1=FusedMoEQuantDesc(),
         a2=FusedMoEQuantDesc(),
