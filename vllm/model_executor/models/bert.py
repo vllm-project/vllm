@@ -412,7 +412,6 @@ class BertModel(nn.Module, SupportsQuant):
         return loaded_params
 
 
-@default_pooling_type("ALL")
 class BertPoolingModel(BertModel):
 
     is_pooling_model = True
@@ -443,7 +442,6 @@ class BertPoolingModel(BertModel):
         return loaded_params
 
 
-@default_pooling_type("CLS")
 class BertEmbeddingModel(nn.Module, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
@@ -506,7 +504,6 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
         })
 
 
-@default_pooling_type("CLS")
 class BertForSequenceClassification(nn.Module, SupportsV0Only,
                                     SupportsCrossEncoding, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.

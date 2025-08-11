@@ -89,7 +89,6 @@ class RobertaClassificationHead(nn.Module):
         return x
 
 
-@default_pooling_type("CLS")
 class RobertaEmbeddingModel(BertEmbeddingModel):
     """A model that uses Roberta to provide embedding functionalities.
 
@@ -155,7 +154,6 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         return loader.load_weights(weights_list, mapper=mapper)
 
 
-@default_pooling_type("CLS")
 class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
                                        SupportsV0Only):
     """A model that uses Roberta to provide embedding functionalities.
