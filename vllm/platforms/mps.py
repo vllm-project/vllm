@@ -33,10 +33,12 @@ class MpsPlatform(Platform):
         return "Apple MPS"  
       
     @classmethod  
+    @classmethod  
     def get_device_total_memory(cls, device_id: int = 0) -> int:  
-        # MPS doesn't have a direct memory query API  
-        # Return a reasonable default or implement estimation  
-        return 16 * 1024 * 1024 * 1024  # 16GB default
+        # On Apple Silicon, MPS uses unified memory with the CPU.
+        # We can use psutil to get the total system memory.
+        import psutil
+        return psutil.virtual_memory().total
     
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
@@ -80,8 +82,9 @@ class MpsPlatform(Platform):
         compilation_config.use_cudagraph = False  # MPS doesn't support CUDA graphs
     
     @classmethod
+    @classmethod
     def get_current_memory_usage(cls, device: torch.device) -> int:
         """Get current memory usage for MPS device."""
-        # MPS doesn't have direct memory query APIs like CUDA
-        # Return 0 as a placeholder since memory profiling isn't critical for basic functionality
-        return 0
+        # torch.mps.current_allocated_memory() is available from PyTorch 1.13.
+        # It returns the current memory allocated on the MPS device.
+        return torch.mps.current_allocated_memory()
