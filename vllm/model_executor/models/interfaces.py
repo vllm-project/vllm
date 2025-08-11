@@ -826,7 +826,7 @@ class SupportsEagle3(Protocol):
         MRO of your model class.
     """
 
-    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         """
         Set which layers should output auxiliary
         hidden states for EAGLE3.
@@ -837,7 +837,7 @@ class SupportsEagle3(Protocol):
         """
         ...
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         """
         Get the layer indices that should output auxiliary hidden states
         for EAGLE3.

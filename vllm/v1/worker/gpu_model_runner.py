@@ -1972,7 +1972,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.model.set_aux_hidden_state_layers(
                         self.model.get_eagle3_aux_hidden_state_layers())
                 else:
-                    logger.warning(
+                    raise RuntimeError(
                         "Model does not support EAGLE3 interface but "
                         "aux_hidden_state_outputs was requested")
             time_after_load = time.perf_counter()
