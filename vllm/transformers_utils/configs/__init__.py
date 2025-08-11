@@ -17,7 +17,6 @@ from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
-from vllm.transformers_utils.configs.mllama import MllamaConfig
 from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
@@ -33,11 +32,10 @@ from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 __all__ = [
     "ChatGLMConfig",
     "DeepseekVLV2Config",
+    "EAGLEConfig",
     "RWConfig",
     "JAISConfig",
     "MedusaConfig",
-    "EAGLEConfig",
-    "MllamaConfig",
     "MLPSpeculatorConfig",
     "MoonViTConfig",
     "KimiVLConfig",
