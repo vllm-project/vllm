@@ -56,7 +56,8 @@ class CUDAGraphMode(enum.Enum):
                 or self.mixed_mode() == CUDAGraphMode.PIECEWISE)
 
     def max_cudagraph_mode(self) -> 'CUDAGraphMode':
-        return max(self.value) if self.separate_routine() else self
+        return CUDAGraphMode(max(
+            self.value)) if self.separate_routine() else self
 
     def has_full_cudagraphs(self) -> bool:
         return self.max_cudagraph_mode() == CUDAGraphMode.FULL

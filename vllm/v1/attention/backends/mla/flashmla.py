@@ -73,7 +73,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         device_properties = torch.cuda.get_device_properties(self.device)
         num_sms = device_properties.multi_processor_count
 
-        if self.compilation_config.full_cuda_graph:
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.cg_buf_tile_scheduler_metadata = torch.zeros(
                 # Upper bound on size (<= #SMs, TileSchedulerMetaDataSize)
                 # TileSchedulerMetaDataSize = 8
