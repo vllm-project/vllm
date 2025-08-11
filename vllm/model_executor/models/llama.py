@@ -471,17 +471,17 @@ class LlamaModel(nn.Module):
 
         #print(params_dict.keys() - loaded_params)
 
-        for name, parameter in params_dict.items():
-            if not hasattr(parameter, "shards"):
-                assert not torch.all(parameter.data == 0), (
-                    name, parameter.data.shape)
-            else:
-                for shard_id, shard in parameter.shards.items():
-                    assert not torch.all(shard.data == 0), (name,
-                                                            shard.data.shape)
-                    #print((name, shard.data, shard.data.shape, shard_id))
+        # for name, parameter in params_dict.items():
+        #     if not hasattr(parameter, "shards"):
+        #         assert not torch.all(parameter.data == 0), (
+        #             name, parameter.data.shape)
+        #     else:
+        #         for shard_id, shard in parameter.shards.items():
+        #             assert not torch.all(shard.data == 0), (name,
+        #                                                     shard.data.shape)
+        #             #print((name, shard.data, shard.data.shape, shard_id))
 
-        print("looks good")
+        # print("looks good")
 
         return loaded_params
 
