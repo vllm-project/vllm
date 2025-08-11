@@ -55,7 +55,7 @@ def _should_ignore_torch_compile(cls) -> bool:
 @overload
 def support_torch_compile(
     *,
-    compile_cond: Optional[Callable[[VllmConfig], bool]] = None,
+    enable_if: Optional[Callable[[VllmConfig], bool]] = None,
 ) -> Callable[[_T], _T]:
     ...
 
@@ -77,7 +77,7 @@ def support_torch_compile(
     cls: Optional[_T] = None,
     *,
     dynamic_arg_dims: Optional[dict[str, Union[int, list[int]]]] = None,
-    compile_cond: Optional[Callable[[VllmConfig], bool]] = None,
+    enable_if: Optional[Callable[[VllmConfig], bool]] = None,
 ) -> Union[Callable[[_T], _T], _T]:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -128,7 +128,7 @@ def support_torch_compile(
     the lifetime of the model, otherwise, it cannot be captured as a single
     computation graph.
 
-    `compile_cond` is a function that takes a `VllmConfig` object as input and
+    `enable_if` is a function that takes a `VllmConfig` object as input and
     returns a boolean value indicating whether to compile the model or not.
     This is useful if you want to compile the model only when certain
     conditions are met.
@@ -164,7 +164,7 @@ def support_torch_compile(
                 raise ValueError(
                     f"Argument {k} not found in the forward method of {cls}")
         return _support_torch_compile(cls, inferred_dynamic_arg_dims,
-                                      compile_cond)
+                                      enable_if)
 
     if cls is not None:
         # use `support_torch_compile` as a decorator without arguments
@@ -177,7 +177,7 @@ def support_torch_compile(
 def _support_torch_compile(
     cls: _T,
     dynamic_arg_dims: dict[str, Union[int, list[int]]],
-    compile_cond: Optional[Callable[[VllmConfig], bool]] = None,
+    enable_if: Optional[Callable[[VllmConfig], bool]] = None,
 ) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -198,15 +198,14 @@ def _support_torch_compile(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs):
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
         self.vllm_config = vllm_config
-        compile_cond_satisfied = compile_cond is None or compile_cond(
-            vllm_config)
+        enable_compile = enable_if is None or enable_if(vllm_config)
         # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
         self.do_not_compile = \
             vllm_config.compilation_config.level in [
             CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
         ] or not supports_dynamo() or _should_ignore_torch_compile(
-            self.__class__) or not compile_cond_satisfied
+            self.__class__) or not enable_compile
         if self.do_not_compile:
             return
 
