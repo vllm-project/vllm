@@ -297,8 +297,7 @@ def is_interleaved(config: PretrainedConfig) -> bool:
     return False
 
 
-def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], *,
-                                     model_type: str):
+def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
     """
     Override default has_no_defaults_at_init for AutoConfig based on model_type
     """
