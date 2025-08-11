@@ -641,6 +641,20 @@ def supports_cross_encoding(
     return is_pooling_model(model) and _supports_cross_encoding(model)
 
 
+def default_pooling_type(pooling_type: str) -> object:
+    """Set default_pooling_type decorator. """
+
+    def func(model: object):
+        model.default_pooling_type = pooling_type
+        return model
+
+    return func
+
+
+def get_default_pooling_type(model: Union[type[object], object]) -> str:
+    return getattr(model, "default_pooling_type", "LAST")
+
+
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 

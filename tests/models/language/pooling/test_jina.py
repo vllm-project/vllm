@@ -6,20 +6,22 @@ import pytest
 
 from vllm import PoolingParams
 
-from ...utils import EmbedModelInfo, RerankModelInfo
+from ...utils import (CLSPoolingEmbedModelInfo, CLSPoolingRerankModelInfo,
+                      EmbedModelInfo, RerankModelInfo)
 from .embed_utils import (check_embeddings_close,
                           correctness_test_embed_models, matryoshka_fy)
 from .mteb_utils import mteb_test_embed_models, mteb_test_rerank_models
 
 EMBEDDING_MODELS = [
-    EmbedModelInfo("jinaai/jina-embeddings-v3",
-                   architecture="XLMRobertaModel",
-                   is_matryoshka=True)
+    CLSPoolingEmbedModelInfo("jinaai/jina-embeddings-v3",
+                             architecture="XLMRobertaModel",
+                             is_matryoshka=True)
 ]
 
 RERANK_MODELS = [
-    RerankModelInfo("jinaai/jina-reranker-v2-base-multilingual",
-                    architecture="XLMRobertaForSequenceClassification")
+    CLSPoolingRerankModelInfo(
+        "jinaai/jina-reranker-v2-base-multilingual",
+        architecture="XLMRobertaForSequenceClassification")
 ]
 
 
