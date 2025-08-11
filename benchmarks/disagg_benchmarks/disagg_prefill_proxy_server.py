@@ -34,26 +34,24 @@ class RateLimiter:
 
     async def acquire(self):
         """Acquire a token from the rate limiter"""
-        async with self.lock:
-            current_time = time.monotonic()
-            elapsed = current_time - self.last_refill
+        while True:
+            async with self.lock:
+                current_time = time.monotonic()
+                elapsed = current_time - self.last_refill
 
-            # Refill tokens if more than 1 second has passed
-            if elapsed > 1.0:
-                self.tokens = self.rate_limit
-                self.last_refill = current_time
+                # Refill tokens if more than 1 second has passed
+                if elapsed > 1.0:
+                    self.tokens = self.rate_limit
+                    self.last_refill = current_time
 
-            # Check if tokens are available
-            if self.tokens > 0:
-                self.tokens -= 1
-                return True
+                # Check if tokens are available
+                if self.tokens > 0:
+                    self.tokens -= 1
+                    return True
 
-            # Calculate wait time if no tokens available
-            wait_time = 1.0 - elapsed
+                # Calculate wait time if no tokens available
+                wait_time = 1.0 - elapsed
             await asyncio.sleep(wait_time)
-            self.last_refill = time.monotonic()
-            self.tokens = self.rate_limit - 1
-            return True
 
 # Request queue manager with concurrency control
 class RequestQueue:
