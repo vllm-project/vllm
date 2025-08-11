@@ -5,7 +5,6 @@
 import asyncio
 import hashlib
 import json
-import logging
 import pickle
 import socket
 from collections.abc import AsyncIterator
@@ -29,7 +28,7 @@ from vllm.utils import (CacheInfo, FlexibleArgumentParser, LRUCache,
                         merge_async_iterators, sha256, split_host_port,
                         split_zmq_path, supports_kw, swap_dict_values)
 
-from .utils import create_new_process_for_each_test, error_on_warning
+from ..utils import create_new_process_for_each_test, error_on_warning
 
 
 @pytest.mark.asyncio
