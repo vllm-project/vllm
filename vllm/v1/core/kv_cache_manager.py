@@ -11,6 +11,7 @@ from vllm.utils import sha256, sha256_cbor_64bit
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
                                          hash_request_tokens, init_none_hash)
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -196,15 +197,13 @@ class KVCacheManager:
         """Get the number of computed (cached) tokens of one req for scheduling.
         This function is used for shortest prefill first scheduling policy.
 
-        NOTE: This function will be called for all requests for all 
-        scheduling steps so it needs to be efficient. We use binary search
-        to accelerate the process of getting number of computed tokens.
+        NOTE: Functionality-wise, this is similar to `get_computed_blocks` 
+        without returning the computed blocks. But implementation-wise, we use
+        binary search to accelerate the process of getting number of computed 
+        tokens for full attention.
 
-        NOTE: We do not use existing `get_computed_blocks` because it is too 
-        slow. 
-
-        NOTE: The exact number of computed tokens returned by this function
-        is only used for scheduling and thus does not have to be accurate.
+        TODO(Kuntai): Optimize the time complexity of this function for other
+        types of attentions.
 
         Args:
             request: The request to get the computed tokens.
@@ -228,36 +227,42 @@ class KVCacheManager:
                                                self.block_size, request)
             self.req_to_block_hashes[request.request_id] = block_hashes
 
+        # NOTE(Kuntai): `get_computed_blocks` is too slow interms of get just
+        # the number of computed tokens.
+        # Instead, we can do binary search to find the # of cache hit tokens.
+        # But this only works when the LLM model only supports full attention.
+
+        # NOTE(Kuntai): Fall back to `get_computed_blocks`
+        # if there are multiple types of attentions.
+        for manager in self.coordinator.single_type_managers:
+            if not isinstance(manager, FullAttentionManager):
+                return self.get_computed_blocks(request)[1]
+
         # Do binary search to find the # of cache hit tokens with low cost.
         # This works when all prefix tokens are stored in the cache.
-        # NOTE(Kuntai): this only works for full attention. Need to modify
-        # for sliding window attention.
         left = 0
         right = len(block_hashes) - 1
         ans = -1
+        pool = self.coordinator.single_type_managers[0].block_pool
 
-        # NOTE(Kuntai): we fall back to `get_computed_blocks`
-        # if there are multiple types of attentions.
-        try:
-            pool = self.coordinator.single_type_managers[0].block_pool
-        except AttributeError:
-            # This LLM has multiple types of attentions.
-            # Use get_computed_blocks instead.
-            return self.get_computed_blocks(request)[1]
-
-        while left <= right:
+        while left < right:
             mid = (left + right) // 2
             block_hash = block_hashes[mid]
             if pool.get_cached_block(block_hash, [0]):
+                # Middle block cache hit. Update answer.
                 ans = mid
+                # Move left to the next block.
                 left = mid + 1
             else:
+                # No cache hit found. Move right to the previous block.
                 right = mid - 1
 
         assert self.block_size is not None, (
             "Block size musts be set when estimating the number of computed "
             "tokens.")
 
+        # Since ans is the index of the block, which starts from 0,
+        # we need to add 1 to get the number of computed tokens.
         return (ans + 1) * self.block_size
 
     def allocate_slots(
