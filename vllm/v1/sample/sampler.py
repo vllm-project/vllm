@@ -57,6 +57,13 @@ class Sampler(nn.Module):
         e) If `all_random` or temperature >= epsilon (1e-5), return the
            randomly sampled tokens and final logprobs if requested. Else,
            return the greedily sampled tokens and logprobs if requested.
+    9. Gather the logprobs of the top `max_num_logprobs` and sampled token
+       (if requested). Note that if the sampled token is within the top
+       `max_num_logprobs`, the logprob will be eventually merged in
+       `LogprobsProcessor` during output processing. Therefore, the
+       final output may contain either `max_num_logprobs + 1` or
+       `max_num_logprobs` logprobs.
+    10. Return the final `SamplerOutput`.
     """
 
     def __init__(self, logprobs_mode: LogprobsMode = "raw_logprobs"):
