@@ -109,9 +109,8 @@ class XPUPlatform(Platform):
         if compilation_config.cudagraph_mode is None and \
                 compilation_config.cudagraph_mode.max_cudagraph_mode() \
                     != CUDAGraphMode.FULL:
-            logger.warning(
-                "CUDA graph is not supported on XPU, disabling cudagraphs "
-                "mode.")
+            logger.info("[XPU] CUDA graph is not supported on XPU, "
+                        "disabling cudagraphs.")
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # check and update parallel config

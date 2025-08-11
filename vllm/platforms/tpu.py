@@ -112,6 +112,12 @@ class TpuPlatform(Platform):
             logger.info("[TPU] Forcing DYNAMO_ONCE compilation level, and "
                         "disabling cudagraph.")
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
+
+        if compilation_config.cudagraph_mode is None or \
+                compilation_config.cudagraph_mode.max_cudagraph_mode() \
+                    != CUDAGraphMode.NONE:
+            logger.info("[TPU] CUDA graph is not supported on TPU, "
+                        "disabling cudagraphs.")
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if compilation_config.backend == "":
