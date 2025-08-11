@@ -27,7 +27,8 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsQuant
+from vllm.model_executor.models.interfaces import (SupportsQuant,
+                                                   default_pooling_type)
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -401,6 +402,7 @@ class BertWithRopeEncoder(nn.Module):
 
 
 @support_torch_compile
+@default_pooling_type("CLS")
 class BertWithRope(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
