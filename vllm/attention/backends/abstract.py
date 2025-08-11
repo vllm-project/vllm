@@ -101,6 +101,10 @@ class AttentionBackend(ABC):
     ) -> None:
         raise NotImplementedError
 
+    @staticmethod
+    def decode_supports_qlen_padding() -> bool:
+        return False
+
     def advance_step(self, model_input: "ModelRunnerInputBase",
                      sampled_token_ids: Optional[torch.Tensor],
                      block_size: int, num_seqs: int, num_queries: int) -> None:

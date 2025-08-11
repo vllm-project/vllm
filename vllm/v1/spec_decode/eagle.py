@@ -71,8 +71,9 @@ class EagleProposer:
             device=device)
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
-        self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs +
-                                   1,
+        max_num_slots_for_arange = max(
+            vllm_config.scheduler_config.max_num_seqs + 1, self.max_num_tokens)
+        self.arange = torch.arange(max_num_slots_for_arange,
                                    device=device,
                                    dtype=torch.int32)
 
@@ -86,12 +87,15 @@ class EagleProposer:
         target_hidden_states: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
+        last_token_indices: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
-        last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
+
+        if last_token_indices is None:
+            last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
@@ -239,6 +243,40 @@ class EagleProposer:
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
+
+    def prepare_inputs_deferred(self,
+                                common_attn_metadata: CommonAttentionMetadata):
+        """
+        This function is used to prepare the inputs for the spec decode.
+        It updates the common_attn_metadata for speculative decoding,
+        but does not consider the rejected tokens. Instead, all tokens
+        are included as inputs to the speculator, with the rejected tokens
+        used as padding and filtered out later by `last_token_indices`.
+        """
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+
+        new_query_len_per_req = (query_start_loc_cpu[1:] -
+                                 query_start_loc_cpu[:-1])
+
+        total_num_tokens = query_start_loc_cpu[-1].item()
+        token_indices = self.arange[:total_num_tokens]
+
+        spec_common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=common_attn_metadata.query_start_loc,
+            seq_lens=common_attn_metadata.seq_lens,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens_cpu=common_attn_metadata.seq_lens_cpu,
+            num_computed_tokens_cpu=common_attn_metadata.
+            num_computed_tokens_cpu,
+            num_reqs=common_attn_metadata.num_reqs,
+            num_actual_tokens=total_num_tokens,
+            max_query_len=new_query_len_per_req.max().item(),
+            block_table_tensor=common_attn_metadata.block_table_tensor,
+            slot_mapping=common_attn_metadata.slot_mapping[token_indices],
+            causal=True,
+        )
+
+        return spec_common_attn_metadata, token_indices
 
     def prepare_inputs(
         self,

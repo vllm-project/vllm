@@ -351,6 +351,7 @@ class MLACommonMetadata(Generic[D]):
 
     num_reqs: int
     max_query_len: int
+    max_seq_len: int
 
     num_actual_tokens: int  # Number of tokens excluding padding.
     query_start_loc: torch.Tensor
@@ -419,6 +420,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         parallel_config = vllm_config.parallel_config
+        self.num_speculative_tokens = 0
+        if vllm_config.speculative_config is not None:
+            self.num_speculative_tokens = \
+                vllm_config.speculative_config.num_speculative_tokens
+        self.decode_threshold = 1 + self.num_speculative_tokens
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
         self.num_heads = self.model_config.get_num_attention_heads(
             parallel_config)
@@ -562,9 +568,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(input_batch,
-                                                           scheduler_output,
-                                                           decode_threshold=1)
+        return reorder_batch_to_split_decodes_and_prefills(
+            input_batch,
+            scheduler_output,
+            decode_threshold=self.decode_threshold)
 
     def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor):
@@ -595,6 +602,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
+        max_seq_len = common_attn_metadata.seq_lens_cpu.max().item()
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
@@ -613,7 +621,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                                    query_seq_lens_cpu)
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
-            split_decodes_and_prefills(common_attn_metadata)
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.decode_threshold)
 
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
@@ -719,6 +729,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         attn_metadata = self.metadata_cls(
             num_reqs=common_attn_metadata.num_reqs,
             max_query_len=common_attn_metadata.max_query_len,
+            max_seq_len=max_seq_len,
             num_actual_tokens=num_tokens,
             query_start_loc=query_start_loc,
             slot_mapping=slot_mapping,
