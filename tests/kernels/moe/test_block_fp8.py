@@ -16,7 +16,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, modular_triton_fused_moe)
 from vllm.platforms import current_platform
 from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
+from vllm.utils.deep_gemm import is_blackwell_deep_gemm_e8m0_used
 
 dg_available = has_deep_gemm()
 
@@ -224,7 +224,8 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
-@pytest.mark.skipif(is_blackwell_deep_gemm_used(), reason="Not E8M0 scale MOE")
+@pytest.mark.skipif(is_blackwell_deep_gemm_e8m0_used(),
+                    reason="Not E8M0 scale MOE")
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
                                             monkeypatch):
