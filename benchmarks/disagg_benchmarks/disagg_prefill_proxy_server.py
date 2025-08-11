@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Global configuration parameters
-AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=60)  # Timeout for backend service requests (seconds)
+AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=300)  # Timeout for backend service requests (seconds)
 MAX_CONCURRENT_REQUESTS = 10  # Maximum concurrent requests to backend services
 REQUEST_QUEUE_SIZE = 50  # Maximum number of requests in the queue
 RATE_LIMIT = 5  # Maximum requests per second (rate limiting)
