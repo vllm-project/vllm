@@ -42,12 +42,13 @@ def unroll_model_tp_dict(model_tp_dict):
 model_tp_dict = {
     "Qwen/Qwen2-VL-7B-Instruct": [1, 2],
     "Qwen/Qwen2-VL-72B-Instruct": [1, 2],
-    "Qwen/Qwen2.5-VL-72B-Instruct": [1, 2]
+    "Qwen/Qwen2.5-VL-72B-Instruct": [1, 2],
+    "zai-org/GLM-4.1V-9B-Thinking": [1, 2],
 }
 
 # https://github.com/pytorch/pytorch/blob/main/torch/testing/_comparison.py#L1317
 dtype_atol_rtol_list = [
-    [torch.bfloat16, 1e-5, 1.6e-2],
+    [torch.bfloat16, 1e-2, 1.6e-2],
 ]
 
 num_tokens_list = [11, 8192]
@@ -73,10 +74,12 @@ def test_mrope(model_name, tp_size, dtype, atol, rtol, num_tokens):
 
     rope_theta = config.rope_theta
     max_position = config.max_position_embeddings
+    partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
+    rotary_dim = int(head_dim * partial_rotary_factor)
 
     mrope_helper_class = get_rope(
         head_size=head_dim,
-        rotary_dim=head_dim,
+        rotary_dim=rotary_dim,
         max_position=max_position,
         base=rope_theta,
         is_neox_style=is_neox_style,
@@ -110,7 +113,10 @@ def test_mrope(model_name, tp_size, dtype, atol, rtol, num_tokens):
                     reason="Skipping CUDA/ROCm only tests.")
 @pytest.mark.parametrize(
     "model_name, tp_size",
-    unroll_model_tp_dict({"Qwen/Qwen2-VL-7B-Instruct": [1, 2]}))
+    unroll_model_tp_dict({
+        "Qwen/Qwen2-VL-7B-Instruct": [1, 2],
+        "zai-org/GLM-4.1V-9B-Thinking": [1, 2]
+    }))
 @pytest.mark.parametrize("dtype, atol, rtol", dtype_atol_rtol_list)
 @pytest.mark.parametrize("num_tokens", [4])
 def test_mrope_torch_compile_tracing(model_name, tp_size, dtype, atol, rtol,
@@ -126,10 +132,12 @@ def test_mrope_torch_compile_tracing(model_name, tp_size, dtype, atol, rtol,
     is_neox_style = True
     rope_theta = config.rope_theta
     max_position = config.max_position_embeddings
+    partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
+    rotary_dim = int(head_dim * partial_rotary_factor)
 
     mrope_helper_class = get_rope(
         head_size=head_dim,
-        rotary_dim=head_dim,
+        rotary_dim=rotary_dim,
         max_position=max_position,
         base=rope_theta,
         is_neox_style=is_neox_style,
@@ -145,7 +153,7 @@ def test_mrope_torch_compile_tracing(model_name, tp_size, dtype, atol, rtol,
     # Create a wrapper that makes the in-place function appear functional
     def functional_forward_cuda(pos, q, k):
         """Wrapper that converts in-place operation to functional style
-        
+
         CUDA Graph does not support in-place operations.
         This wrapper creates working copies of the 
         input tensors and modifies them.

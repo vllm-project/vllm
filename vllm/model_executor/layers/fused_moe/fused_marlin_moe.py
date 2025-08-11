@@ -186,7 +186,8 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
 
         intermediate_cache2 = swiglu_oai(intermediate_cache1)
     else:
-        assert False, "Only silu and swiglu_oai activations are supported."
+        raise ValueError(f"Unsupported activation: {activation}. "
+                         "Only silu and swiglu_oai activations are supported.")
 
     if expert_map is not None:
         intermediate_cache3.zero_()

@@ -94,11 +94,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 not current_platform.has_device_capability(100):
             if not current_platform.is_device_capability(90):
                 # marlin kernel has better performance on ampere
-                self.use_marlin = True
+                return True
             if not has_triton_kernels():
-                self.use_marlin = True
+                return True
             if not is_torch_equal_or_newer("2.8.0"):
-                self.use_marlin = True
+                return True
         return False
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -475,8 +475,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             custom_routing_function, e_score_correction_bias,
             apply_router_weight_on_input, scoring_func, activation,
             expert_load_view, logical_to_physical_map,
-            logical_replica_count), ("MXFP4 are not supported\
-                                      with this configuration."                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      )
+            logical_replica_count), (
+                "MXFP4 are not supported with this configuration.")
 
         if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
                 or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
