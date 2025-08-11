@@ -28,3 +28,39 @@ wget <https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/
 Note:
 If you have an error that pandas or dataset packages are missed, we need to run:
 pip install vllm[bench]
+
+# Install development environment (in pod, but pre-commit has been also installed in my mac)
+
+1- Install UV:
+>> curl -LsSf https://astral.sh/uv/install.sh | sh
+
+2- New venv
+>> uv venv --python 3.12 --seed
+>> source .venv/bin/activate
+
+3- In CUDA environments:
+>> uv pip install -r requirements/common.txt -r requirements/dev.txt --torch-backend=auto
+
+Linting, formatting and static type checking
+>> pre-commit install
+
+You can manually run pre-commit with
+>> pre-commit run --all-files --show-diff-on-failure
+
+To manually run something from CI that does not run
+locally by default, you can run:
+>> pre-commit run mypy-3.9 --hook-stage manual --all-files
+
+Unit tests
+>> pytest tests/
+
+Run tests for a single test file with detailed output
+>> pytest -s -v tests/test_logger.py
+
+4- (In just MAC or local)
+>> uv pip install pre-commit
+>> pre-commit
+
+5- To run just pre-commit with a hook do:
+>> pre-commit run <hook_id> 
+Check list in .pre-commit-config.yaml
