@@ -12,7 +12,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (fp8_m_grouped_gemm_nt_masked,
-                                  is_blackwell_deep_gemm_used)
+                                  is_blackwell_deep_gemm_e8m0_used)
 
 logger = init_logger(__name__)
 
@@ -176,7 +176,7 @@ def silu_mul_fp8_quant_deep_gemm(
         eps,
         fp8_min,
         fp8_max,
-        is_blackwell_deep_gemm_used(),
+        is_blackwell_deep_gemm_e8m0_used(),
         BLOCK=group_size,
         NUM_STAGES=8,
         num_warps=1,
