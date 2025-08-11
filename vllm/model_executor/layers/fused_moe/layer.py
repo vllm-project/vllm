@@ -22,7 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 # yapf: disable
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig, FusedMoEParallelConfig, FusedMoEQuantConfig)
+    FusedMoEConfig, FusedMoEParallelConfig, FusedMoEQuantConfig, biased_moe_quant_config)
 # yapf: enable
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat, FusedMoEModularKernel,
@@ -528,13 +528,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
-                w1_bias=layer.w13_bias if self.moe.has_bias else None,
-                w2_bias=layer.w2_bias if self.moe.has_bias else None,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
                 activation=activation,
-                quant_config=None,
+                quant_config=self.moe_quant_config,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
