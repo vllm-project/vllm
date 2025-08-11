@@ -19,7 +19,11 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 from vllm.platforms.interface import _Backend
-from vllm.utils import (STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL,
+from vllm.utils import (STR_BACKEND_ENV_VAR, STR_DIFFERENTIAL_FLASH_ATTN_VAL,
+                        STR_DUAL_CHUNK_FLASH_ATTN_VAL, STR_FLASH_ATTN_VAL,
+                        STR_FLASHINFER_ATTN_VAL, STR_FLASHMLA_VAL,
+                        STR_PLACEHOLDER_ATTN_VAL, STR_ROCM_AITER_MLA_VAL,
+                        STR_ROCM_FLASH_ATTN_VAL, STR_TRITON_MLA_VAL,
                         STR_XFORMERS_ATTN_VAL, make_tensor_with_pad)
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
@@ -515,8 +519,6 @@ def make_backend(backend_name: str) -> AttentionBackend:
 
     "XFORMERS" -> construct xformers backend
 
-    TODO: other backends
-
     Note: at time of writing the Attention wrapper automatically selects
     its own backend for Attention.forward(); so the backend instance which
     you generate with this function is not meant to be used for *running*
@@ -535,6 +537,34 @@ def make_backend(backend_name: str) -> AttentionBackend:
     elif backend_name == STR_FLASH_ATTN_VAL:
         from vllm.attention.backends.flash_attn import FlashAttentionBackend
         return FlashAttentionBackend()
+    elif backend_name == STR_DUAL_CHUNK_FLASH_ATTN_VAL:
+        from vllm.attention.backends.dual_chunk_flash_attn import (
+            DualChunkFlashAttentionBackend)
+        return DualChunkFlashAttentionBackend()
+    elif backend_name == STR_DIFFERENTIAL_FLASH_ATTN_VAL:
+        from vllm.attention.backends.differential_flash_attn import (
+            DifferentialFlashAttentionBackend)
+        return DifferentialFlashAttentionBackend()
+    elif backend_name == STR_FLASHINFER_ATTN_VAL:
+        from vllm.attention.backends.flashinfer import FlashInferBackend
+        return FlashInferBackend()
+    elif backend_name == STR_ROCM_FLASH_ATTN_VAL:
+        from vllm.attention.backends.rocm_flash_attn import (
+            ROCmFlashAttentionBackend)
+        return ROCmFlashAttentionBackend()
+    elif backend_name == STR_PLACEHOLDER_ATTN_VAL:
+        from vllm.attention.backends.placeholder_attn import (
+            PlaceholderAttentionBackend)
+        return PlaceholderAttentionBackend()
+    elif backend_name == STR_FLASHMLA_VAL:
+        from vllm.attention.backends.flashmla import FlashMLABackend
+        return FlashMLABackend()
+    elif backend_name == STR_ROCM_AITER_MLA_VAL:
+        from vllm.attention.backends.rocm_aiter_mla import AiterMLABackend
+        return AiterMLABackend()
+    elif backend_name == STR_TRITON_MLA_VAL:
+        from vllm.attention.backends.triton_mla import TritonMLABackend
+        return TritonMLABackend()
 
     raise AssertionError(
         f"Unrecognized backend_name {backend_name} for unit test")
