@@ -1455,25 +1455,26 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.w2_lora_b_stacked = self.w2_lora_b_stacked
         self.base_layer.w3_lora_a_stacked = self.w3_lora_a_stacked
         self.base_layer.w3_lora_b_stacked = self.w3_lora_b_stacked
-
+        # It's will be use by 'LoRALayerWeights.create_dummy_lora_weights'
+        # to create a dummy lora weights.
         self.lora_a_stacked = []
         self.lora_b_stacked = []
         for lora_id in range(max_loras):
             for experts_id in range(self.base_layer.global_num_experts):
-                # gate_proj,up_proj,down_proj
+                # gate_proj,down_proj,up_proj
                 self.lora_a_stacked.append(
                     self.w1_lora_a_stacked[lora_id][experts_id])
                 self.lora_a_stacked.append(
-                    self.w3_lora_a_stacked[lora_id][experts_id])
-                self.lora_a_stacked.append(
                     self.w2_lora_a_stacked[lora_id][experts_id])
+                self.lora_a_stacked.append(
+                    self.w3_lora_a_stacked[lora_id][experts_id])
 
                 self.lora_b_stacked.append(
                     self.w1_lora_b_stacked[lora_id][experts_id])
                 self.lora_b_stacked.append(
-                    self.w3_lora_b_stacked[lora_id][experts_id])
-                self.lora_b_stacked.append(
                     self.w2_lora_b_stacked[lora_id][experts_id])
+                self.lora_b_stacked.append(
+                    self.w3_lora_b_stacked[lora_id][experts_id])
 
     def reset_lora(self, index: int):
         """Resets the lora weights at index back to 0."""
@@ -1495,11 +1496,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         """Overwrites lora tensors at index."""
         for eid in range(len(lora_a) // 3):
             w1_lora_a = lora_a[eid * 3]
-            w3_lora_a = lora_a[eid * 3 + 1]
-            w2_lora_a = lora_a[eid * 3 + 2]
+            w2_lora_a = lora_a[eid * 3 + 1]
+            w3_lora_a = lora_a[eid * 3 + 2]
             w1_lora_b = lora_b[eid * 3]
-            w3_lora_b = lora_b[eid * 3 + 1]
-            w2_lora_b = lora_b[eid * 3 + 2]
+            w2_lora_b = lora_b[eid * 3 + 1]
+            w3_lora_b = lora_b[eid * 3 + 2]
 
             if self.tp_size > 1:
 

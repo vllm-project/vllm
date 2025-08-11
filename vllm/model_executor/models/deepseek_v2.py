@@ -742,22 +742,12 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
             ]
         }
 
-        packed_modules_mapping_replacement = {
-            "experts": [
-                "experts.{}.gate_proj",
-                "experts.{}.up_proj",
-                "experts.{}.down_proj",
-            ]
-        }
+        expert_params_mapping = self.get_expert_mapping()
+        packed_modules_mapping["experts"] = [
+            weight_name.rstrip(".")
+            for _, weight_name, _, _ in expert_params_mapping
+        ]
 
-        n_routed_experts = getattr(self.config, "n_routed_experts", None)
-        assert n_routed_experts is not None
-        for key, values in packed_modules_mapping_replacement.items():
-            expert_layers = []
-            for expert_id in range(0, n_routed_experts):
-                for layer_name in values:
-                    expert_layers.append(layer_name.format(expert_id))
-            packed_modules_mapping[key] = expert_layers
         return packed_modules_mapping
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -875,6 +865,16 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts,
+            num_redundant_experts=0)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
