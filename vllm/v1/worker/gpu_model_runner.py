@@ -1803,7 +1803,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.model.get_eagle3_aux_hidden_state_layers())
             time_after_load = time.perf_counter()
 
-            max_M = self.model_config.max_seq_len_to_capture * 4
+            max_M = 4096
             print(f"Creating allreduce context for model loading")
             WORLD_SIZE = int(get_tp_group().world_size)
             TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
@@ -1819,7 +1819,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     TP_GROUP, max_M, attn_N, attn_K, self.model_config.dtype, self.model_config.dtype, WORLD_SIZE, persistent=True, use_ll_kernel=True, copy_to_local=False, NUM_COMM_SMS=16
             )
             self.mlp_gemm_ar = GemmARLayer(
-                    TP_GROUP, max_M, mlp_N, mlp_K, self.model_config.dtype, self.model_config.dtype, WORLD_SIZE, persistent=True, use_ll_kernel=True, copy_to_local=False, NUM_COMM_SMS=16
+                TP_GROUP, max_M, mlp_N, mlp_K, self.model_config.dtype, self.model_config.dtype, WORLD_SIZE, persistent=True, use_ll_kernel=False, copy_to_local=False, NUM_COMM_SMS=4
             )
             
             logger.info("Gemm AR ctx done.")
