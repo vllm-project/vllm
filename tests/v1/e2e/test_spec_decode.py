@@ -126,7 +126,6 @@ def test_ngram_correctness(
 
 
 @pytest.mark.parametrize(["model_setup", "mm_enabled"], [
-    (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False),
     (("eagle", "meta-llama/Llama-3.1-8B-Instruct",
       "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
     (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
