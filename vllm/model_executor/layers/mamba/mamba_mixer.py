@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, NamedTuple
+from typing import NamedTuple, Optional
 
 import torch
 from torch import nn
@@ -154,17 +154,17 @@ class MambaMixer(MambaBase, CustomOp):
 
         self.prefix = prefix
 
-    def _ssm_transform(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Applies x_proj, splits into time_step, B, C, applies RMS norm, and dt_proj.
-        Returns (discrete_time_step, time_step, B, C)
-        """
+    def _ssm_transform(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.is_lora_enabled:
             ssm_params = self.x_proj(x.contiguous())[0]
         else:
             ssm_params = self.x_proj(x)[0]
-        time_step, B, C = torch.split(ssm_params, [self.time_step_rank, self.ssm_state_size, self.ssm_state_size],
-                                      dim=-1)
+        time_step, B, C = torch.split(
+            ssm_params,
+            [self.time_step_rank, self.ssm_state_size, self.ssm_state_size],
+            dim=-1)
         if self.use_rms_norm:
             time_step = self.dt_layernorm(time_step.contiguous())
             B = self.b_layernorm(B.contiguous())
@@ -187,15 +187,18 @@ class MambaMixer(MambaBase, CustomOp):
         -----
         1. Apply the gated-MLP linear projection to the raw input.
         2. Pass the projected sequence through the convolutional mixing layer.
-        3. Feed the result into the State-Space Model (SSM) block.
-        4. Perform the recurrence y ← SSM(A, B, C, Δ)(x) to produce contextual representations.
-        5. Project the contextualised sequence back to the output embedding dimension.
+        3. Feed the result into the State-Space Model (SSM) blocks.
+        4. Perform the recurrence y ← SSM(A, B, C, Δ)(x) 
+           to produce contextual representations.
+        5. Project the contextualised sequence back
+           to the output embedding dimension.
 
         Batch handling
         --------------
-        Prefill and decode tokens are processed by dedicated CUDA kernels for both the
-        convolutional (conv1d) and SSM stages. In the case of a mixed batch (containing
-        both prefill and decode tokens), both sets of kernels are executed independently
+        Prefill and decode tokens are processed by dedicated CUDA
+        kernels for both the convolutional (conv1d) and SSM stages.
+        In the case of a mixed batch (containing both prefill and
+        decode tokens), both sets of kernels are executed independently
         and their outputs are concatenated before the final output projection.
         """
 
@@ -269,18 +272,18 @@ class MambaMixer(MambaBase, CustomOp):
         if has_prefill:
             # 2.a Prefill: Convolution sequence transformation
             conv_input_p = hidden_states_BC_p
-            conv_out_p = causal_conv1d_fn(
-                conv_input_p,
-                conv_weights,
-                self.conv1d.bias,
-                activation=self.activation,
-                conv_states=conv_state,
-                has_initial_state=initial_states,
-                cache_indices=state_indices_tensor_p,
-                query_start_loc=query_start_loc_p
-            )
-            # 3. State Space Model sequence transformation. Lora kernel requires contiguous tensor.
-            discrete_time_step_p, B_p, C_p = self._ssm_transform(conv_out_p.transpose(-2, -1))
+            conv_out_p = causal_conv1d_fn(conv_input_p,
+                                          conv_weights,
+                                          self.conv1d.bias,
+                                          activation=self.activation,
+                                          conv_states=conv_state,
+                                          has_initial_state=initial_states,
+                                          cache_indices=state_indices_tensor_p,
+                                          query_start_loc=query_start_loc_p)
+            # 3. State Space Model sequence transformations.
+            #  Lora kernel requires contiguous tensor.
+            discrete_time_step_p, B_p, C_p = self._ssm_transform(
+                conv_out_p.transpose(-2, -1))
             time_proj_bias = self._time_proj_bias()
 
             # 4.a Prefill: perform the recurrence y ← SSM(A, B, C, Δ)(x)
@@ -297,8 +300,7 @@ class MambaMixer(MambaBase, CustomOp):
                 delta_softplus=True,
                 cache_indices=state_indices_tensor_p,
                 has_initial_state=initial_states,
-                query_start_loc=query_start_loc_p
-            )
+                query_start_loc=query_start_loc_p)
             ssm_outputs.append(scan_out_p)
 
         if has_decode:
@@ -310,29 +312,29 @@ class MambaMixer(MambaBase, CustomOp):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=state_indices_tensor_d
-            ).transpose(0, 1)
+                conv_state_indices=state_indices_tensor_d).transpose(0, 1)
 
-            # 3. State Space Model sequence transformation. Lora kernel requires contiguous tensor.
-            discrete_time_step_d, B_d, C_d = self._ssm_transform(conv_out_d.transpose(-2, -1))
+            # 3. State Space Model sequence transformation.
+            #  Lora kernel requires contiguous tensor.
+            discrete_time_step_d, B_d, C_d = self._ssm_transform(
+                conv_out_d.transpose(-2, -1))
             time_proj_bias = self._time_proj_bias()
 
             # 4.b Decode: perform the recurrence y ← SSM(A, B, C, Δ)(x)
-            scan_outputs_d = torch.empty_like(hidden_states_BC_d.transpose(0, 1))
-            selective_state_update(
-                ssm_state,
-                conv_out_d.transpose(0, 1),
-                discrete_time_step_d.transpose(0, 1),
-                self.A,
-                B_d,
-                C_d,
-                self.D,
-                gate_d.transpose(0, 1),
-                time_proj_bias,
-                dt_softplus=True,
-                state_batch_indices=state_indices_tensor_d,
-                out=scan_outputs_d
-            )
+            scan_outputs_d = torch.empty_like(
+                hidden_states_BC_d.transpose(0, 1))
+            selective_state_update(ssm_state,
+                                   conv_out_d.transpose(0, 1),
+                                   discrete_time_step_d.transpose(0, 1),
+                                   self.A,
+                                   B_d,
+                                   C_d,
+                                   self.D,
+                                   gate_d.transpose(0, 1),
+                                   time_proj_bias,
+                                   dt_softplus=True,
+                                   state_batch_indices=state_indices_tensor_d,
+                                   out=scan_outputs_d)
             scan_outputs_d = scan_outputs_d.transpose(0, 1)
 
             if envs.VLLM_USE_V1:
@@ -340,11 +342,13 @@ class MambaMixer(MambaBase, CustomOp):
             else:
                 ssm_outputs.append(scan_outputs_d)
 
-        scan_outputs_combined = ssm_outputs[0] if len(ssm_outputs) == 1 else torch.cat(ssm_outputs, dim=-1)
+        scan_outputs_combined = ssm_outputs[0] if len(
+            ssm_outputs) == 1 else torch.cat(ssm_outputs, dim=-1)
 
         # 5. Final output projection
         if self.is_lora_enabled:  # Lora kernel requires contiguous tensor.
-            scan_outputs_combined = scan_outputs_combined.transpose(-2, -1).contiguous()
+            scan_outputs_combined = scan_outputs_combined.transpose(
+                -2, -1).contiguous()
             out = self.out_proj(scan_outputs_combined)[0]
         else:
             out = self.out_proj(scan_outputs_combined.transpose(-2, -1))[0]
@@ -364,7 +368,6 @@ class MambaMixer(MambaBase, CustomOp):
         return "mamba1"
 
     def _time_proj_bias(self) -> Optional[torch.Tensor]:
-        """Return the time projection bias as float tensor, or None if not present."""
         if hasattr(self.dt_proj, "bias") and self.dt_proj.bias is not None:
             return self.dt_proj.bias.float()
         return None
@@ -382,45 +385,42 @@ class PrefillDecodeSplit(NamedTuple):
 
 
 def split_batch_to_prefill_and_decode(
-        hidden_states_BC: torch.Tensor,
-        gate: torch.Tensor,
-        state_indices_tensor: torch.Tensor,
-        query_start_loc: torch.Tensor,
-        has_initial_states_p: Optional[torch.Tensor],
-        num_prefill_tokens: int,
-        num_decode_tokens: int,
-        num_prefills: int,
-        num_decodes: int,
+    hidden_states_BC: torch.Tensor,
+    gate: torch.Tensor,
+    state_indices_tensor: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    has_initial_states_p: Optional[torch.Tensor],
+    num_prefill_tokens: int,
+    num_decode_tokens: int,
+    num_prefills: int,
+    num_decodes: int,
 ) -> PrefillDecodeSplit:
     if envs.VLLM_USE_V1:
         # In v1, decode tokens come first, then prefill tokens.
-        hidden_states_BC_d, hidden_states_BC_p = torch.split(hidden_states_BC,
-                                                             [num_decode_tokens, num_prefill_tokens],
-                                                             dim=-1)
+        hidden_states_BC_d, hidden_states_BC_p = torch.split(
+            hidden_states_BC, [num_decode_tokens, num_prefill_tokens], dim=-1)
         gate_d, gate_p = torch.split(gate,
                                      [num_decode_tokens, num_prefill_tokens],
                                      dim=-1)
-        state_indices_tensor_d, state_indices_tensor_p = torch.split(state_indices_tensor,
-                                                                     [num_decodes, num_prefills],
-                                                                     dim=0)
-        query_start_loc_p = (query_start_loc[-num_prefills - 1:] - num_decodes if num_prefills > 0 else None)
-        has_initial_states_p_split = has_initial_states_p[-num_prefills:] if (
-                has_initial_states_p is not None and num_prefills > 0) else None
-        initial_states = has_initial_states_p_split[:] if has_initial_states_p_split is not None else None
+        state_indices_tensor_d, state_indices_tensor_p = torch.split(
+            state_indices_tensor, [num_decodes, num_prefills], dim=0)
+        query_start_loc_p = (query_start_loc[-num_prefills - 1:] -
+                             num_decodes if num_prefills > 0 else None)
+        initial_states = has_initial_states_p[-num_prefills:] if (
+            has_initial_states_p is not None and num_prefills > 0) else None
     else:
         # In v0, prefill tokens come first, then decode tokens.
-        hidden_states_BC_p, hidden_states_BC_d = torch.split(hidden_states_BC,
-                                                             [num_prefill_tokens, num_decode_tokens],
-                                                             dim=-1)
+        hidden_states_BC_p, hidden_states_BC_d = torch.split(
+            hidden_states_BC, [num_prefill_tokens, num_decode_tokens], dim=-1)
         gate_p, gate_d = torch.split(gate,
                                      [num_prefill_tokens, num_decode_tokens],
                                      dim=-1)
-        state_indices_tensor_p, state_indices_tensor_d = torch.split(state_indices_tensor,
-                                                                     [num_prefills, num_decodes],
-                                                                     dim=0)
-        query_start_loc_p = (query_start_loc[:num_prefills + 1] if num_prefills > 0 else None)
+        state_indices_tensor_p, state_indices_tensor_d = torch.split(
+            state_indices_tensor, [num_prefills, num_decodes], dim=0)
+        query_start_loc_p = (query_start_loc[:num_prefills +
+                                             1] if num_prefills > 0 else None)
         initial_states = has_initial_states_p[:num_prefills] if (
-                has_initial_states_p is not None and num_prefills > 0) else None
+            has_initial_states_p is not None and num_prefills > 0) else None
 
     return PrefillDecodeSplit(
         hidden_states_BC_p=hidden_states_BC_p,

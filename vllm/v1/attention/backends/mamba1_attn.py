@@ -2,20 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
-from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata,
-    split_decodes_and_prefills)
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata,
+                                              split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
 class Mamba1AttentionBackend(AttentionBackend):
@@ -38,15 +34,15 @@ class Mamba1AttentionMetadata:
 
 
 class Mamba1AttentionMetadataBuilder(
-    AttentionMetadataBuilder[Mamba1AttentionMetadata]):
+        AttentionMetadataBuilder[Mamba1AttentionMetadata]):
     reorder_batch_threshold: ClassVar[int] = 1
 
     def __init__(
-            self,
-            kv_cache_spec: AttentionSpec,
-            vllm_config: VllmConfig,
-            device: torch.device,
-            layer_names: list[str],
+        self,
+        kv_cache_spec: AttentionSpec,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        layer_names: list[str],
     ):
         assert isinstance(kv_cache_spec, MambaSpec)
         self.kv_cache_spec = kv_cache_spec
@@ -55,10 +51,10 @@ class Mamba1AttentionMetadataBuilder(
         self.layer_names = layer_names
 
     def build(
-            self,
-            common_prefix_len: int,
-            common_attn_metadata: CommonAttentionMetadata,
-            fast_build: bool = False,
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
     ) -> Mamba1AttentionMetadata:
         query_start_loc = common_attn_metadata.query_start_loc
 
@@ -74,7 +70,6 @@ class Mamba1AttentionMetadataBuilder(
 
         if num_prefills > 0:
             has_initial_states = context_lens_tensor > 0
-
 
         return Mamba1AttentionMetadata(
             query_start_loc=query_start_loc,
