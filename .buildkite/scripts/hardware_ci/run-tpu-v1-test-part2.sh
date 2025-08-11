@@ -139,6 +139,8 @@ run_and_track_test 5 "test_spmd_model_weight_loading.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_spmd_model_weight_loading.py"
 run_and_track_test 6 "test_kv_cache_update_kernel.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_kv_cache_update_kernel.py"
+run_and_track_test 7 "test_tpu_int8.py" \
+    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_tpu_int8.py"
 
 # After all tests have been attempted, exit with the overall status.
 if [ "$overall_script_exit_code" -ne 0 ]; then
