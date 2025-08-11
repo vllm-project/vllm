@@ -44,19 +44,6 @@ class TpuPlatform(Platform):
         "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
     ]
 
-    @staticmethod
-    def _register_tpu_engines():
-        try:
-            from tpu_commons.core.core_tpu import DisaggEngineCoreProc
-            register_engine_core_proc("disaggregated_tpu",
-                                      DisaggEngineCoreProc)
-            logger.info("Successfully registered 'DisaggEngineCoreProc' as "
-                        "'disaggregated_tpu' engine from tpu_commons.")
-        except ImportError:
-            logger.warning(
-                "tpu_commons is not installed. TPU-specific engines will not "
-                "be available. To enable, run: 'pip install -e tpu_commons'")
-
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
@@ -210,8 +197,46 @@ class TpuPlatform(Platform):
 
 
 try:
-    from tpu_commons.platforms import TpuPlatform as TpuCommonsPlatform
-    TpuPlatform = TpuCommonsPlatform  # type: ignore
-except ImportError:
-    logger.info("tpu_commons not found, using vLLM's TpuPlatform")
+    import os
+    import warnings
+
+    def get_tpu_platform_cls(backend_type="jax"):
+        """Get the appropriate TPU platform implementation from tpu_commons."""
+        if backend_type == "jax":
+            from tpu_commons.platforms.tpu_jax import (
+                TpuPlatform as TpuCommonsPlatform)
+            return TpuCommonsPlatform
+        elif backend_type == "torchax":
+            from tpu_commons.platforms.tpu_torchax import (
+                TpuPlatform as TpuCommonsPlatform)
+            return TpuCommonsPlatform
+        else:
+            raise ValueError(f"Unknown TPU backend type: {backend_type}")
+
+    TPU_BACKEND_TYPE = os.environ.get("TPU_BACKEND_TYPE", "jax").lower()
+    try:
+        TpuPlatform = get_tpu_platform_cls(TPU_BACKEND_TYPE)
+    except (ImportError, ValueError):
+        warnings.warn(
+            "tpu_commons is installed, but failed to load backend "
+            "'{TPU_BACKEND_TYPE}': {e}. Falling back to default "
+            "vLLM TpuPlatform.",
+            stacklevel=2)
+
+    try:
+        from tpu_commons.core.disagg_utils import is_disagg_enabled
+        if is_disagg_enabled():
+            from tpu_commons.core.core_tpu import DisaggEngineCoreProc
+            register_engine_core_proc("disaggregated_tpu",
+                                      DisaggEngineCoreProc)
+            logger.info("Successfully registered 'DisaggEngineCoreProc' as "
+                        "'disaggregated_tpu' engine from tpu_commons.")
+    except ImportError:
+        logger.warning(
+            "tpu_commons is installed, but a component required for "
+            "disaggregated serving could not be imported. Disaggregated "
+            "serving will not be available.")
+except (ImportError, AttributeError):
+    logger.info("tpu_commons not found, using vLLM's default TpuPlatform. "
+                "To enable advanced TPU features, install tpu_commons.")
     pass
