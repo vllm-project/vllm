@@ -118,6 +118,10 @@ class EngineCoreOutput(
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
 
+    # The number of draft tokens from spec decoding in the step.
+    # Unset if spec decoding is off, or there's no drafting in this step.
+    num_draft_tokens: Optional[int] = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

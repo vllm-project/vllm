@@ -878,6 +878,8 @@ class Scheduler(SchedulerInterface):
                         events=request.take_events(),
                         kv_transfer_params=kv_transfer_params,
                         num_cached_tokens=request.num_cached_tokens,
+                        num_draft_tokens=len(scheduled_spec_token_ids)
+                        if scheduled_spec_token_ids is not None else 0,
                     ))
 
             else:

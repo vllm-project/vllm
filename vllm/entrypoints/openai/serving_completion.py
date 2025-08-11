@@ -337,6 +337,8 @@ class OpenAIServingCompletion(OpenAIServing):
             include_usage, include_continuous_usage = False, False
 
         try:
+            total_steps = 0
+            total_draft_tokens = 0
             async for prompt_idx, res in result_generator:
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
@@ -361,6 +363,9 @@ class OpenAIServingCompletion(OpenAIServing):
                 delta_token_ids: GenericSequence[int]
                 out_logprobs: Optional[GenericSequence[Optional[dict[
                     int, Logprob]]]]
+
+                total_steps += len(res.outputs)
+                total_draft_tokens += res.num_draft_tokens if res.num_draft_tokens is not None else 0
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
@@ -449,7 +454,9 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_tokens=total_prompt_tokens,
                 completion_tokens=total_completion_tokens,
                 total_tokens=total_prompt_tokens + total_completion_tokens,
-            )
+                total_steps=total_steps,
+                total_draft_tokens=total_draft_tokens
+                if total_draft_tokens > 0 else None)
 
             if self.enable_prompt_tokens_details and num_cached_tokens:
                 final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
