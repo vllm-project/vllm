@@ -469,6 +469,33 @@ def is_attention_free(
 
 
 @runtime_checkable
+class HasMamba2(Protocol):
+    """The interface required for all models like mamba2, bamba, zamba2,
+    etc., that have mamba2 blocks"""
+
+    has_mamba2: ClassVar[Literal[True]] = True
+    """
+        A flag that indicates if the model has mamba2 blocks.
+    """
+
+
+@overload
+def has_mamba2(model: object) -> TypeIs[HasMamba2]:
+    ...
+
+
+@overload
+def has_mamba2(model: type[object]) -> TypeIs[type[HasMamba2]]:
+    ...
+
+
+def has_mamba2(
+    model: Union[type[object], object]
+) -> Union[TypeIs[type[HasMamba2]], TypeIs[HasMamba2]]:
+    return getattr(model, "has_mamba2", False)
+
+
+@runtime_checkable
 class IsHybrid(Protocol):
     """The interface required for all models like Jamba that have both
     attention and mamba blocks, indicates that 

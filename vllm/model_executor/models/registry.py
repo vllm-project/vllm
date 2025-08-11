@@ -25,8 +25,8 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.dynamic_module import (
     try_get_class_from_dynamic_module)
 
-from .interfaces import (has_inner_state, has_noops, is_attention_free,
-                         is_hybrid, supports_cross_encoding,
+from .interfaces import (has_inner_state, has_mamba2, has_noops,
+                         is_attention_free, is_hybrid, supports_cross_encoding,
                          supports_multimodal, supports_multimodal_raw_input,
                          supports_pp, supports_transcription, supports_v0_only)
 from .interfaces_base import is_pooling_model, is_text_generation_model
@@ -312,6 +312,7 @@ class _ModelInfo:
     has_inner_state: bool
     is_attention_free: bool
     is_hybrid: bool
+    has_mamba2: bool
     has_noops: bool
     supports_transcription: bool
     supports_transcription_only: bool
@@ -329,6 +330,7 @@ class _ModelInfo:
             supports_pp=supports_pp(model),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
+            has_mamba2=has_mamba2(model),
             is_hybrid=is_hybrid(model),
             supports_transcription=supports_transcription(model),
             supports_transcription_only=(supports_transcription(model) and
@@ -759,6 +761,14 @@ class _ModelRegistry:
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.is_hybrid
+
+    def model_has_mamba2(
+        self,
+        architectures: Union[str, list[str]],
+        model_config: ModelConfig,
+    ) -> bool:
+        model_cls, _ = self.inspect_model_cls(architectures, model_config)
+        return model_cls.has_mamba2
 
     def is_noops_model(
         self,

@@ -1680,6 +1680,10 @@ class ModelConfig:
         return self._model_info.is_hybrid
 
     @property
+    def has_mamba2(self) -> bool:
+        return self._model_info.has_mamba2
+
+    @property
     def has_noops(self) -> bool:
         return self._model_info.has_noops
 
@@ -4033,13 +4037,17 @@ class VllmConfig:
             return
 
         from vllm.model_executor.models.config import (
-            MODELS_CONFIG_MAP, HybridAttentionMambaModelConfig)
+            MODELS_CONFIG_MAP, HybridAttentionMambaModelConfig,
+            Mamba2ModelConfig)
         cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
 
         if self.model_config.is_hybrid:
             HybridAttentionMambaModelConfig.verify_and_update_config(self)
+
+        if self.model_config.has_mamba2:
+            Mamba2ModelConfig.verify_and_update_config(self)
 
         if self.model_config.convert_type == "classify":
             # Maybe convert ForCausalLM into ForSequenceClassification model.

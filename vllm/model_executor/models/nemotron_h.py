@@ -45,9 +45,9 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid,
-                                                   SupportsLoRA, SupportsPP,
-                                                   SupportsQuant)
+from vllm.model_executor.models.interfaces import (HasInnerState, HasMamba2,
+                                                   IsHybrid, SupportsLoRA,
+                                                   SupportsPP, SupportsQuant)
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.models.utils import (
@@ -462,7 +462,7 @@ class NemotronHModel(nn.Module):
 
 
 class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
-                           IsHybrid, SupportsQuant):
+                           IsHybrid, SupportsQuant, HasMamba2):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

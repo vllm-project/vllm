@@ -36,7 +36,8 @@ from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP
+from .interfaces import (HasInnerState, HasMamba2, IsHybrid, SupportsLoRA,
+                         SupportsPP)
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -507,7 +508,7 @@ class FalconH1Model(nn.Module):
 
 
 class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
-                          IsHybrid):
+                          IsHybrid, HasMamba2):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],

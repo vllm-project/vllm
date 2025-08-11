@@ -275,6 +275,25 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
                     "%d for performance.", 1024)
 
 
+class Mamba2ModelConfig(VerifyAndUpdateConfig):
+
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Enable full cuda graphs for decode-only batches to ensure that
+        V1 performance matches that of V0.
+
+        Args:
+            vllm_config: vLLM Config
+        """
+        if not envs.VLLM_USE_V1:
+            return
+
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.full_cuda_graph is None:
+            compilation_config.full_cuda_graph = True
+
+
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 
     @classmethod
