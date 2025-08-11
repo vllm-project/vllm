@@ -1163,6 +1163,8 @@ class OpenAIServingResponses(OpenAIServing):
                         ))
 
         async def empty_async_generator():
+            # A hack to trick Python to think this is a generator but in fact
+            # it immediately returns.
             if False:
                 yield
 
