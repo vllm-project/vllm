@@ -77,9 +77,8 @@ class TestData:
                               reorder: bool) -> "TestData":
         hidden_states = torch.randn(
             (m, k), device="cuda", dtype=torch.bfloat16) / 10
-        w13 = torch.randn(
-            (e, 2 * n, k), device="cuda", dtype=torch.bfloat16) / 10
-        w2 = torch.randn((e, k, n), device="cuda", dtype=torch.bfloat16) / 10
+        w13 = torch.randn((e, 2 * n, k), device="cuda", dtype=torch.bfloat16)
+        w2 = torch.randn((e, k, n), device="cuda", dtype=torch.bfloat16)
 
         # Scale to fp8
         _, a1_scale = quant_fp8_per_tensor(hidden_states)
@@ -103,7 +102,7 @@ class TestData:
                                               layer.w2_weight)
         layer.custom_routing_function = Llama4MoE.custom_routing_function
         layer.intermediate_size_per_partition = n
-        layer.ep_rank = 1
+        layer.ep_rank = 0
         layer.local_num_experts = e
 
         return TestData(
