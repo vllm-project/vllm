@@ -2965,10 +2965,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
 
         if self.is_elastic:
-            if self.shared_kv_cache_layers:
-                raise NotImplementedError(
-                    "Cross layer KV sharing is not supported with kvcached yet."
-                )
             kv_caches = self._allocate_kv_cache_from_kvcached(kv_cache_config)
         else:
             # Initialize the memory buffer for KV cache
@@ -3182,16 +3178,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Returns a flat list whose order corresponds to
         `kv_cache_group.layer_names`.
         """
+        if self.shared_kv_cache_layers:
+            raise NotImplementedError(
+                "kvcached does not support cross layer KV sharing yet.")
 
         if len(kv_cache_config.kv_cache_groups) > 1:
             raise NotImplementedError(
-                "Hybrid models with more than one KV cache type are not "
-                "supported yet.")
+                "kvcached does not support hybrid models with more than one "
+                "KV cache type yet.")
 
         kv_cache_group = kv_cache_config.kv_cache_groups[0]
         kv_cache_spec = kv_cache_group.kv_cache_spec
         if not isinstance(kv_cache_spec, FullAttentionSpec):
-            raise ValueError("kvcached only supports FullAttentionSpec layers")
+            raise NotImplementedError(
+                "kvcached only supports FullAttentionSpec layers for now.")
 
         # Build a lookup: layer_name -> KVCacheTensor config for quick access.
         from vllm.v1.kv_cache_interface import KVCacheTensor
@@ -3219,8 +3219,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Attention backend for this group is the first one initialised in
         # `initialize_attn_backend()` which must have been called already.
-        attn_backend_cls = self.attn_backends[0]
-        kv_cache_shape = attn_backend_cls.get_kv_cache_shape(
+        attn_backend = self.attn_groups[0][0].backend
+        kv_cache_shape = attn_backend.get_kv_cache_shape(
             num_blocks,
             kv_cache_spec.block_size,
             kv_cache_spec.num_kv_heads,
