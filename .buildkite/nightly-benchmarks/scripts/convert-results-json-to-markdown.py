@@ -14,8 +14,6 @@ import pandas as pd
 import psutil
 from tabulate import tabulate
 
-# results_folder = Path("results/")
-
 # latency results and the keys that will be printed into markdown
 latency_results = []
 latency_column_mapping = {
@@ -50,6 +48,9 @@ serving_column_mapping = {
     "dataset_name": "Dataset Name",
     "input_len": "Input Len",
     "output_len": "Output Len",
+    "tp_size": "TP Size",
+    "pp_size": "PP Size",
+    "dtype": "dtype",
     "gpu_type": "GPU",
     "completed": "# of req.",
     "qps": "qps",
@@ -195,14 +196,12 @@ if __name__ == "__main__":
         "--result",
         type=str,
         default="results",
-        help="input filter string for json file names",
+        help="Folder name for benchmark output results.",
     )
     args = parser.parse_args()
-    result = args.result
-    if os.path.exists(result) is False:
-        print("results folder doesn't exit  : ", result)
-        exit(0)
-    results_folder = Path(result)
+    results_folder = Path(args.result)
+    if not results_folder.exists():
+        raise FileNotFoundError(f"results folder does not exist: {results_folder}")
     # collect results
     for test_file in results_folder.glob("*.json"):
         with open(test_file) as f:
@@ -217,6 +216,21 @@ if __name__ == "__main__":
             except OSError as e:
                 print(e)
                 continue
+            # Parse Server Command Arg
+            out: dict[str, Any] = {
+                "server_command": parse_client_command(command["server_command"])
+            }
+            parse_args = [
+                "--tensor-parallel-size",
+                "--pipeline-parallel-size",
+                "--dtype",
+            ]
+            col_mapping = ["tp_size", "pp_size", "dtype"]
+            for index, arg in enumerate(parse_args):
+                if arg in out["server_command"]["args"]:
+                    raw_result.update(
+                        {col_mapping[index]: out["server_command"]["args"][arg]}
+                    )
 
             # Parse Client Command Arg
             out: dict[str, Any] = {
@@ -329,9 +343,8 @@ if __name__ == "__main__":
             columns=latency_column_mapping
         )
     if not serving_results.empty:
-        serving_results = serving_results[list(serving_column_mapping.keys())].rename(
-            columns=serving_column_mapping
-        )
+        valid_columns = [col for col in serving_column_mapping.keys() if col in serving_results.columns]
+        serving_results = serving_results[valid_columns].rename(columns=serving_column_mapping)
     if not throughput_results.empty:
         throughput_results = throughput_results[
             list(throughput_results_column_mapping.keys())

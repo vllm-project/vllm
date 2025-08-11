@@ -194,9 +194,9 @@ run_latency_tests() {
 
     # check if there is enough GPU to run the test
     tp=$(echo "$latency_params" | jq -r '.tensor_parallel_size')
-    pp=$(echo "$latency_params" | jq -r '.pipeline_parallel_size')
-    world_size=$(($tp*$pp))
     if [ "$ON_CPU" == "1" ]; then
+      pp=$(echo "$latency_params" | jq -r '.pipeline_parallel_size')
+      world_size=$(($tp*$pp))
       if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
         echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
         continue
@@ -263,9 +263,9 @@ run_throughput_tests() {
 
     # check if there is enough GPU to run the test
     tp=$(echo "$throughput_params" | jq -r '.tensor_parallel_size')
-    pp=$(echo "$throughput_params" | jq -r '.pipeline_parallel_size')
-    world_size=$(($tp*$pp))
     if [ "$ON_CPU" == "1" ]; then
+      pp=$(echo "$throughput_params" | jq -r '.pipeline_parallel_size')
+      world_size=$(($tp*$pp))
       if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
         echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
         continue
@@ -335,13 +335,17 @@ run_serving_tests() {
     echo "Running over qps list $qps_list"
     max_concurrency_list=$(echo "$params" | jq -r '.max_concurrency_list')
     max_concurrency_list=$(echo "$max_concurrency_list" | jq -r '.[] | @sh')
-    echo "Final Running over max concurrency list $max_concurrency_list"
+    if [[ -z "$max_concurrency_list" || "$max_concurrency_list" == "null" ]]; then
+        num_prompts=$(echo "$client_params" | jq -r '.num_prompts')
+        max_concurrency_list="$num_prompts"
+    fi
+    echo "Running over max concurrency list $max_concurrency_list"
 
     # check if there is enough resources to run the test
     tp=$(echo "$server_params" | jq -r '.tensor_parallel_size')
-    pp=$(echo "$server_params" | jq -r '.pipeline_parallel_size')
-    world_size=$(($tp*$pp))
     if [ "$ON_CPU" == "1" ]; then
+      pp=$(echo "$server_params" | jq -r '.pipeline_parallel_size')
+      world_size=$(($tp*$pp))
       if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
         echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
         continue
