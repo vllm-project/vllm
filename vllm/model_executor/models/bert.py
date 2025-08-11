@@ -490,13 +490,8 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
 
     def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
         return DispatchPooler({
-            "encode":
-            Pooler.for_encode(pooler_config),
-            "embed":
-            Pooler.for_embed(
-                pooler_config,
-                default_pooling_type=PoolingType.CLS,
-            ),
+            "encode": Pooler.for_encode(pooler_config),
+            "embed": Pooler.for_embed(pooler_config),
         })
 
 
