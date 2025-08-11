@@ -985,8 +985,6 @@ class OpenAIServingResponses(OpenAIServing):
                                 output_index=current_output_index,
                                 item_id=current_item_id,
                                 content_index=current_content_index,
-                                # TODO: migrate this to
-                                # ResponseReasoningTextContent for now
                                 part=openai_responses_types.ResponseOutputText(
                                     type="output_text",
                                     text="",
