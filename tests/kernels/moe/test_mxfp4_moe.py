@@ -8,14 +8,21 @@ from typing import Optional
 
 import pytest
 import torch
-from flashinfer import (fp4_quantize, mxfp8_quantize, next_positive_power_of_2,
-                        reorder_rows_for_gated_act_gemm, shuffle_matrix_a,
-                        shuffle_matrix_sf_a, trtllm_fp4_block_scale_moe)
 from packaging import version
 
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
     "quark") is not None and version.parse(
         importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
+
+device_props = torch.cuda.get_device_properties(torch.cuda.current_device())
+TRTLLM_GEN_MXFP4_AVAILABLE = torch.cuda.is_available(
+) and device_props.major == 10 and device_props.minor == 0
+
+if TRTLLM_GEN_MXFP4_AVAILABLE:
+    from flashinfer import (fp4_quantize, mxfp8_quantize,
+                            next_positive_power_of_2,
+                            reorder_rows_for_gated_act_gemm, shuffle_matrix_a,
+                            shuffle_matrix_sf_a, trtllm_fp4_block_scale_moe)
 
 
 @dataclass
@@ -359,6 +366,9 @@ def test_trtllm_gen_mxfp4_fused_moe(
     limit: Optional[float],
     act_type: str,
 ):
+    if not TRTLLM_GEN_MXFP4_AVAILABLE:
+        pytest.skip(
+            "This test requires nvidia gpu and compute capability sm100")
     seed = 42
     torch.manual_seed(seed)
     hidden_states = torch.randn(num_tokens,
