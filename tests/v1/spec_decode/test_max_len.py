@@ -40,8 +40,10 @@ def test_eagle_max_len(monkeypatch: pytest.MonkeyPatch,
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        if attn_backend == "TREE_ATTN":
-            pytest.skip("TREE_ATTN is skipped on current platform")
+        if attn_backend == "TREE_ATTN" and num_speculative_tokens > 1:
+            # TREE_ATTN fails the test with multi-token spec decode
+            # TODO: Investigate why
+            pytest.skip("TREE_ATTN fails the test")
 
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
