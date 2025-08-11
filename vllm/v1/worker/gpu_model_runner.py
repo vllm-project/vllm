@@ -2696,6 +2696,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                       head_size=attn_module.head_size,
                                       dtype=self.kv_cache_dtype,
                                       use_mla=use_mla))
+            else:
+                raise ValueError("Expected only encoder-only layers")
+
         if len(attn_specs) > 0:
             assert len(attn_specs) == len(attn_layers), \
                 "All or none of the layers are expected to be encoder-only"
