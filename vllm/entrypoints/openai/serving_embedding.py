@@ -182,7 +182,7 @@ class EmbeddingMixin(OpenAIServing):
         max_pos_embeddings = self._get_max_position_embeddings()
         # Process all chunks for MEAN aggregation
         for chunk_idx, chunk_tokens in enumerate(
-            chunk_list(token_ids, max_pos_embeddings)):
+                chunk_list(token_ids, max_pos_embeddings)):
             # Create a request ID for this chunk
             chunk_request_id = (f"{ctx.request_id}-prompt-{prompt_idx}-"
                                 f"chunk-{chunk_idx}")
