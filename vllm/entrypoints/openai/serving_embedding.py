@@ -65,6 +65,10 @@ class EmbeddingMixin(OpenAIServing):
             pooler_config is not None
             and getattr(pooler_config, 'enable_chunked_processing', False))
 
+        # Cache max_embed_len to avoid repeated attribute lookups
+        self.max_embed_len = (pooler_config.max_embed_len if pooler_config
+                              and pooler_config.max_embed_len else None)
+
     @override
     async def _preprocess(
         self,
@@ -230,12 +234,8 @@ class EmbeddingMixin(OpenAIServing):
             # Check if chunked processing is enabled for pooling models
             enable_chunked = self._should_use_chunked_processing(request)
 
-            # Get pooler config for max_embed_len
-            pooler_config = getattr(self.model_config, 'pooler_config', None)
-
-            # Get max_embed_len from pooler config if set
-            max_embed_len = (pooler_config.max_embed_len if pooler_config
-                             and pooler_config.max_embed_len else None)
+            # Use cached max_embed_len value
+            max_embed_len = self.max_embed_len
 
             # Use max_position_embeddings for chunked processing decisions
             max_pos_embeddings = self._get_max_position_embeddings()
