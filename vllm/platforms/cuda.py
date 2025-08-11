@@ -498,12 +498,16 @@ class CudaPlatformBase(Platform):
         fp8_attention = kv_cache_dtype.startswith("fp8")
         will_use_fa = (not envs.is_set("VLLM_ATTENTION_BACKEND")
                        ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
+        will_use_flashmla = (envs.is_set("VLLM_ATTENTION_BACKEND")
+                             and envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
         supported = False
         if cls.is_device_capability(100):
             supported = True
         elif fp8_attention and will_use_fa:
             from vllm.attention.utils.fa_utils import flash_attn_supports_fp8
             supported = flash_attn_supports_fp8()
+        elif fp8_attention and will_use_flashmla:
+            supported = True
         return supported
 
 
