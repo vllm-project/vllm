@@ -690,6 +690,11 @@ class TransformersModel(TransformersBase):
 
 
 @support_torch_compile
+class TransformersMoEModel(TransformersMoEBase, TransformersModel):
+    pass
+
+
+@support_torch_compile
 class TransformersForCausalLM(TransformersBase):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -727,6 +732,11 @@ class TransformersForCausalLM(TransformersBase):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
+
+
+@support_torch_compile
+class TransformersMoEForCausalLM(TransformersMoEBase, TransformersForCausalLM):
+    pass
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -851,3 +861,12 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
             inputs_embeds = inputs_embeds.masked_scatter(
                 mask, multimodal_embeddings)
         return inputs_embeds
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MultiModalProcessor,
+    info=MultiModalProcessingInfo,
+    dummy_inputs=MultiModalDummyInputsBuilder)
+class TransformersMoEForMultimodalLM(TransformersMoEForCausalLM,
+                                     TransformersForMultimodalLM):
+    pass
