@@ -478,9 +478,6 @@ class VllmBackend:
             #    it mainly summarizes how the model is used in forward pass)
             forward_code_files = list(
                 sorted(self.compilation_config.traced_files))
-            # print(f"[compile] {self.compilation_config.traced_files}")
-            if "<frozen os>" in forward_code_files:
-                forward_code_files.remove("<frozen os>")
             self.compilation_config.traced_files.clear()
             logger.debug(
                 "Traced files (to be considered for compilation cache):\n%s",

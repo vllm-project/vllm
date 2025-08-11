@@ -1327,7 +1327,6 @@ class RowParallelLinear(LinearBase):
 
             elif self.ar_option == 'triton_dist':
                 # triton dist AR
-                # print(1111)
                 output = self.gemm_ar_op.forward(input_parallel, self._parameters['weight'], None)
             else:
                 raise ValueError(f"Unknown all-reduce method: {self.ar_option}")

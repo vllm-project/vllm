@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import os
 import copy
 import gc
 import time
@@ -1803,32 +1803,34 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.model.get_eagle3_aux_hidden_state_layers())
             time_after_load = time.perf_counter()
 
-            max_M = 4096
-            print(f"Creating allreduce context for model loading")
-            WORLD_SIZE = int(get_tp_group().world_size)
-            TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
-            init_nvshmem_by_torch_process_group(TP_GROUP)
-            if not is_nvshmem_multimem_supported():
-                warnings.warn("Skip because nvshmem multimem is not supported")
-                sys.exit(0)
-            attn_K = self.model.model.layers[0].self_attn.o_proj.input_size_per_partition
-            attn_N = self.model.model.layers[0].self_attn.o_proj.output_size
-            mlp_K = self.model.model.layers[0].mlp.down_proj.input_size_per_partition
-            mlp_N = self.model.model.layers[0].mlp.down_proj.output_size
-            self.attn_gemm_ar = GemmARLayer(
-                    TP_GROUP, max_M, attn_N, attn_K, self.model_config.dtype, self.model_config.dtype, WORLD_SIZE, persistent=True, use_ll_kernel=True, copy_to_local=False, NUM_COMM_SMS=16
-            )
-            self.mlp_gemm_ar = GemmARLayer(
-                TP_GROUP, max_M, mlp_N, mlp_K, self.model_config.dtype, self.model_config.dtype, WORLD_SIZE, persistent=True, use_ll_kernel=False, copy_to_local=False, NUM_COMM_SMS=4
-            )
-            
-            logger.info("Gemm AR ctx done.")
-            
-            for module in self.model.modules():
-                if isinstance(module, RowParallelLinear) and module.input_size_per_partition == attn_K:
-                    module.gemm_ar_op = self.attn_gemm_ar
-                elif isinstance(module, RowParallelLinear) and module.input_size_per_partition == mlp_K:
-                    module.gemm_ar_op = self.mlp_gemm_ar
+            ar_option = os.getenv("AR_METHOD", "vllm")
+            if ar_option == "triton_dist":
+                max_M = 4096
+                print(f"Creating allreduce context for model loading")
+                WORLD_SIZE = int(get_tp_group().world_size)
+                TP_GROUP = torch.distributed.new_group(ranks=list(range(WORLD_SIZE)), backend="nccl")
+                init_nvshmem_by_torch_process_group(TP_GROUP)
+                if not is_nvshmem_multimem_supported():
+                    warnings.warn("Skip because nvshmem multimem is not supported")
+                    sys.exit(0)
+                attn_K = self.model.model.layers[0].self_attn.o_proj.input_size_per_partition
+                attn_N = self.model.model.layers[0].self_attn.o_proj.output_size
+                mlp_K = self.model.model.layers[0].mlp.down_proj.input_size_per_partition
+                mlp_N = self.model.model.layers[0].mlp.down_proj.output_size
+                self.attn_gemm_ar = GemmARLayer(
+                        TP_GROUP, max_M, attn_N, attn_K, self.model_config.dtype, self.model_config.dtype, WORLD_SIZE, persistent=True, use_ll_kernel=True, copy_to_local=False, NUM_COMM_SMS=16
+                )
+                self.mlp_gemm_ar = GemmARLayer(
+                    TP_GROUP, max_M, mlp_N, mlp_K, self.model_config.dtype, self.model_config.dtype, WORLD_SIZE, persistent=True, use_ll_kernel=False, copy_to_local=False, NUM_COMM_SMS=4
+                )
+                
+                logger.info("Gemm AR ctx done.")
+                
+                for module in self.model.modules():
+                    if isinstance(module, RowParallelLinear) and module.input_size_per_partition == attn_K:
+                        module.gemm_ar_op = self.attn_gemm_ar
+                    elif isinstance(module, RowParallelLinear) and module.input_size_per_partition == mlp_K:
+                        module.gemm_ar_op = self.mlp_gemm_ar
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Model loading took %.4f GiB and %.6f seconds",

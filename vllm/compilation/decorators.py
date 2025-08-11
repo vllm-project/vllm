@@ -217,7 +217,6 @@ def _support_torch_compile(
             # collect all relevant files traced by Dynamo,
             # so that the compilation cache can trigger re-compilation
             # properly when any of these files change.
-            # print(f"[compile] {self.vllm_config.compilation_config.traced_files}")
             # 1. the file containing the top-level forward function
             self.vllm_config.compilation_config.traced_files.add(
                 self.original_code_object.co_filename)
@@ -232,9 +231,6 @@ def _support_torch_compile(
                 code = func.get_code()
                 self.vllm_config.compilation_config.traced_files.add(
                     code.co_filename)
-                # if str(code.co_filename) == '<frozen os>':
-                #     print(func, code)
-                # print(f"[compile] {self.vllm_config.compilation_config.traced_files}")
                 return inline_call(parent, func, args, kwargs)
 
             with patch.object(InliningInstructionTranslator, 'inline_call',
