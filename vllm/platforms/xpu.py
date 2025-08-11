@@ -79,6 +79,10 @@ class XPUPlatform(Platform):
         return True
 
     @classmethod
+    def get_piecewise_backend_cls(cls) -> str:
+        return "vllm.compilation.cuda_piecewise_backend.CUDAPiecewiseBackend"  # noqa
+
+    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 

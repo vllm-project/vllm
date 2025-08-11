@@ -191,7 +191,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # opaque custom op. For other platforms, we directly call them
         # and let torch.compile handle them.
         self.use_direct_call = not current_platform.is_cuda_alike(
-        ) and not current_platform.is_cpu()
+        ) and not current_platform.is_cpu() and not current_platform.is_xpu()
 
         self.use_output = self.attn_backend.accept_output_buffer
         compilation_config = get_current_vllm_config().compilation_config
