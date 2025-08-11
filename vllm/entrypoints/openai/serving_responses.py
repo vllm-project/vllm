@@ -994,7 +994,6 @@ class OpenAIServingResponses(OpenAIServing):
                                     logprobs=[],
                                 ),
                             ))
-                    # TODO: migrate to OpenAI types once updated.
                     yield _send_event(
                         ResponseReasoningTextDeltaEvent(
                             type="response.reasoning_text.delta",
