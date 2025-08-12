@@ -164,7 +164,7 @@ class ServeContext(RequestProcessingMixin, ResponseGenerationMixin, BaseModel,
 
     # Shared across most requests
     tokenizer: Optional[AnyTokenizer] = None
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # `protected_namespaces` resolves Pydantic v2's warning
     # on conflict with protected namespace "model_"
@@ -556,7 +556,7 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt_ids: list[int],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]],
     ) -> TextTokensPrompt:
         async_tokenizer = self._get_async_tokenizer(tokenizer)
 
@@ -848,7 +848,7 @@ class OpenAIServing:
         documents: Optional[list[dict[str, str]]] = None,
         chat_template_kwargs: Optional[dict[str, Any]] = None,
         tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None,
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = False,
     ) -> tuple[list[ConversationMessage], Sequence[RequestPrompt],
                list[EngineTokensPrompt]]:
@@ -1004,7 +1004,7 @@ class OpenAIServing:
     def _load_prompt_embeds(
         self,
         prompt_embeds: Optional[Union[bytes, list[bytes]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
     ) -> list[EmbedsPrompt]:
 
         def _load_and_validate_embed(embed: bytes) -> EmbedsPrompt:
