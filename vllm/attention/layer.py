@@ -128,6 +128,10 @@ class Attention(nn.Module):
         self._q_scale = torch.tensor(1.0, dtype=torch.float32)
         self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
 
+        # Keeping float32 version of _q_scale tensor for assertions
+        # during graph capture. Otherwise asserts are triggeting HIP error
+        self._q_scale_float = 1.0
+
         # We also keep the float32 versions of k/v_scale for attention
         # backends that don't support tensors (Flashinfer)
         self._k_scale_float = 1.0
@@ -291,6 +295,7 @@ class Attention(nn.Module):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
         self._k_scale.copy_(torch.abs(key).max() / self.k_range)
         self._v_scale.copy_(torch.abs(value).max() / self.v_range)
+        self._q_scale_float = self._q_scale.item()
         self._k_scale_float = self._k_scale.item()
         self._v_scale_float = self._v_scale.item()
         # We only calculate the scales once

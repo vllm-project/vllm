@@ -356,7 +356,7 @@ class TritonAttentionImpl(AttentionImpl):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
             num_tokens, num_heads, head_size = query.shape
-            assert layer._q_scale == 1.0, \
+            assert layer._q_scale_float == 1.0, \
                 "A non 1.0 q_scale is not currently supported."
             if not current_platform.is_rocm():
                 # Skip Q quantization on ROCm, since dequantizing back to
