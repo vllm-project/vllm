@@ -93,7 +93,13 @@ class AsyncLLM(EngineClient):
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
         self.log_requests = log_requests
-        self.log_stats = log_stats
+
+        self.log_stats = log_stats or (stat_loggers is not None)
+        disable_default_loggers = not log_stats and (stat_loggers is not None)
+        if disable_default_loggers:
+            logger.info(
+                "AsyncLLM created with log_stats=False and non-empty custom "
+                "logger list; enabling logging without default stat loggers")
 
         if self.model_config.skip_tokenizer_init:
             self.tokenizer = None
@@ -132,6 +138,7 @@ class AsyncLLM(EngineClient):
                 vllm_config=vllm_config,
                 engine_idxs=self.engine_core.engine_ranks_managed,
                 custom_stat_loggers=stat_loggers,
+                enable_default_loggers=not disable_default_loggers,
             )
             self.logger_manager.log_engine_initialized()
 
