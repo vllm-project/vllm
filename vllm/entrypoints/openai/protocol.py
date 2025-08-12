@@ -528,8 +528,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=(
             "If specified, will override the default guided decoding backend "
-            "of the server for this specific request. If set, must be either "
-            "'outlines' / 'lm-format-enforcer'"),
+            "of the server for this specific request. If set, must be one of "
+            "'outlines', 'lm-format-enforcer', 'xgrammar', 'guidance'"),
     )
     guided_whitespace_pattern: Optional[str] = Field(
         default=None,
@@ -1014,7 +1014,7 @@ class CompletionRequest(OpenAIBaseModel):
         description=(
             "If specified, will override the default guided decoding backend "
             "of the server for this specific request. If set, must be one of "
-            "'outlines' / 'lm-format-enforcer'"),
+            "'outlines', 'lm-format-enforcer', 'xgrammar', 'guidance'"),
     )
     guided_whitespace_pattern: Optional[str] = Field(
         default=None,
