@@ -35,20 +35,19 @@ FLASH_MLA_UNSUPPORTED_REASON = is_flashmla_supported()[1] \
 @pytest.mark.parametrize("block_size", [64])
 @pytest.mark.parametrize("causal", [True])
 @pytest.mark.parametrize("varlen", [False, True])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("device", ["cuda:0"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @torch.inference_mode()
 def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal,
-                   varlen, dtype, device):
+                   varlen, dtype):
+    device = torch.device("cuda:0")
     torch.set_default_dtype(dtype)
     torch.set_default_device(device)
     torch.cuda.set_device(device)
     torch.manual_seed(0)
     random.seed(0)
 
-    print(
-        f"{b=}, {s_q=}, {mean_sk=}, {h_q=}, {h_kv=}, "
-        f"{d=}, {dv=}, {causal=}, {varlen=}, {dtype=}")
+    print(f"{b=}, {s_q=}, {mean_sk=}, {h_q=}, {h_kv=}, "
+          f"{d=}, {dv=}, {causal=}, {varlen=}, {dtype=}")
 
     cache_seqlens = torch.full((b, ), mean_sk, dtype=torch.int32)
     if varlen:
