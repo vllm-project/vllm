@@ -488,7 +488,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
             )
-            if self.has_bias:
+            if self.has_bias and not isinstance(self.fused_experts,
+                                                FusedMoEModularKernel):
                 kwargs.update({
                     "w1_bias": getattr(layer, "w13_bias", None),
                     "w2_bias": getattr(layer, "w2_bias", None),
