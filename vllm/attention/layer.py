@@ -138,6 +138,7 @@ class Attention(nn.Module):
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
+        self.has_sink = extra_impl_args.get("sinks") is not None
 
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
@@ -165,7 +166,8 @@ class Attention(nn.Module):
                                                  kv_cache_dtype,
                                                  block_size,
                                                  is_attention_free,
-                                                 use_mla=use_mla)
+                                                 use_mla=use_mla,
+                                                 has_sink=self.has_sink)
         else:
             self.attn_backend = attn_backend
 

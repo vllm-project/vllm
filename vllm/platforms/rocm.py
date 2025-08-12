@@ -188,8 +188,8 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1,
-                             use_mla) -> str:
+                             kv_cache_dtype, block_size, use_v1, use_mla,
+                             has_sink) -> str:
         if use_mla:
             from vllm.attention.backends.rocm_aiter_mla import (
                 is_aiter_mla_enabled)
