@@ -10,13 +10,14 @@ import pytest
 import torch
 from packaging import version
 
+from vllm.platforms import current_platform
+
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
     "quark") is not None and version.parse(
         importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
 
-device_props = torch.cuda.get_device_properties(torch.cuda.current_device())
-TRTLLM_GEN_MXFP4_AVAILABLE = torch.cuda.is_available(
-) and device_props.major == 10 and device_props.minor == 0
+TRTLLM_GEN_MXFP4_AVAILABLE = current_platform.is_cuda(
+) and current_platform.is_device_capability(100)
 
 if TRTLLM_GEN_MXFP4_AVAILABLE:
     from flashinfer import (fp4_quantize, mxfp8_quantize,
