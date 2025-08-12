@@ -388,7 +388,7 @@ class PrometheusStatLogger(StatLoggerBase):
         self.histogram_time_per_output_token = make_per_engine(
             histogram_time_per_output_token, engine_indexes, model_name)
 
-        self.histogram_time_per_prefill_token_request = \
+        histogram_time_per_prefill_token_request = \
             self._histogram_cls(
                 name="vllm:time_per_prefill_token_request_seconds",
                 documentation="Time spent per token during prefill  "
@@ -396,7 +396,10 @@ class PrometheusStatLogger(StatLoggerBase):
                 buckets=[
                     0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0
                 ],
-                labelnames=labelnames).labels(*labelvalues)
+                labelnames=labelnames)
+        self.histogram_time_per_prefill_token_request = make_per_engine(
+            histogram_time_per_prefill_token_request, engine_indexes,
+            model_name)
 
         request_latency_buckets = [
             0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
@@ -562,8 +565,8 @@ class PrometheusStatLogger(StatLoggerBase):
             if finished_request.num_prompt_tokens > 0:
                 time_per_prefill_token = (finished_request.prefill_time /
                                           finished_request.num_prompt_tokens)
-                self.histogram_time_per_prefill_token_request.observe(
-                    time_per_prefill_token)
+                self.histogram_time_per_prefill_token_request[
+                    engine_idx].observe(time_per_prefill_token)
             self.histogram_inference_time_request[engine_idx].observe(
                 finished_request.inference_time)
             self.histogram_decode_time_request[engine_idx].observe(
