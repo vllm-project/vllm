@@ -827,7 +827,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Prepare encoder attention metadata separately
         # (encoder layers are not in KV cache groups)
         if self.is_encoder_only_model:
-            common_attn_metadata, encoder_attn_metadata = \
+
+            per_layer_metadata = \
                 self._build_encoder_only_attn_metadata(
                 scheduler_output)
 
@@ -836,6 +837,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.vllm_config, Attention)
             for layer_name, attn_module in attention_layers.items():
                 if attn_module.attn_type == AttentionType.ENCODER_ONLY:
+                    common_attn_metadata, encoder_attn_metadata =\
+                        per_layer_metadata[layer_name]
                     attn_metadata[layer_name] = encoder_attn_metadata
 
         # Prepare the attention metadata for each KV cache group and make layers
@@ -2684,30 +2687,41 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Check if model is encoder-only
         block_size = self.vllm_config.cache_config.block_size
         use_mla = self.vllm_config.model_config.use_mla
-        attn_specs = list[AttentionSpec]()
-        for attn_module in attn_layers.values():
+        attn_specs: dict[AttentionSpec, list[str]] = defaultdict(list)
+        for layer_name, attn_module in attn_layers.items():
 
             if attn_module.attn_type == AttentionType.ENCODER_ONLY:
-                assert attn_module.sliding_window is None, "Sliding "
-                "window attention is not supported for encoder-only models"
+                if attn_module.sliding_window is None:
+                    attn_spec: AttentionSpec = FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        use_mla=use_mla)
+                else:
+                    attn_spec = SlidingWindowSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        sliding_window=attn_module.sliding_window,
+                        use_mla=use_mla)
+                attn_specs[attn_spec].append(layer_name)
 
-                attn_specs.append(
-                    FullAttentionSpec(block_size=block_size,
-                                      num_kv_heads=attn_module.num_kv_heads,
-                                      head_size=attn_module.head_size,
-                                      dtype=self.kv_cache_dtype,
-                                      use_mla=use_mla))
             else:
                 raise ValueError("Expected only encoder-only layers")
 
         if len(attn_specs) > 0:
-            assert len(attn_specs) == len(attn_layers), \
+            total_layers = 0
+            for attn_spec, layer_names in attn_specs.items():
+
+                attn_backends = get_attn_backends_for_layers(layer_names)
+                total_layers += len(layer_names)
+
+                self.attn_groups.append(
+                    create_attn_groups(attn_backends, attn_spec))
+            assert total_layers == len(attn_layers), \
                 "All or none of the layers are expected to be encoder-only"
-
-            attn_backends = get_attn_backends_for_layers(attn_layers.keys())
-
-            self.attn_groups.append(
-                create_attn_groups(attn_backends, attn_specs[0]))
             self.is_encoder_only_model = True
 
     def calculate_reorder_batch_threshold(self) -> None:
@@ -3080,7 +3094,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _build_encoder_only_attn_metadata(
             self, scheduler_output: "SchedulerOutput") -> \
-                tuple[CommonAttentionMetadata, Any]:
+                dict[str, tuple[CommonAttentionMetadata, Any]]:
         """Prepare encoder attention metadata for encoder-only models.
 
         Args:
@@ -3097,10 +3111,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         max_num_scheduled_tokens = max(tokens)
 
-        # Use the first attention metadata builder
-        # to create encoder attention metadata
-        builder = self.attn_groups[0][0].metadata_builder
-
         dummy_block_table = torch.zeros((num_reqs, 1),
                                         dtype=torch.int32,
                                         device=self.device)
@@ -3108,22 +3118,38 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                          dtype=torch.int32,
                                          device=self.device)
 
-        common_metadata = CommonAttentionMetadata(
-            query_start_loc=self.query_start_loc[:num_reqs + 1],
-            query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
-            seq_lens=self.seq_lens[:num_reqs],
-            seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
-            num_computed_tokens_cpu=self.input_batch.
-            num_computed_tokens_cpu_tensor[:num_reqs],
-            num_reqs=num_reqs,
-            num_actual_tokens=total_num_scheduled_tokens,
-            max_query_len=max_num_scheduled_tokens,
-            block_table_tensor=dummy_block_table,
-            slot_mapping=dummy_slot_mapping,
-            causal=False,
-        )
+        group_metadata = dict[str, tuple[CommonAttentionMetadata, Any]]()
 
-        return common_metadata, builder.build(
-            common_prefix_len=0,  # No cascade for encoder
-            common_attn_metadata=common_metadata,
-        )
+        for attn_group_list in self.attn_groups:
+
+            assert len(attn_group_list) == 1
+            attn_group = attn_group_list[0]
+
+            # Use the first attention metadata builder
+            # to create encoder attention metadata
+            builder = attn_group.metadata_builder
+
+            common_metadata = CommonAttentionMetadata(
+                query_start_loc=self.query_start_loc[:num_reqs + 1],
+                query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
+                seq_lens=self.seq_lens[:num_reqs],
+                seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
+                num_computed_tokens_cpu=self.input_batch.
+                num_computed_tokens_cpu_tensor[:num_reqs],
+                num_reqs=num_reqs,
+                num_actual_tokens=total_num_scheduled_tokens,
+                max_query_len=max_num_scheduled_tokens,
+                block_table_tensor=dummy_block_table,
+                slot_mapping=dummy_slot_mapping,
+                causal=False,
+            )
+
+            metadata = builder.build(
+                common_prefix_len=0,  # No cascade for encoder
+                common_attn_metadata=common_metadata,
+            )
+
+            for layer_name in attn_group.layer_names:
+                group_metadata[layer_name] = (common_metadata, metadata)
+
+        return group_metadata
