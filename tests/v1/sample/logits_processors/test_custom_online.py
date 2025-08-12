@@ -57,7 +57,7 @@ def server(default_server_args, request, monkeypatch):
         with RemoteOpenAIServer(
                 MODEL_NAME,
                 default_server_args,
-                multiproc_method="fork",
+                multiproc_method="spawn",
                 cmd_str=CMD_STR,
         ) as remote_server:
             yield remote_server

@@ -137,6 +137,7 @@ class RemoteOpenAIServer:
         if env_dict is not None:
             env.update(env_dict)
 
+        shell = False
         if cmd_str is None:
             cli_arg_list = ["vllm", "serve", model, *vllm_serve_args]
         else:
@@ -144,12 +145,14 @@ class RemoteOpenAIServer:
                 "python", "-c", f"\"{cmd_str}\"", "serve", model,
                 *vllm_serve_args
             ]
+            shell = True
 
         self.proc = subprocess.Popen(
             cli_arg_list,
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,
+            shell=shell,
         )
         max_wait_seconds = max_wait_seconds or 240
         self._wait_for_server(url=self.url_for("health"),
