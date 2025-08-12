@@ -343,7 +343,7 @@ def argsort_mm_positions(
             "`group_mm_kwargs_by_modality` and will be removed in v0.13. "
             "Please use `group_mm_kwargs_by_modality` instead.")
 def group_mm_inputs_by_modality(
-    mm_inputs: list[MultiModalKwargs], ) -> list[list[MultiModalKwargs]]:
+        mm_inputs: list[MultiModalKwargs]) -> list[list[MultiModalKwargs]]:
     if not mm_inputs:
         return []
 
