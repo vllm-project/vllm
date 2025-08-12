@@ -81,6 +81,7 @@ class CpuArchEnum(enum.Enum):
     X86 = enum.auto()
     ARM = enum.auto()
     POWERPC = enum.auto()
+    S390X = enum.auto()
     OTHER = enum.auto()
     UNKNOWN = enum.auto()
 
@@ -371,6 +372,8 @@ class Platform:
 
         if machine in ("x86_64", "amd64", "i386", "i686"):
             return CpuArchEnum.X86
+        elif machine == "s390x":
+            return CpuArchEnum.S390X
         elif machine.startswith("arm") or machine.startswith("aarch"):
             return CpuArchEnum.ARM
         elif machine.startswith("ppc"):

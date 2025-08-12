@@ -43,7 +43,8 @@ class CPUWorker(Worker):
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
         if omp_cpuids == "auto" and platform.system() == "Linux":
-            if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
+            cpu_arch = current_platform.get_cpu_architecture()
+            if cpu_arch in (CpuArchEnum.POWERPC, CpuArchEnum.S390X):
                 # For POWERPC SMT-8/4/2
                 self.local_omp_cpuid = self._get_autobind_cpu_ids(
                     lambda cpus: [cpu for cpu in cpus if cpu.id % 8 < 4])
