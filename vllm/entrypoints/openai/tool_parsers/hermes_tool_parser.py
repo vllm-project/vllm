@@ -146,6 +146,7 @@ class Hermes2ProToolParser(ToolParser):
                 self.tool_call_end_token_id)
             tool_call_portion = None
             text_portion = None
+            tool_call_end = False
 
             # case: if we're generating text, OR rounding out a tool call
             if (cur_tool_start_count == cur_tool_end_count
@@ -156,6 +157,7 @@ class Hermes2ProToolParser(ToolParser):
 
             if self.tool_call_end_token in delta_text:
                 logger.debug("tool_call_end_token in delta_text")
+                tool_call_end = True
                 full_text = current_text + delta_text
                 tool_call_portion = full_text.split(
                     self.tool_call_start_token)[-1].split(
@@ -255,6 +257,9 @@ class Hermes2ProToolParser(ToolParser):
                 if (current_tool_call is None):
                     return None
                 function_name: Union[str, None] = current_tool_call.get("name")
+                arguments: dict = current_tool_call.get("arguments")
+                if arguments is not None:
+                    arguments = json.dumps(arguments, ensure_ascii=False)
                 if function_name:
                     self.current_tool_name_sent = True
                     return DeltaMessage(tool_calls=[
@@ -262,7 +267,8 @@ class Hermes2ProToolParser(ToolParser):
                                       type="function",
                                       id=random_tool_call_id(),
                                       function=DeltaFunctionCall(
-                                          name=function_name).model_dump(
+                                          name=function_name, 
+                                          arguments=arguments).model_dump(
                                               exclude_none=True))
                     ])
                 else:
@@ -297,8 +303,16 @@ class Hermes2ProToolParser(ToolParser):
             logger.debug("diffing old arguments: %s", prev_arguments)
             logger.debug("against new ones: %s", cur_arguments)
 
+            # Handle tool call with no argument
+            if tool_call_end and cur_arguments == {} and prev_arguments == {}:
+                delta = DeltaMessage(tool_calls=[
+                    DeltaToolCall(index=self.current_tool_id,
+                                  function=DeltaFunctionCall(
+                                      arguments=json.dumps({})).model_dump(
+                                          exclude_none=True))
+                ])
             # case -- no arguments have been created yet. skip sending a delta.
-            if not cur_arguments and not prev_arguments:
+            elif not cur_arguments and not prev_arguments:
                 logger.debug("Skipping text %s - no arguments", delta_text)
                 delta = None
 
