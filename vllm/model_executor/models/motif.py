@@ -19,7 +19,7 @@ from vllm.attention.selector import _Backend
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import RMSNorm, PolyNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
@@ -39,30 +39,6 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
-
-
-class PolyNorm(torch.nn.Module):
-    """ 
-    A trainable activation function introduced in https://arxiv.org/html/2411.03884v1.
-    The code is copied from https://github.com/BryceZhuo/PolyCom?tab=readme-ov-file/README.md
-    """
-
-    def __init__(self, eps=1e-6):
-        super().__init__()
-        self.weight = torch.nn.Parameter(torch.ones(3) / 3)
-        self.bias = torch.nn.Parameter(torch.zeros(1))
-        self.eps = eps
-
-    def _norm(self, x):
-        return x / torch.sqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x):
-        orig_dtype = x.dtype
-        x_float = x.to(torch.float32)
-        output = (self.weight[0] * self._norm(x_float**3) +
-                  self.weight[1] * self._norm(x_float**2) +
-                  self.weight[2] * self._norm(x_float) + self.bias)
-        return output.to(orig_dtype)
 
 
 class MotifMLP(nn.Module):
@@ -199,9 +175,7 @@ class MotifAttention(nn.Module):
         self.lambda_k2 = nn.Parameter(
             torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0,
                                                                     std=0.1))
-        self.subln = nn.RMSNorm(2 * self.head_dim,
-                                eps=1e-5,
-                                elementwise_affine=True)
+        self.subln = RMSNorm(2 * self.head_dim, eps=1e-5)
 
         params = {
             'differential_flash_attention_config': {
