@@ -174,20 +174,12 @@ class DummyLogitsProcessor(LogitsProcessor):
             # Process moved requests, unidirectional move (a->b) and swap
             # (a<->b)
             for adx, bdx, direct in batch_update.moved:
-                if direct == MoveDirectionality.SWAP:
-                    # Sparse swap
-                    a_val = self.req_info.pop(adx, None)
-                    b_val = self.req_info.pop(bdx, None)
-                    if a_val is not None:
-                        self.req_info[bdx] = a_val
-                    if b_val is not None:
-                        self.req_info[adx] = b_val
-                else:
-                    # Sparse unidirectional move
-                    if adx in self.req_info:
-                        self.req_info[bdx] = self.req_info.pop(adx)
-                    else:
-                        self.req_info.pop(bdx, None)
+                a_val = self.req_info.pop(adx, None)
+                b_val = self.req_info.pop(bdx, None)
+                if a_val is not None:
+                    self.req_info[bdx] = a_val
+                if direct == MoveDirectionality.SWAP and b_val is not None:
+                    self.req_info[adx] = b_val
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if not self.req_info:
