@@ -272,6 +272,9 @@ _SPECULATIVE_DECODING_MODELS = {
 }
 
 _TRANSFORMERS_SUPPORTED_MODELS = {
+    # Text generation models
+    "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    # Multimodal models
     "Emu3ForConditionalGeneration": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
 }
 
