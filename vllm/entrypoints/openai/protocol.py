@@ -1366,8 +1366,25 @@ class EmbeddingChatRequest(OpenAIBaseModel):
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
 
-PoolingCompletionRequest = EmbeddingCompletionRequest
-PoolingChatRequest = EmbeddingChatRequest
+
+class PoolingCompletionRequest(EmbeddingCompletionRequest):
+    task: Optional[str] = None
+
+    def to_pooling_params(self):
+        return PoolingParams(dimensions=self.dimensions,
+                             normalize=self.normalize,
+                             task=self.task)
+
+
+class PoolingChatRequest(EmbeddingChatRequest):
+    task: Optional[str] = None
+
+    def to_pooling_params(self):
+        return PoolingParams(dimensions=self.dimensions,
+                             normalize=self.normalize,
+                             task=self.task)
+
+
 PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest]
 
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import itertools
 from collections.abc import Iterable
 from typing import Optional, Union
 
@@ -8,12 +9,17 @@ import torch
 from torch import nn
 from transformers import RobertaConfig
 
-from vllm.config import VllmConfig
+from vllm.config import PoolerConfig, VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.pooler import (ClassifierPooler, CLSPool,
-                                               DispatchPooler, Pooler)
+                                               DispatchPooler, Pooler,
+                                               PoolerOutput, PoolingMetadata,
+                                               PoolingParamsUpdate,
+                                               PoolingTask, build_output)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.bert import (TOKEN_TYPE_SHIFT,
                                              BertEmbeddingModel, BertModel,
                                              _decode_token_type_ids,
@@ -21,6 +27,7 @@ from vllm.model_executor.models.bert import (TOKEN_TYPE_SHIFT,
 from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
                                               maybe_prefix)
 from vllm.sequence import IntermediateTensors
+from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
 from .interfaces import SupportsCrossEncoding, default_pooling_type
@@ -148,6 +155,130 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
 
         loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
         return loader.load_weights(weights_list, mapper=mapper)
+
+
+class M3SparsePooler(Pooler):
+    """A pooler that implements M3 sparse pooling
+
+    This layer does the following:
+    1. By default returns dense embeddings.
+    2. If the pooling params "additional_data" contain
+       "sparse_embeddings", return sparse embeddings
+
+    Attributes:
+        dense_pooler: The default pooler.
+        sparse_linear: the linear module applied to the
+          logits to obtain the token weights
+        bos_token_id and eos_token_id: The special tokens
+          inserted by the tokenizer. These are removed for
+          sparse embeddings
+    """
+
+    def __init__(self, sparse_linear: nn.Module, bos_token_id: int,
+                 eos_token_id: int) -> None:
+        super().__init__()
+        self.sparse_linear = sparse_linear
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+
+    def get_supported_tasks(self) -> set[PoolingTask]:
+        return {"embed-sparse"}
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return PoolingParamsUpdate(requires_token_ids=True)
+
+    def forward(
+        self,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+        pooling_metadata: PoolingMetadata,
+    ) -> PoolerOutput:
+
+        assert isinstance(pooling_metadata, V1PoolingMetadata), \
+            "BGE-M3 sparse embeddding are only support with V1"
+        assert isinstance(hidden_states, list)
+
+        pooled_outputs = []
+
+        for i, hidden_state in enumerate(hidden_states):
+            pooled_data = torch.squeeze(torch.relu(
+                self.sparse_linear(hidden_state)),
+                                        dim=0)
+            token_ids = pooling_metadata.prompt_token_ids[
+                i, :pooling_metadata.prompt_lens[i]]
+            if token_ids[0] == self.bos_token_id:
+                pooled_data = pooled_data[1:]
+            if token_ids[-1] == self.eos_token_id:
+                pooled_data = pooled_data[:-1]
+            pooled_outputs.append(pooled_data)
+
+        return PoolerOutput(outputs=build_output(pooled_outputs))
+
+
+def filter_secondary_weights(
+    all_weights: Iterable[tuple[str, torch.Tensor]],
+    secondary_weights: list[str],
+) -> tuple[Iterable[tuple[str, torch.Tensor]], Iterable[tuple[str,
+                                                              torch.Tensor]]]:
+    all_weights1, all_weights2 = itertools.tee(all_weights)
+
+    def filtered(n):
+        return any(n.startswith(f) for f in secondary_weights)
+
+    return ((n, w) for n, w in all_weights1 if filtered(n)), \
+           ((n, w) for n, w in all_weights2 if not filtered(n))
+
+
+class BgeM3EmbeddingModel(RobertaEmbeddingModel):
+    """A model that extends RobertaEmbeddingModel with sparse embeddings.
+
+   This class supports loading an additional sparse_linear.pt file
+   to create sparse embeddings as described in https://arxiv.org/abs/2402.03216
+   """
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+
+        self.hidden_size = vllm_config.model_config.hf_config.hidden_size
+
+        self.bos_token_id = vllm_config.model_config.hf_config.bos_token_id
+        self.eos_token_id = vllm_config.model_config.hf_config.eos_token_id
+
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.secondary_weight_prefix = "sparse_linear."
+
+        self.secondary_weights = [
+            DefaultModelLoader.Source(
+                model_or_path=vllm_config.model_config.model,
+                revision=None,
+                prefix=self.secondary_weight_prefix,
+                allow_patterns_overrides=["sparse_linear.pt"])
+        ]
+
+    def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
+        self.sparse_linear = nn.Linear(self.hidden_size, 1)
+        return DispatchPooler({
+            "encode":
+            Pooler.for_encode(pooler_config),
+            "embed":
+            Pooler.for_embed(pooler_config),
+            "embed-sparse":
+            M3SparsePooler(self.sparse_linear, self.bos_token_id,
+                           self.eos_token_id),
+        })
+
+    def load_weights(self, all_weights: Iterable[tuple[str, torch.Tensor]]):
+        secondary, weights = filter_secondary_weights(
+            all_weights, [self.secondary_weight_prefix])
+
+        super().load_weights(weights)
+
+        params_dict = dict(self.named_parameters())
+
+        for name, loaded_weight in secondary:
+            if name.startswith(self.secondary_weight_prefix):
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
 
 
 @default_pooling_type("CLS")

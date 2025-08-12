@@ -140,7 +140,8 @@ class OpenAIServingPooling(OpenAIServing):
             pooling_params = request.to_pooling_params()
 
             try:
-                pooling_params.verify("encode", self.model_config)
+                task = request.task if request.task is not None else "encode"
+                pooling_params.verify(task, self.model_config)
             except ValueError as e:
                 return self.create_error_response(str(e))
 
