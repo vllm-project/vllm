@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1
+
+# --- Config ---
+# Use a Gaudi 1.21.x PyTorch base (Ubuntu 24.04 + PyTorch 2.6 installer).
+# Adjust if your environment pins a different 1.21 minor.
+ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.21.3/ubuntu24.04/habanalabs/pytorch-installer-2.6.0:latest
+
+FROM ${BASE_IMAGE}
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Minimal build tools
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      git build-essential ca-certificates bash && \
+    rm -rf /var/lib/apt/lists/*
+
+# --- Workspace root ---
+WORKDIR /workspace
+
+# -----------------------------
+# Build vLLM from source (skip CUDA/ROCm, reuse Habana torch)
+# -----------------------------
+RUN git clone --depth=1 https://github.com/vllm-project/vllm /workspace/vllm
+WORKDIR /workspace/vllm
+
+# Install build reqs but strip any torch* so we don't overwrite Habana torch
+RUN sed '/^[[:space:]]*torch/Id' requirements/build.txt > /tmp/vllm-build-no-torch.txt && \
+    python -m pip install --upgrade pip && \
+    python -m pip install -r /tmp/vllm-build-no-torch.txt
+
+# Build vLLM in editable mode with "empty" device to avoid GPU-specific builds
+RUN VLLM_TARGET_DEVICE=empty python -m pip install --no-build-isolation -e .
+
+# -----------------------------
+# Build vLLM-Gaudi from source
+# -----------------------------
+WORKDIR /workspace
+RUN git clone --depth=1 https://github.com/vllm-project/vllm-gaudi /workspace/vllm-gaudi
+WORKDIR /workspace/vllm-gaudi
+RUN python -m pip install -e .
+
+# Default to interactive shell
+ENTRYPOINT ["/bin/bash"]
+
