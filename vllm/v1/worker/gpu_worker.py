@@ -399,9 +399,9 @@ class Worker(WorkerBase):
                 scheduler_output.total_num_scheduled_tokens)
             compile_cuda_graph(scheduler_output.total_num_scheduled_tokens)
         else:
-            next_comp = list(
-                warmup_sizes_set.difference(
-                    self._token_compiled_cudagraphs))[0]
+            next_comp_set = warmup_sizes_set.difference(self._token_compiled_cudagraphs)
+            if len(next_comp_set) != 0:
+                next_comp = list(next_comp_set)[0] 
             self._token_compiled_cudagraphs.add(next_comp)
             compile_cuda_graph(next_comp)
 
