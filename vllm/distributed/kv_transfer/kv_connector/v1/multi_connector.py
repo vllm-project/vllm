@@ -224,11 +224,14 @@ class MultiConnector(KVConnectorBase_V1):
             "connectors")
         assert ktcs is not None
         layouts: set[str] = set()
+        temp_vllm_config = copy.copy(vllm_config)
         for ktc in ktcs:
+            kv_transfer_config = KVTransferConfig(**ktc)
+            temp_vllm_config.kv_transfer_config = kv_transfer_config
             connector_cls = KVConnectorFactory.get_connector_class(
-                KVTransferConfig(**ktc))
+                kv_transfer_config)
             required_kvcache_layout = (
-                connector_cls.get_required_kvcache_layout(vllm_config))
+                connector_cls.get_required_kvcache_layout(temp_vllm_config))
             if required_kvcache_layout is not None:
                 layouts.add(required_kvcache_layout)
 
