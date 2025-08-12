@@ -18,6 +18,18 @@ Finally, update our [list of supported models](../../models/supported_models.md)
 !!! important
     The list of models in each section should be maintained in alphabetical order.
 
+Once you commit your changes, the pre-commit script will add one or more entries to the file `models/_cached_model_info.py`
+with information about your model. This modified file needs to be committed as well.
+This file will be used during the initialization of the model to speed up loading.
+
+In case you need to regenerate the entire file for all models, just run:
+
+```python
+python tools/enforce_cached_model_info.py -b
+```
+
+The argument `-b` means build the cached file.
+
 ## Out-of-tree models
 
 You can load an external model [using a plugin](../../design/plugin_system.md) without modifying the vLLM codebase.
