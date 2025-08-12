@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import atexit
 from typing import TYPE_CHECKING, Optional
 
 from vllm import envs
@@ -62,5 +63,6 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
         if envs.VLLM_USE_V1:
             _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(
                 config=vllm_config, role=KVConnectorRole.WORKER)
+            atexit.register(_KV_CONNECTOR_AGENT.shutdown)
         else:
             raise ValueError("V0 is no longer supported")
