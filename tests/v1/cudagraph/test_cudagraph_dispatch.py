@@ -34,6 +34,11 @@ def _create_vllm_config(compilation_config: CompilationConfig,
     mock_config.compilation_config = compilation_config
     mock_config.scheduler_config = SchedulerConfig(max_num_seqs=max_num_seqs)
     mock_config.parallel_config = ParallelConfig()
+
+    # Mimic the behavior of VllmConfig.__post_init__()
+    if compilation_config.level == CompilationLevel.PIECEWISE:
+        compilation_config.set_splitting_ops_for_v1()
+
     return mock_config
 
 
@@ -73,7 +78,6 @@ class TestCudagraphDispatcher:
             cudagraph_mode=params["cudagraph_mode"],
             level=params["compilation_level"],
             cudagraph_capture_sizes=[1, 8])
-        comp_config.set_splitting_ops_for_v1()
 
         config = _create_vllm_config(comp_config, max_num_seqs=8)
         dispatcher = CudagraphDispatcher(config)
