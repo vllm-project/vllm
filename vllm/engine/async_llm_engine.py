@@ -1114,6 +1114,7 @@ class AsyncLLMEngine(EngineClient):
         self.engine.reset_prefix_cache(device)
 
     async def sleep(self, level: int = 1) -> None:
+        self.reset_prefix_cache()
         self.engine.sleep(level)
 
     async def wake_up(self, tags: Optional[list[str]] = None) -> None:
