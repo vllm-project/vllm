@@ -207,9 +207,8 @@ class PrometheusStatLogger(StatLoggerBase):
             documentation=
             "Total number of tokens currently waiting in the queue",
             labelnames=labelnames)
-        self.gauge_num_tokens_waiting = make_per_engine(gauge_num_tokens_waiting,
-                                                       engine_indexes,
-                                                       model_name)
+        self.gauge_num_tokens_waiting = make_per_engine(
+            gauge_num_tokens_waiting, engine_indexes, model_name)
 
         #
         # GPU cache
