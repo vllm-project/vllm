@@ -369,8 +369,6 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         expert_tokens_meta: Optional[ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
-        w1_bias: Optional[torch.Tensor] = None,
-        w2_bias: Optional[torch.Tensor] = None,
     ):
         """
         This function computes the intermediate result of a Mixture of Experts
@@ -687,9 +685,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 apply_router_weight_on_input: bool = False,
                 extra_expert_args: Optional[dict] = None,
                 extra_prepare_args: Optional[dict] = None,
-                extra_finalize_args: Optional[dict] = None,
-                w1_bias: Optional[torch.Tensor] = None,
-                w2_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+                extra_finalize_args: Optional[dict] = None) -> torch.Tensor:
         """
         This function computes a Mixture of Experts (MoE) layer using two sets
         of weights, w1 and w2, and top-k gating mechanism.

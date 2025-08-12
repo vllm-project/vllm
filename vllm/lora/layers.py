@@ -1232,6 +1232,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 self.base_layer._lora["expert_map"] = kwargs["expert_map"]
                 self.base_layer._lora["apply_router_weight_on_input"] = kwargs[
                     "apply_router_weight_on_input"]
+                # TODO A temporary workaround to adapt the
+                # 'FusedMoEModularKernel.forward' interface, to be used until
+                # the 'FusedMoEModularKernel' refactoring is completed.
+                kwargs["extra_expert_args"] = {
+                    k: kwargs.pop(k)
+                    for k in ["w1_bias", "w2_bias"] if k in kwargs
+                }
                 result = func(*args, **kwargs)
                 return result
 
