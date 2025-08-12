@@ -38,9 +38,8 @@ theme:
     - navigation.tabs
     - navigation.tabs.sticky
     - navigation.sections
-    - navigation.prune
-    - navigation.top
     - navigation.indexes
+    - navigation.top
     - search.highlight
     - search.share
     - toc.follow
