@@ -234,10 +234,32 @@ try:
 except ImportError:
     flashinfer_available = False
 
-if envs.VLLM_AITER_TRITON_FP8_BMM:
+
+def is_rocm_aiter_fp8bmm_enabled() -> bool:
+    return current_platform.is_rocm() \
+        and envs.VLLM_ROCM_USE_AITER_FP8BMM \
+        and envs.VLLM_ROCM_USE_AITER
+
+
+if is_rocm_aiter_fp8bmm_enabled():
+    from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501
+        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_fp8_bmm)
+
+    def aiter_triton_fp8_bmm_wrapper(x,
+                                     w,
+                                     w_s,
+                                     group_size=128,
+                                     y=None,
+                                     transpose_bm=False):
+        return aiter_fp8_bmm(x,
+                             w,
+                             w_s,
+                             group_size=group_size,
+                             YQ=y,
+                             transpose_bm=transpose_bm)
+
     def dynamic_per_batched_tensor_quant(
-        x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
-    ):
+            x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn):
         DTYPE_MAX = torch.finfo(dtype).max
         min_val, max_val = x.aminmax()
         amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-10)
@@ -245,15 +267,7 @@ if envs.VLLM_AITER_TRITON_FP8_BMM:
         x_scl_sat = (x * scale).clamp(min=-DTYPE_MAX, max=DTYPE_MAX)
         return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
 
-    from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant
-    @torch.compiler.disable
-    def aiter_triton_fp8_bmm_wrapper(x, w, w_s, group_size = 128, y = None, transpose_bm = False):
-        if y is not None:
-            batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(x, w, w_s, group_size = group_size, YQ=y, transpose_bm=transpose_bm)
-        else:
-            y = batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(x, w, w_s, group_size = group_size, transpose_bm = transpose_bm)
-            return y
-            
+
 logger = init_logger(__name__)
 
 CUDNN_WORKSPACE_SIZE = 12800
@@ -972,9 +986,13 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     def _v_up_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-        if envs.VLLM_AITER_TRITON_FP8_BMM:
-            # Multiply + Transpose (N, B, L) x (N, L, V) -> (N, B, V) -> (B, N, V)
-            x = aiter_triton_fp8_bmm_wrapper(x, self.W_V, self.W_V_scale, group_size = 256, transpose_bm = True)
+        if is_rocm_aiter_fp8bmm_enabled():
+            # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
+            x = aiter_triton_fp8_bmm_wrapper(x,
+                                             self.W_V,
+                                             self.W_V_scale,
+                                             group_size=128,
+                                             transpose_bm=True)
             # Convert from (B, N, V) to (B, N * V)
             x = x.reshape(-1, self.num_heads * self.v_head_dim)
         else:
@@ -983,7 +1001,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             # Convert from (N, B, V) to (B, N * V)
             x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
         return x
-
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
 
@@ -1031,12 +1048,37 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         W_UK, W_UV = kv_b_proj_weight.split(
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        
-        if envs.VLLM_AITER_TRITON_FP8_BMM:
-            W_K = W_UK.transpose(0, 1) # 16 512 128
-            W_V = W_UV.permute(1, 2, 0) # 16 128 512
-            self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(W_K, dtype=torch.float8_e4m3fnuz)
-            self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(W_V, dtype=torch.float8_e4m3fnuz)
+
+        if is_rocm_aiter_fp8bmm_enabled():
+            W_K = W_UK.transpose(0, 1)  # 16 512 128
+            W_V = W_UV.permute(1, 2, 0)  # 16 128 512
+            self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
+                W_K, dtype=torch.float8_e4m3fnuz)
+            self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(
+                W_V, dtype=torch.float8_e4m3fnuz)
+            logger.info_once(
+                "[Aiter Triton] compiling fp8 BMM for batch sizes 1 to 128 "
+                f"W_K shape = {list(self.W_K.shape)} and "
+                f"W_V shape = {list(self.W_V.shape)}")
+            for m in range(1, 129):
+                x = torch.empty((self.W_K.shape[0], m, self.W_K.shape[2]),
+                                dtype=torch.bfloat16,
+                                device=self.W_K.device)
+                aiter_triton_fp8_bmm_wrapper(x,
+                                             self.W_K,
+                                             self.W_K_scale,
+                                             group_size=128,
+                                             transpose_bm=True)
+
+                x = torch.empty((self.W_V.shape[0], m, self.W_V.shape[2]),
+                                dtype=torch.bfloat16,
+                                device=self.W_V.device)
+                aiter_triton_fp8_bmm_wrapper(x,
+                                             self.W_V,
+                                             self.W_V_scale,
+                                             group_size=128,
+                                             transpose_bm=True)
+
         else:
             # Convert from (L, N, V) to (N, L, V)
             self.W_UV = W_UV.transpose(0, 1)
@@ -1235,9 +1277,14 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             # Convert from (B, N, P) to (N, B, P)
             decode_q_nope = decode_q_nope.transpose(0, 1)
 
-            if envs.VLLM_AITER_TRITON_FP8_BMM:
-                # Multiply + Transpose (N, B, P) x (N, P, L) -> (N, B, L) -> (B, N, L)
-                decode_ql_nope = aiter_triton_fp8_bmm_wrapper(decode_q_nope, self.W_K, self.W_K_scale, group_size = 128, transpose_bm = True)
+            if is_rocm_aiter_fp8bmm_enabled():
+                # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
+                decode_ql_nope = aiter_triton_fp8_bmm_wrapper(
+                    decode_q_nope,
+                    self.W_K,
+                    self.W_K_scale,
+                    group_size=128,
+                    transpose_bm=True)
             else:
                 # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
                 decode_ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
