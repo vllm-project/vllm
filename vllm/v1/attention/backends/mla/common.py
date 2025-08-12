@@ -427,9 +427,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.page_size = self.kv_cache_spec.block_size
 
         if self.chunked_prefill_enabled:
-            workspace_dtype = self.model_config.dtype
-            if cache_config.cache_dtype.startswith("fp8"):
-                workspace_dtype = current_platform.fp8_dtype()
             self.chunked_prefill_workspace_size = min(
                 # Max sure there is enough for 8 full length request or at least
                 # 4 pages of cache per request
@@ -450,7 +447,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.chunked_prefill_workspace = torch.empty(
                 (self.chunked_prefill_workspace_size,
                  self.model_config.get_head_size()),
-                dtype=workspace_dtype,
+                dtype=self.model_config.dtype,
                 device=device,
             )
 
@@ -638,8 +635,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
                 if self.aot_schedule:
                     # align max_context_chunk to page_size by rounding down,
-                    # currently the `gather_cache` kernel cannot handle
-                    # `context_chunk_starts` that are not aligned to page_size
+                    # currently the `gather_and_maybe_dequant_cache` kernel
+                    # cannot handle `context_chunk_starts` that are not aligned
+                    # to page_size
                     max_context_chunk = round_down(max_context_chunk,
                                                    self.page_size)
 
@@ -1016,6 +1014,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
+        k_scale: torch.Tensor,
     ):
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
@@ -1025,17 +1024,17 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
 
-        fp8_attention = self.kv_cache_dtype.startswith("fp8")
-
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
 
-            ops.gather_cache(
+            ops.gather_and_maybe_dequant_cache(
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
                 block_table=prefill_metadata.block_table,
                 cu_seq_lens=prefill_metadata.chunked_context.cu_seq_lens[i],
                 batch_size=attn_metadata.num_prefills,
+                kv_cache_dtype=self.kv_cache_dtype,
+                scale=k_scale,
                 seq_starts=prefill_metadata.chunked_context.starts[i],
             )
 
@@ -1043,16 +1042,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 [..., :self.kv_lora_rank]
             k_pe = workspace[:toks]\
                 [..., self.kv_lora_rank:].unsqueeze(1)
-
-            if fp8_attention:
-                target_dtype = self.kv_b_proj.weight.dtype
-                kv_c_normed_dequant = torch.empty_like(kv_c_normed,
-                                                       dtype=target_dtype)
-                k_pe_dequant = torch.empty_like(k_pe, dtype=target_dtype)
-                ops.convert_fp8(kv_c_normed_dequant, kv_c_normed)
-                ops.convert_fp8(k_pe_dequant, k_pe)
-                kv_c_normed = kv_c_normed_dequant
-                k_pe = k_pe_dequant
 
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view( \
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
@@ -1096,6 +1085,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         k_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
+        k_scale: torch.Tensor,
     ) -> torch.Tensor:
         assert attn_metadata.prefill is not None
 
@@ -1118,7 +1108,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         if has_context:
             suffix_output, suffix_lse = output
             context_output, context_lse = self._compute_prefill_context( \
-                q, kv_c_and_k_pe_cache, attn_metadata)
+                q, kv_c_and_k_pe_cache, attn_metadata, k_scale)
 
             output = torch.empty_like(suffix_output)
             merge_attn_states(
@@ -1212,7 +1202,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         if has_prefill:
             output[num_decode_tokens:] = self._forward_prefill(
                 prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
-                attn_metadata)
+                attn_metadata, layer._k_scale)
 
         if has_decode:
             assert attn_metadata.decode is not None

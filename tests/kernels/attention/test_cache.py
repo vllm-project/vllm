@@ -709,14 +709,15 @@ def test_swap_blocks_mla(
 @pytest.mark.parametrize("max_seq_len", [512])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize("kv_cache_dtype",
-                         ["auto"])  # You can also test "fp8" if needed.
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
-                          num_blocks, max_seq_len, batch_size, dtype,
-                          kv_cache_dtype, device):
+def test_gather_and_maybe_dequant_cache_mla(kv_lora_rank, qk_rope_head_dim,
+                                            block_size, num_blocks,
+                                            max_seq_len, batch_size, dtype,
+                                            kv_cache_dtype, device):
     entry_size = kv_lora_rank + qk_rope_head_dim
+    scale = torch.tensor(0.1, dtype=torch.float32, device=device)
     src_cache = _create_mla_cache(num_blocks, block_size, entry_size, dtype,
                                   kv_cache_dtype, device)
     _fill_mla_cache(src_cache, kv_cache_dtype=kv_cache_dtype)
@@ -742,10 +743,9 @@ def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
         perm = torch.randperm(num_blocks, device=device)
         block_table[b, :] = perm
 
-    dst = torch.zeros((total_tokens, entry_size),
-                      dtype=src_cache.dtype,
-                      device=device)
+    dst = torch.zeros((total_tokens, entry_size), dtype=dtype, device=device)
 
+    # TODO - do dequant here
     expected_batches = []
     for b in range(batch_size):
         s = seq_len_tensor[b]
@@ -765,12 +765,15 @@ def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
     expected = torch.cat(expected_batches, dim=0)
 
     opcheck(
-        torch.ops._C_cache_ops.gather_cache,
-        (src_cache, dst, block_table, cu_seq_lens, batch_size, None),
+        torch.ops._C_cache_ops.gather_and_maybe_dequant_cache,
+        (src_cache, dst, block_table, cu_seq_lens, batch_size, kv_cache_dtype,
+         scale, None),
         test_utils=DEFAULT_OPCHECK_TEST_UTILS,
     )
 
-    ops.gather_cache(src_cache, dst, block_table, cu_seq_lens, batch_size)
+    ops.gather_and_maybe_dequant_cache(src_cache, dst, block_table,
+                                       cu_seq_lens, batch_size, kv_cache_dtype,
+                                       scale, None)
     torch.testing.assert_close(dst, expected)
 
 

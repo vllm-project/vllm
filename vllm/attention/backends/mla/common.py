@@ -922,8 +922,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
                 self.context_chunk_workspace_size // num_prefills_with_context
 
             # align max_context_chunk to page_size by rounding down,
-            # currently the `gather_cache` kernel cannot handle
-            # `context_chunk_starts` that are not aligned to page_size
+            # currently the `gather_and_maybe_dequant_cache` kernel cannot
+            # handle `context_chunk_starts` that are not aligned to page_size
             max_context_chunk = round_down(max_context_chunk, self.page_size)
             assert max_context_chunk > 0
             num_chunks = cdiv(context_lens_tensor.max(), max_context_chunk)
@@ -1167,6 +1167,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
+        k_scale: torch.Tensor,
     ):
         prefill_metadata = attn_metadata.prefill_metadata
         assert prefill_metadata is not None
@@ -1188,12 +1189,14 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         for i in range(iters):
             toks = prefill_metadata.context_chunk_seq_tot[i]
 
-            ops.gather_cache(
+            ops.gather_and_maybe_dequant_cache(
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
                 block_table=prefill_metadata.block_tables,
                 cu_seq_lens=prefill_metadata.context_chunk_cu_seq_lens[i],
                 batch_size=prefill_metadata.num_prefills,
+                kv_cache_dtype=self.kv_cache_dtype,
+                scale=k_scale,
                 seq_starts=prefill_metadata.context_chunk_starts[i],
             )
 
@@ -1250,6 +1253,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         k_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
+        k_scale: torch.Tensor,
     ) -> torch.Tensor:
 
         prefill_metadata = attn_metadata.prefill_metadata
@@ -1282,7 +1286,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             # ROCm flash_attn_varlen_func will return 3 objects instead of 2
             suffix_output, suffix_lse = output
             context_output, context_lse = self._compute_prefill_context( \
-                q, kv_c_and_k_pe_cache, attn_metadata)
+                q, kv_c_and_k_pe_cache, attn_metadata, k_scale)
 
             output = torch.empty_like(suffix_output)
             merge_attn_states(
@@ -1372,7 +1376,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         if has_prefill:
             output[:num_prefill_tokens] = self._forward_prefill(
                 prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
-                attn_metadata)
+                attn_metadata, layer._k_scale)
 
         if has_decode:
             decode_q_nope, decode_q_pe = decode_q.split(
