@@ -21,6 +21,17 @@ vLLM is a fast and easy-to-use library for LLM inference and serving.
 
 Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has evolved into a community-driven project with contributions from both academia and industry.
 
+Where to get started with vLLM depends on the type of user. If you are looking to:
+
+- Run open-source models on vLLM, we recommend starting with the [Quickstart Guide](./getting_started/quickstart.md)
+- Build applications with vLLM, we recommend starting with the [User Guide](./usage)
+- Build vLLM, we recommend starting with [Developer Guide](./contributing)
+
+For information about the development of vLLM, see:
+
+- [Roadmap](https://roadmap.vllm.ai)
+- [Releases](https://github.com/vllm-project/vllm/releases)
+
 vLLM is fast with:
 
 - State-of-the-art serving throughput
@@ -42,12 +53,6 @@ vLLM is flexible and easy to use with:
 - Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs, Gaudi® accelerators and GPUs, IBM Power CPUs, TPU, and AWS Trainium and Inferentia Accelerators.
 - Prefix caching support
 - Multi-LoRA support
-
-Where to get started with vLLM depends on the type of user. If you are looking to:
-
-- run open-source models on vLLM, we recommend starting with [quickstart](./getting_started/quickstart.md) and branching out from there as you learn more
-- build applications with vLLM, we recommend starting with the [User Guide](./usage)
-- build vLLM, we recommend starting with [Developer Guide](./contributing)
 
 For more information, check out the following:
 
