@@ -312,7 +312,7 @@ class Worker(WorkerBase):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
 
-        if has_flashinfer():
+        if has_flashinfer() and current_platform.is_device_capability(100):
             self.model_runner.flashinfer_autotune()
 
         if not self.model_config.enforce_eager:
