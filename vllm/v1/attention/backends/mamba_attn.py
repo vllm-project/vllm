@@ -2,20 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import ClassVar, Optional
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
-from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata,
-    reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
+from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                              AttentionMetadataBuilder,
+                                              CommonAttentionMetadata,
+                                              split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
 def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
@@ -86,20 +84,28 @@ class Mamba2AttentionMetadata:
 
 class Mamba2AttentionMetadataBuilder(
         AttentionMetadataBuilder[Mamba2AttentionMetadata]):
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.PURE_DECODE_ONLY
 
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
+    reorder_batch_threshold: ClassVar[int] = 1
+
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
         assert isinstance(kv_cache_spec, MambaSpec)
         self.kv_cache_spec = kv_cache_spec
         self.chunk_size = vllm_config.model_config.get_mamba_chunk_size()
+        self.vllm_config = vllm_config
+        self.compilation_config = vllm_config.compilation_config
         assert self.chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models")
-
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(input_batch,
-                                                           scheduler_output,
-                                                           decode_threshold=1)
+        self.decode_cudagraph_max_bs = min(
+            self.vllm_config.scheduler_config.max_num_seqs,
+            self.compilation_config.max_capture_size)
+        self.state_indices_tensor = torch.empty(
+            (self.decode_cudagraph_max_bs, ),
+            dtype=torch.int32,
+            device=device,
+        )
 
     def build(self,
               common_prefix_len: int,
@@ -152,6 +158,14 @@ class Mamba2AttentionMetadataBuilder(
                         query_start_loc_p, self.chunk_size,
                         num_prefill_tokens))
 
+        elif num_decodes <= self.decode_cudagraph_max_bs:
+            # Pad state tensor for CUDA graph
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decodes)
+            self.state_indices_tensor[:num_decodes].copy_(state_indices_tensor,
+                                                          non_blocking=True)
+            state_indices_tensor = self.state_indices_tensor[:num_input_tokens]
+            state_indices_tensor[num_decodes:] = PAD_SLOT_ID
+
         attn_metadata = Mamba2AttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -168,3 +182,23 @@ class Mamba2AttentionMetadataBuilder(
             state_indices_tensor=state_indices_tensor,
         )
         return attn_metadata
+
+    def build_for_cudagraph_capture(
+            self, common_attn_metadata: CommonAttentionMetadata):
+        """
+        This method builds the metadata for full cudagraph capture.
+        Currently, only decode is supported for full cudagraphs with Mamba.
+        """
+        m = common_attn_metadata
+
+        assert m.num_reqs == m.num_actual_tokens, \
+            "Mamba only supports decode-only full CUDAGraph capture. " \
+            "Make sure all cudagraph capture sizes <= max_num_seq."
+
+        m.max_query_len = 1  # decode-only
+
+        return self.build(0, m)
+
+    def can_run_in_cudagraph(
+            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
+        return common_attn_metadata.max_query_len == 1

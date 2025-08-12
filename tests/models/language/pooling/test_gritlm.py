@@ -28,10 +28,7 @@ def test_find_array():
 
     model_config = ModelConfig(
         MODEL_NAME,
-        task="embed",
-        tokenizer=MODEL_NAME,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
+        runner="pooling",
         dtype="bfloat16",
         seed=0,
     )
@@ -117,10 +114,10 @@ def test_gritlm_offline_embedding(vllm_runner):
 
     with vllm_runner(
             MODEL_NAME,
-            task="embed",
+            runner="pooling",
             max_model_len=MAX_MODEL_LEN,
     ) as vllm_model:
-        llm = vllm_model.model
+        llm = vllm_model.llm
 
         d_rep = run_llm_encode(
             llm,
@@ -140,7 +137,7 @@ def test_gritlm_offline_embedding(vllm_runner):
 async def test_gritlm_api_server_embedding():
     queries, q_instruction, documents, d_instruction = get_test_data()
 
-    args = ["--task", "embed", "--max_model_len", str(MAX_MODEL_LEN)]
+    args = ["--runner", "pooling", "--max_model_len", str(MAX_MODEL_LEN)]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as server:
         client_embedding = server.get_async_client()
@@ -164,10 +161,10 @@ def test_gritlm_offline_generate(monkeypatch: pytest.MonkeyPatch, vllm_runner):
 
     with vllm_runner(
             MODEL_NAME,
-            task="generate",
+            runner="generate",
             max_model_len=MAX_MODEL_LEN,
     ) as vllm_model:
-        llm = vllm_model.model
+        llm = vllm_model.llm
 
         sampling_params = SamplingParams(temperature=0.0, max_tokens=256)
         outputs = llm.generate(input, sampling_params=sampling_params)
@@ -179,7 +176,7 @@ def test_gritlm_offline_generate(monkeypatch: pytest.MonkeyPatch, vllm_runner):
 async def test_gritlm_api_server_generate():
     input = "<|user|>\nWhat is the capital of France?\n<|assistant|>\n"
 
-    args = ["--task", "generate", "--max_model_len", str(MAX_MODEL_LEN)]
+    args = ["--runner", "generate", "--max_model_len", str(MAX_MODEL_LEN)]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as server:
         client_generate = server.get_async_client()

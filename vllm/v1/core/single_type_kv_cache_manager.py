@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Callable
@@ -27,7 +28,7 @@ class SingleTypeKVCacheManager(ABC):
         caching_hash_fn: Callable,
     ) -> None:
         """
-        Initializes the SpecializedManager.
+        Initializes the SingleTypeKVCacheManager.
         Args:
             kv_cache_spec: The kv_cache_spec for this manager.
             block_pool: The block pool.
@@ -177,14 +178,17 @@ class SingleTypeKVCacheManager(ABC):
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
         """
-        Get the number of common prefix blocks for a request.
+        Get the number of common prefix blocks for all requests in the RUNNING
+        state.
 
         Args:
             request_id: The request ID.
-            block_hashes: The block hashes of the request.
+            num_running_requests: The total number of requests in the RUNNING
+                state.
 
         Returns:
-            The number of common prefix blocks.
+            The number of common prefix blocks for all requests in the RUNNING
+                state.
         """
 
         raise NotImplementedError
@@ -264,7 +268,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids)))
         max_num_blocks = max_length // kv_cache_spec.block_size
-        for i, block_hash in zip(range(max_num_blocks), block_hashes):
+        for block_hash in itertools.islice(block_hashes, max_num_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.

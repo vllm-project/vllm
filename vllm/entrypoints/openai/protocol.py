@@ -17,8 +17,9 @@ from openai.types.chat.chat_completion_audio import (
 from openai.types.chat.chat_completion_message import (
     Annotation as OpenAIAnnotation)
 # yapf: enable
-from openai.types.responses import (ResponseInputParam, ResponseOutputItem,
-                                    ResponseOutputMessage, ResponsePrompt,
+from openai.types.responses import (ResponseFunctionToolCall,
+                                    ResponseInputItemParam, ResponseOutputItem,
+                                    ResponsePrompt, ResponseReasoningItem,
                                     ResponseStatus, ResponseTextConfig)
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
@@ -77,12 +78,15 @@ class OpenAIBaseModel(BaseModel):
         return result
 
 
-class ErrorResponse(OpenAIBaseModel):
-    object: str = "error"
+class ErrorInfo(OpenAIBaseModel):
     message: str
     type: str
     param: Optional[str] = None
     code: int
+
+
+class ErrorResponse(OpenAIBaseModel):
+    error: ErrorInfo
 
 
 class ModelPermission(OpenAIBaseModel):
@@ -234,6 +238,11 @@ def get_logits_processors(processors: Optional[LogitsProcessors],
     return None
 
 
+ResponseInputOutputItem: TypeAlias = Union[ResponseInputItemParam,
+                                           ResponseReasoningItem,
+                                           ResponseFunctionToolCall]
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -248,7 +257,7 @@ class ResponsesRequest(OpenAIBaseModel):
             "reasoning.encrypted_content",
         ],
     ]] = None
-    input: Union[str, ResponseInputParam]
+    input: Union[str, list[ResponseInputOutputItem]]
     instructions: Optional[str] = None
     max_output_tokens: Optional[int] = None
     max_tool_calls: Optional[int] = None
@@ -323,6 +332,7 @@ class ResponsesRequest(OpenAIBaseModel):
         if (top_p := self.top_p) is None:
             top_p = default_sampling_params.get(
                 "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"])
+        stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
         guided_decoding = None
@@ -340,6 +350,7 @@ class ResponsesRequest(OpenAIBaseModel):
             top_p=top_p,
             max_tokens=max_tokens,
             logprobs=self.top_logprobs,
+            stop_token_ids=stop_token_ids,
             output_kind=(RequestOutputKind.DELTA
                          if self.stream else RequestOutputKind.FINAL_ONLY),
             guided_decoding=guided_decoding,
@@ -404,6 +415,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         Literal["required"],
         ChatCompletionNamedToolChoiceParam,
     ]] = "none"
+    reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
+    include_reasoning: bool = True
 
     # NOTE this will be ignored by vLLM -- the model determines the behavior
     parallel_tool_calls: Optional[bool] = False
@@ -841,7 +854,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             return data
 
         # if "tool_choice" is specified -- validation
-        if "tool_choice" in data:
+        if "tool_choice" in data and data["tool_choice"] is not None:
 
             # ensure that if "tool choice" is specified, tools are present
             if "tools" not in data or data["tools"] is None:
@@ -853,11 +866,20 @@ class ChatCompletionRequest(OpenAIBaseModel):
             if data["tool_choice"] not in [
                     "auto", "required"
             ] and not isinstance(data["tool_choice"], dict):
-                raise NotImplementedError(
+                raise ValueError(
                     f'Invalid value for `tool_choice`: {data["tool_choice"]}! '\
                     'Only named tools, "none", "auto" or "required" '\
                     'are supported.'
                 )
+
+            # if tool_choice is "required" but the "tools" list is empty,
+            # override the data to behave like "none" to align with
+            # OpenAI’s behavior.
+            if data["tool_choice"] == "required" and isinstance(
+                    data["tools"], list) and len(data["tools"]) == 0:
+                data["tool_choice"] = "none"
+                del data["tools"]
+                return data
 
             # ensure that if "tool_choice" is specified as an object,
             # it matches a valid tool
@@ -1006,6 +1028,13 @@ class CompletionRequest(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."),
+    )
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."),
     )
     logits_processors: Optional[LogitsProcessors] = Field(
         default=None,
@@ -1251,11 +1280,20 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."),
     )
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."),
+    )
+    normalize: Optional[bool] = None
 
     # --8<-- [end:embedding-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions)
+        return PoolingParams(dimensions=self.dimensions,
+                             normalize=self.normalize)
 
 
 class EmbeddingChatRequest(OpenAIBaseModel):
@@ -1302,6 +1340,14 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."),
     )
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."),
+    )
+    normalize: Optional[bool] = None
     # --8<-- [end:chat-embedding-extra-params]
 
     @model_validator(mode="before")
@@ -1314,7 +1360,8 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         return data
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions)
+        return PoolingParams(dimensions=self.dimensions,
+                             normalize=self.normalize)
 
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
@@ -1345,10 +1392,12 @@ class ScoreRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."),
     )
 
+    activation: Optional[bool] = None
+
     # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams()
+        return PoolingParams(activation=self.activation)
 
 
 class RerankRequest(OpenAIBaseModel):
@@ -1373,10 +1422,12 @@ class RerankRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."),
     )
 
+    activation: Optional[bool] = None
+
     # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams()
+        return PoolingParams(activation=self.activation)
 
 
 class RerankDocument(BaseModel):
@@ -1523,10 +1574,12 @@ class ClassificationRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."),
     )
 
+    activation: Optional[bool] = None
+
     # --8<-- [end:classification-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams()
+        return PoolingParams(activation=self.activation)
 
 
 class ClassificationData(OpenAIBaseModel):
@@ -1677,13 +1730,20 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
 
 
-class ResponseReasoningItem(OpenAIBaseModel):
-    id: str = Field(default_factory=lambda: f"rs_{random_uuid()}")
-    text: str
-    summary: list = Field(default_factory=list)
-    type: Literal["reasoning"] = "reasoning"
-    encrypted_content: Optional[str] = None
-    status: Optional[Literal["in_progress", "completed", "incomplete"]]
+class InputTokensDetails(OpenAIBaseModel):
+    cached_tokens: int
+
+
+class OutputTokensDetails(OpenAIBaseModel):
+    reasoning_tokens: int
+
+
+class ResponseUsage(OpenAIBaseModel):
+    input_tokens: int
+    input_tokens_details: InputTokensDetails
+    output_tokens: int
+    output_tokens_details: OutputTokensDetails
+    total_tokens: int
 
 
 class ResponsesResponse(OpenAIBaseModel):
@@ -1695,7 +1755,7 @@ class ResponsesResponse(OpenAIBaseModel):
     metadata: Optional[Metadata] = None
     model: str
     object: Literal["response"] = "response"
-    output: list[Union[ResponseOutputMessage, ResponseReasoningItem]]
+    output: list[ResponseOutputItem]
     parallel_tool_calls: bool
     temperature: float
     tool_choice: ToolChoice
@@ -1712,7 +1772,7 @@ class ResponsesResponse(OpenAIBaseModel):
     text: Optional[ResponseTextConfig] = None
     top_logprobs: int
     truncation: Literal["auto", "disabled"]
-    usage: Optional[UsageInfo] = None
+    usage: Optional[ResponseUsage] = None
     user: Optional[str] = None
 
     @classmethod
@@ -1724,7 +1784,7 @@ class ResponsesResponse(OpenAIBaseModel):
         created_time: int,
         output: list[ResponseOutputItem],
         status: ResponseStatus,
-        usage: Optional[UsageInfo] = None,
+        usage: Optional[ResponseUsage] = None,
     ) -> "ResponsesResponse":
         return cls(
             id=request.request_id,

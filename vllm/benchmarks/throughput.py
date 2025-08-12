@@ -21,11 +21,9 @@ from vllm.benchmarks.datasets import (AIMODataset, BurstGPTDataset,
                                       InstructCoderDataset, RandomDataset,
                                       SampleRequest, ShareGPTDataset,
                                       SonnetDataset, VisionArenaDataset)
-from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
-                                   write_to_json)
+from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
+                                       write_to_json)
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
-from vllm.entrypoints.openai.api_server import (
-    build_async_engine_client_from_engine_args)
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -146,9 +144,13 @@ async def run_vllm_async(
     disable_detokenize: bool = False,
 ) -> float:
     from vllm import SamplingParams
+    from vllm.entrypoints.openai.api_server import (
+        build_async_engine_client_from_engine_args)
 
     async with build_async_engine_client_from_engine_args(
-            engine_args, disable_frontend_multiprocessing) as llm:
+        engine_args,
+        disable_frontend_multiprocessing=disable_frontend_multiprocessing,
+    ) as llm:
         model_config = await llm.get_model_config()
         assert all(
             model_config.max_model_len >= (request.prompt_len +

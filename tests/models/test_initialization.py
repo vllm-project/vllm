@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import partial
 from unittest.mock import patch
 
 import pytest
-from transformers import PretrainedConfig
 
 from vllm import LLM
+from vllm.config import ModelImpl
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from ..utils import create_new_process_for_each_test
-from .registry import AUTO_EXAMPLE_MODELS, HF_EXAMPLE_MODELS, HfExampleModels
+from .registry import (_TRANSFORMERS_BACKEND_MODELS, AUTO_EXAMPLE_MODELS,
+                       HF_EXAMPLE_MODELS, HfExampleModels)
+from .utils import dummy_hf_overrides
 
 
 @create_new_process_for_each_test()
@@ -31,61 +34,14 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
-    # FIXME: Possible memory leak in the previous tests?
-    if model_arch in ("Glm4vForConditionalGeneration",
-                      "GraniteSpeechForConditionalGeneration",
-                      "KimiVLForConditionalGeneration"):
-        pytest.skip("Avoid OOM")
+    hf_overrides_fn = partial(dummy_hf_overrides,
+                              model_arch=model_arch,
+                              exist_overrides=model_info.hf_overrides)
 
     if model_arch in ("Llama4ForCausalLM", "EagleLlama4ForCausalLM"):
         from vllm.model_executor.models.llama4 import Llama4ForCausalLM
         from vllm.model_executor.models.registry import ModelRegistry
         ModelRegistry.register_model("Llama4ForCausalLM", Llama4ForCausalLM)
-
-    # Avoid OOM and reduce initialization time by only using 1 layer
-    def hf_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
-        hf_config.update(model_info.hf_overrides)
-
-        text_config = hf_config.get_text_config()
-
-        # Ensure at least 2 expert per group
-        # Since `grouped_topk` assumes top-2
-        n_group = getattr(text_config, 'n_group', None)
-        num_experts = n_group * 2 if n_group is not None else 2
-
-        # we use three layers for Gemma-3n to check
-        # both normal layer and kv_shared_layer
-        num_hidden_layers = (3 if model_arch
-                             == "Gemma3nForConditionalGeneration" else 1)
-
-        text_config.update({
-            "num_layers": 1,
-            "num_hidden_layers": num_hidden_layers,
-            "num_experts": num_experts,
-            "num_experts_per_tok": 2,
-            "num_local_experts": num_experts,
-            # Otherwise there will not be any expert layers
-            "first_k_dense_replace": 0,
-            # To avoid OOM on DeepSeek-V3
-            "n_routed_experts": num_experts,
-            # For Gemma-3n
-            "num_kv_shared_layers": 1,
-        })
-
-        if hasattr(hf_config, "vision_config"):
-            hf_config.vision_config.update({
-                "num_layers": 1,
-                "num_hidden_layers": 1,
-            })
-
-        # e.g.: ibm-granite/granite-speech-3.3-2b
-        if hasattr(hf_config, "encoder_config"):
-            hf_config.encoder_config.update({
-                "num_layers": 1,
-                "num_hidden_layers": 1,
-            })
-
-        return hf_config
 
     # Avoid calling model.forward()
     def _initialize_kv_caches_v0(self) -> None:
@@ -112,6 +68,11 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
         if model_arch == "Phi4FlashForCausalLM":
             # Phi4FlashForCausalLM only supports DIFFERENTIAL_FLASH_ATTN backend
             m.setenv("VLLM_ATTENTION_BACKEND", "DIFFERENTIAL_FLASH_ATTN")
+        if model_arch == "GptOssForCausalLM":
+            # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
+            # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
+            # L4 supports FA3.
+            m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,
@@ -126,7 +87,9 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             # these tests seem to produce leftover memory
             gpu_memory_utilization=0.80,
             load_format="dummy",
-            hf_overrides=hf_overrides,
+            model_impl=ModelImpl.TRANSFORMERS
+            if model_arch in _TRANSFORMERS_BACKEND_MODELS else ModelImpl.VLLM,
+            hf_overrides=hf_overrides_fn,
         )
 
 

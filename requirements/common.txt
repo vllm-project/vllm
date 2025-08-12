@@ -7,13 +7,12 @@ requests >= 2.26.0
 tqdm
 blake3
 py-cpuinfo
-transformers >= 4.53.2
-huggingface-hub[hf_xet] >= 0.33.0  # Required for Xet downloads.
+transformers >= 4.55.0
 tokenizers >= 0.21.1  # Required for fast incremental detokenization.
 protobuf # Required by LlamaTokenizer.
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
 aiohttp
-openai >= 1.87.0, <= 1.90.0 # Ensure modern openai package (ensure ResponsePrompt exists in type.responses and max_completion_tokens field support)
+openai >= 1.99.1  # For Responses API with reasoning content
 pydantic >= 2.10
 prometheus_client >= 0.18.0
 pillow  # Required for image processing
@@ -33,7 +32,7 @@ pyzmq >= 25.0.0
 msgspec
 gguf >= 0.13.0
 importlib_metadata; python_version < '3.10'
-mistral_common[opencv] >= 1.8.0
+mistral_common[image,audio] >= 1.8.2
 opencv-python-headless >= 4.11.0    # required for video IO
 pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
@@ -48,3 +47,5 @@ scipy # Required for phi-4-multimodal-instruct
 ninja # Required for xgrammar, rocm, tpu, xpu
 pybase64 # fast base64 implementation
 cbor2 # Required for cross-language serialization of hashable objects
+setproctitle # Used to set process names for better debugging and monitoring
+openai-harmony >= 0.0.3  # Required for gpt-oss

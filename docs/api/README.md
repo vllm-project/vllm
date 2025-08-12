@@ -1,7 +1,5 @@
 # Summary
 
-[](){ #configuration }
-
 ## Configuration
 
 API documentation for vLLM's configuration classes.
@@ -14,7 +12,6 @@ API documentation for vLLM's configuration classes.
 - [vllm.config.DeviceConfig][]
 - [vllm.config.SpeculativeConfig][]
 - [vllm.config.LoRAConfig][]
-- [vllm.config.PromptAdapterConfig][]
 - [vllm.config.MultiModalConfig][]
 - [vllm.config.PoolerConfig][]
 - [vllm.config.DecodingConfig][]

@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from .mteb_utils import RerankModelInfo, mteb_test_rerank_models
+from ...utils import (CLSPoolingRerankModelInfo, LASTPoolingRerankModelInfo,
+                      RerankModelInfo)
+from .mteb_utils import mteb_test_rerank_models
 
 RERANK_MODELS = [
-    RerankModelInfo("cross-encoder/ms-marco-TinyBERT-L-2-v2",
-                    architecture="BertForSequenceClassification"),
-    RerankModelInfo("tomaarsen/Qwen3-Reranker-0.6B-seq-cls",
-                    architecture="Qwen3ForSequenceClassification")
+    CLSPoolingRerankModelInfo("cross-encoder/ms-marco-TinyBERT-L-2-v2",
+                              architecture="BertForSequenceClassification"),
+    LASTPoolingRerankModelInfo("tomaarsen/Qwen3-Reranker-0.6B-seq-cls",
+                               architecture="Qwen3ForSequenceClassification")
 ]
 
 

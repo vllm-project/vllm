@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm import SamplingParams
-from vllm.config import LoadFormat
 
 test_model = "openai-community/gpt2"
 
@@ -17,7 +16,6 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95, seed=0)
 
 
 def test_model_loader_download_files(vllm_runner):
-    with vllm_runner(test_model,
-                     load_format=LoadFormat.FASTSAFETENSORS) as llm:
+    with vllm_runner(test_model, load_format="fastsafetensors") as llm:
         deserialized_outputs = llm.generate(prompts, sampling_params)
         assert deserialized_outputs

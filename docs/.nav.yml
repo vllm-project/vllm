@@ -1,5 +1,5 @@
 nav:
-  - Home: 
+  - Home:
     - vLLM: README.md
     - Getting Started:
       - getting_started/quickstart.md
@@ -49,23 +49,18 @@ nav:
     - General:
       - glob: contributing/*
         flatten_single_child_sections: true
-    - Model Implementation: 
+    - Model Implementation:
       - contributing/model/README.md
       - contributing/model/basic.md
       - contributing/model/registration.md
       - contributing/model/tests.md
       - contributing/model/multimodal.md
     - CI: contributing/ci
-    - Design Documents:
-      - V0: design
-      - V1: design/v1
+    - Design Documents: design
   - API Reference:
-    - Summary: api/README.md
-    - Contents:
-      - glob: api/vllm/*
-        preserve_directory_names: true
-  - CLI Reference:
-    - Summary: cli/README.md
+    - api/README.md
+    - api/vllm/*
+  - CLI Reference: cli
   - Community:
     - community/*
     - Blog: https://blog.vllm.ai

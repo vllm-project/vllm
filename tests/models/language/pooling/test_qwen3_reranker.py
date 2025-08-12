@@ -8,15 +8,16 @@ import torch
 from tests.conftest import HfRunner
 from tests.utils import multi_gpu_test
 
-from .mteb_utils import RerankModelInfo, mteb_test_rerank_models
+from ...utils import LASTPoolingRerankModelInfo, RerankModelInfo
+from .mteb_utils import mteb_test_rerank_models
 
 RERANK_MODELS = [
-    RerankModelInfo("Qwen/Qwen3-Reranker-0.6B",
-                    architecture="Qwen3ForSequenceClassification",
-                    enable_test=True),
-    RerankModelInfo("Qwen/Qwen3-Reranker-4B",
-                    architecture="Qwen3ForSequenceClassification",
-                    enable_test=False)
+    LASTPoolingRerankModelInfo("Qwen/Qwen3-Reranker-0.6B",
+                               architecture="Qwen3ForSequenceClassification",
+                               enable_test=True),
+    LASTPoolingRerankModelInfo("Qwen/Qwen3-Reranker-4B",
+                               architecture="Qwen3ForSequenceClassification",
+                               enable_test=False)
 ]
 
 
@@ -83,9 +84,6 @@ def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
         }
     }
 
-    if model_info.name == "Qwen/Qwen3-Reranker-4B":
-        vllm_extra_kwargs["max_num_seqs"] = 1
-
     mteb_test_rerank_models(Qwen3RerankerHfRunner, vllm_runner, model_info,
                             vllm_extra_kwargs)
 
@@ -105,9 +103,6 @@ def test_rerank_models_mteb_tp(vllm_runner,
         },
         "tensor_parallel_size": 2,
     }
-
-    if model_info.name == "Qwen/Qwen3-Reranker-4B":
-        vllm_extra_kwargs["max_num_seqs"] = 1
 
     mteb_test_rerank_models(Qwen3RerankerHfRunner,
                             vllm_runner,

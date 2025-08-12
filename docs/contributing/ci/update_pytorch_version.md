@@ -57,8 +57,7 @@ cc the PyTorch release team to initiate discussion on how to address them.
 
 ## Update CUDA version
 
-The PyTorch release matrix includes both stable and experimental [CUDA versions](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-compatibility-matrix). Due to limitations, only the latest stable CUDA version (for example,
-`torch2.7.0+cu12.6`) is uploaded to PyPI. However, vLLM may require a different CUDA version,
+The PyTorch release matrix includes both stable and experimental [CUDA versions](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-compatibility-matrix). Due to limitations, only the latest stable CUDA version (for example, torch `2.7.1+cu126`) is uploaded to PyPI. However, vLLM may require a different CUDA version,
 such as 12.8 for Blackwell support.
 This complicates the process as we cannot use the out-of-the-box
 `pip install torch torchvision torchaudio` command. The solution is to use
@@ -107,6 +106,7 @@ releases (which would take too much time), they can be built from
 source to unblock the update process.
 
 ### FlashInfer
+
 Here is how to build and install it from source with `torch2.7.0+cu128` in vLLM [Dockerfile](https://github.com/vllm-project/vllm/blob/27bebcd89792d5c4b08af7a65095759526f2f9e1/docker/Dockerfile#L259-L271):
 
 ```bash
@@ -122,25 +122,13 @@ public location for immediate installation, such as [this FlashInfer wheel link]
 team if you want to get the package published there.
 
 ### xFormers
+
 Similar to FlashInfer, here is how to build and install xFormers from source:
 
 ```bash
 export TORCH_CUDA_ARCH_LIST='7.0 7.5 8.0 8.9 9.0 10.0+PTX'
 MAX_JOBS=16 uv pip install --system \
     --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.30"
-```
-
-### Mamba
-
-```bash
-uv pip install --system \
-    --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
-```
-
-### causal-conv1d
-
-```
-uv pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
 ```
 
 ## Update all the different vLLM platforms

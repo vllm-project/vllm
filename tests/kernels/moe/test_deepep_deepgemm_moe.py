@@ -20,7 +20,8 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.platforms import current_platform
 from vllm.utils import has_deep_ep, has_deep_gemm
-from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
+from vllm.utils.deep_gemm import (is_blackwell_deep_gemm_e8m0_used,
+                                  is_deep_gemm_supported)
 
 from .parallel_utils import ProcessGroupInfo, parallel_launch
 from .utils import make_test_weights
@@ -46,7 +47,7 @@ requires_deep_ep = pytest.mark.skipif(
 )
 
 requires_deep_gemm = pytest.mark.skipif(
-    not has_deep_gemm(),
+    not is_deep_gemm_supported(),
     reason="Requires deep_gemm kernels",
 )
 
@@ -369,7 +370,7 @@ NUM_EXPERTS = [32]
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
 @requires_deep_ep
 @requires_deep_gemm
-@pytest.mark.skipif(is_blackwell_deep_gemm_used(),
+@pytest.mark.skipif(is_blackwell_deep_gemm_e8m0_used(),
                     reason="Skipping test for Blackwell DeepGEMM")
 def test_ht_deepep_deepgemm_moe(mnk: tuple[int, int, int], num_experts: int,
                                 topk: int, world_dp_size: tuple[int, int]):
@@ -426,7 +427,7 @@ USE_FP8_DISPATCH = [False]
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
 @requires_deep_ep
 @requires_deep_gemm
-@pytest.mark.skipif(is_blackwell_deep_gemm_used(),
+@pytest.mark.skipif(is_blackwell_deep_gemm_e8m0_used(),
                     reason="Skipping test for Blackwell DeepGEMM")
 def test_ll_deepep_deepgemm_moe(
     mnk: tuple[int, int, int],

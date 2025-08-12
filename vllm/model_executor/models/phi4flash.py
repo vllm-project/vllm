@@ -116,13 +116,8 @@ class SambaYAttention(nn.Module):
             self.Wqkv = nn.Linear(self.hidden_size, op_size, bias=True)
 
         # disable sliding window for the second half of the model
-        sliding_window = config.interleaved_sliding_window[layer_idx]
-        if layer_idx >= config.num_hidden_layers // 2:
-            assert sliding_window is None, \
-                "sliding_window must be none for the second decoder"
-        else:
-            assert sliding_window is not None, \
-                "sliding_window must be set for the first decoder"
+        is_sliding = config.layer_types[layer_idx] == "sliding_attention"
+        sliding_window = config.sliding_window if is_sliding else None
 
         assert self.num_heads % 2 == 0, 'num_heads should be even'
         assert self.num_key_value_heads % 2 == 0, 'num_heads should be even'
@@ -387,7 +382,8 @@ class Phi4Mamba(nn.Module):
                 has_initial_state=attn_metadata.context_lens_tensor > 0,
                 query_start_loc=attn_metadata.query_start_loc)
         else:
-            scan_outputs = selective_state_update(
+            scan_outputs = torch.empty_like(hidden_states.transpose(0, 1))
+            selective_state_update(
                 mamba_cache_params.ssm_state,
                 hidden_states.transpose(0, 1),
                 discrete_time_step.transpose(0, 1),
@@ -400,7 +396,8 @@ class Phi4Mamba(nn.Module):
                 None if self.yoco_kv else gate.transpose(0, 1),
                 time_proj_bias,
                 dt_softplus=True,
-                state_batch_indices=mamba_cache_params.state_indices_tensor)
+                state_batch_indices=mamba_cache_params.state_indices_tensor,
+                out=scan_outputs)
             scan_outputs = scan_outputs.transpose(0, 1)
 
         # 4. Final linear projection
