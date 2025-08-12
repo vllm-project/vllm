@@ -32,6 +32,7 @@ class NixlAgentMetadata(KVConnectorHandshakeMetadata):
     num_blocks: int = field()
     block_len: int = field()
     attn_backend_name: str = field()
+    kv_cache_layout: str = field()
     connector_type: str = "nixl"
 
 
