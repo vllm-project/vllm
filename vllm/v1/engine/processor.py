@@ -247,7 +247,7 @@ class Processor:
                              f"is out of range [0, {data_parallel_size}).")
 
         if arrival_time is None:
-            arrival_time = time.time()
+            arrival_time = time.monotonic()
 
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.
