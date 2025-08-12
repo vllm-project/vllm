@@ -57,9 +57,10 @@ steps:
   - vllm/
   - tests/mq_llm_engine
   - tests/async_engine
-  - tests/test_inputs
+  - tests/test_inputs.py
+  - tests/test_outputs.py
   - tests/multimodal
-  - tests/test_utils
+  - tests/utils_
   - tests/worker
   - tests/standalone_tests/lazy_imports.py
   commands:
@@ -70,7 +71,7 @@ steps:
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s multimodal
-  - pytest -v -s test_utils.py # Utils
+  - pytest -v -s utils_ # Utils
   - pytest -v -s worker # Worker
 
 - label: Python-only Installation Test
