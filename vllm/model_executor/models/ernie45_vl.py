@@ -611,7 +611,8 @@ class VariableResolutionResamplerModel(nn.Module):
         self.use_temporal_conv = config.use_temporal_conv
 
         # compress 2d conv(picture) to 1d
-        self.spatial_dim = self.in_dim * self.spatial_conv_size * self.spatial_conv_size
+        self.spatial_dim = (self.in_dim * self.spatial_conv_size *
+                            self.spatial_conv_size)
         # compress 3d conv(video) to 1d
         self.temporal_dim = (self.in_dim * self.spatial_conv_size *
                              self.spatial_conv_size * self.temporal_conv_size)
@@ -1041,8 +1042,9 @@ class Ernie4_5VLMultiModalProcessor(
                     del processor_output['images']
                 if key == "grid_thw":
                     grid_thw = processor_output['grid_thw']
-                    # Identify elements where the first dimension is greater than 1
-                    # and treat them as the video modality
+                    # Identify elements where the first
+                    # dimension is greater than 1 and
+                    # treat them as the video modality
                     mask = grid_thw[:, 0] > 1
                     processor_output["video_grid_thw"] = grid_thw[mask]
                     processor_output["image_grid_thw"] = grid_thw[~mask]
@@ -1118,10 +1120,12 @@ class Ernie4_5_VLDummyInputsBuilder(
         num_videos = mm_counts.get("video", 0)
         prompt = ""
         for i in range(num_images):
-            prompt += f"Picture {i+1}:<|IMAGE_START|><|image@placeholder|><|IMAGE_END|>"
+            prompt += (f"Picture {i+1}:"
+                       "<|IMAGE_START|><|image@placeholder|><|IMAGE_END|>")
 
         for i in range(num_videos):
-            prompt += f"Video {i+1}:<|VIDEO_START|><|video@placeholder|><|VIDEO_END|>"
+            prompt += (f"Video {i+1}:"
+                       "<|VIDEO_START|><|video@placeholder|><|VIDEO_END|>")
         return prompt
 
     def get_dummy_mm_data(
@@ -1174,7 +1178,8 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
         orig_to_new_prefix={
             "lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
-            # model.resampler_model.-> language_model.model.resampler_model. -> resampler_model.
+            # model.resampler_model.-> language_model.model.resampler_model.
+            # language_model.model.resampler_model. -> resampler_model.
             "language_model.model.resampler_model.": "resampler_model.",
         })
 
@@ -1262,11 +1267,11 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
                 [-2, -1]).repeat_interleave(patch_size_squared, -1))
 
         if not image_processor.image_mean_tensor.is_contiguous():
-            image_processor.image_mean_tensor = image_processor.image_mean_tensor.contiguous(
-            )
+            image_processor.image_mean_tensor = \
+                image_processor.image_mean_tensor.contiguous()
         if not image_processor.image_std_tensor.is_contiguous():
-            image_processor.image_std_tensor = image_processor.image_std_tensor.contiguous(
-            )
+            image_processor.image_std_tensor = \
+                image_processor.image_std_tensor.contiguous()
 
         self.image_processor = image_processor
 
@@ -1281,8 +1286,8 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
                 self.image_processor.image_mean_tensor.to(current_device))
             self.image_processor.image_std_tensor = (
                 self.image_processor.image_std_tensor.to(current_device))
-            pixel_values = self.image_processor.rescale_factor * pixel_values.to(
-                torch.float32)
+            pixel_values = self.image_processor.rescale_factor * \
+                            pixel_values.to(torch.float32)
             pixel_values = (pixel_values -
                             self.image_processor.image_mean_tensor
                             ) / self.image_processor.image_std_tensor
@@ -1294,7 +1299,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
             grid_thw = grid_thw[grid_thw > 0]
             if grid_thw.numel() % 3 != 0:
                 raise ValueError(
-                    f"grid_thw has {grid_thw.numel()} elements after filtering, "
+                    f"grid_thw has {grid_thw.numel()} elements after filtering,"
                     "which is not divisible by 3.")
             grid_thw = grid_thw.reshape(-1, 3)
             grid_thw = F.pad(

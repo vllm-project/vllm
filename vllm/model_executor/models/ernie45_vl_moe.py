@@ -215,7 +215,8 @@ class Ernie4_5_VLMoE(nn.Module):
 
         assert text_moe_layer_start_index <= text_moe_layer_end_index
 
-        if layer_idx >= text_moe_layer_start_index and layer_idx <= text_moe_layer_end_index:
+        if layer_idx >= text_moe_layer_start_index and \
+            layer_idx <= text_moe_layer_end_index:
             self.text_experts_gate = ReplicatedLinear(
                 config.hidden_size,
                 config.moe_num_experts[0],
@@ -243,7 +244,8 @@ class Ernie4_5_VLMoE(nn.Module):
                 prefix=f"{prefix}.mlp")
 
         assert image_moe_layer_start_index <= image_moe_layer_end_index
-        if layer_idx >= image_moe_layer_start_index and layer_idx <= image_moe_layer_end_index:
+        if layer_idx >= image_moe_layer_start_index and \
+            layer_idx <= image_moe_layer_end_index:
             self.image_experts_gate = ReplicatedLinear(
                 config.hidden_size,
                 config.moe_num_experts[1],
@@ -633,7 +635,9 @@ class Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
                 loaded_params.add("lm_head.weight")
                 continue
             # MTP will be supported soon.
-            if "mtp" in name or "vision_model" in name or "resampler_model" in name:
+            if "mtp" in name or \
+               "vision_model" in name or \
+               "resampler_model" in name:
                 continue
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
@@ -661,7 +665,8 @@ class Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
                 if "mlp.experts" in name:
                     moe_offset = int(name.split(".")[-3])
                     image_expert_start_idx = self.config.moe_num_experts[0]
-                    is_text_expert = True if moe_offset <= image_expert_start_idx - 1 else False
+                    is_text_expert = \
+                        moe_offset <= image_expert_start_idx - 1
                     if is_text_expert:
                         name = name.replace(".experts.", ".text_experts.")
                     else:
@@ -678,8 +683,8 @@ class Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
 
                     # Distinguish between image experts and text experts
                     moe_offset = int(name.split(".")[-3])
-                    is_text_expert = True if moe_offset <= self.config.moe_num_experts[
-                        0] - 1 else False
+                    is_text_expert = \
+                        moe_offset <= self.config.moe_num_experts[0] - 1
 
                     name = name.replace(weight_name, param_name)
                     if is_text_expert:

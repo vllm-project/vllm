@@ -27,7 +27,7 @@
 
 import math
 from collections import defaultdict
-from typing import Any, Dict, List, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
@@ -79,11 +79,6 @@ def smart_resize(
         else:
             new_height = max(factor, round_by_factor(height, factor))
             new_width = floor_by_factor(new_height * MAX_RATIO, factor)
-
-        logger.info(
-            f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {max(height, width) / min(height, width)},\
-              resize to {max(new_height, new_width) / min(new_height, new_width)}"
-        )
 
         height = new_height
         width = new_width
@@ -192,7 +187,7 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
         self.is_training = True
         self.role_prefixes = {"system": "", "user": "User: ", "bot": "Assistant: "}
 
-    def _build_token_type_mapping(self) -> Dict[Any, int]:
+    def _build_token_type_mapping(self) -> dict[Any, int]:
         mapping = defaultdict(lambda: IDS_TYPE_FLAG["text"])
         for token in (self.IMG_START, self.IMG_END, self.VID_START, self.VID_END):
             mapping[token] = IDS_TYPE_FLAG["image"]
@@ -201,9 +196,9 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
 
     def __call__(
         self,
-        text: Union[str, List[str]],
-        images: List[Image.Image] = [],
-        videos: List[List[Image.Image]] = [],
+        text: Union[str, list[str]],
+        images: Optional[list[Image.Image]] = None,
+        videos: Optional[list[list[Image.Image]]] = None,
         **kwargs,
     ) -> BatchFeature:
         """
@@ -221,6 +216,11 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
             "pic_cnt": 0,
             "video_cnt": 0,
         }
+
+        if images is None:
+            images = []
+        if videos is None:
+            videos = []
         if not isinstance(text, list):
             text = [text]
 
@@ -246,7 +246,7 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
             outputs.pop(key, None)
 
         outputs = self._pack_outputs(outputs)
-        for key in outputs.keys():
+        for key in outputs:
             if isinstance(outputs[key], np.ndarray):
                 if key in ["images", "grid_thw"]:
                     outputs[key] = torch.tensor(np.array(outputs[key]))
@@ -255,7 +255,7 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
 
         return BatchFeature(data=outputs)
 
-    def _add_special_token(self, token: Union[str, int], outputs: Dict) -> None:
+    def _add_special_token(self, token: Union[str, int], outputs: dict) -> None:
         """add special token to outputs"""
         token_id = (
             token
@@ -268,7 +268,7 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
         outputs["position_ids"].append([pos] * 3)
         outputs["cur_position"] += 1
 
-    def _add_text(self, text: str, outputs: Dict) -> None:
+    def _add_text(self, text: str, outputs: dict) -> None:
         """add text to outputs"""
         tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(text))
         outputs["input_ids"].extend(tokens)
@@ -279,7 +279,7 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
             outputs["position_ids"].append([start + i] * 3)
         outputs["cur_position"] += len(tokens)
 
-    def _add_image(self, img: Image.Image, outputs: Dict) -> None:
+    def _add_image(self, img: Image.Image, outputs: dict) -> None:
         """add image to outputs"""
         outputs["pic_cnt"] += 1
         self._add_special_token(self.IMG_START, outputs)
@@ -317,7 +317,7 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
         self._add_special_token(self.IMG_END, outputs)
 
     def _add_video(
-        self, pixel_stack: List[np.ndarray], outputs: Dict
+        self, pixel_stack: list[np.ndarray], outputs: dict
     ) -> None:
         outputs["video_cnt"] += 1
         self._add_special_token(self.VID_START, outputs)
@@ -359,7 +359,7 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
 
     def _compute_3d_positions(
         self, t: int, h: int, w: int, start_idx: int
-    ) -> List[List[int]]:
+    ) -> list[list[int]]:
         # Downsample time if needed
         t_eff = t // self.temporal_conv_size if t != 1 else 1
         gh, gw = h // self.spatial_conv_size, w // self.spatial_conv_size
@@ -372,7 +372,7 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
             [start_idx + ti, start_idx + hi, start_idx + wi] for ti, hi, wi in coords
         ]
 
-    def _pack_outputs(self, outs: Dict) -> Dict[str, Any]:
+    def _pack_outputs(self, outs: dict) -> dict[str, Any]:
         # Stack or nullify image-related fields
         if not outs["images"]:
             outs["images"] = None

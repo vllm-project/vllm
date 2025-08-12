@@ -41,9 +41,10 @@ class Ernie4_5_VLRotaryEmbedding(MRotaryEmbedding):
             section_t = self.mrope_section[2]  # 20
             assert section_h == section_w
             # Split according to [h w h w h w h w... t t t...]
-            section_cos_t, section_cos_h, section_cos_w = cos[..., -section_t :], \
-                                                            cos[..., : section_h + section_w : 2], \
-                                                            cos[..., 1 : section_h + section_w : 2],
+            section_cos_t = cos[..., -section_t:]
+            section_cos_h = cos[..., :section_h + section_w:2]
+            section_cos_w = cos[..., 1:section_h + section_w:2]
+
             cos_t, cos_h, cos_w = section_cos_t[0], section_cos_h[
                 1], section_cos_w[2]
             cos_hw = torch.stack([cos_h, cos_w],
@@ -51,9 +52,10 @@ class Ernie4_5_VLRotaryEmbedding(MRotaryEmbedding):
                                                  (cos_h.shape[-1] * 2, ))
             cos = torch.cat([cos_hw, cos_t], dim=-1)
 
-            section_sin_t, section_sin_h, section_sin_w = sin[..., -section_t :], \
-                                                            sin[..., : section_h + section_w : 2], \
-                                                            sin[..., 1 : section_h + section_w : 2],
+            section_sin_t = sin[..., -section_t:]
+            section_sin_h = sin[..., :section_h + section_w:2]
+            section_sin_w = sin[..., 1:section_h + section_w:2]
+
             sin_t, sin_h, sin_w = section_sin_t[0], section_sin_h[
                 1], section_sin_w[2]
             sin_hw = torch.stack([sin_h, sin_w],
