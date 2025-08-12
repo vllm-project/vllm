@@ -34,6 +34,10 @@ class Hermes2ProToolParser(ToolParser):
                 "Detected Mistral tokenizer when using a Hermes model")
             self.model_tokenizer = self.model_tokenizer.tokenizer
 
+        # Cache for incomplete delta
+        self.caching_delta: str = ""
+        # Flag to start accumulating delta
+        self.flag_start: bool = False
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id: int = -1
@@ -127,6 +131,10 @@ class Hermes2ProToolParser(ToolParser):
 
         logger.debug("delta_text: %s", delta_text)
         logger.debug("delta_token_ids: %s", delta_token_ids)
+        if self.flag_start:
+            # if we are in the middle of a tool call, cache the delta
+            self.caching_delta += delta_text
+            logger.debug("Caching delta: %s", self.caching_delta)
         # check to see if we should be streaming a tool call - is there a
         if self.tool_call_start_token_id not in current_token_ids:
             logger.debug("No tool call tokens found!")
@@ -151,6 +159,7 @@ class Hermes2ProToolParser(ToolParser):
             if (cur_tool_start_count == cur_tool_end_count
                     and prev_tool_end_count == cur_tool_end_count
                     and self.tool_call_end_token not in delta_text):
+                self.flag_start = False
                 logger.debug("Generating text content! skipping tool parsing.")
                 return DeltaMessage(content=delta_text)
 
@@ -189,6 +198,9 @@ class Hermes2ProToolParser(ToolParser):
                 self.current_tool_id += 1
                 self.current_tool_name_sent = False
                 self.streamed_args_for_tool.append("")
+                self.flag_start = True
+                # Clear delta cache and start next tool call
+                self.caching_delta = ""
                 logger.debug("Starting on a new tool %s", self.current_tool_id)
 
             # case -- we're updating an existing tool call
@@ -317,19 +329,28 @@ class Hermes2ProToolParser(ToolParser):
                                                 ensure_ascii=False)
                 logger.debug("finding %s in %s", delta_text,
                              cur_arguments_json)
-
-                # get the location where previous args differ from current
-                if (delta_text not in cur_arguments_json[:-2]):
-                    return None
-                args_delta_start_loc = cur_arguments_json[:-2]. \
+                
+                 # get the location where previous args differ from current
+                if (delta_text not in cur_arguments_json):
+                    index, substring = self.longest_common_prefix_either_side(cur_arguments_json, delta_text)
+                    if index == -1:
+                        logger.debug("No common prefix found, returning None")
+                        return None
+                    else:
+                        logger.debug("Common prefix found: %s at index %d",
+                                     substring, index)
+                        # If the common prefix is found, we can use it to   
+                        # determine where the delta starts
+                        arguments_delta = cur_arguments_json[:index] + delta_text
+                else:
+                    args_delta_start_loc = cur_arguments_json[:-2]. \
                                            rindex(delta_text) + \
                                            len(delta_text)
 
-                # use that to find the actual delta
-                arguments_delta = cur_arguments_json[:args_delta_start_loc]
-                logger.debug("First tokens in arguments received: %s",
-                             arguments_delta)
-
+                    # use that to find the actual delta
+                    arguments_delta = cur_arguments_json[:args_delta_start_loc]
+                logger.debug("First tokens in arguments received: %s", arguments_delta)
+                
                 delta = DeltaMessage(tool_calls=[
                     DeltaToolCall(index=self.current_tool_id,
                                   function=DeltaFunctionCall(
@@ -343,8 +364,12 @@ class Hermes2ProToolParser(ToolParser):
             elif cur_arguments and prev_arguments:
                 if isinstance(delta_text, str) and len(delta_text.rstrip(
                 )) >= 1 and delta_text.rstrip()[-1] == '}':
-                    delta_text = delta_text.rstrip()[:-1]
-
+                    logger.debug("delta_text ends with '}' - assuming it's a complete JSON")
+                    # if the delta text is a complete JSON, we can just use it
+                    # as the arguments
+                    if self.is_valid_json(self.caching_delta):
+                        logger.debug("caching_delta is valid JSON")
+                        delta_text = delta_text.rstrip()[:-1]
                 logger.debug("got diff %s", delta_text)
 
                 delta = DeltaMessage(tool_calls=[
@@ -369,3 +394,36 @@ class Hermes2ProToolParser(ToolParser):
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
             return None  # do not stream a delta. skip this token ID.
+    
+    def longest_common_prefix_either_side(self, p: str, q: str):
+        def prefix_in_other(a, b):
+            for length in range(len(a), 0, -1):
+                prefix = a[:length]
+                if prefix in b:
+                    return prefix
+            return ""
+
+        p_prefix = prefix_in_other(p, q)
+        q_prefix = prefix_in_other(q, p)
+
+        if len(p_prefix) > len(q_prefix):
+            return 0, p_prefix  # Start index in p is 0
+        elif len(q_prefix) > 0:
+            # Start index in p corresponds to the start index of q_prefix in p
+            start_index = p.find(q_prefix)
+            return start_index, q_prefix
+        else:
+            return -1, ""
+    
+    def is_valid_json(self, s: str) -> bool:
+        """
+        Check if a string is valid JSON format.
+
+        :param s: String to be checked
+        :return: True if valid JSON, otherwise False
+        """
+        try:
+            json.loads(s)
+            return True
+        except (ValueError, TypeError):
+            return False
