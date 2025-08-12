@@ -1150,6 +1150,10 @@ class Scheduler(SchedulerInterface):
         # if finished_recving: add to state so we can
             scheduler the request during the next step.
         """
+
+        if self.connector is not None:
+            self.connector.update_connector_output(kv_connector_output)
+
         # KV Connector:: update recv and send status from last step.
         for req_id in (kv_connector_output.finished_recving or ()):
             logger.debug("Finished recving KV transfer for request %s", req_id)

@@ -4,8 +4,8 @@
 import pytest
 import torch
 
-from vllm.model_executor.models.fuyu import FuyuImagePatchInputs
 from vllm.model_executor.models.glm4_1v import Glm4vImageEmbeddingInputs
+from vllm.model_executor.models.granite_speech import GraniteSpeechAudioInputs
 from vllm.model_executor.models.phi3v import Phi3VImagePixelInputs
 
 
@@ -31,6 +31,31 @@ def test_tensor_schema_constant_dim_failure():
             data=torch.randn(16, 64, 4, 32, 32),  # dim[2] = 4
             image_sizes=torch.randint(0, 256, (16, 2)),
         )
+
+
+def test_tensor_schema_invalid_types_in_list():
+    with pytest.raises(ValueError, match="is not a torch.Tensor"):
+        Phi3VImagePixelInputs(
+            data=[
+                torch.randn(64, 3, 32, 32),
+                "not_a_tensor",
+                torch.randn(64, 3, 32, 32),
+            ],
+            image_sizes=torch.randint(0, 256, (3, 2)),
+        )
+
+
+def test_tensor_schema_rank_mismatch():
+    with pytest.raises(ValueError, match="has rank 3 but expected 5"):
+        Phi3VImagePixelInputs(
+            data=torch.randn(16, 64, 3),
+            image_sizes=torch.randint(0, 256, (16, 2)),
+        )
+
+
+def test_tensor_schema_missing_required_field():
+    with pytest.raises(ValueError, match="Required field 'data' is missing"):
+        Phi3VImagePixelInputs(image_sizes=torch.randint(0, 256, (16, 2)), )
 
 
 def test_tensor_schema_symbolic_dim_mismatch():
@@ -129,23 +154,27 @@ def test_tensor_schema_with_invalid_resolve_binding_dims():
 
 
 def test_tensor_schema_with_list_of_symbolic_dim():
-    flat_data = torch.stack([torch.randn(768) for _ in range(3)])  # (bn=3, fn)
-    patches_per_image = [64, 64, 64]  # len = bn = 3
+    input_features = torch.randn(3, 10, 160)  # (b=3, fi=10, 160)
+    input_features_mask = torch.randn(3, 8)  # (b=3, fo=8)
+    audio_embed_sizes = [8, 8, 8]  # len = b = 3
 
-    FuyuImagePatchInputs(
-        flat_data=flat_data,
-        patches_per_image=patches_per_image,
+    GraniteSpeechAudioInputs(
+        input_features=input_features,
+        input_features_mask=input_features_mask,
+        audio_embed_sizes=audio_embed_sizes,
     )
 
 
 def test_tensor_schema_with_list_of_symbolic_dim_mismatch_in_length():
-    flat_data = torch.stack([torch.randn(768) for _ in range(4)])  # (bn=4, fn)
-    patches_per_image = [64, 64, 64]  # len = 3 ≠ bn
+    input_features = torch.randn(4, 10, 160)  # (b=4, fi=10, 160)
+    input_features_mask = torch.randn(4, 8)  # (b=4, fo=8)
+    audio_embed_sizes = [8, 8, 8]  # len = 3 ≠ b
 
-    with pytest.raises(ValueError, match="expected 'bn'=4, got 3"):
-        FuyuImagePatchInputs(
-            flat_data=flat_data,
-            patches_per_image=patches_per_image,
+    with pytest.raises(ValueError, match="expected 'b'=4, got 3"):
+        GraniteSpeechAudioInputs(
+            input_features=input_features,
+            input_features_mask=input_features_mask,
+            audio_embed_sizes=audio_embed_sizes,
         )
 
 

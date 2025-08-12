@@ -126,6 +126,29 @@ def run_chameleon(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+def run_command_a_vision(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "CohereLabs/command-a-vision-07-2025"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=32768,
+        tensor_parallel_size=4,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    prompts = [
+        f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|><|IMG_PATCH|>{question}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Deepseek-VL2
 def run_deepseek_vl2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -211,7 +234,33 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
         )
         for question in questions
     ]
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
 
+
+# Gemma3N
+def run_gemma3n(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "google/gemma-3n-E2B-it"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=2048,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+        enforce_eager=True,
+    )
+
+    prompts = [
+        (
+            "<start_of_turn>user\n"
+            f"<image_soft_token>{question}<end_of_turn>\n"
+            "<start_of_turn>model\n"
+        )
+        for question in questions
+    ]
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
@@ -1391,10 +1440,12 @@ model_example_map = {
     "aya_vision": run_aya_vision,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
+    "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
     "florence2": run_florence2,
     "fuyu": run_fuyu,
     "gemma3": run_gemma3,
+    "gemma3n": run_gemma3n,
     "glm4v": run_glm4v,
     "glm4_1v": run_glm4_1v,
     "h2ovl_chat": run_h2ovl,
