@@ -130,8 +130,9 @@ def test_short_prompt_lifecycle():
     # Confirm we do not have any memory leaks after req lifecycle.
     # We need to mark sending finish to clear data for persistent batch.
     scheduler_output = scheduler.schedule()
-    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
-    model_runner_output.finished_sending = [request.request_id]
+    # Use create_model_runner_output to pass kv_connector_output along
+    model_runner_output = create_model_runner_output(
+        reqs=[request], finished_sending=[request.request_id])
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)
 
