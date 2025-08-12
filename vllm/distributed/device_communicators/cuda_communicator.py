@@ -179,7 +179,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         return output.movedim(0, dim).contiguous()
 
     def send(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
-        """Sends a tensor to the destination rank in a non-blocking way"""
+        """Sends a tensor to the destination rank in a blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
@@ -236,7 +236,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             input_size = input_.size()
             if sizes is not None:
                 assert len(sizes) == world_size
-                assert input_.shape[dim] == sizes[self.rank_in_group]
+                assert input_.shape[dim] == sizes[self.rank_in_group], (
+                    f"{input_.shape[dim]} != {sizes[self.rank_in_group]}")
                 output_size = (sum(sizes), ) + input_size[1:]
             else:
                 output_size = (input_size[0] * world_size, ) + input_size[1:]

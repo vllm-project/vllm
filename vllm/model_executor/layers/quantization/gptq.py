@@ -10,10 +10,11 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_linear_quant_method)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
@@ -110,8 +111,23 @@ class GPTQConfig(QuantizationConfig):
         return cls(weight_bits, group_size, desc_act, lm_head_quantized,
                    dynamic)
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["GPTQLinearMethod"]:
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> Optional[Union["GPTQLinearMethod", "QuantizeMethodBase"]]:
+        if isinstance(layer, FusedMoE):
+            # GPTQ MoE support: fall back to MoeWNA16 for broad compatibility
+            from .moe_wna16 import MoeWNA16Config
+
+            config = {
+                "quant_method": "gptq",
+                "bits": self.weight_bits,
+                "group_size": self.group_size,
+                "sym": True,  # GPTQ typically uses symmetric quantization
+                "lm_head": False,
+            }
+            return MoeWNA16Config.from_config(config).get_quant_method(
+                layer, prefix)
+
         return get_linear_quant_method(self, layer, prefix, GPTQLinearMethod)
 
 

@@ -119,6 +119,7 @@ export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 ```
 
 ### Using API Endpoints
+
 Loading a LoRA Adapter:
 
 To dynamically load a LoRA adapter, send a POST request to the `/v1/load_lora_adapter` endpoint with the necessary
@@ -156,6 +157,7 @@ curl -X POST http://localhost:8000/v1/unload_lora_adapter \
 ```
 
 ### Using Plugins
+
 Alternatively, you can use the LoRAResolver plugin to dynamically load LoRA adapters. LoRAResolver plugins enable you to load LoRA adapters from both local and remote sources such as local file system and S3. On every request, when there's a new model name that hasn't been loaded yet, the LoRAResolver will try to resolve and load the corresponding LoRA adapter.
 
 You can set up multiple LoRAResolver plugins if you want to load LoRA adapters from different sources. For example, you might have one resolver for local files and another for S3 storage. vLLM will load the first LoRA adapter that it finds.

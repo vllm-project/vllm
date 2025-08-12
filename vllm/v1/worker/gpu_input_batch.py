@@ -337,7 +337,9 @@ class InputBatch:
                 self.generators[req_index] = request.generator
 
             if sampling_params.logprobs is not None:
-                self.num_logprobs[req_id] = sampling_params.logprobs
+                self.num_logprobs[req_id] = (self.vocab_size
+                                             if sampling_params.logprobs == -1
+                                             else sampling_params.logprobs)
             if sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[
                     req_id] = sampling_params.prompt_logprobs
@@ -389,7 +391,7 @@ class InputBatch:
 
     def remove_request(self, req_id: str) -> Optional[int]:
         """This method must always be followed by a call to condense().
-        
+
         Args:
           req_id: request to remove
 
@@ -590,7 +592,7 @@ class InputBatch:
 
     def refresh_metadata(self):
         """Apply batch updates, reset input batch at end of step
-        
+
         * Apply batch add/remove/permute to logits procs' states
         * If batch state is modified, update sampling metadata
         """

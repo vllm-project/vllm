@@ -17,7 +17,7 @@ from vllm.v1.core.kv_cache_utils import (
     estimate_max_model_len, generate_block_hash_extra_keys,
     get_kv_cache_config, get_max_concurrency_for_kv_cache_config,
     hash_block_tokens, hash_request_tokens, init_none_hash,
-    unify_kv_cache_configs)
+    is_kv_cache_type_uniform, unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
                                         SlidingWindowSpec)
@@ -112,9 +112,9 @@ def test_kv_cache_block():
     assert block.block_hash is None
 
     # Test reference count manipulation
-    block.incr_ref()
+    block.ref_cnt += 1
     assert block.ref_cnt == 1
-    block.decr_ref()
+    block.ref_cnt -= 1
     assert block.ref_cnt == 0
 
     # Test block hash setting and resetting
@@ -685,6 +685,38 @@ def test_merge_kv_cache_spec():
     assert merged_layer_spec.sliding_window == 1
 
 
+def test_is_kv_cache_type_uniform():
+    kv_cache_spec = {
+        "layer_1": new_kv_cache_spec(num_kv_heads=32),
+        "layer_2": new_kv_cache_spec(num_kv_heads=32),
+    }
+    assert is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_kv_cache_spec(num_kv_heads=32),
+        "layer_2": new_kv_cache_spec(num_kv_heads=32, sliding_window=1),
+    }
+    assert is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_kv_cache_spec(num_kv_heads=32),
+        "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+    }
+    assert not is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+        "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+    }
+    assert is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+        "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=2),
+    }
+    assert not is_kv_cache_type_uniform(kv_cache_spec)
+
+
 @pytest.mark.parametrize(
     ("model_id", "max_model_len", "want_estimated_max_len"), [
         ("Qwen/Qwen1.5-7B", 16385, 16384),
@@ -695,11 +727,7 @@ def test_estimate_max_model_len(model_id, max_model_len,
     # Create a VllmConfig
     model_config = ModelConfig(
         model_id,
-        task="generate",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
+        runner="generate",
         dtype="float16",
         max_model_len=max_model_len,
     )
@@ -733,11 +761,7 @@ def test_get_max_concurrency_for_kv_cache_config():
     max_model_len = 16384
     model_config = ModelConfig(
         model_id,
-        task="generate",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
+        runner="generate",
         dtype="float16",
         max_model_len=max_model_len,
     )

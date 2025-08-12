@@ -20,9 +20,8 @@ MODEL_NAME = "facebook/opt-125m"
 @pytest.fixture(scope="module")
 def default_server_args():
     return [
-        # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "bfloat16",
+        "float32",
         "--max-model-len",
         "2048",
         "--max-num-seqs",

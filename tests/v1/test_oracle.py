@@ -12,8 +12,6 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 UNSUPPORTED_MODELS_V1 = [
     "openai/whisper-large-v3",  # transcription
     "facebook/bart-large-cnn",  # encoder decoder
-    "state-spaces/mamba-130m-hf",  # mamba1
-    "BAAI/bge-m3",  # embedding
 ]
 
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
@@ -46,13 +44,6 @@ def test_unsupported_configs(monkeypatch):
                 speculative_config={
                     "model": MODEL,
                 },
-            ).create_engine_config()
-
-        with pytest.raises(NotImplementedError):
-            AsyncEngineArgs(
-                model=MODEL,
-                guided_decoding_backend="lm-format-enforcer",
-                guided_decoding_disable_fallback=True,
             ).create_engine_config()
 
         with pytest.raises(NotImplementedError):

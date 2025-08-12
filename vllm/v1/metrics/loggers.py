@@ -6,7 +6,6 @@ import time
 from abc import ABC, abstractmethod
 from typing import Callable, Optional, Union
 
-import numpy as np
 import prometheus_client
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
@@ -69,18 +68,20 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_log_time = now
 
         # Tracked stats over current local logging interval.
-        self.num_prompt_tokens: list[int] = []
-        self.num_generation_tokens: list[int] = []
+        self.num_prompt_tokens: int = 0
+        self.num_generation_tokens: int = 0
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
-        self.num_prompt_tokens.append(iteration_stats.num_prompt_tokens)
-        self.num_generation_tokens.append(
-            iteration_stats.num_generation_tokens)
+        self.num_prompt_tokens += iteration_stats.num_prompt_tokens
+        self.num_generation_tokens += iteration_stats.num_generation_tokens
 
-    def _get_throughput(self, tracked_stats: list[int], now: float) -> float:
+    def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
-        return float(np.sum(tracked_stats) / (now - self.last_log_time))
+        delta_time = now - self.last_log_time
+        if delta_time <= 0.0:
+            return 0.0
+        return float(tracked_stats / delta_time)
 
     def record(self,
                scheduler_stats: Optional[SchedulerStats],

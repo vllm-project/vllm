@@ -76,10 +76,6 @@ def get_vllm_config():
     )
     model_config = ModelConfig(
         model="facebook/opt-125m",
-        task="generate",
-        tokenizer="facebook/opt-125m",
-        tokenizer_mode="auto",
-        trust_remote_code=True,
         dtype="float16",
         seed=42,
     )
@@ -421,12 +417,12 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
         return rnd_stride
 
     # Patch the attention backend class and re-trigger the KV cache creation.
-    for attn_backend in model_runner.attn_backends:
+    for attn_group in model_runner._attn_group_iterator():
+        attn_backend = attn_group.backend
         monkeypatch.setattr(attn_backend, "get_kv_cache_stride_order",
                             rnd_stride_order)
 
-    model_runner.attn_backends = []
-    model_runner.attn_metadata_builders = []
+    model_runner.attn_groups = []
     model_runner.initialize_kv_cache(model_runner.kv_cache_config)
 
     # Shape is unchanged, but layout may differ
@@ -460,9 +456,14 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
         {"load_config": {
             "load_format": original_load_format
         }})
-    model_runner_2.load_model()  # Load real weights inplace
+    model_runner_2.reload_weights()  # Load real weights inplace
     assert str(model_runner.get_model().state_dict()) == str(
         model_runner_2.get_model().state_dict())
+
+
+def test_reload_weights_before_load_model(model_runner):
+    with pytest.raises(AssertionError):
+        model_runner.reload_weights()
 
 
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
@@ -744,7 +745,8 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
     layer_4 = "model.layers.4.mixer"
     layer_5 = "model.layers.5.mixer"
 
-    with set_current_vllm_config(vllm_config):
+    with set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
         hf_config = vllm_config.model_config.hf_config
         fwd_context = {}
         for key in [layer_0, layer_1]:
