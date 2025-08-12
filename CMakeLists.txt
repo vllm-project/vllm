@@ -367,6 +367,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       SRCS "${MARLIN_SRCS}"
       CUDA_ARCHS "${MARLIN_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${MARLIN_SRCS}")
+    set_source_files_properties("csrc/quantization/gptq_marlin/gptq_marlin.cu"
+      PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+
     message(STATUS "Building Marlin kernels for archs: ${MARLIN_ARCHS}")
   else()
     message(STATUS "Not building Marlin kernels as no compatible archs found"
