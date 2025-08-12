@@ -41,14 +41,21 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.distributed.communication_op import tensor_model_parallel_all_gather
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
+# yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
+                                               MergedReplicatedLinear,
                                                QKVParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
+# yapf: enable
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
@@ -170,19 +177,25 @@ class Qwen2_5_VisionMLP(nn.Module):
                  bias: bool = False,
                  act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+                 prefix: str = "",
+                 use_data_parallel: bool = False):
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
+        cls_gate_up_proj = (MergedReplicatedLinear if use_data_parallel else
+                            MergedColumnParallelLinear)
+        self.gate_up_proj = cls_gate_up_proj(
             input_size=in_features,
             output_sizes=[hidden_features] * 2,  # [gate_proj, up_proj]
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj")
-        self.down_proj = RowParallelLinear(hidden_features,
-                                           in_features,
-                                           bias=bias,
-                                           quant_config=quant_config,
-                                           prefix=f"{prefix}.down_proj")
+
+        cls_down_proj = (ReplicatedLinear
+                         if use_data_parallel else RowParallelLinear)
+        self.down_proj = cls_down_proj(hidden_features,
+                                       in_features,
+                                       bias=bias,
+                                       quant_config=quant_config,
+                                       prefix=f"{prefix}.down_proj")
         self.act_fn = act_fn
 
     def forward(self, x: torch.Tensor):
@@ -211,6 +224,271 @@ def all_gather_interleave(local_tensor, hidden_size: int, tp_size: int):
     return result_tensor
 
 
+def get_load_balance_indices(sizes, num_gpus=2, min_samples_per_gpu=1):
+    """
+    Generate shuffle and unshuffle indices for load balancing across GPUs.
+    Ensures each GPU gets at least min_samples_per_gpu samples.
+    
+    Args:
+        sizes: List or tensor of flatten image sizes
+        num_gpus: Number of GPUs to balance across
+        min_samples_per_gpu: Minimum samples each GPU should get
+    
+    Returns:
+        shuffle_indices: Indices to reorder data for balanced loading
+        unshuffle_indices: Indices to restore original order
+        gpu_sample_counts: Number of samples assigned to each GPU
+    """
+    sizes = torch.tensor(sizes) if not isinstance(sizes,
+                                                  torch.Tensor) else sizes
+    # Ensure sizes is on CPU for consistent device handling
+    sizes = sizes.cpu()
+    n_samples = len(sizes)
+
+    # Handle edge cases
+    if n_samples == 0:
+        return torch.tensor([]), torch.tensor([]), torch.zeros(num_gpus,
+                                                               dtype=torch.int)
+
+    if n_samples < num_gpus:
+        # If we have fewer samples than GPUs, some GPUs will be idle
+        # Assign one sample per GPU for available samples
+        shuffle_indices = torch.arange(n_samples)
+        unshuffle_indices = torch.arange(n_samples)
+        gpu_sample_counts = torch.zeros(num_gpus, dtype=torch.int)
+        gpu_sample_counts[:n_samples] = 1
+        return shuffle_indices, unshuffle_indices, gpu_sample_counts
+
+    # Sort indices by size (descending order for better balancing)
+    sorted_indices = torch.argsort(sizes, descending=True)
+
+    # Phase 1: Ensure minimum samples per GPU
+    gpu_assignments = [[] for _ in range(num_gpus)]
+    # Keep gpu_loads on CPU to match sizes device
+    gpu_loads = torch.zeros(
+        num_gpus,
+        dtype=sizes.dtype,
+        device=sizes.device,
+    )
+    used_indices = set()
+
+    # Assign minimum samples to each GPU
+    # (round-robin with smallest samples first)
+    small_to_large_indices = torch.argsort(sizes, descending=False)
+
+    for gpu_id in range(num_gpus):
+        samples_assigned = 0
+        for idx in small_to_large_indices:
+            if idx.item(
+            ) not in used_indices and samples_assigned < min_samples_per_gpu:
+                gpu_assignments[gpu_id].append(idx.item())
+                gpu_loads[gpu_id] += sizes[idx]
+                used_indices.add(idx.item())
+                samples_assigned += 1
+
+                if samples_assigned >= min_samples_per_gpu:
+                    break
+
+    # Phase 2: Distribute remaining samples using greedy load balancing
+    remaining_indices = [
+        idx for idx in sorted_indices if idx.item() not in used_indices
+    ]
+
+    for idx in remaining_indices:
+        size = sizes[idx]
+        # Find GPU with minimum current load
+        min_gpu = torch.argmin(gpu_loads)
+        gpu_assignments[min_gpu.item()].append(idx.item())
+        gpu_loads[min_gpu] += size
+
+    # Create shuffle indices by concatenating GPU assignments
+    shuffle_indices = []
+    gpu_sample_counts = torch.zeros(num_gpus, dtype=torch.int)
+
+    for gpu_id in range(num_gpus):
+        shuffle_indices.extend(gpu_assignments[gpu_id])
+        gpu_sample_counts[gpu_id] = len(gpu_assignments[gpu_id])
+
+    shuffle_indices = torch.tensor(shuffle_indices)
+
+    # Create unshuffle indices (inverse permutation)
+    unshuffle_indices = torch.zeros_like(shuffle_indices)
+    unshuffle_indices[shuffle_indices] = torch.arange(len(shuffle_indices))
+
+    return shuffle_indices, unshuffle_indices, gpu_sample_counts
+
+
+def run_dp_sharded_vision_model(
+    vision_model: torch.nn.Module,
+    pixel_values: torch.Tensor,
+    grid_thw_list: list[list[int]],
+) -> torch.Tensor:
+    """Run a vision model with data parallelism (DP) sharding. The function 
+    will shard the input image tensor on the first dimension and run the vision
+    model
+    Args:
+        vision_model (torch.nn.Module): Vision model.
+        pixel_values (torch.Tensor): Image/Video input tensor.
+        grid_thw_list: List of grid dimensions for each image
+    Returns:
+        torch.Tensor: Output image embeddings
+    """
+
+    image_grid_thw = torch.tensor(grid_thw_list, device=pixel_values.device)
+
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank_local = get_tensor_model_parallel_rank()
+
+    # pixel_values: torch.Size([15984, 1176])
+    # image_grid_thw: [
+    #     [1, 42, 74], [1, 52, 74], [1, 74, 56],
+    #     [1, 66, 74], [1, 66, 74]
+    # ]
+    patches_per_image = image_grid_thw.prod(-1)
+    # print(f"patches_per_image: {patches_per_image}")
+
+    # patches_per_image: [31752, 38016, 41440, 41616, 41616]
+
+    cum_patches_per_image = torch.cumsum(patches_per_image, dim=0)
+    # Add 0 at the beginning for easier indexing
+    cum_patches_per_image = torch.cat([
+        torch.tensor([0], device=cum_patches_per_image.device),
+        cum_patches_per_image
+    ])
+    # print(f"cum_patches_per_image: {cum_patches_per_image}")
+    # cum_patches_per_image: [0, 31752, 69768, 111208, 152824, 194440]
+
+    if patches_per_image.ndim == 1:
+        patches_per_image = patches_per_image.unsqueeze(0)
+
+    # Get load balancing indices (allow zero load on some GPUs)
+    (image_to_tp_rank, unshuffle_indices, gpu_sample_counts) \
+    = get_load_balance_indices(
+        patches_per_image.squeeze(0), tp_size, min_samples_per_gpu=0)
+
+    # Create a mapping from image index to rank
+    image_is_in_rank = torch.zeros(
+        (tp_size, len(patches_per_image.squeeze(0))), dtype=torch.bool)
+    current_idx = 0
+    for rank in range(tp_size):
+        count = gpu_sample_counts[rank]
+        if count > 0:
+            rank_images = image_to_tp_rank[current_idx:current_idx + count]
+            image_is_in_rank[rank, rank_images] = True
+            current_idx += count
+
+    # print(f"image_to_tp_rank: {image_to_tp_rank}")
+    # print(f"unshuffle_indices: {unshuffle_indices}")
+    # print(f"gpu_sample_counts: {gpu_sample_counts}")
+    # print(f"image_is_in_rank: {image_is_in_rank}")
+
+    # Get the local images assigned to this rank
+    image_idxs_local = image_is_in_rank[tp_rank_local].nonzero().squeeze(-1)
+    # Rank 0: image_idxs_local: [0, 2]
+    # Rank 1: image_idxs_local: [1, 3, 4]
+
+    # Get the pixel values for the local images based on the image_idxs_local
+    if len(image_idxs_local) > 0:
+        pixel_values_local = torch.cat([
+            pixel_values[cum_patches_per_image[i]:cum_patches_per_image[i + 1]]
+            for i in image_idxs_local.tolist()
+        ])
+    else:
+        # Handle case where this rank has no images
+        pixel_values_local = torch.empty((0, pixel_values.shape[1]),
+                                         device=pixel_values.device,
+                                         dtype=pixel_values.dtype)
+
+    # Rank 0: pixel_values_local: torch.Size([31752 + 41440, 1176])
+    # Rank 1: pixel_values_local: torch.Size([38016 + 41616 + 41616, 1176])
+
+    embed_dim_reduction_factor = (vision_model.spatial_merge_size *
+                                  vision_model.spatial_merge_size)
+
+    # Calculate grouped pixel values lengths for each rank
+    grouped_pixel_values_len = []
+    for rank in range(tp_size):
+        rank_images = image_is_in_rank[rank].nonzero().squeeze(-1)
+        if len(rank_images) > 0:
+            total_patches = sum(
+                patches_per_image.squeeze(0)[i] for i in rank_images.tolist())
+            grouped_pixel_values_len.append(total_patches.item())
+        else:
+            grouped_pixel_values_len.append(0)
+
+    # Find the max length across all ranks
+    max_len_per_rank = max(
+        grouped_pixel_values_len) // embed_dim_reduction_factor
+
+    local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local.tolist()]
+    # Run the vision model on the local pixel_values_local
+    if pixel_values_local.shape[0] > 0:
+        image_embeds_local = vision_model(pixel_values_local,
+                                          local_grid_thw_list)
+    else:
+        # Handle empty case
+        image_embeds_local = torch.empty((0, vision_model.out_hidden_size),
+                                         device=pixel_values.device,
+                                         dtype=pixel_values.dtype)
+
+    # Pad the output based on max_len_per_rank
+    current_len = image_embeds_local.shape[0]
+    if current_len < max_len_per_rank:
+        padding_size = max_len_per_rank - current_len
+        padding = torch.zeros((padding_size, image_embeds_local.shape[1]),
+                              device=image_embeds_local.device,
+                              dtype=image_embeds_local.dtype)
+        image_embeds_local_padded = torch.cat([image_embeds_local, padding],
+                                              dim=0)
+    else:
+        image_embeds_local_padded = image_embeds_local
+
+    # Do all_gather to collect embeddings from all ranks
+    gathered_embeds = tensor_model_parallel_all_gather(
+        image_embeds_local_padded, dim=0)
+    # Shape: [tp_size * max_len_per_rank, hidden_size]
+
+    # Remove padding and reconstruct per-rank embeddings
+    rank_embeddings = []
+    for rank in range(tp_size):
+        start_idx = rank * max_len_per_rank
+        end_idx = start_idx + (grouped_pixel_values_len[rank] //
+                               embed_dim_reduction_factor)
+        rank_embeddings.append(gathered_embeds[start_idx:end_idx])
+
+    # Reconstruct embeddings in the shuffled order
+    shuffled_embeddings = []
+    current_idx = 0
+    for rank in range(tp_size):
+        count = gpu_sample_counts[rank]
+        if count > 0:
+            # Get images assigned to this rank in shuffled order
+            rank_images = image_to_tp_rank[current_idx:current_idx + count]
+            rank_embed = rank_embeddings[rank]
+
+            # Split rank embeddings back to individual images
+            embed_start = 0
+            for img_idx in rank_images:
+                img_patches = patches_per_image.squeeze(
+                    0)[img_idx] // embed_dim_reduction_factor
+                img_embed = rank_embed[embed_start:embed_start + img_patches]
+                shuffled_embeddings.append(img_embed)
+                embed_start += img_patches
+
+            current_idx += count
+
+    # Unshuffle to restore original order
+    original_order_embeddings = [None] * len(shuffled_embeddings)
+    for shuffled_idx, original_idx in enumerate(unshuffle_indices):
+        original_order_embeddings[original_idx] = shuffled_embeddings[
+            shuffled_idx]
+
+    # Concatenate all embeddings in original order
+    final_embeddings = torch.cat(original_order_embeddings, dim=0)
+
+    return final_embeddings
+
+
 class Qwen2_5_VisionAttention(nn.Module):
 
     def __init__(
@@ -220,28 +498,42 @@ class Qwen2_5_VisionAttention(nn.Module):
         projection_size: int,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
-        self.tp_size = parallel_state.get_tensor_model_parallel_world_size()
+        self.tp_size = (1 if use_data_parallel else
+                        parallel_state.get_tensor_model_parallel_world_size())
         self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads)
         self.num_attention_heads_per_partition = dist_utils.divide(
             num_heads, self.tp_size)
 
-        self.qkv = QKVParallelLinear(
-            hidden_size=embed_dim,
-            head_size=self.hidden_size_per_attention_head,
-            total_num_heads=num_heads,
-            total_num_kv_heads=num_heads,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv")
-        self.proj = RowParallelLinear(input_size=projection_size,
-                                      output_size=embed_dim,
-                                      quant_config=quant_config,
-                                      prefix=f"{prefix}.proj")
+        if use_data_parallel:
+            self.qkv = ReplicatedLinear(embed_dim,
+                                        self.hidden_size_per_attention_head *
+                                        3 * num_heads,
+                                        bias=True,
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.qkv")
+
+        else:
+            self.qkv = QKVParallelLinear(
+                hidden_size=embed_dim,
+                head_size=self.hidden_size_per_attention_head,
+                total_num_heads=num_heads,
+                total_num_kv_heads=num_heads,
+                bias=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv")
+
+        cls_proj = (ReplicatedLinear
+                    if use_data_parallel else RowParallelLinear)
+        self.proj = cls_proj(input_size=projection_size,
+                             output_size=embed_dim,
+                             quant_config=quant_config,
+                             prefix=f"{prefix}.proj")
 
         # Detect attention implementation.
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
@@ -302,8 +594,6 @@ class Qwen2_5_VisionAttention(nn.Module):
             k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
 
         if self.is_flash_attn_backend:
-            # from vllm_flash_attn.flash_attn_interface import (
-            #   flash_attn_varlen_func)
             if self.attn_backend == _Backend.ROCM_AITER_FA:
                 from aiter import flash_attn_varlen_func
             else:
@@ -370,23 +660,27 @@ class Qwen2_5_VisionBlock(nn.Module):
         norm_layer: Optional[Callable[[int], nn.Module]] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
-        self.attn = Qwen2_5_VisionAttention(embed_dim=dim,
-                                            num_heads=num_heads,
-                                            projection_size=dim,
-                                            quant_config=quant_config,
-                                            prefix=f"{prefix}.attn")
+        self.attn = Qwen2_5_VisionAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            projection_size=dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            use_data_parallel=use_data_parallel)
         self.mlp = Qwen2_5_VisionMLP(dim,
                                      mlp_hidden_dim,
                                      act_fn=act_fn,
                                      bias=True,
                                      quant_config=quant_config,
-                                     prefix=f"{prefix}.mlp")
+                                     prefix=f"{prefix}.mlp",
+                                     use_data_parallel=use_data_parallel)
 
     def forward(
             self,
@@ -445,24 +739,30 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
         spatial_merge_size: int = 2,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = context_dim * (spatial_merge_size**2)
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.ln_q = norm_layer(context_dim)
+
+        cls_fc1 = (ReplicatedLinear
+                   if use_data_parallel else ColumnParallelLinear)
+        cls_fc2 = (ReplicatedLinear
+                   if use_data_parallel else RowParallelLinear)
         self.mlp = nn.ModuleList([
-            ColumnParallelLinear(self.hidden_size,
-                                 self.hidden_size,
-                                 bias=True,
-                                 quant_config=quant_config,
-                                 prefix=f"{prefix}.mlp.0"),
+            cls_fc1(self.hidden_size,
+                    self.hidden_size,
+                    bias=True,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp.0"),
             nn.GELU(),
-            RowParallelLinear(self.hidden_size,
-                              d_model,
-                              bias=True,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.mlp.2"),
+            cls_fc2(self.hidden_size,
+                    d_model,
+                    bias=True,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp.2"),
         ])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -514,6 +814,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         norm_eps: float = 1e-6,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
@@ -523,6 +824,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         depth = vision_config.depth
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
+        self.use_data_parallel = use_data_parallel
+        self.out_hidden_size = vision_config.out_hidden_size
 
         # args for get_window_index_thw
         self.window_size = vision_config.window_size
@@ -550,7 +853,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
                                     vision_config.hidden_act),
                                 norm_layer=norm_layer,
                                 quant_config=quant_config,
-                                prefix=f"{prefix}.blocks.{layer_idx}")
+                                prefix=f"{prefix}.blocks.{layer_idx}",
+                                use_data_parallel=use_data_parallel)
             for layer_idx in range(depth)
         ])
         self.merger = Qwen2_5_VisionPatchMerger(
@@ -560,6 +864,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             spatial_merge_size=self.spatial_merge_size,
             quant_config=quant_config,
             prefix=f"{prefix}.merger",
+            use_data_parallel=use_data_parallel,
         )
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
 
@@ -767,7 +1072,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
-
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -840,6 +1144,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
+        self.use_data_parallel = (vllm_config.parallel_config.
+                                  enable_multimodal_encoder_data_parallel)
         self.config = config
         self.multimodal_config = multimodal_config
 
@@ -848,6 +1154,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
             quant_config=self._maybe_ignore_quant_config(self.quant_config),
             prefix=maybe_prefix(prefix, "visual"),
+            use_data_parallel=self.use_data_parallel,
         )
 
         self.language_model = init_vllm_registered_model(
@@ -968,7 +1275,13 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-            image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
+
+            if self.use_data_parallel:
+                image_embeds = run_dp_sharded_vision_model(
+                    self.visual, pixel_values, grid_thw_list)
+            else:
+                image_embeds = self.visual(pixel_values,
+                                           grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
@@ -988,8 +1301,12 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
-            video_embeds = self.visual(pixel_values_videos,
-                                       grid_thw=grid_thw_list)
+            if self.use_data_parallel:
+                video_embeds = run_dp_sharded_vision_model(
+                    self.visual, pixel_values_videos, grid_thw_list)
+            else:
+                video_embeds = self.visual(pixel_values_videos,
+                                           grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size

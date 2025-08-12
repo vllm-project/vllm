@@ -440,7 +440,7 @@ class MergedReplicatedLinear(ReplicatedLinear):
             shard_offset = sum(self.output_sizes[:loaded_shard_id])
             shard_size = self.output_sizes[loaded_shard_id]
 
-        param[shard_offset:shard_offset + shard_size] = loaded_weight
+        param.data[shard_offset:shard_offset + shard_size] = loaded_weight
 
 
 class ColumnParallelLinear(LinearBase):
