@@ -43,6 +43,12 @@ vLLM is flexible and easy to use with:
 - Prefix caching support
 - Multi-LoRA support
 
+Where to get started with vLLM depends on the type of user. If you are looking to:
+
+- run open-source models on vLLM, we recommend starting with [quickstart](./getting_started/quickstart.md) and branching out from there as you learn more
+- build applications with vLLM, we recommend starting with the [User Guide](./usage)
+- build vLLM, we recommend starting with [Developer Guide](./contributing)
+
 For more information, check out the following:
 
 - [vLLM announcing blog post](https://vllm.ai) (intro to PagedAttention)
