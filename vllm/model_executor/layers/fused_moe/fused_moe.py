@@ -40,7 +40,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
-from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
+from vllm.utils.deep_gemm import is_blackwell_deep_gemm_e8m0_used
 
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
@@ -1038,9 +1038,9 @@ def inplace_fused_experts(
         w2_zp: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[List[int]] = None,
+        block_shape: Optional[List[int]] = None,  #noqa: UP006
         w1_bias: Optional[torch.Tensor] = None,
-        w2_bias: Optional[torch.Tensor] = None) -> None:  #noqa: UP006
+        w2_bias: Optional[torch.Tensor] = None) -> None:
     fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
                        activation, is_act_and_mul,
                        apply_router_weight_on_input, use_fp8_w8a8,
@@ -1387,8 +1387,8 @@ def fused_experts(hidden_states: torch.Tensor,
     # E8M0 scale, which means we requantize the weight and input to the specific
     # scale. Fallen back to cutlass or triton for some cases would cause
     # accuracy issue.
-    should_use_deep_gemm = is_blackwell_deep_gemm_used() or _valid_deep_gemm(
-        hidden_states, w1, w2)
+    should_use_deep_gemm = is_blackwell_deep_gemm_e8m0_used(
+    ) or _valid_deep_gemm(hidden_states, w1, w2)
     if (allow_deep_gemm and use_fp8_w8a8 and should_use_deep_gemm):
         assert apply_router_weight_on_input is False
         assert is_act_and_mul, (

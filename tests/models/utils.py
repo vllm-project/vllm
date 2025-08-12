@@ -345,19 +345,38 @@ class EmbedModelInfo(NamedTuple):
     matryoshka_dimensions: Optional[list[int]] = None
     architecture: str = ""
     dtype: str = "auto"
+    default_pooling_type: str = ""
     enable_test: bool = True
+
+
+class CLSPoolingEmbedModelInfo(EmbedModelInfo):
+    default_pooling_type: str = "CLS"
+
+
+class LASTPoolingEmbedModelInfo(EmbedModelInfo):
+    default_pooling_type: str = "LAST"
 
 
 class RerankModelInfo(NamedTuple):
     name: str
     architecture: str = ""
     dtype: str = "auto"
+    default_pooling_type: str = ""
     enable_test: bool = True
+
+
+class CLSPoolingRerankModelInfo(RerankModelInfo):
+    default_pooling_type: str = "CLS"
+
+
+class LASTPoolingRerankModelInfo(RerankModelInfo):
+    default_pooling_type: str = "LAST"
 
 
 def dummy_hf_overrides(
     hf_config: PretrainedConfig,
-    model_arch: str,
+    *,
+    model_arch: str = "",
     exist_overrides: Optional[dict[str, Any]] = None,
 ) -> PretrainedConfig:
     """
