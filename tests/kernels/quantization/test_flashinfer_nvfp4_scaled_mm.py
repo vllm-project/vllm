@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import flashinfer
 import pytest
 import torch
 from nvfp4_utils import (FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX,
@@ -8,6 +7,7 @@ from nvfp4_utils import (FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX,
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm
 
 if not current_platform.has_device_capability(100):
     pytest.skip(
@@ -109,6 +109,8 @@ def test_flashinfer_nvfp4_gemm(
         device,
     )
 
+    import flashinfer
+
     if backend == "trtllm":
         epilogue_tile_m = 128
         b_fp4 = flashinfer.shuffle_matrix_a(b_fp4.view(torch.uint8),
@@ -121,7 +123,7 @@ def test_flashinfer_nvfp4_gemm(
                 b_scale_interleaved.shape).view(torch.float8_e4m3fn))
 
     with flashinfer.autotune(autotune):
-        out = ops.flashinfer_scaled_fp4_mm(
+        out = flashinfer_scaled_fp4_mm(
             a_fp4,
             b_fp4,
             a_scale_interleaved,
