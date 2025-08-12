@@ -625,8 +625,12 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         use_batched_format: bool = False,
     ):
         super().__init__(
+            # NVFP4 requires two levels of quantization, which involves
+            # computing some scaling factors dynamically. This makes it
+            # incompatible with the typical prepare -> MoE -> finalize
+            # pipeline. Move the quantization logic into the MoE body.
             FusedMoEQuantConfig(
-                quant_dtype=None,  # skip quantization here
+                quant_dtype=None,  # skip quantization in prepare/finalize
                 per_act_token_quant=per_act_token_quant,
                 per_out_ch_quant=per_out_ch_quant,
                 block_shape=block_shape,
@@ -712,8 +716,6 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         e, m, n, k, _ = mk._moe_problem_size(hidden_states, w1, w2, topk_ids)
         n = w2.shape[2] * 2
-        #n = n // 2
-        #assert n == w2.shape[2] * 2, f"{n} == {w2.shape[2] * 2}"
 
         run_cutlass_moe_fp4(
             output=output,
