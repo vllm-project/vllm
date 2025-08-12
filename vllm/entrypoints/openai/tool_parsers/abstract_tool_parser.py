@@ -8,7 +8,8 @@ from typing import Callable, Optional, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
-                                              ExtractedToolCallInformation)
+                                              ExtractedToolCallInformation,
+                                              ResponsesRequest)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import import_from_path, is_list_of
@@ -46,8 +47,10 @@ class ToolParser:
         return request
 
     def extract_tool_calls(
-            self, model_output: str,
-            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
+        self,
+        model_output: str,
+        request: Union[ChatCompletionRequest, ResponsesRequest],
+    ) -> ExtractedToolCallInformation:
         """
         Static method that should be implemented for extracting tool calls from
         a complete model-generated string.
