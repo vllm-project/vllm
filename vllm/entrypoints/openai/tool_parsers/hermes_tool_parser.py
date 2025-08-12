@@ -267,7 +267,7 @@ class Hermes2ProToolParser(ToolParser):
                                       type="function",
                                       id=random_tool_call_id(),
                                       function=DeltaFunctionCall(
-                                          name=function_name, 
+                                          name=function_name,
                                           arguments=arguments).model_dump(
                                               exclude_none=True))
                     ])
