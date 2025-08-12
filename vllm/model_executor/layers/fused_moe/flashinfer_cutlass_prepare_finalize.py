@@ -60,7 +60,12 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
-        assert not apply_router_weight_on_input
+        if apply_router_weight_on_input:
+            topk = topk_ids.size(1)
+            # TODO: this only works for topK=1, will need to update for topK>1
+            assert topk == 1, \
+                "apply_router_weight_on_input is only implemented for topk=1"
+            a1.mul_(topk_weights.to(a1.dtype))
 
         (a1_gscale, use_dp, local_tokens) = extract_required_args(
             extra_prepare_args, ['a1_gscale', 'use_dp', 'local_tokens'])
