@@ -1093,6 +1093,8 @@ class Scheduler(SchedulerInterface):
     def shutdown(self) -> None:
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+        if self.connector is not None:
+            self.connector.shutdown()
 
     ########################################################################
     # KV Connector Related Methods

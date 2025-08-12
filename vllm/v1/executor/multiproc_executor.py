@@ -25,6 +25,7 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
+from vllm.distributed.kv_transfer import ensure_kv_transfer_shutdown
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.executor.multiproc_worker_utils import (
     set_multiprocessing_worker_envs)
@@ -488,6 +489,8 @@ class WorkerProc:
         self.worker_response_mq = None
         destroy_model_parallel()
         destroy_distributed_environment()
+        ensure_kv_transfer_shutdown()
+
 
     @staticmethod
     def worker_main(*args, **kwargs):
