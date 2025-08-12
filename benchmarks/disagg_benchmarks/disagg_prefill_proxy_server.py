@@ -8,9 +8,7 @@ import time
 from collections import deque
 
 import aiohttp
-from quart import Quart, make_response, request, Response
-
-
+from quart import Quart, Response, make_response, request
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -122,7 +120,7 @@ async def forward_request(url, data):
                 else:
                     # Handle backend service errors
                     error_text = await response.text()
-                    logger.error("error: %s-%s",response.status, error_text)
+                    logger.error("error: %s-%s", response.status, error_text)
                     yield b'{"error": "Backend service error"}'
         except aiohttp.ClientError as e:
             # Handle connection errors
