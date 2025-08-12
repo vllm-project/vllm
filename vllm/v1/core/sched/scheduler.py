@@ -263,7 +263,7 @@ class Scheduler(SchedulerInterface):
                         self.running.remove(preempted_req)
                     else:
                         preempted_req = self.running.pop()
-                    
+
                     preempted_tokens = preempted_req.num_computed_tokens
                     self._preempted_tokens += preempted_tokens
 

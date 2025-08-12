@@ -524,6 +524,9 @@ class PrometheusStatLogger(StatLoggerBase):
                 self.spec_decoding_prom.observe(
                     scheduler_stats.spec_decoding_stats)
 
+            self.counter_num_tokens_preempted[engine_idx].inc(
+                scheduler_stats.num_tokens_preempted)
+
         if iteration_stats is None:
             return
 
@@ -533,8 +536,6 @@ class PrometheusStatLogger(StatLoggerBase):
             iteration_stats.num_prompt_tokens)
         self.counter_generation_tokens[engine_idx].inc(
             iteration_stats.num_generation_tokens)
-        self.counter_num_tokens_preempted[engine_idx].inc(
-            scheduler_stats.num_tokens_preempted)
         self.histogram_iteration_tokens[engine_idx].observe(
             iteration_stats.num_prompt_tokens + \
             iteration_stats.num_generation_tokens)
