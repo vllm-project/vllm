@@ -134,7 +134,7 @@ $$
 3. Apply the grouping strategy in case 3\.
 
 Note that this can lead to more than 400 block\_size for attention layers, which is too large. Another padding strategy is to increase block\_size until
-<!-- markdownlint-enable MD049 -->
+<!-- markdownlint-disable MD049 -->
 $$
 \text{block_size} \times \text{kv_hidden_size}_{\text{att}} \times \text{num_attn_layers} \ge \text{state_size}_{\text{mamba}}
 $$
