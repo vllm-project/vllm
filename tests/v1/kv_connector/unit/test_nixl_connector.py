@@ -419,6 +419,52 @@ class TestNixlHandshake:
                     return
         raise TimeoutError("Took too long to complete async handshake.")
 
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        FakeNixlWrapper)
+    def test_handshake_fails_on_kv_cache_layout_mismatch(self, dist_init):
+        """
+        Verify that adding a remote agent fails if kv_cache_layout differs.
+        This test is only relevant for heterogeneous TP.
+        """
+        vllm_config = create_vllm_config()
+
+        # Mock TP world size to 2 to force heterogeneous TP when
+        # remote_tp_size=1
+        with patch(
+                "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.get_tensor_model_parallel_world_size",  # noqa: E501
+                return_value=2):
+            # Initialize connector and worker (with fake NIXL wrapper)
+            connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+            connector.connector_worker = FakeNixlConnectorWorker(
+                vllm_config, connector.engine_id, hand_shake_latency=0)
+            worker = connector.connector_worker
+
+            # Minimal local registration params used by add_remote_agent
+            worker.slot_size_bytes = 4096
+            worker.block_len = worker.slot_size_bytes * worker.block_size
+            worker.num_blocks = 1
+            worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+
+            # Metadata with different kv_cache_layout than local worker
+            mismatched_layout = "HND" if worker.kv_cache_layout != "HND" \
+                else "NHD"
+            meta = NixlAgentMetadata(
+                engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+                kv_caches_base_addr=[0],
+                num_blocks=1,
+                block_len=worker.block_len,
+                attn_backend_name=worker.backend_name,
+                kv_cache_layout=mismatched_layout,
+            )
+
+            # We don't check layout for homogeneous TP and MLA for now, as the
+            # whole block is moved.
+            worker.add_remote_agent(meta, remote_tp_size=2)
+            with pytest.raises(AssertionError):
+                worker.add_remote_agent(meta, remote_tp_size=1)
+
 
 # NOTE: resource cleanup in mp backend is a bit finicky, so the order in which
 # we put here is important. First run ray, it will clean up the resources, then
