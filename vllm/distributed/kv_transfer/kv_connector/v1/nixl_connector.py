@@ -697,9 +697,15 @@ class NixlConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
+
         _, first_kv_cache = next(iter(kv_caches.items()))
         if self.device_type == "hpu":
-            kv_elem_size = first_kv_cache[0][0].dtype.itemsize
+            if self.use_mla:
+                # MLA: kv_cache is a single tensor (latent), not a tuple
+                kv_elem_size = first_kv_cache[0].dtype.itemsize
+            else:
+                # Standard: kv_cache is a tuple of (key, value)
+                kv_elem_size = first_kv_cache[0][0].dtype.itemsize
         else:
             kv_elem_size = first_kv_cache.element_size()
 
@@ -721,13 +727,14 @@ class NixlConnectorWorker:
         # will only affects the strides. For MLA instead, we make require no
         # such thing and resort to the standard layout.
         use_mla = len(first_kv_cache.shape) == 3 if self.device_type != "hpu" else False
+        #import remote_pdb; remote_pdb.set_trace()
         if self.device_type == "tpu":
             assert not use_mla, f"{self.kv_buffer_device} does not support MLA."
             assert self._use_pallas_v1, f"attn backend: {self.backend_name}"
             # tpu (v1) kv shape per layer:
             # (num_blocks, block_size, num_kv_heads * 2, head_size)
             self.num_blocks = first_kv_cache.shape[0]
-            block_rank = 3  # [block_size, kv_heads, head_dim]
+            block_rank = 3  # [block_size, kv_heads, head_dim]#
             block_shape = first_kv_cache.shape[-block_rank:]
             block_size, n_kv_heads_x_2, head_dim = block_shape
             self.slot_size_bytes = kv_elem_size * n_kv_heads_x_2 * head_dim
@@ -759,17 +766,26 @@ class NixlConnectorWorker:
                 self.slot_size_bytes = kv_elem_size * n_kv_heads * head_dim
             assert block_size == self.block_size
         elif self.device_type == "hpu":
-            # habana kv_cache: [2, num_blocks*block_size, kv_heads, head_dim]
-            #from remote_pdb import RemotePdb; RemotePdb('0.0.0.0', 4444).set_trace()
-            self.num_blocks = first_kv_cache[0].shape[0] // self.block_size
-            block_rank = 3  # [block_size, kv_heads, head_dim]
-            block_shape = first_kv_cache[0].shape[-block_rank:]
-            block_shape = list(block_shape)
-            block_shape[0] = block_shape[0] // self.num_blocks
-            block_shape = torch.Size(block_shape)
-            block_size, n_kv_heads, head_dim = block_shape[-3:]
-            # head size in bytes.
-            self.slot_size_bytes = kv_elem_size * n_kv_heads * head_dim
+            if self.use_mla:
+                # MLA case.
+                use_mla = True
+                self.num_blocks = first_kv_cache[0].shape[0] // self.block_size
+                block_rank = 2  # [block_size, latent_dim]
+                block_shape = first_kv_cache[0].shape[-block_rank:]
+                block_size, kv_latent_dim = block_shape
+                self.slot_size_bytes = kv_elem_size * kv_latent_dim
+            else:
+                # habana kv_cache: [2, num_blocks*block_size, kv_heads, head_dim]
+                #from remote_pdb import RemotePdb; RemotePdb('0.0.0.0', 4444).set_trace()
+                self.num_blocks = first_kv_cache[0].shape[0] // self.block_size
+                block_rank = 3  # [block_size, kv_heads, head_dim]
+                block_shape = first_kv_cache[0].shape[-block_rank:]
+                block_shape = list(block_shape)
+                block_shape[0] = block_shape[0] // self.num_blocks
+                block_shape = torch.Size(block_shape)
+                block_size, n_kv_heads, head_dim = block_shape[-3:]
+                # head size in bytes.
+                self.slot_size_bytes = kv_elem_size * n_kv_heads * head_dim
         else:
             raise RuntimeError(
                 f"{self.device_type} ({self.backend_name}) is not supported.")

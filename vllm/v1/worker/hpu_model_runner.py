@@ -2440,12 +2440,7 @@ class HPUModelRunner:
 
         if has_kv_transfer_group():
             #import remote_pdb; remote_pdb.set_trace()           
-            kv_caches = {}
-            for layer, (key_cache, value_cache) in kv_caches.items():
-                if value_cache is not None:
-                    kv_caches[layer] = torch.stack((key_cache, value_cache))
-                else:
-                    kv_caches[layer] = key_cache  
+
             #kv_caches = { layer: torch.stack((tup[0], tup[1])) for layer,tup in kv_caches.items()}
             get_kv_transfer_group().register_kv_caches(kv_caches)
             get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
