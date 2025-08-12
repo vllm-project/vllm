@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Optional
+from typing import ClassVar, Optional
 
 import torch
 
@@ -12,9 +12,17 @@ from vllm.attention.backends.abstract import (AttentionType,
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
-                                                   MLACommonMetadata)
+                                                   MLACommonMetadata,
+                                                   MLACommonMetadataBuilder)
+from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 logger = init_logger(__name__)
+
+
+class CutlassMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+    # enable full CUDA Graph support for decode-only capture
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.PURE_DECODE_ONLY
 
 
 class CutlassMLABackend(MLACommonBackend):
@@ -26,6 +34,10 @@ class CutlassMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["CutlassMLAImpl"]:
         return CutlassMLAImpl
+
+    @staticmethod
+    def get_builder_cls() -> type["CutlassMLAMetadataBuilder"]:
+        return CutlassMLAMetadataBuilder
 
 
 class SM100Workspace:
