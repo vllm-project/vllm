@@ -1068,7 +1068,8 @@ class EngineArgs:
             ) and current_platform.get_cpu_architecture() in (
                     CpuArchEnum.POWERPC, CpuArchEnum.S390X, CpuArchEnum.ARM):
                 logger.info(
-                    "Chunked prefill is not supported for ARM and POWER and S390X CPUs; "
+                    "Chunked prefill is not supported for ARM and POWER "
+                    "and S390X CPUs; "
                     "disabling it for V1 backend.")
                 self.enable_chunked_prefill = False
         else:
