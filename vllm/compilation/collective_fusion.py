@@ -399,10 +399,10 @@ if flashinfer_comm is not None:
     # Max size of the input tensor per world size
     # to use flashinfer fused allreduce
     _FI_MAX_SIZES = {
-        2: 64 * MiB,  # 64MB
-        4: 32 * MiB,  # 32MB
-        6: 32 * MiB,  # 32MB
-        8: 32 * MiB,  # 32MB
+        2: 8 * MiB,  # 8MB
+        4: 3 * MiB,  # 3MB
+        6: 2 * MiB,  # 2MB
+        8: 2 * MiB,  # 2MB
     }
 
     try:

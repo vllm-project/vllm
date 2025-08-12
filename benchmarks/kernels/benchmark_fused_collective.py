@@ -649,8 +649,7 @@ def run_benchmarks(
                 logger.error("FlashInfer Fused AllReduce+RMSNorm Oneshot failed: %s", e)
                 results["flashinfer_fused_allreduce_rmsnorm_oneshot"] = float("inf")
 
-        # FlashInfer Fused AllReduce + RMSNorm Two-shot
-        if flashinfer_comm is not None and allreduce_params is not None:
+            # FlashInfer Fused AllReduce + RMSNorm Two-shot
             try:
                 time_ms = benchmark_operation(
                     flashinfer_fused_allreduce_rmsnorm,
@@ -670,6 +669,23 @@ def run_benchmarks(
                 results["flashinfer_fused_allreduce_rmsnorm_twoshot"] = float("inf")
 
     if quant_mode in ["all", "fp8_only"]:
+        # Standard AllReduce + RMSNorm + FP8 Quant
+        try:
+            time_ms = benchmark_operation(
+                standard_allreduce_rmsnorm_fp8_quant,
+                input_tensor,
+                norm_out=norm_out,
+                residual=residual,
+                rms_gamma=rms_gamma,
+                rms_eps=rms_eps,
+                scale_factor=scale_fp8,
+                quant_out=quant_out_fp8,
+            )
+            results["standard_allreduce_rmsnorm_fp8_quant"] = time_ms
+        except Exception as e:
+            logger.error("Standard AllReduce+RMSNorm+FP8 failed: %s", e)
+            results["standard_allreduce_rmsnorm_fp8_quant"] = float("inf")
+
         # Standard AllReduce + RMSNorm + FP8 Quant Native Compiled
         try:
             time_ms = benchmark_operation(
@@ -715,9 +731,7 @@ def run_benchmarks(
                 results["flashinfer_fused_allreduce_rmsnorm_fp8_quant_oneshot"] = float(
                     "inf"
                 )
-
-        # FlashInfer Fused AllReduce + RMSNorm + FP8 Quant Two-shot
-        if flashinfer_comm is not None and allreduce_params is not None:
+            # FlashInfer Fused AllReduce + RMSNorm + FP8 Quant Two-shot
             try:
                 time_ms = benchmark_operation(
                     flashinfer_fused_allreduce_rmsnorm_fp8_quant,
@@ -744,6 +758,24 @@ def run_benchmarks(
                 )
 
     if quant_mode in ["all", "fp4_only"]:
+        # Standard AllReduce + RMSNorm + FP4 Quant
+        try:
+            time_ms = benchmark_operation(
+                standard_allreduce_rmsnorm_fp4_quant,
+                input_tensor,
+                norm_out=norm_out,
+                residual=residual,
+                rms_gamma=rms_gamma,
+                rms_eps=rms_eps,
+                input_global_scale=scale_fp4,
+                quant_out=fp4_quant_out,
+                output_scale=fp4_output_scale,
+            )
+            results["standard_allreduce_rmsnorm_fp4_quant"] = time_ms
+        except Exception as e:
+            logger.error("Standard AllReduce+RMSNorm+FP4 failed: %s", e)
+            results["standard_allreduce_rmsnorm_fp4_quant"] = float("inf")
+
         # Standard AllReduce + RMSNorm + FP4 Quant Native Compiled
         try:
             time_ms = benchmark_operation(
