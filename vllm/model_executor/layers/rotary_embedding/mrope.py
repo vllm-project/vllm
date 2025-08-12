@@ -363,11 +363,12 @@ class MRotaryEmbedding(RotaryEmbedding):
                         video_grid_thw[mm_data_idx][1],
                         video_grid_thw[mm_data_idx][2],
                     )
-                    llm_grid_t, llm_grid_h, llm_grid_w = (
-                        t // temporal_conv_size,
-                        h // spatial_conv_size,
-                        w // spatial_conv_size
-                    )
+                    llm_grid_t, llm_grid_h, llm_grid_w = (t //
+                                                          temporal_conv_size,
+                                                          h //
+                                                          spatial_conv_size,
+                                                          w //
+                                                          spatial_conv_size)
 
                     for t_idx in range(llm_grid_t):
                         t_index = torch.tensor(t_idx).view(-1, 1).expand(

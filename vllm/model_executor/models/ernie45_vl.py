@@ -1019,7 +1019,6 @@ class Ernie4_5VLMultiModalProcessor(
             mm_data["images"] = []
         if "videos" not in mm_data:
             mm_data["videos"] = []
-
         processor_output = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**mm_kwargs),
             dict(text=[prompt],

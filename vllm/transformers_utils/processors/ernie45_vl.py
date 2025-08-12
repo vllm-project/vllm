@@ -27,7 +27,7 @@
 
 import math
 from collections import defaultdict
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, TypedDict
 
 import numpy as np
 import torch
@@ -40,17 +40,17 @@ from transformers.utils import logging
 logger = logging.get_logger(__name__)
 
 
-def round_by_factor(number: int, factor: int) -> int:
+def round_by_factor(number: Union[int, float], factor: int) -> int:
     """Returns the closest integer to 'number' that is divisible by 'factor'."""
     return round(number / factor) * factor
 
 
-def ceil_by_factor(number: int, factor: int) -> int:
+def ceil_by_factor(number: Union[int, float], factor: int) -> int:
     """Returns the smallest integer greater than or equal to 'number' that is divisible by 'factor'."""
     return math.ceil(number / factor) * factor
 
 
-def floor_by_factor(number: int, factor: int) -> int:
+def floor_by_factor(number: Union[int, float], factor: int) -> int:
     """Returns the largest integer less than or equal to 'number' that is divisible by 'factor'."""
     return math.floor(number / factor) * factor
 
@@ -101,6 +101,19 @@ def smart_resize(
 
 
 IDS_TYPE_FLAG = {"text": 0, "image": 1, "video": 2, "audio": 3}
+
+
+
+class OutputsType(TypedDict):
+    input_ids: list[Any]
+    token_type_ids: list[Any]
+    position_ids: list[Any]
+    images: list[Any]
+    grid_thw: list[Any]
+    image_type_ids: list[Any]
+    cur_position: int
+    pic_cnt: int
+    video_cnt: int
 
 
 class Ernie4_5_VLProcessor(ProcessorMixin):
@@ -205,7 +218,7 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
         Convert chat messages into model inputs.
         Returns a dict with input_ids, token_type_ids, position_ids, images, grid_thw, image_type_ids, labels.
         """
-        outputs = {
+        outputs: OutputsType = {
             "input_ids": [],
             "token_type_ids": [],
             "position_ids": [],
@@ -317,7 +330,7 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
         self._add_special_token(self.IMG_END, outputs)
 
     def _add_video(
-        self, pixel_stack: list[np.ndarray], outputs: dict
+        self, pixel_stack: np.ndarray, outputs: dict
     ) -> None:
         outputs["video_cnt"] += 1
         self._add_special_token(self.VID_START, outputs)
