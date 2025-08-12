@@ -196,48 +196,15 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
 
     try:
         cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
-    except (OSError, KeyError, TypeError) as e:
-        # HACK: getsource() fails in Python 3.13+ - try alternative approaches
-        if is_dataclass(cls):
-            # Get source from class file using inspect
-            source_file = inspect.getfile(cls)
-            with open(source_file) as f:
-                source_lines = f.readlines()
-
-            # Find the class definition line
-            class_line_no = None
-            for i, line in enumerate(source_lines):
+    except (OSError, KeyError, TypeError):
+        # HACK: Python 3.13+ workaround - set missing __firstlineno__
+        # Workaround can be removed after we upgrade to pydantic==2.12.0
+        with open(inspect.getfile(cls)) as f:
+            for i, line in enumerate(f):
                 if f"class {cls.__name__}" in line and ":" in line:
-                    class_line_no = i
+                    cls.__firstlineno__ = i + 1
                     break
-
-            if class_line_no is not None:
-                # Find the end of the class using proper indentation logic
-                class_indent = len(source_lines[class_line_no]) - len(
-                    source_lines[class_line_no].lstrip())
-
-                # Find class end by looking for next definition at same or
-                # less indentation
-                class_end_line = len(source_lines)
-                for i in range(class_line_no + 1, len(source_lines)):
-                    line = source_lines[i]
-                    if line.strip():  # Non-empty line
-                        line_indent = len(line) - len(line.lstrip())
-                        # If we find a line at same or less indentation that
-                        # starts a new definition
-                        if (line_indent <= class_indent
-                                and (line.lstrip().startswith(
-                                    ('def ', 'class ', '@')) or line.strip()
-                                     in ('if __name__ == "__main__":', ))):
-                            class_end_line = i
-                            break
-
-                # Extract and parse the class source
-                class_source_lines = source_lines[class_line_no:class_end_line]
-                class_source = ''.join(class_source_lines)
-                cls_node = ast.parse(textwrap.dedent(class_source)).body[0]
-        else:
-            raise TypeError("Class is not a dataclass.") from e
+        cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
 
     if not isinstance(cls_node, ast.ClassDef):
         raise TypeError("Given object was not a class.")
