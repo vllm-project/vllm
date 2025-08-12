@@ -259,8 +259,9 @@ def selective_state_update(state,
                                              ((4, 4, 3) if dstate < 128 else
                                               ((64, 2, 8) if dstate == 128 else
                                                ((4, 8, 3)))))))
-    tie_hdim = A.stride(-1) == 0 and A.stride(-2) == 0 and dt.stride(
-        -1) == 0 and dt_bias.stride(-1) == 0
+    tie_hdim = A.stride(-1) == 0 and A.stride(-2) == 0 and dt.stride(-1) == 0
+    if dt_bias is not None:
+        tie_hdim = tie_hdim and dt_bias.stride(-1) == 0
     with torch.cuda.device(x.device.index):
         _selective_scan_update_kernel[grid](
             # Pointers to matrices
