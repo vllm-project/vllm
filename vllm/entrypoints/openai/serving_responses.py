@@ -575,7 +575,6 @@ class OpenAIServingResponses(OpenAIServing):
                     delta=False,
                 )
 
-        output = []
         reasoning_item = None
         message_item = None
         if reasoning_content:
@@ -643,7 +642,7 @@ class OpenAIServingResponses(OpenAIServing):
                 tool_parser = self.tool_parser(tokenizer)
             except RuntimeError as e:
                 logger.exception("Error in tool parser creation.")
-                return self.create_error_response(str(e))
+                raise e
             tool_call_info = tool_parser.extract_tool_calls(
                 content if content is not None else "", request=request)
             if tool_call_info is not None and tool_call_info.tools_called:
@@ -660,8 +659,7 @@ class OpenAIServingResponses(OpenAIServing):
                 if message_item:
                     outputs.append(message_item)
         else:
-            return self.create_error_response(
-                f"Invalid tool_choice: {request.tool_choice}")
+            raise ValueError(f"Invalid tool_choice: {request.tool_choice}")
 
         if function_calls:
             outputs.extend([
