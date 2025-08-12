@@ -341,6 +341,7 @@ class ReplicatedLinear(LinearBase):
         # (such scales for AutoFp8).
         # Special case for GGUF
 
+
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
         if is_gguf_weight_type:
@@ -419,6 +420,7 @@ class MergedReplicatedLinear(ReplicatedLinear):
                       loaded_shard_id: Optional[int] = None):
         assert loaded_shard_id is not None
         assert loaded_shard_id < len(self.output_sizes)
+
 
         if isinstance(param, BlockQuantScaleParameter):
             from vllm.model_executor.layers.quantization.fp8 import (
@@ -532,6 +534,7 @@ class ColumnParallelLinear(LinearBase):
         self.tp_rank = get_tensor_model_parallel_rank()
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+
 
         output_dim = getattr(param, "output_dim", None)
 
@@ -663,6 +666,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[int] = None):
+        
+
 
         # Special case for GGUF
         # initialize GGUF param after we know the quantize type
@@ -1365,6 +1370,7 @@ class RowParallelLinear(LinearBase):
             assert loaded_weight.numel() == 1
             loaded_weight = loaded_weight.reshape(1)
 
+        print(type(param))
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(

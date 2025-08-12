@@ -45,7 +45,7 @@ from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.parameter import ShardedModelWeightParameter
+from vllm.model_executor.parameter import PartitionedModelWeightParameter
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -553,7 +553,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
             return new or original
 
-        def get_shard_id_of_matches(layer_name, targets, fused):
+        def get_partition_id_of_matches(layer_name, targets, fused):
             if fused is not None:
                 for fused_suffix in fused:
                     if name.endswith(fused_suffix):
@@ -573,26 +573,26 @@ class CompressedTensorsConfig(QuantizationConfig):
                                 args.ignore,
                                 fused=self.packed_modules_mapping):
 
-                        shard_ids = set()
+                        partition_ids = set()
                         for ending in self.packed_modules_mapping:
                             if layer_name.endswith(ending):
-                                for shard_id, shard_ending in enumerate(
+                                for partition_id, shard_ending in enumerate(
                                         self.packed_modules_mapping[ending]):
                                     thing = layer_name.removesuffix(
                                         ending) + shard_ending
                                     if is_match(thing, layer, args.targets,
                                                 args.ignore):
-                                        shard_ids.add(shard_id)
+                                        partition_ids.add(partition_id)
 
-                        if len(shard_ids) == 0:
-                            shard_ids.add(0)
+                        if len(partition_ids) == 0:
+                            partition_ids.add(0)
 
                         if args.location == TransformLocation.INPUT:
                             input_tfm = replace_with_check(
-                                input_tfm, (name, scheme, args, shard_ids))
+                                input_tfm, (name, scheme, args, partition_ids))
                         if args.location == TransformLocation.OUTPUT:
                             output_tfm = replace_with_check(
-                                output_tfm, (name, scheme, args, shard_ids))
+                                output_tfm, (name, scheme, args, partition_ids))
 
         # attach transforms for later retrieval by LinearMethod, or
         if not hasattr(layer, "input_tfm"):
@@ -723,9 +723,11 @@ class CompressedTensorsConfig(QuantizationConfig):
 registry = {}
 
 
+# one to one with (scheme, module, location)
 class vllmTransformBase(torch.nn.Module):  # InternalModule
+    weight: PartitionedModelWeightParameter
 
-    def __init__(self, scheme: TransformScheme, args: TransformArgs, shard_ids,
+    def __init__(self, scheme: TransformScheme, args: TransformArgs, partition_ids,
                  layer: torch.nn.Module, weight_loader: Callable,
                  input_size_per_partition, output_partition_sizes, asdf_args):
         super().__init__()
@@ -739,11 +741,17 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
         else:
             raise ValueError(layer.__mro__)
 
-        self.weight = ShardedModelWeightParameter()
+        data_shape = (sum(output_partition_sizes, 0), input_size_per_partition)
+        self.weight = PartitionedModelWeightParameter(
+            data_shape=data_shape,
+            dtype=scheme.precision,
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader)
 
-        #for shard_id, output_shape in enumerate(output_partition_sizes):
-        for shard_id in shard_ids:
-            output_shape = output_partition_sizes[shard_id]
+        #for partition_id, output_shape in enumerate(output_partition_sizes):
+        for partition_id in partition_ids:
+            output_shape = output_partition_sizes[partition_id]
 
             if isinstance(layer, LinearBase):
                 assert hasattr(layer, "weight")
@@ -771,41 +779,43 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
                     device=layer.weight.device,
                 )
 
-            p = torch.nn.Parameter(
-                data=registry[key],
-                #input_dim=1,
-                #output_dim=0,
-                #weight_loader=default_weight_loader
-                requires_grad=False,
-            )
+            self.weight.add_partition(partition_id, registry[key])
 
-            # TODO: use set_weight_attrs
-            # TODO: this weight loader needs to account for tp sharding, maybe handled by using ModelWeightParameter
-            # but do not pass weight_loader, since that weight loader handles partition sharding which we do not want
-            # partitionining is handled by asdf
+            # p = ModelWeightParameter(
+            #     data=registry[key],
+            #     #input_dim=1,
+            #     #output_dim=0,
+            #     #weight_loader=default_weight_loader
+            #     requires_grad=False,
+            # )
 
-            # normally, partitioning (fused ops) is handled by Linear.weight_loader via Linear.__init__ -> LinearMethod.create_weights -> Parameter.__init__
-            # and tp is handled by Linear.*_size_per_partition via Linear.__init__ -> LinearMethod.create_weights -> Parameter.__init__
+            # # TODO: use set_weight_attrs
+            # # TODO: this weight loader needs to account for tp sharding, maybe handled by using ModelWeightParameter
+            # # but do not pass weight_loader, since that weight loader handles partition sharding which we do not want
+            # # partitionining is handled by asdf
 
-            # however, partitioning assumes that the parameter is one tensor
-            # this assumption can't be true for shared tensors
+            # # normally, partitioning (fused ops) is handled by Linear.weight_loader via Linear.__init__ -> LinearMethod.create_weights -> Parameter.__init__
+            # # and tp is handled by Linear.*_size_per_partition via Linear.__init__ -> LinearMethod.create_weights -> Parameter.__init__
+
+            # # however, partitioning assumes that the parameter is one tensor
+            # # this assumption can't be true for shared tensors
             
-            # instead, we keep Linear.*_size_per_partition sizes to account for tp initialize
-            # if 
+            # # instead, we keep Linear.*_size_per_partition sizes to account for tp initialize
 
-            # weight loader 2 kicks responsibility for tp loading to the parameter. This is convenient for us
+            # # weight loader 2 kicks responsibility for tp loading to the parameter. This is convenient for us
+            # # since 
 
-            # we can create a meta tensor
+            # # we can create a meta tensor
 
-            # and tp is handled by Linear.__init__ passed to 
-            # however, the weight loader assumes that the parameter
-            p.input_dim = 1
-            p.output_dim = 0
-            # p.weight_loader = lambda *args, **kwargs: None
-            p.weight_loader = default_weight_loader
-            #set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+            # # and tp is handled by Linear.__init__ passed to 
+            # # however, the weight loader assumes that the parameter
+            # p.input_dim = 1
+            # p.output_dim = 0
+            # # p.weight_loader = lambda *args, **kwargs: None
+            # p.weight_loader = default_weight_loader
+            # #set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
 
-            self.weight.shards[shard_id] = p
+            # self.weight.shards[partition_id] = p
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         if self.args.location == TransformLocation.INPUT:
@@ -844,12 +854,12 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
 
         # for each transform arg applied (module)
         for attr_name in ("input_tfm", "output_tfm"):
-            for (name, scheme, args, shard_ids) in getattr(layer, attr_name):
+            for (name, scheme, args, partition_ids) in getattr(layer, attr_name):
                 # the transform module will handle any shards that get sent to it
                 # (up gate), (qkv)
                 transform_name = f"{name}_{args.location}"
                 transform = vllmTransformBase(
-                    scheme, args, shard_ids, layer, weight_loader,
+                    scheme, args, partition_ids, layer, weight_loader,
                     input_size_per_partition, output_partition_sizes,
                     asdf_args)
 
@@ -868,27 +878,27 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
 
         xs = [x for _ in range(len(self.output_partition_sizes))]
 
-        weight_shards = layer.weight.split(self.output_partition_sizes, dim=0)
+        weight_partitions = layer.weight.split(self.output_partition_sizes, dim=0)
         # TODO: bias shards
 
-        for i, weight_shard in enumerate(weight_shards):
+        for partition_id, weight_partition in enumerate(weight_partitions):
             for transform in self.input_transforms:
-                if i not in transform.weight.shards:
+                if not transform.weight.has_partition(partition_id):
                     continue
 
-                transform_shard = transform.weight.shards[i]
-                xs[i] = (xs[i].to(transform_shard.dtype) @ transform_shard).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
+                transform_partition = transform.get_partition(partition_id)
+                xs[partition_id] = (xs[partition_id].to(transform_partition.dtype) @ transform_partition).to(xs[partition_id].dtype) / math.sqrt(transform_partition.size(0))
 
             assert bias is None
-            xs[i] = dispatch_unquantized_gemm()(layer, xs[i], weight_shard, bias)
+            xs[partition_id] = dispatch_unquantized_gemm()(layer, xs[partition_id], weight_partition, bias)
 
             for transform in self.output_transforms:
-                if i not in transform.weight.shards:
+                if not transform.weight.has_partition(partition_id):
                     continue
 
-                transform_shard = transform.weight.shards[i]
                 # TODO: inverse is hard coded right now
-                xs[i] = (xs[i].to(transform_shard.dtype) @ transform_shard.T).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
+                transform_partition = transform.get_partition(partition_id)
+                xs[partition_id] = (xs[partition_id].to(transform_partition.dtype) @ transform_partition.T).to(xs[partition_id].dtype) / math.sqrt(transform_partition.size(0))
 
         return torch.hstack(xs)
 
