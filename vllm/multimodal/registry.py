@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
@@ -86,6 +87,13 @@ class _ProcessorFactories(Generic[_I]):
         return self.processor(info, dummy_inputs_builder, cache=cache)
 
 
+# Make sure a different cache is used for each model config
+# NOTE: ModelConfig is not hashable so it cannot be passed directly
+@lru_cache(maxsize=1)
+def _get_processor_cache(model_id: str, capacity_gb: int):
+    return ProcessingCache(capacity_gb) if capacity_gb > 0 else None
+
+
 class MultiModalRegistry:
     """
     A registry that dispatches data processing according to the model.
@@ -95,24 +103,56 @@ class MultiModalRegistry:
         self._processor_factories = ClassRegistry[nn.Module,
                                                   _ProcessorFactories]()
 
-        self._processor_cache: Optional[ProcessingCache] = None
-
     def _get_processor_cache(self, model_config: "ModelConfig"):
+        model_id = model_config.model
         capacity_gb = model_config.mm_processor_cache_gb
-        if capacity_gb is None:
-            return None  # Overrides `disable_cache` argument
+        return _get_processor_cache(model_id, capacity_gb)
 
-        if self._processor_cache is None:
-            self._processor_cache = ProcessingCache(capacity_gb)
-
-        return self._processor_cache
-
-    def reset_processor_cache(self) -> bool:
+    def reset_processor_cache(self, model_config: "ModelConfig") -> bool:
         """Reset the multi-modal processing cache."""
-        if self._processor_cache:
-            self._processor_cache.reset()
+        if processor_cache := self._get_processor_cache(model_config):
+            processor_cache.reset()
 
         return True  # Success
+
+    def enable_mm_input_cache(self, model_config: "ModelConfig") -> bool:
+        """Whether the multi-modal input cache should be enabled.
+        NOTE: This is put under MultiModalRegistry on purpose to respect 
+        text-only mode for multimodal models.
+        """
+
+        if not self.supports_multimodal_inputs(model_config):
+            return False
+
+        mm_config = model_config.get_multimodal_config()
+
+        return mm_config.mm_processor_cache_gb > 0
+
+    def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
+        """
+        Checks if the model supports multimodal inputs.
+        Returns True if the model is multimodal with any non-zero supported 
+        modalities, otherwise returns False, effectively running in 
+        text-only mode.
+        """
+        if not model_config.is_multimodal_model:
+            return False
+
+        info = self._create_processing_info(model_config, tokenizer=None)
+        supported_modalities = info.get_supported_mm_limits()
+
+        mm_config = model_config.get_multimodal_config()
+
+        # Check if all supported modalities have limit == 0
+        if all(
+                mm_config.get_limit_per_prompt(modality) == 0
+                for modality in supported_modalities):
+            logger.info_once(
+                "All limits of multimodal modalities supported by the model "
+                "are set to 0, running in text-only mode.")
+            return False
+
+        return True
 
     def get_max_tokens_per_item_by_modality(
         self,
@@ -238,6 +278,26 @@ class MultiModalRegistry:
         model_cls, _ = get_model_architecture(model_config)
         return model_cls
 
+    def _create_processing_ctx(
+        self,
+        model_config: "ModelConfig",
+        tokenizer: Optional[AnyTokenizer] = None,
+    ) -> InputProcessingContext:
+        if tokenizer is None and not model_config.skip_tokenizer_init:
+            tokenizer = cached_tokenizer_from_config(model_config)
+        return InputProcessingContext(model_config, tokenizer)
+
+    def _create_processing_info(
+        self,
+        model_config: "ModelConfig",
+        *,
+        tokenizer: Optional[AnyTokenizer] = None,
+    ) -> BaseProcessingInfo:
+        model_cls = self._get_model_cls(model_config)
+        factories = self._processor_factories[model_cls]
+        ctx = self._create_processing_ctx(model_config, tokenizer)
+        return factories.info(ctx)
+
     def create_processor(
         self,
         model_config: "ModelConfig",
@@ -251,15 +311,13 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             raise ValueError(f"{model_config.model} is not a multimodal model")
 
-        if tokenizer is None and not model_config.skip_tokenizer_init:
-            tokenizer = cached_tokenizer_from_config(model_config)
         if disable_cache is None:
             disable_cache = not model_config.enable_mm_processor_cache
 
         model_cls = self._get_model_cls(model_config)
         factories = self._processor_factories[model_cls]
 
-        ctx = InputProcessingContext(model_config, tokenizer)
+        ctx = self._create_processing_ctx(model_config, tokenizer)
         cache = None if disable_cache else self._get_processor_cache(
             model_config)
 

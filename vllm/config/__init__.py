@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# ruff: noqa: F401
 import ast
 import copy
 import enum
@@ -10,11 +11,9 @@ import json
 import textwrap
 import uuid
 import warnings
-from collections import Counter
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
-                         replace)
+from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
 from functools import cached_property, lru_cache
 from importlib.util import find_spec
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
@@ -22,16 +21,21 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
 
 import regex as re
 import torch
-from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
+from pydantic import (ConfigDict, SkipValidation, field_validator,
                       model_validator)
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self, assert_never, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
-from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
+from vllm.config.cache import (BlockSize, CacheConfig, CacheDType,
+                               PrefixCachingHashAlgo)
+from vllm.config.compilation import (CompilationConfig, CompilationLevel,
+                                     PassConfig)
+from vllm.config.parallel import DistributedExecutorBackend, ParallelConfig
+from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
+from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.platforms import current_platform
@@ -39,51 +43,35 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    maybe_override_with_speculators_target_model, try_get_generation_config,
-    try_get_safetensors_metadata, try_get_tokenizer_config, uses_mrope)
+    is_interleaved, maybe_override_with_speculators_target_model,
+    try_get_generation_config, try_get_safetensors_metadata,
+    try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
-# yapf conflicts with isort for this block
-# yapf: disable
-from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
-                        MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
-                        POOLING_MODEL_MAX_NUM_BATCHED_TOKENS, GiB_bytes,
-                        LayerBlockType, LazyLoader, common_broadcastable_dtype,
-                        cuda_device_count_stateless, get_cpu_memory,
-                        get_open_port, is_torch_equal_or_newer, random_uuid,
-                        resolve_obj_by_qualname)
-
-# yapf: enable
+from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS, LayerBlockType,
+                        LazyLoader, common_broadcastable_dtype, random_uuid)
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
-    from ray.runtime_env import RuntimeEnv
-    from ray.util.placement_group import PlacementGroup
     from transformers.configuration_utils import PretrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
-    from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
-    ConfigType = type[DataclassInstance]
     HfOverrides = Union[dict, Callable[[type], type]]
 else:
     DataclassInstance = Any
-    PlacementGroup = Any
-    RuntimeEnv = Any
     PretrainedConfig = Any
-    ExecutorBase = Any
     QuantizationConfig = Any
     QuantizationMethods = Any
     BaseModelLoader = Any
     LoadFormats = Any
     TensorizerConfig = Any
-    ConfigType = type
     HfOverrides = Union[dict[str, Any], Callable[[type], type]]
 
     me_quant = LazyLoader("model_executor", globals(),
@@ -93,7 +81,6 @@ else:
 
 logger = init_logger(__name__)
 DataclassInstanceT = TypeVar("DataclassInstanceT", bound=DataclassInstance)
-ConfigT = TypeVar("ConfigT", bound=ConfigType)
 
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
                      "score", "reward", "transcription", "draft"]
@@ -232,23 +219,6 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
             out[target.id] = doc
 
     return out
-
-
-def config(cls: ConfigT) -> ConfigT:
-    """
-    A decorator that ensures all fields in a dataclass have default values
-    and that each field has a docstring.
-
-    If a `ConfigT` is used as a CLI argument itself, the default value provided
-    by `get_kwargs` will be the result parsing a JSON string as the kwargs
-    (i.e. `ConfigT(**json.loads(cli_arg))`). However, if a particular `ConfigT`
-    requires custom construction from CLI (i.e. `CompilationConfig`), it can
-    have a `from_cli` method, which will be called instead.
-
-    Config validation is performed by the tools/validate_config.py
-    script, which is invoked during the pre-commit checks.
-    """
-    return cls
 
 
 def get_field(cls: ConfigType, name: str) -> Field:
@@ -741,52 +711,30 @@ class ModelConfig:
             revision=self.revision,
         )
 
-        # Workaround for Gemma 2 which uses interleaved sliding window
-        # attention, but it's not specified in its config.
-        # TODO: remove this when Gemma 2 config updated in HuggingFace.
-        if self.hf_text_config.model_type == "gemma2":
-            self.hf_text_config.sliding_window_pattern = 2
-
-        # TODO: remove this when Gemma 3n config updated in HuggingFace.
-        if self.hf_text_config.model_type == "gemma3n_text":
-            # 4 sliding window attention followed by 1 full attention
-            self.hf_text_config.sliding_window_pattern = "LLLLG"
-
-        sliding_window = getattr(self.hf_text_config, "sliding_window", None)
-        sliding_window_pattern = getattr(self.hf_text_config,
-                                         "sliding_window_pattern", None)
-        has_interleaved_attention = sliding_window_pattern is not None or (
-            isinstance(sliding_window, list))
-
-        if not self.disable_sliding_window and has_interleaved_attention:
-            if not envs.VLLM_USE_V1 and (backend := envs.VLLM_ATTENTION_BACKEND
-                                         ) in ("XFORMERS", "FLASHINFER"):
-                sliding_window_len_min = get_min_sliding_window(
-                    self.hf_text_config.sliding_window)
-
-                logger.warning_once(
-                    "%s has interleaved attention, which is currently not supported by the %s backend. Disabling sliding window and capping the max length to the sliding window size (%d).",  # noqa: E501
-                    self.hf_text_config.model_type,
-                    backend,
-                    sliding_window_len_min,
-                )
-                self.disable_sliding_window = True
-            else:
-                # for a model with interleaved attention,
-                # the scheduler and the model treat it as full attention
-                # (i.e., not dropping any tokens outside the window).
-                # only the attention layer itself is aware of the sliding
-                # window, and use the window size to compute the attention.
-                self.hf_text_config.interleaved_sliding_window = sliding_window
-
-                if hasattr(self.hf_text_config, "sliding_window"):
-                    delattr(self.hf_text_config, "sliding_window")
-
-                sliding_window = None
+        # Interleaved attention is not supported by some backends in V0
+        if (not self.disable_sliding_window
+                and is_interleaved(self.hf_text_config)
+                and not envs.VLLM_USE_V1
+                and (backend := envs.VLLM_ATTENTION_BACKEND)
+                in ("XFORMERS", "FLASHINFER")):
+            logger.warning_once(
+                "%s has interleaved attention, which is currently not "
+                "supported by the %s backend. Disabling sliding window and "
+                "capping the max length to the sliding window size (%d).",
+                self.hf_text_config.model_type,
+                backend,
+                self.hf_text_config.sliding_window,
+            )
+            self.disable_sliding_window = True
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
         self.multimodal_config = self._init_multimodal_config()
+
+        if self.disable_sliding_window:
+            # Set after get_and_verify_max_len to ensure that max_model_len
+            # can be correctly capped to sliding window size
+            self.hf_text_config.sliding_window = None
 
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
@@ -917,6 +865,10 @@ class ModelConfig:
                 for k, v in base_config.items():
                     if getattr(pooler_config, k) is None:
                         setattr(pooler_config, k, v)
+
+            default_pooling_type = self._model_info.default_pooling_type
+            if pooler_config.pooling_type is None:
+                pooler_config.pooling_type = default_pooling_type
 
             return pooler_config
 
@@ -1212,8 +1164,18 @@ class ModelConfig:
                     "non-quantized models.", self.quantization)
 
     def _verify_cuda_graph(self) -> None:
+        # The `max_seq_len_to_capture` was incorrectly
+        # based on the encoder's input length (448)
+        # but not the decoder's larger input length (1500).
+        # This change ensures the CUDA Graph captures the correct,
+        # larger sequence length, allowing it to work as intended.
+        effective_max_seq_len = self.max_model_len
+        if self.is_encoder_decoder:
+            effective_max_seq_len = max(
+                effective_max_seq_len,
+                getattr(self.hf_config, "max_source_positions", 0))
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
-                                          self.max_model_len)
+                                          effective_max_seq_len)
         # CUDAGraph capture not supported for enc-dec models and mllama on ROCm
         ROCM_UNSUPPORTED_MODELS = ['mllama']
         unsupported_rocm = (self.hf_config.model_type
@@ -1349,26 +1311,9 @@ class ModelConfig:
             if self.use_async_output_proc:
                 self.use_async_output_proc = False
 
-    def get_hf_config_sliding_window(
-            self) -> Union[Optional[int], list[Optional[int]]]:
-        """Get the sliding window size, or None if disabled."""
-
-        # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
-        # addition to sliding window size. We check if that field is present
-        # and if it's False, return None.
-        if (hasattr(self.hf_text_config, "use_sliding_window")
-                and not self.hf_text_config.use_sliding_window):
-            return None
+    def get_sliding_window(self) -> Optional[int]:
+        """Get the sliding window size from the HF text config if present."""
         return getattr(self.hf_text_config, "sliding_window", None)
-
-    def get_sliding_window(self) -> Optional[Union[int, list[Optional[int]]]]:
-        """Get the sliding window size, or None if disabled.
-        """
-        # If user disables sliding window, return None.
-        if self.disable_sliding_window:
-            return None
-        # Otherwise get the value from the hf config.
-        return self.get_hf_config_sliding_window()
 
     def get_vocab_size(self) -> int:
         return getattr(self.hf_text_config, "vocab_size", 0)
@@ -1715,15 +1660,6 @@ class ModelConfig:
 
         return mm_config.mm_processor_cache_gb > 0
 
-    @property
-    def enable_mm_input_cache(self) -> bool:
-        """Whether the multi-modal input cache should be enabled."""
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return False
-
-        return mm_config.mm_processor_cache_gb > 0
-
     def get_mm_input_cache_gb(self) -> int:
         mm_config = self.multimodal_config
         if mm_config is None:
@@ -1798,194 +1734,11 @@ class ModelConfig:
             tokenizer_config=tokenizer_config,
             max_model_len=max_model_len,
             disable_sliding_window=self.disable_sliding_window,
-            sliding_window_len=self.get_hf_config_sliding_window(),
+            sliding_window=self.get_sliding_window(),
             spec_target_max_model_len=self.spec_target_max_model_len,
             encoder_config=self.encoder_config)
         logger.info("Using max model len %s", max_model_len)
         return max_model_len
-
-
-BlockSize = Literal[1, 8, 16, 32, 64, 128]
-CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
-PrefixCachingHashAlgo = Literal["builtin", "sha256", "sha256_cbor_64bit"]
-
-
-@config
-@dataclass
-class CacheConfig:
-    """Configuration for the KV cache."""
-
-    block_size: SkipValidation[BlockSize] = None  # type: ignore
-    """Size of a contiguous cache block in number of tokens. This is ignored on
-    neuron devices and set to `--max-model-len`. On CUDA devices, only block
-    sizes up to 32 are supported. On HPU devices, block size defaults to 128.
-
-    This config has no static default. If left unspecified by the user, it will
-    be set in `Platform.check_and_update_config()` based on the current
-    platform."""
-    gpu_memory_utilization: float = 0.9
-    """The fraction of GPU memory to be used for the model executor, which can
-    range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
-    utilization. If unspecified, will use the default value of 0.9. This is a
-    per-instance limit, and only applies to the current vLLM instance. It does
-    not matter if you have another vLLM instance running on the same GPU. For
-    example, if you have two vLLM instances running on the same GPU, you can
-    set the GPU memory utilization to 0.5 for each instance."""
-    swap_space: float = 4
-    """Size of the CPU swap space per GPU (in GiB)."""
-    cache_dtype: CacheDType = "auto"
-    """Data type for kv cache storage. If "auto", will use model data type.
-    CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
-    fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc)."""
-    is_attention_free: bool = False
-    """Whether the model is attention-free. This is primarily set in
-    `ModelConfig` and that value should be manually duplicated here."""
-    num_gpu_blocks_override: Optional[int] = None
-    """Number of GPU blocks to use. This overrides the profiled `num_gpu_blocks`
-    if specified. Does nothing if `None`. Used for testing preemption."""
-    sliding_window: Optional[int] = None
-    """Sliding window size for the KV cache. This is primarily set in
-    `ModelConfig` and that value should be manually duplicated here."""
-    enable_prefix_caching: Optional[bool] = None
-    """Whether to enable prefix caching. Disabled by default for V0. Enabled by
-    default for V1."""
-    prefix_caching_hash_algo: PrefixCachingHashAlgo = "builtin"
-    """Set the hash algorithm for prefix caching:\n
-    - "builtin" is Python's built-in hash.\n
-    - "sha256" is collision resistant but with certain overheads.
-    This option uses Pickle for object serialization before hashing.\n
-    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible
-    hash. It serializes objects using canonical CBOR and hashes them with
-    SHA-256. The resulting hash consists of the lower 64 bits of the SHA-256
-    digest."""
-    cpu_offload_gb: float = 0
-    """The space in GiB to offload to CPU, per GPU. Default is 0, which means
-    no offloading. Intuitively, this argument can be seen as a virtual way to
-    increase the GPU memory size. For example, if you have one 24 GB GPU and
-    set this to 10, virtually you can think of it as a 34 GB GPU. Then you can
-    load a 13B model with BF16 weight, which requires at least 26GB GPU memory.
-    Note that this requires fast CPU-GPU interconnect, as part of the model is
-    loaded from CPU memory to GPU memory on the fly in each model forward pass.
-    """
-    calculate_kv_scales: bool = False
-    """This enables dynamic calculation of `k_scale` and `v_scale` when
-    kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
-    checkpoint if available. Otherwise, the scales will default to 1.0."""
-    cpu_kvcache_space_bytes: Optional[int] = None
-    """(CPU backend only) CPU key-value cache space."""
-    mamba_page_size_padded: Optional[int] = None
-    """ Optional override for mamba page size; used by hybrid mamba/attention
-    models to ensure exact alignment with attention page size."""
-
-    # Will be set after profiling.
-    num_gpu_blocks: Optional[int] = field(default=None, init=False)
-    """The number of blocks to allocate for GPU memory."""
-    num_cpu_blocks: Optional[int] = field(default=None, init=False)
-    """The number of blocks to allocate for CPU memory."""
-
-    kv_sharing_fast_prefill: bool = False
-    """This feature is work in progress and no prefill optimization takes place
-    with this flag enabled currently.
-
-    In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
-    some layers can skip tokens corresponding to prefill. This flag enables
-    attention metadata for eligible layers to be overriden with metadata
-    necessary for implementating this optimization in some models (e.g. Gemma3n)
-    """
-
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        factors: list[Any] = []
-        factors.append(self.cache_dtype)
-        # `cpu_offload_gb` does not use `torch.compile` yet.
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
-        return hash_str
-
-    def __post_init__(self) -> None:
-        self.swap_space_bytes = self.swap_space * GiB_bytes
-
-        self._verify_cache_dtype()
-        self._verify_prefix_caching()
-
-    def metrics_info(self):
-        # convert cache_config to dict(key: str, value: str) for prometheus
-        # metrics info
-        return {key: str(value) for key, value in self.__dict__.items()}
-
-    @model_validator(mode='after')
-    def _verify_args(self) -> Self:
-        if self.cpu_offload_gb < 0:
-            raise ValueError("CPU offload space must be non-negative"
-                             f", but got {self.cpu_offload_gb}")
-
-        if self.gpu_memory_utilization > 1.0:
-            raise ValueError(
-                "GPU memory utilization must be less than 1.0. Got "
-                f"{self.gpu_memory_utilization}.")
-
-        if self.kv_sharing_fast_prefill:
-            logger.warning_once(
-                "--kv-sharing-fast-prefill is currently work in progress "
-                "and not functional yet (i.e. no prefill savings)")
-
-        return self
-
-    def _verify_cache_dtype(self) -> None:
-        if self.cache_dtype == "auto":
-            pass
-        elif self.cache_dtype in get_args(CacheDType):
-            logger.info(
-                "Using fp8 data type to store kv cache. It reduces the GPU "
-                "memory footprint and boosts the performance. "
-                "Meanwhile, it may cause accuracy drop without a proper "
-                "scaling factor.")
-        else:
-            raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
-
-    def _verify_prefix_caching(self) -> None:
-        if not self.enable_prefix_caching:
-            return
-
-        if self.sliding_window is not None and not envs.VLLM_USE_V1:
-            raise NotImplementedError(
-                "Prefix caching is not supported with sliding window. "
-                "Run with --disable-sliding-window to use prefix caching.")
-
-        if (self.enable_prefix_caching and self.prefix_caching_hash_algo
-                not in get_args(PrefixCachingHashAlgo)):
-            raise ValueError(
-                "Unknown prefix caching hash algorithm: "
-                f"{self.prefix_caching_hash_algo}. Must be one of "
-                f"{get_args(PrefixCachingHashAlgo)}.")
-
-    def verify_with_parallel_config(
-        self,
-        parallel_config: "ParallelConfig",
-    ) -> None:
-        total_cpu_memory = get_cpu_memory()
-        # FIXME(woosuk): Here, it is assumed that the GPUs in a tensor parallel
-        # group are in the same node. However, the GPUs may span multiple nodes.
-        num_gpus_per_node = parallel_config.tensor_parallel_size
-        cpu_memory_usage = self.swap_space_bytes * num_gpus_per_node
-
-        msg = (f"{cpu_memory_usage / GiB_bytes:.2f} GiB out of the "
-               f"{total_cpu_memory / GiB_bytes:.2f} GiB total CPU memory "
-               "is allocated for the swap space.")
-        if cpu_memory_usage > 0.7 * total_cpu_memory:
-            raise ValueError("Too large swap space. " + msg)
-        elif cpu_memory_usage > 0.4 * total_cpu_memory:
-            logger.warning("Possibly too large swap space. %s", msg)
 
 
 @config
@@ -2070,659 +1823,6 @@ class LoadConfig:
                 self.ignore_patterns)
         else:
             self.ignore_patterns = ["original/**/*"]
-
-
-DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
-
-
-@config
-@dataclass
-class ParallelConfig:
-    """Configuration for the distributed execution."""
-
-    pipeline_parallel_size: int = 1
-    """Number of pipeline parallel groups."""
-    tensor_parallel_size: int = 1
-    """Number of tensor parallel groups."""
-    data_parallel_size: int = 1
-    """Number of data parallel groups. MoE layers will be sharded according to
-    the product of the tensor parallel size and data parallel size."""
-    data_parallel_size_local: int = 1
-    """Number of local data parallel groups."""
-    data_parallel_rank: int = 0
-    """Rank of the data parallel group."""
-    data_parallel_rank_local: Optional[int] = None
-    """Local rank of the data parallel group,
-    set only in SPMD mode."""
-    data_parallel_master_ip: str = "127.0.0.1"
-    """IP of the data parallel master."""
-    data_parallel_rpc_port: int = 29550
-    """Port for data parallel messaging."""
-    data_parallel_master_port: int = 29500
-    """Port of the data parallel master."""
-    data_parallel_backend: str = "mp"
-    """Backend to use for data parallel, either "mp" or "ray"."""
-    data_parallel_external_lb: bool = False
-    """Whether to use "external" DP LB mode. Applies only to online serving
-    and when data_parallel_size > 0. This is useful for a "one-pod-per-rank"
-    wide-EP setup in Kuberentes. Set implicitly when --data-parallel-rank
-    is provided explicitly to vllm serve."""
-    data_parallel_hybrid_lb: bool = False
-    """Whether to use "hybrid" DP LB mode. Applies only to online serving
-    and when data_parallel_size > 0. Enables running an AsyncLLM
-    and API server on a "per-node" basis where vLLM load balances
-    between local data parallel ranks, but an external LB balances
-    between vLLM nodes/replicas. Set explicitly in conjunction with
-    --data-parallel-start-rank."""
-    enable_expert_parallel: bool = False
-    """Use expert parallelism instead of tensor parallelism for MoE layers."""
-    enable_eplb: bool = False
-    """Enable expert parallelism load balancing for MoE layers."""
-    num_redundant_experts: int = 0
-    """Number of redundant experts to use for expert parallelism."""
-    eplb_window_size: int = 1000
-    """Window size for expert load recording."""
-    eplb_step_interval: int = 3000
-    """
-    Interval for rearranging experts in expert parallelism.
-
-    Note that if this is greater than the EPLB window size, only the metrics
-    of the last `eplb_window_size` steps will be used for rearranging experts.
-    """
-    eplb_log_balancedness: bool = False
-    """
-    Log the balancedness each step of expert parallelism.
-    This is turned off by default since it will cause communication overhead.
-    """
-
-    max_parallel_loading_workers: Optional[int] = None
-    """Maximum number of parallel loading workers when loading model
-    sequentially in multiple batches. To avoid RAM OOM when using tensor
-    parallel and large models."""
-
-    disable_custom_all_reduce: bool = False
-    """Disable the custom all-reduce kernel and fall back to NCCL."""
-
-    ray_workers_use_nsight: bool = False
-    """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
-
-    ray_runtime_env: Optional["RuntimeEnv"] = None
-    """Ray runtime environment to pass to distributed workers."""
-
-    placement_group: Optional["PlacementGroup"] = None
-    """ray distributed model workers placement group."""
-
-    distributed_executor_backend: Optional[Union[DistributedExecutorBackend,
-                                                 type["ExecutorBase"]]] = None
-    """Backend to use for distributed model
-    workers, either "ray" or "mp" (multiprocessing). If the product
-    of pipeline_parallel_size and tensor_parallel_size is less than
-    or equal to the number of GPUs available, "mp" will be used to
-    keep processing on a single host. Otherwise, this will default
-    to "ray" if Ray is installed and fail otherwise. Note that tpu
-    only support Ray for distributed inference."""
-
-    worker_cls: str = "auto"
-    """The full name of the worker class to use. If "auto", the worker class
-    will be determined based on the platform."""
-    sd_worker_cls: str = "auto"
-    """The full name of the worker class to use for speculative decoding.
-    If "auto", the worker class will be determined based on the platform."""
-    worker_extension_cls: str = ""
-    """The full name of the worker extension class to use. The worker extension
-    class is dynamically inherited by the worker class. This is used to inject
-    new attributes and methods to the worker class for use in collective_rpc
-    calls."""
-
-    world_size: int = field(init=False)
-    """world_size is TPxPP, it affects the number of workers we create."""
-
-    rank: int = 0
-    """Global rank in distributed setup."""
-
-    enable_multimodal_encoder_data_parallel: bool = False
-    """ Use data parallelism instead of tensor parallelism for vision encoder.
-    Only support LLama4 for now"""
-
-    @property
-    def world_size_across_dp(self) -> int:
-        """world_size_across_dp is TPxPPxDP, it is the size of the world
-        including data parallelism."""
-        return self.world_size * self.data_parallel_size
-
-    def get_next_dp_init_port(self) -> int:
-        """
-        We might need to initialize process groups in multiple
-        processes that is related to data parallelism,
-        e.g. both in the worker and in the engine, which
-        can live in different processes. To avoid port conflicts, we
-        increment the port number each time we need to initialize a
-        new process group related to data parallelism.
-        """
-        answer = self.data_parallel_master_port
-        self.data_parallel_master_port += 1
-        return answer
-
-    def stateless_init_dp_group(self) -> "ProcessGroup":
-        # NOTE: In high-concurrency scenarios multiple processes
-        # can pick the same (currently free) port through a race
-        # condition when calling `get_open_port()`. When the first
-        # process binds the port the others will subsequently fail
-        # with `torch.distributed.DistNetworkError: EADDRINUSE`.
-        # To make the initialization more robust we retry a few times
-        # with a fresh port whenever this specific error is observed.
-        from torch.distributed import DistNetworkError
-
-        from vllm.distributed.utils import (
-            stateless_init_torch_distributed_process_group)
-
-        max_retries = 5
-        last_exc: Optional[Exception] = None
-        for _ in range(max_retries):
-            try:
-                # use gloo since the engine process might not have cuda device
-                return stateless_init_torch_distributed_process_group(
-                    self.data_parallel_master_ip,
-                    self.get_next_dp_init_port(),
-                    self.data_parallel_rank,
-                    self.data_parallel_size,
-                    backend="gloo")
-            except DistNetworkError as e:
-                # We only want to retry when the root cause is EADDRINUSE.
-                if "EADDRINUSE" in str(e):
-                    logger.warning(
-                        "Address already in use. Retrying with a new port.")
-                    last_exc = e
-                    continue  # try again with a new port
-                raise e
-
-        # If we get here all retries have failed.
-        assert last_exc is not None
-        raise last_exc
-
-    @staticmethod
-    def has_unfinished_dp(dp_group: "ProcessGroup",
-                          has_unfinished: bool) -> bool:
-        tensor = torch.tensor([has_unfinished],
-                              dtype=torch.int32,
-                              device="cpu")
-        # dp rank 0: has_unfinished_seqs=True
-        # dp rank 1: has_unfinished_seqs=False
-        # aggregated: has_unfinished_seqs=True
-        # so this is an OR operation, i.e. MAX in integers
-        torch.distributed.all_reduce(tensor, op=ReduceOp.MAX, group=dp_group)
-        aggregated_has_unfinished = bool(tensor.item())
-        return aggregated_has_unfinished
-
-    @staticmethod
-    def sync_kv_cache_memory_size(dp_group: "ProcessGroup",
-                                  kv_cache_memory: int) -> int:
-        if kv_cache_memory == -1:
-            kv_cache_memory = torch.iinfo(torch.int64).max
-        tensor = torch.tensor([kv_cache_memory],
-                              dtype=torch.int64,
-                              device="cpu")
-        # we cannot use broadcast for stateless dp group since it depends
-        # on global rank
-        torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
-        return tensor.item()
-
-    def compute_hash(self):
-        """
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        factors: list[Any] = []
-        factors.append(self.pipeline_parallel_size)
-        factors.append(self.tensor_parallel_size)
-        factors.append(self.enable_expert_parallel)
-        factors.append(self.data_parallel_size)
-        factors.append(envs.VLLM_ALL2ALL_BACKEND)
-        return hashlib.sha256(str(factors).encode()).hexdigest()
-
-    def __post_init__(self) -> None:
-        self.world_size = self.pipeline_parallel_size * \
-            self.tensor_parallel_size
-
-        if self.data_parallel_size_local > self.data_parallel_size:
-            raise ValueError(
-                f"data_parallel_size_local ({self.data_parallel_size_local}) "
-                f"must be <= data_parallel_size ({self.data_parallel_size})")
-
-        if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
-            # Data parallel was specified in the engine args.
-            self.data_parallel_master_port = get_open_port()
-
-            if not (0 <= self.data_parallel_rank < self.data_parallel_size):
-                raise ValueError(
-                    f"data_parallel_rank ({self.data_parallel_rank})"
-                    f" must be in the range [0, {self.data_parallel_size})")
-        else:
-            # Otherwise fall back to env vars (e.g. for offline SPMD case).
-            self.data_parallel_size = envs.VLLM_DP_SIZE
-            self.data_parallel_rank = envs.VLLM_DP_RANK
-            self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
-            self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
-            self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
-
-            if self.data_parallel_external_lb:
-                raise ValueError("data_parallel_external_lb can only "
-                                 "be set when data_parallel_size > 1")
-
-        if self.distributed_executor_backend == "external_launcher":
-            import os
-            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-            logger.info("Disabling V1 multiprocessing for external launcher.")
-
-        if self.enable_eplb:
-            if not current_platform.is_cuda():
-                raise ValueError(
-                    "Expert parallelism load balancing is only supported on "
-                    "CUDA devices now.")
-            if self.num_redundant_experts < 0:
-                raise ValueError(
-                    "num_redundant_experts must be non-negative, but got "
-                    f"{self.num_redundant_experts}.")
-            if not self.enable_expert_parallel:
-                raise ValueError(
-                    "enable_expert_parallel must be True to use EPLB.")
-            if self.tensor_parallel_size * self.data_parallel_size <= 1:
-                raise ValueError(
-                    "EPLB requires tensor_parallel_size or data_parallel_size "
-                    f"to be greater than 1, but got "
-                    f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
-                )
-        else:
-            if self.num_redundant_experts != 0:
-                raise ValueError(
-                    "num_redundant_experts should be used with EPLB."
-                    f"{self.num_redundant_experts}.")
-        if self.distributed_executor_backend is None and self.world_size > 1:
-            # We use multiprocessing by default if world_size fits on the
-            # current node and we aren't in a ray placement group.
-
-            from vllm.executor import ray_utils
-            backend: DistributedExecutorBackend = "mp"
-            ray_found = ray_utils.ray_is_available()
-            if current_platform.is_neuron():
-                # neuron uses single process to control multiple devices
-                backend = "uni"
-            elif current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
-                backend = "uni"
-            elif (current_platform.is_cuda()
-                  and cuda_device_count_stateless() < self.world_size):
-                if not ray_found:
-                    raise ValueError("Unable to load Ray: "
-                                     f"{ray_utils.ray_import_err}. Ray is "
-                                     "required for multi-node inference, "
-                                     "please install Ray with `pip install "
-                                     "ray`.")
-                backend = "ray"
-            elif self.data_parallel_backend == "ray":
-                logger.info("Using ray distributed inference because "
-                            "data_parallel_backend is ray")
-                backend = "ray"
-            elif ray_found:
-                if self.placement_group:
-                    backend = "ray"
-                else:
-                    from ray import is_initialized as ray_is_initialized
-                    if ray_is_initialized():
-                        from ray.util import get_current_placement_group
-                        if get_current_placement_group():
-                            backend = "ray"
-            self.distributed_executor_backend = backend
-            logger.debug("Defaulting to use %s for distributed inference",
-                         backend)
-
-        if self.distributed_executor_backend is None and self.world_size == 1:
-            self.distributed_executor_backend = "uni"
-
-    @property
-    def use_ray(self) -> bool:
-        return self.distributed_executor_backend == "ray" or (
-            isinstance(self.distributed_executor_backend, type)
-            and self.distributed_executor_backend.uses_ray)
-
-    @model_validator(mode='after')
-    def _verify_args(self) -> Self:
-        # Lazy import to avoid circular import
-        from vllm.executor.executor_base import ExecutorBase
-        from vllm.platforms import current_platform
-        if self.distributed_executor_backend not in (
-                "ray", "mp", "uni",
-                "external_launcher", None) and not (isinstance(
-                    self.distributed_executor_backend, type) and issubclass(
-                        self.distributed_executor_backend, ExecutorBase)):
-            raise ValueError(
-                "Unrecognized distributed executor backend "
-                f"{self.distributed_executor_backend}. Supported "
-                "values are 'ray', 'mp' 'uni', 'external_launcher' or"
-                " custom ExecutorBase subclass.")
-        if self.use_ray:
-            from vllm.executor import ray_utils
-            ray_utils.assert_ray_available()
-
-        if not current_platform.use_custom_allreduce():
-            self.disable_custom_all_reduce = True
-            logger.debug(
-                "Disabled the custom all-reduce kernel because it is not "
-                "supported on current platform.")
-        if self.ray_workers_use_nsight and not self.use_ray:
-            raise ValueError("Unable to use nsight profiling unless workers "
-                             "run with Ray.")
-
-        return self
-
-
-PreemptionMode = Literal["swap", "recompute"]
-SchedulerPolicy = Literal["fcfs", "priority"]
-
-
-@config
-@dataclass
-class SchedulerConfig:
-    """Scheduler configuration."""
-
-    runner_type: RunnerType = "generate"
-    """The runner type to launch for the model."""
-
-    max_num_batched_tokens: SkipValidation[int] = None  # type: ignore
-    """Maximum number of tokens to be processed in a single iteration.
-
-    This config has no static default. If left unspecified by the user, it will
-    be set in `EngineArgs.create_engine_config` based on the usage context."""
-
-    max_num_seqs: SkipValidation[int] = None  # type: ignore
-    """Maximum number of sequences to be processed in a single iteration.
-
-    This config has no static default. If left unspecified by the user, it will
-    be set in `EngineArgs.create_engine_config` based on the usage context."""
-
-    max_model_len: SkipValidation[int] = None  # type: ignore
-    """Maximum length of a sequence (including prompt and generated text). This
-    is primarily set in `ModelConfig` and that value should be manually
-    duplicated here."""
-
-    max_num_partial_prefills: int = 1
-    """For chunked prefill, the maximum number of sequences that can be
-    partially prefilled concurrently."""
-
-    max_long_partial_prefills: int = 1
-    """For chunked prefill, the maximum number of prompts longer than
-    long_prefill_token_threshold that will be prefilled concurrently. Setting
-    this less than max_num_partial_prefills will allow shorter prompts to jump
-    the queue in front of longer prompts in some cases, improving latency."""
-
-    long_prefill_token_threshold: int = 0
-    """For chunked prefill, a request is considered long if the prompt is
-    longer than this number of tokens."""
-
-    num_lookahead_slots: int = 0
-    """The number of slots to allocate per sequence per
-    step, beyond the known token ids. This is used in speculative
-    decoding to store KV activations of tokens which may or may not be
-    accepted.
-
-    NOTE: This will be replaced by speculative config in the future; it is
-    present to enable correctness tests until then."""
-
-    cuda_graph_sizes: list[int] = field(default_factory=list)
-    """Cuda graph capture sizes
-    1. if none provided, then default set to [min(max_num_seqs * 2, 512)]
-    2. if one value is provided, then the capture list would follow the
-    pattern: [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
-    3. more than one value (e.g. 1 2 128) is provided, then the capture list
-    will follow the provided list."""
-
-    delay_factor: float = 0.0
-    """Apply a delay (of delay factor multiplied by previous
-    prompt latency) before scheduling next prompt."""
-
-    enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
-    """If True, prefill requests can be chunked based
-    on the remaining max_num_batched_tokens."""
-
-    is_multimodal_model: bool = False
-    """True if the model is multimodal."""
-
-    # TODO (ywang96): Make this configurable.
-    max_num_encoder_input_tokens: int = field(init=False)
-    """Multimodal encoder compute budget, only used in V1.
-
-    NOTE: This is not currently configurable. It will be overridden by
-    max_num_batched_tokens in case max multimodal embedding size is larger."""
-
-    # TODO (ywang96): Make this configurable.
-    encoder_cache_size: int = field(init=False)
-    """Multimodal encoder cache size, only used in V1.
-
-    NOTE: This is not currently configurable. It will be overridden by
-    max_num_batched_tokens in case max multimodal embedding size is larger."""
-
-    preemption_mode: Optional[PreemptionMode] = None
-    """Whether to perform preemption by swapping or
-    recomputation. If not specified, we determine the mode as follows:
-    We use recomputation by default since it incurs lower overhead than
-    swapping. However, when the sequence group has multiple sequences
-    (e.g., beam search), recomputation is not currently supported. In
-    such a case, we use swapping instead."""
-
-    num_scheduler_steps: int = 1
-    """Maximum number of forward steps per scheduler call."""
-
-    multi_step_stream_outputs: bool = True
-    """If False, then multi-step will stream outputs at the end of all steps"""
-
-    send_delta_data: bool = False
-    """Private API. If used, scheduler sends delta data to
-    workers instead of an entire data. It should be enabled only
-    when SPMD worker architecture is enabled. I.e.,
-    VLLM_USE_RAY_SPMD_WORKER=1"""
-
-    policy: SchedulerPolicy = "fcfs"
-    """The scheduling policy to use:\n
-    - "fcfs" means first come first served, i.e. requests are handled in order
-    of arrival.\n
-    - "priority" means requests are handled based on given priority (lower
-    value means earlier handling) and time of arrival deciding any ties)."""
-
-    chunked_prefill_enabled: bool = field(init=False)
-    """True if chunked prefill is enabled."""
-
-    disable_chunked_mm_input: bool = False
-    """If set to true and chunked prefill is enabled, we do not want to
-    partially schedule a multimodal item. Only used in V1
-    This ensures that if a request has a mixed prompt
-    (like text tokens TTTT followed by image tokens IIIIIIIIII) where only
-    some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
-    it will be scheduled as TTTT in one step and IIIIIIIIII in the next."""
-
-    # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
-    # or "mod.custom_class".
-    scheduler_cls: Union[str, type[object]] = "vllm.core.scheduler.Scheduler"
-    """The scheduler class to use. "vllm.core.scheduler.Scheduler" is the
-    default scheduler. Can be a class directly or the path to a class of form
-    "mod.custom_class"."""
-
-    disable_hybrid_kv_cache_manager: bool = False
-    """If set to True, KV cache manager will allocate the same size of KV cache
-    for all attention layers even if there are multiple type of attention layers
-    like full attention and sliding window attention.
-    """
-
-    async_scheduling: bool = False
-    """EXPERIMENTAL: If set to True, perform async scheduling. This may help
-    reduce the CPU overheads, leading to better latency and throughput. However,
-    async scheduling is currently not supported with some features such as
-    structured outputs, speculative decoding, and pipeline parallelism.
-    """
-
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
-        return hash_str
-
-    def __post_init__(self) -> None:
-        if self.max_model_len is None:
-            self.max_model_len = 8192
-
-        if self.max_num_seqs is None:
-            self.max_num_seqs = 128
-
-        if self.max_num_batched_tokens is None:
-            if self.enable_chunked_prefill:
-                if self.num_scheduler_steps > 1:
-                    # Multi-step Chunked-Prefill doesn't allow prompt-chunking
-                    # for now. Have max_num_batched_tokens set to max_model_len
-                    # so we don't reject sequences on account of a short
-                    # max_num_batched_tokens.
-                    self.max_num_batched_tokens = max(
-                        self.max_model_len, DEFAULT_MAX_NUM_BATCHED_TOKENS)
-                else:
-                    self.max_num_batched_tokens = (
-                        DEFAULT_MAX_NUM_BATCHED_TOKENS)
-            else:
-                # If max_model_len is too short, use
-                # DEFAULT_MAX_NUM_BATCHED_TOKENS as the default value
-                # for higher throughput.
-                self.max_num_batched_tokens = max(
-                    self.max_model_len, DEFAULT_MAX_NUM_BATCHED_TOKENS)
-
-            if self.runner_type == "pooling":
-                # Choose specific value for higher throughput
-                self.max_num_batched_tokens = max(
-                    self.max_num_batched_tokens,
-                    POOLING_MODEL_MAX_NUM_BATCHED_TOKENS,
-                )
-            if self.is_multimodal_model:
-                # The value needs to be at least the number of multimodal tokens
-                self.max_num_batched_tokens = max(
-                    self.max_num_batched_tokens,
-                    MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
-                )
-
-            # When using default settings,
-            # Ensure max_num_batched_tokens does not exceed model limit.
-            # Some models (e.g., Whisper) have embeddings tied to max length.
-            self.max_num_batched_tokens = min(
-                self.max_num_seqs * self.max_model_len,
-                self.max_num_batched_tokens)
-
-        self.max_num_encoder_input_tokens = self.max_num_batched_tokens
-        self.encoder_cache_size = self.max_num_batched_tokens
-
-        if self.enable_chunked_prefill:
-            logger.info(
-                "Chunked prefill is enabled with max_num_batched_tokens=%d.",
-                self.max_num_batched_tokens)
-
-        self.chunked_prefill_enabled = self.enable_chunked_prefill
-        if self.max_num_partial_prefills > 1:
-            if self.long_prefill_token_threshold == 0:
-                self.long_prefill_token_threshold = int(self.max_model_len *
-                                                        0.04)
-
-            logger.info(
-                "Concurrent partial prefills enabled with "
-                "max_num_partial_prefills=%d, max_long_partial_prefills=%d, "
-                "long_prefill_token_threshold=%d",
-                self.max_num_partial_prefills, self.max_long_partial_prefills,
-                self.long_prefill_token_threshold)
-
-        # NOTE: Default set cuda_graph_sizes to [min(max_num_seqs * 2, 512)].
-        # This avoids OOM in tight memory scenarios with small max_num_seqs,
-        # and prevents capture of many large graphs (>512) that would greatly
-        # increase startup time with limited performance benefit.
-        if not self.cuda_graph_sizes:
-            self.cuda_graph_sizes = [min(self.max_num_seqs * 2, 512)]
-
-        if self.async_scheduling:
-            self.scheduler_cls = (
-                "vllm.v1.core.sched.async_scheduler.AsyncScheduler")
-
-    @model_validator(mode='after')
-    def _verify_args(self) -> Self:
-        if (self.max_num_batched_tokens < self.max_model_len
-                and not self.chunked_prefill_enabled):
-            raise ValueError(
-                f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
-                f"smaller than max_model_len ({self.max_model_len}). "
-                "This effectively limits the maximum sequence length to "
-                "max_num_batched_tokens and makes vLLM reject longer "
-                "sequences. Please increase max_num_batched_tokens or "
-                "decrease max_model_len.")
-
-        if self.max_num_batched_tokens < self.max_num_seqs:
-            raise ValueError(
-                f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
-                "be greater than or equal to max_num_seqs "
-                f"({self.max_num_seqs}).")
-
-        if self.max_num_batched_tokens > self.max_num_seqs * self.max_model_len:
-            logger.warning(
-                "max_num_batched_tokens (%d) exceeds max_num_seqs "
-                "* max_model_len (%d). This may lead to unexpected behavior.",
-                self.max_num_batched_tokens,
-                self.max_num_seqs * self.max_model_len)
-
-        if self.num_lookahead_slots < 0:
-            raise ValueError(
-                "num_lookahead_slots "
-                f"({self.num_lookahead_slots}) must be greater than or "
-                "equal to 0.")
-
-        if self.num_scheduler_steps < 1:
-            raise ValueError(
-                "num_scheduler_steps "
-                f"({self.num_scheduler_steps}) must be greater than or "
-                "equal to 1.")
-
-        if self.max_num_partial_prefills < 1:
-            raise ValueError(
-                f"max_num_partial_prefills ({self.max_num_partial_prefills}) "
-                "must be greater than or equal to 1.")
-        elif self.max_num_partial_prefills > 1:
-            if not self.chunked_prefill_enabled:
-                raise ValueError("Chunked prefill must be enabled to set "
-                                 "max_num_partial_prefills > 1.")
-
-            if self.long_prefill_token_threshold > self.max_model_len:
-                raise ValueError(
-                    "long_prefill_token_threshold "
-                    f"({self.long_prefill_token_threshold}) cannot be greater "
-                    f"than the max_model_len ({self.max_model_len}).")
-
-        if (self.max_long_partial_prefills
-                < 1) or (self.max_long_partial_prefills
-                         > self.max_num_partial_prefills):
-            raise ValueError(
-                f"max_long_partial_prefills ({self.max_long_partial_prefills}) "
-                "must be greater than or equal to 1 and less than or equal to "
-                f"max_num_partial_prefills ({self.max_num_partial_prefills}).")
-
-        return self
-
-    @property
-    def is_multi_step(self) -> bool:
-        return self.num_scheduler_steps > 1
 
 
 Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu"]
@@ -3234,13 +2334,7 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        from vllm.transformers_utils.configs import SpeculatorsConfig
-
-        eagle3_target_supported = ["llama"]
-        if self.draft_model_config and isinstance(
-                self.draft_model_config.hf_config, SpeculatorsConfig):
-            eagle3_target_supported.append("qwen")
-
+        eagle3_target_supported = ["llama", "qwen"]
         if self.method == "eagle3" and self.target_model_config and not any(
                 supported_model in
                 self.target_model_config.hf_text_config.model_type
@@ -3693,7 +2787,7 @@ def _get_and_verify_max_len(
     tokenizer_config: Optional[dict],
     max_model_len: Optional[int],
     disable_sliding_window: bool,
-    sliding_window_len: Optional[Union[int, list[Optional[int]]]],
+    sliding_window: Optional[int],
     spec_target_max_model_len: Optional[int] = None,
     encoder_config: Optional[Any] = None,
 ) -> int:
@@ -3732,13 +2826,10 @@ def _get_and_verify_max_len(
 
     # If sliding window is manually disabled, max_length should be less
     # than the sliding window length in the model config.
-    if disable_sliding_window and sliding_window_len is not None:
-
-        sliding_window_len_min = get_min_sliding_window(sliding_window_len)
-        max_len_key = "sliding_window" \
-            if sliding_window_len_min < derived_max_model_len else max_len_key
-        derived_max_model_len = min(derived_max_model_len,
-                                    sliding_window_len_min)
+    if (disable_sliding_window and sliding_window is not None
+            and sliding_window < derived_max_model_len):
+        max_len_key = "sliding_window"
+        derived_max_model_len = sliding_window
 
     # Consider model_max_length in tokenizer_config
     if tokenizer_config:
@@ -3837,14 +2928,6 @@ def _get_and_verify_max_len(
                     f"{msg} To allow overriding this maximum, set "
                     "the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN=1")
     return int(max_model_len)
-
-
-def get_min_sliding_window(
-        sliding_window: Union[int, list[Optional[int]]]) -> int:
-    if isinstance(sliding_window, list):
-        return min(s for s in sliding_window if s is not None)
-
-    return sliding_window
 
 
 def get_served_model_name(model: str,
@@ -4152,421 +3235,6 @@ class KVEventsConfig:
     """The topic to use for the event publisher. Consumers can subscribe to
     this topic to receive events.
     """
-
-
-class CompilationLevel:
-    # constants for the levels of the compilation process
-    NO_COMPILATION = 0
-    DYNAMO_AS_IS = 1
-    DYNAMO_ONCE = 2
-    PIECEWISE = 3
-
-
-@config
-@dataclass
-class PassConfig:
-    """Configuration for custom Inductor passes.
-
-    This is separate from general `CompilationConfig` so that inductor passes
-    don't all have access to full configuration - that would create a cycle as
-    the `PassManager` is set as a property of config."""
-
-    enable_fusion: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
-    """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
-    enable_attn_fusion: bool = False
-    """Whether to enable the custom attention+quant fusion pass."""
-    enable_noop: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
-    """Whether to enable the custom no-op elimination pass."""
-    enable_sequence_parallelism: bool = False
-    """Whether to enable sequence parallelism."""
-    enable_async_tp: bool = False
-    """Whether to enable async TP."""
-    enable_fi_allreduce_fusion: bool = False
-    """Whether to enable flashinfer allreduce fusion."""
-    fi_allreduce_fusion_max_token_num: int = 16384
-    """Max number of tokens to used in flashinfer allreduce fusion."""
-
-    # TODO(luka) better pass enabling system.
-
-    def uuid(self):
-        """
-        Produces a hash unique to the pass configuration.
-        Any new fields that affect compilation should be added to the hash.
-        Any future fields that don't affect compilation should be excluded.
-        """
-        return InductorPass.hash_dict(asdict(self))
-
-    def __post_init__(self) -> None:
-        if not self.enable_noop:
-            if self.enable_fusion:
-                logger.warning_once(
-                    "Fusion enabled but reshape elimination disabled. "
-                    "RMSNorm/SiluMul + quant (fp8) fusion might not work")
-            if self.enable_attn_fusion:
-                logger.warning_once(
-                    "Fusion enabled but reshape elimination disabled. "
-                    "Attention + quant (fp8) fusion might not work")
-
-
-@config
-@dataclass
-class CompilationConfig:
-    """Configuration for compilation. It has three parts:
-
-    - Top-level Compilation control:
-        - [`level`][vllm.config.CompilationConfig.level]
-        - [`debug_dump_path`][vllm.config.CompilationConfig.debug_dump_path]
-        - [`cache_dir`][vllm.config.CompilationConfig.cache_dir]
-        - [`backend`][vllm.config.CompilationConfig.backend]
-        - [`custom_ops`][vllm.config.CompilationConfig.custom_ops]
-        - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
-    - CudaGraph capture:
-        - [`use_cudagraph`][vllm.config.CompilationConfig.use_cudagraph]
-        - [`cudagraph_capture_sizes`]
-        [vllm.config.CompilationConfig.cudagraph_capture_sizes]
-        - [`cudagraph_num_of_warmups`]
-        [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
-        - [`cudagraph_copy_inputs`]
-        [vllm.config.CompilationConfig.cudagraph_copy_inputs]
-        - [`full_cuda_graph`][vllm.config.CompilationConfig.full_cuda_graph]
-    - Inductor compilation:
-        - [`use_inductor`][vllm.config.CompilationConfig.use_inductor]
-        - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
-        - [`inductor_compile_config`]
-        [vllm.config.CompilationConfig.inductor_compile_config]
-        - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
-        - custom inductor passes
-
-    Why we have different sizes for cudagraph and inductor:
-    - cudagraph: a cudagraph captured for a specific size can only be used
-        for the same size. We need to capture all the sizes we want to use.
-    - inductor: a graph compiled by inductor for a general shape can be used
-        for different sizes. Inductor can also compile for specific sizes,
-        where it can have more information to optimize the graph with fully
-        static shapes. However, we find the general shape compilation is
-        sufficient for most cases. It might be beneficial to compile for
-        certain small batchsizes, where inductor is good at optimizing.
-    """
-    # Top-level Compilation control
-    level: Optional[int] = None
-    """The level of compilation:
-
-    - None: If None, we will select the default compilation level.
-      For V1 engine this is 3, for V0 engine this is 0.
-    - 0: no compilation.
-    - 1: dynamo as is.
-    - 2: dynamo once.
-    - 3: piecewise compilation."""
-    debug_dump_path: str = ""
-    """The path to dump the debug information."""
-    cache_dir: str = ""
-    """The directory to store the compiled graph, to accelerate Inductor
-    compilation. By default, it will use model-related information to generate
-    a cache directory."""
-    backend: str = ""
-    """The backend for compilation. It needs to be a string:
-
-    - "" (empty string): use the default backend.
-    - "eager"/"openxla"/...: use the specified backend registered in PyTorch.
-    - "full.module.name": a qualified name which can be used to import the
-
-    backend function.
-    We use string to avoid serialization issues when using compilation in a
-    distributed setting. When the compilation level is 1 or 2, the backend is
-    used for the compilation directly (it sees the whole graph). When the
-    compilation level is 3, the backend is used for the piecewise compilation
-    (it sees a part of the graph)."""
-    custom_ops: list[str] = field(default_factory=list)
-    """Fine-grained control over which custom ops to enable/disable. Use 'all'
-    to enable all, 'none' to disable all. Also specify a list of custom op
-    names to enable (prefixed with a '+'), or disable (prefixed with a '-').
-    Examples:
-
-    - 'all,-op1' to enable all except op1
-    - 'none,+op1,+op2' to enable only op1 and op2
-
-    By default, all custom ops are enabled when running without Inductor and
-    disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
-    Inductor generates (fused) Triton kernels for disabled custom ops."""
-    splitting_ops: list[str] = field(default_factory=list)
-    """A list of ops to split the full graph into subgraphs, used in piecewise
-    compilation."""
-
-    # Inductor capture
-    use_inductor: bool = True
-    """Whether to use inductor compilation:
-
-    - False: inductor compilation is not used. graph runs in eager
-        (custom_ops enabled by default).
-    - True: inductor compilation is used (custom_ops disabled by default).
-        One graph for symbolic shape and one graph per size in compile_sizes
-        are compiled using configurations in inductor_compile_config.
-
-    This setting is ignored if level<PIECEWISE."""
-    compile_sizes: Optional[list[Union[int, str]]] = None
-    """Sizes to compile for inductor. In addition
-    to integers, it also supports "cudagraph_capture_sizes" to
-    specify the sizes for cudagraph capture."""
-    inductor_compile_config: dict = field(default_factory=dict)
-    """Additional configurations for inductor.
-    - None: use default configurations."""
-    inductor_passes: dict[str, str] = field(default_factory=dict)
-    """Additional passes for inductor. It is a dictionary
-    from pass name to pass function qualified name. We use function
-    name because the config uses JSON format. If we pass the config
-    from Python, functions can also be passed directly via Python object
-    constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
-
-    # CudaGraph compilation
-    use_cudagraph: bool = field(default_factory=lambda: envs.VLLM_USE_V1)
-    """Whether to use cudagraph inside compilation.
-    - False: cudagraph inside compilation is not used.
-    - True: cudagraph inside compilation is used. It requires
-        that all input buffers have fixed addresses, and all
-        splitting ops write their outputs to input buffers.
-    In the vLLM V1 Engine, this flag only applies for
-    CompilationLevel.PIECEWISE (aka -O3).
-    Note that this is orthogonal to the cudagraph capture logic
-    outside of compilation.
-    TODO: move outside cudagraph logic into compilation.
-    torch.compile will handle cudagraph capture logic in the future."""
-    cudagraph_num_of_warmups: int = 0
-    """Number of warmup runs for cudagraph.
-    It means the first several runs will be treated as warmup runs.
-    Only after that, the execution will be recorded, and the recorded
-    cudagraph will be used for subsequent runs."""
-    cudagraph_capture_sizes: Optional[list[int]] = None
-    """Sizes to capture cudagraph.
-    - None (default): capture sizes are inferred from vllm config.
-    - list[int]: capture sizes are specified as given."""
-    cudagraph_copy_inputs: bool = False
-    """Whether to copy input tensors for
-    cudagraph. If the caller can guarantee that the same input buffers
-    are always used, it can set this to False. Otherwise, it should
-    set this to True, and the compiler will copy the input to an
-    internally managed buffer. Default is False."""
-    full_cuda_graph: bool = False
-    """whether to use a full cuda graph for the entire forward pass rather than
-    splitting certain operations such as attention into subgraphs. Thus this
-    flag cannot be used together with splitting_ops. This may provide
-    performance benefits for smaller models."""
-
-    pass_config: PassConfig = field(default_factory=PassConfig)
-    """Custom inductor passes, see PassConfig for more details"""
-
-    max_capture_size: int = field(default=None, init=False)  # type: ignore
-    """not configurable, computed after init"""
-    local_cache_dir: str = field(default=None, init=False)  # type: ignore
-    """local cache dir for each rank"""
-    bs_to_padded_graph_size: list[int] = field(
-        default=None,  # type: ignore
-        init=False)
-    """optimization:
-    Intuitively, bs_to_padded_graph_size should be dict[int, int].
-    since we know all keys are in a range [0, max_capture_size],
-    we can optimize it to list[int] for better lookup performance."""
-
-    # keep track of enabled and disabled custom ops
-    enabled_custom_ops: Counter[str] = field(default_factory=Counter,
-                                             init=False)
-    """custom ops that are enabled"""
-    disabled_custom_ops: Counter[str] = field(default_factory=Counter,
-                                              init=False)
-    """custom ops that are disabled"""
-    traced_files: set[str] = field(default_factory=set, init=False)
-    """files that are traced for compilation"""
-    compilation_time: float = field(default=0.0, init=False)
-    """time taken for compilation"""
-
-    static_forward_context: dict[str, Any] = field(default_factory=dict,
-                                                   init=False)
-    """Per-model forward context
-    Map from layer name to layer objects that need to be accessed outside
-    model code, e.g., Attention, FusedMOE when dp_size>1."""
-
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        factors: list[Any] = []
-        factors.append(self.level)
-        factors.append(self.backend)
-        factors.append(self.custom_ops)
-        factors.append(self.splitting_ops)
-        factors.append(self.use_inductor)
-        factors.append(self.inductor_compile_config)
-        factors.append(self.inductor_passes)
-        factors.append(self.pass_config.uuid())
-        return hashlib.sha256(str(factors).encode()).hexdigest()
-
-    def __repr__(self) -> str:
-        exclude = {
-            "static_forward_context": True,
-            "enabled_custom_ops": True,
-            "disabled_custom_ops": True,
-            "compilation_time": True,
-            "bs_to_padded_graph_size": True,
-            "traced_files": True,
-            "inductor_compile_config": {
-                "post_grad_custom_post_pass": True,
-            },
-        }
-
-        # exclude default attr in pass_config
-        pass_config_exclude = {}
-        for attr, default_val in vars(PassConfig()).items():
-            if getattr(self.pass_config, attr) == default_val:
-                pass_config_exclude[attr] = True
-        if pass_config_exclude:
-            exclude["pass_config"] = pass_config_exclude
-
-        # The cast to string is necessary because Pydantic is mocked in docs
-        # builds and sphinx-argparse doesn't know the return type of decode()
-        return str(
-            TypeAdapter(CompilationConfig).dump_json(
-                self,
-                exclude=exclude,  # type: ignore[arg-type]
-                exclude_unset=True).decode())
-
-    __str__ = __repr__
-
-    @classmethod
-    def from_cli(cls, cli_value: str) -> "CompilationConfig":
-        """Parse the CLI value for the compilation config.
-        -O1, -O2, -O3, etc. is handled in FlexibleArgumentParser.
-        """
-        return TypeAdapter(CompilationConfig).validate_json(cli_value)
-
-    def __post_init__(self) -> None:
-        count_none = self.custom_ops.count("none")
-        count_all = self.custom_ops.count("all")
-        assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
-
-        # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
-        # 1. A bug in PyTorch, fixed in 2.7:
-        #    https://github.com/pytorch/pytorch/issues/147924
-        # 2. Custom passes (fusion) rely on auto-functionalization V1 and don't
-        #    work with V2. Addressing this will take extra engineering effort
-        #    and it is not yet a priority. RFC here:
-        #    https://github.com/vllm-project/vllm/issues/14703
-
-        if is_torch_equal_or_newer("2.6"):
-            KEY = 'enable_auto_functionalized_v2'
-            if KEY not in self.inductor_compile_config:
-                self.inductor_compile_config[KEY] = False
-
-        for k, v in self.inductor_passes.items():
-            if not isinstance(v, str):
-                assert callable(v), (
-                    f"pass {k} should be callable or a qualified name")
-                self.inductor_compile_config[k] = v if isinstance(
-                    v, InductorPass) else CallableInductorPass(v)
-                continue
-
-            # resolve function from qualified name
-            names = v.split(".")
-            module = ".".join(names[:-1])
-            func_name = names[-1]
-            func = __import__(module).__dict__[func_name]
-            self.inductor_compile_config[k] = func if isinstance(
-                func, InductorPass) else CallableInductorPass(func)
-
-        if isinstance(self.pass_config, dict):
-            self.pass_config = PassConfig(**self.pass_config)
-
-    def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
-        if self.level == CompilationLevel.NO_COMPILATION:
-            raise ValueError("No compilation level is set.")
-
-        from torch._dynamo.backends.registry import list_backends
-        torch_backends = list_backends(exclude_tags=tuple())
-        if self.level in [
-                CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE
-        ]:
-            if self.backend == "":
-                return "eager"
-            if self.backend in torch_backends:
-                return self.backend
-            return resolve_obj_by_qualname(self.backend)
-
-        # TODO: pass user-specified backend to piecewise compilation
-        # merge with the config use_inductor
-        assert self.level == CompilationLevel.PIECEWISE
-
-        from vllm.compilation.backends import VllmBackend
-        return VllmBackend(vllm_config)
-
-    def init_with_cudagraph_sizes(self,
-                                  cudagraph_capture_sizes: list[int]) -> None:
-        """To complete the initialization of config,
-        we need to know the cudagraph sizes."""
-
-        if self.cudagraph_capture_sizes is None:
-            self.cudagraph_capture_sizes = cudagraph_capture_sizes
-        else:
-            # de-duplicate the sizes provided by the config
-            dedup_sizes = list(set(self.cudagraph_capture_sizes))
-            if len(dedup_sizes) < len(self.cudagraph_capture_sizes):
-                logger.info(("cudagraph sizes specified by model runner"
-                             " %s is overridden by config %s"),
-                            cudagraph_capture_sizes, dedup_sizes)
-            self.cudagraph_capture_sizes = dedup_sizes
-
-        computed_compile_sizes = []
-        if self.compile_sizes is not None:
-            # de-duplicate the sizes provided by the config
-            self.compile_sizes = list(set(self.compile_sizes))
-            for x in self.compile_sizes:
-                if isinstance(x, str):
-                    assert x == "cudagraph_capture_sizes", \
-                    "Unrecognized size type in compile_sizes, " \
-                    f"expect 'cudagraph_capture_sizes', got {x}"
-                    computed_compile_sizes.extend(self.cudagraph_capture_sizes)
-                else:
-                    assert isinstance(x, int)
-                    computed_compile_sizes.append(x)
-        self.compile_sizes = computed_compile_sizes  # type: ignore
-
-        # sort to make sure cudagraph capture sizes are in descending order
-        self.cudagraph_capture_sizes.sort(reverse=True)
-        self.max_capture_size = self.cudagraph_capture_sizes[
-            0] if self.cudagraph_capture_sizes else 0
-
-        # pre-compute the mapping from batch size to padded graph size
-        self.bs_to_padded_graph_size = [
-            0 for i in range(self.max_capture_size + 1)
-        ]
-        for end, start in zip(self.cudagraph_capture_sizes,
-                              self.cudagraph_capture_sizes[1:] + [0]):
-            for bs in range(start, end):
-                if bs == start:
-                    self.bs_to_padded_graph_size[bs] = start
-                else:
-                    self.bs_to_padded_graph_size[bs] = end
-        self.bs_to_padded_graph_size[
-            self.max_capture_size] = self.max_capture_size
-
-    def set_splitting_ops_for_v1(self):
-        # NOTE: this function needs to be called
-        if self.splitting_ops and self.full_cuda_graph:
-            raise ValueError("full_cuda_graph cannot be used together with "
-                             "splitting_ops, as Full CUDA graph will override "
-                             f"the splitting_ops: {self.splitting_ops}")
-
-        if not self.splitting_ops:
-            self.splitting_ops = [] if self.full_cuda_graph else [
-                "vllm.unified_attention",
-                "vllm.unified_attention_with_output",
-                "vllm.mamba_mixer2",
-            ]
 
 
 @config
@@ -4877,6 +3545,10 @@ class VllmConfig:
             if pooling_type is None or pooling_type.lower() != "last":
                 disable_chunked_prefill_reasons.append(
                     "Only \"last\" pooling supports chunked "
+                    "prefill and prefix caching; disabling both.")
+            elif not getattr(self.model_config.hf_config, "is_causal", True):
+                disable_chunked_prefill_reasons.append(
+                    "Only models using causal attention supports chunked "
                     "prefill and prefix caching; disabling both.")
 
         if disable_chunked_prefill_reasons:
