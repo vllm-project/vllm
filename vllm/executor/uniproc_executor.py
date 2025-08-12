@@ -71,6 +71,9 @@ class UniProcExecutor(ExecutorBase):
             self.shutdown()
         return
 
+    def shutdown(self) -> None:
+        self.collective_rpc("shutdown")
+
 
 UniProcExecutorAsync = UniProcExecutor
 

@@ -507,6 +507,7 @@ class WorkerProc:
         return cast(list[WorkerProcHandle], ready_proc_handles)
 
     def shutdown(self):
+        self.worker.shutdown()
         self.rpc_broadcast_mq = None
         self.worker_response_mq = None
         destroy_model_parallel()
