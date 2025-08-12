@@ -26,19 +26,16 @@
 """Processor class for Ernie_4_5_VL."""
 
 import math
+from collections import defaultdict
 from typing import Any, Dict, List, Union
 
 import numpy as np
 import torch
 from PIL import Image
-from collections import defaultdict
-
-
-from transformers.utils import logging
-from transformers.processing_utils import ProcessorMixin
 from transformers.image_processing_utils import BatchFeature
 from transformers.image_utils import ChannelDimension
-
+from transformers.processing_utils import ProcessorMixin
+from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
@@ -226,10 +223,10 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
         }
         if not isinstance(text, list):
             text = [text]
-        
+
         if len(text) == 0:
             raise ValueError("Processor no text is provided")
-        
+
         # only support single element
         texts = text[0]
 
@@ -270,7 +267,7 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
         pos = outputs["cur_position"]
         outputs["position_ids"].append([pos] * 3)
         outputs["cur_position"] += 1
-    
+
     def _add_text(self, text: str, outputs: Dict) -> None:
         """add text to outputs"""
         tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(text))

@@ -397,8 +397,6 @@ class MRotaryEmbedding(RotaryEmbedding):
                                 len(input_tokens)).item()
         return llm_positions, mrope_position_delta
 
-
-
     @classmethod
     def _vl_get_input_positions_tensor(
         cls,

@@ -41,7 +41,8 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding.ernie45_vl_rope import Ernie4_5_VLRotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding.ernie45_vl_rope import (
+    Ernie4_5_VLRotaryEmbedding)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -49,17 +50,14 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from .ernie45_moe import Ernie4_5_MoeMLP
 from .interfaces import SupportsPP
 from .utils import (PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
-
-from .ernie45_moe import Ernie4_5_MoeMLP
-
 logger = init_logger(__name__)
-
 
 
 class Ernie4_5_VLMLP(Ernie4_5_MoeMLP):
@@ -135,10 +133,8 @@ class Ernie4_5_VLAttention(nn.Module):
             max_position_embeddings=max_position_embeddings,
             base=rope_theta,
             is_neox_style=False,
-            dtype = torch.get_default_dtype(),
-            mrope_section=[h_rope, w_rope , t_rope]
-            )
-
+            dtype=torch.get_default_dtype(),
+            mrope_section=[h_rope, w_rope, t_rope])
 
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -164,7 +160,6 @@ class Ernie4_5_VLAttention(nn.Module):
         # Output projection
         output, _ = self.o_proj(attn_output)
         return output
-
 
 
 class Ernie4_5_VLMoE(nn.Module):
@@ -195,9 +190,6 @@ class Ernie4_5_VLMoE(nn.Module):
                 f"Tensor parallel size {self.tp_size} is greater than "
                 f"the number of experts {moe_num_experts}.")
 
-
-        
-
         moe_layer_start_index = config.moe_layer_start_index
         if isinstance(moe_layer_start_index, int):
             text_moe_layer_start_index = moe_layer_start_index
@@ -205,7 +197,7 @@ class Ernie4_5_VLMoE(nn.Module):
         else:
             text_moe_layer_start_index = moe_layer_start_index[0]
             image_moe_layer_start_index = moe_layer_start_index[1]
-        
+
         moe_layer_end_index = config.moe_layer_end_index
         if moe_layer_end_index is None:
             text_moe_layer_end_index = config.num_layers
@@ -219,27 +211,28 @@ class Ernie4_5_VLMoE(nn.Module):
 
         assert config.moe_num_experts[0] == config.moe_num_experts[1]
         self.e_score_correction_bias = nn.Parameter(
-                torch.empty(2, config.moe_num_experts[0]))
-
+            torch.empty(2, config.moe_num_experts[0]))
 
         assert text_moe_layer_start_index <= text_moe_layer_end_index
-        
-        if layer_idx >= text_moe_layer_start_index and layer_idx <= text_moe_layer_end_index:
-            self.text_experts_gate = ReplicatedLinear(config.hidden_size,
-                                                      config.moe_num_experts[0],
-                                                      bias=False,
-                                                      quant_config=quant_config,
-                                                      prefix=f"{prefix}.text_experts_gate")
 
-            self.text_experts = FusedMoE(num_experts=config.moe_num_experts[0],
-                                top_k=config.moe_k,
-                                hidden_size=config.hidden_size,
-                                intermediate_size=config.moe_intermediate_size[0],
-                                reduce_results=False,
-                                renormalize=True,
-                                quant_config=quant_config,
-                                e_score_correction_bias=self.e_score_correction_bias[0],
-                                prefix=f"{prefix}.text_experts")
+        if layer_idx >= text_moe_layer_start_index and layer_idx <= text_moe_layer_end_index:
+            self.text_experts_gate = ReplicatedLinear(
+                config.hidden_size,
+                config.moe_num_experts[0],
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.text_experts_gate")
+
+            self.text_experts = FusedMoE(
+                num_experts=config.moe_num_experts[0],
+                top_k=config.moe_k,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size[0],
+                reduce_results=False,
+                renormalize=True,
+                quant_config=quant_config,
+                e_score_correction_bias=self.e_score_correction_bias[0],
+                prefix=f"{prefix}.text_experts")
         else:
             self.text_experts = Ernie4_5_VLMLP(
                 hidden_size=config.hidden_size,
@@ -251,21 +244,23 @@ class Ernie4_5_VLMoE(nn.Module):
 
         assert image_moe_layer_start_index <= image_moe_layer_end_index
         if layer_idx >= image_moe_layer_start_index and layer_idx <= image_moe_layer_end_index:
-            self.image_experts_gate = ReplicatedLinear(config.hidden_size,
-                                                       config.moe_num_experts[1],
-                                                       bias=False,
-                                                       quant_config=quant_config,
-                                                       prefix=f"{prefix}.image_experts_gate")
+            self.image_experts_gate = ReplicatedLinear(
+                config.hidden_size,
+                config.moe_num_experts[1],
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.image_experts_gate")
 
-            self.image_experts = FusedMoE(num_experts=config.moe_num_experts[1],
-                                top_k=config.moe_k,
-                                hidden_size=config.hidden_size,
-                                intermediate_size=config.moe_intermediate_size[1],
-                                reduce_results=False,
-                                renormalize=True,
-                                quant_config=quant_config,
-                                e_score_correction_bias=self.e_score_correction_bias[1],
-                                prefix=f"{prefix}.image_experts")
+            self.image_experts = FusedMoE(
+                num_experts=config.moe_num_experts[1],
+                top_k=config.moe_k,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size[1],
+                reduce_results=False,
+                renormalize=True,
+                quant_config=quant_config,
+                e_score_correction_bias=self.e_score_correction_bias[1],
+                prefix=f"{prefix}.image_experts")
         else:
             self.image_experts = Ernie4_5_VLMLP(
                 hidden_size=config.hidden_size,
@@ -284,20 +279,20 @@ class Ernie4_5_VLMoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.shared_experts",
-                reduce_results=self.text_experts.must_reduce_shared_expert_outputs(
-                ))
+                reduce_results=self.text_experts.
+                must_reduce_shared_expert_outputs())
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         visual_token_mask: torch.Tensor,
         **kwargs: object,
-        ) -> torch.Tensor:
-        
+    ) -> torch.Tensor:
+
         orig_shape = hidden_states.shape
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
-        
+
         if self.has_shared_experts:
             shared_output = self.shared_experts(hidden_states)
 
@@ -305,25 +300,30 @@ class Ernie4_5_VLMoE(nn.Module):
             # assert visual_token_mask.shape[0] != hidden_states.shape[0]
             visual_token_mask = visual_token_mask.repeat(
                 1, self.hidden_size).bool()
-            text_token_mask =  ~visual_token_mask
+            text_token_mask = ~visual_token_mask
             final_hidden_states = torch.zeros_like(hidden_states)
-            
-            text_hidden_states = hidden_states[text_token_mask].reshape(-1, self.hidden_size)
-            image_hidden_states = hidden_states[visual_token_mask].reshape(-1, self.hidden_size)
+
+            text_hidden_states = hidden_states[text_token_mask].reshape(
+                -1, self.hidden_size)
+            image_hidden_states = hidden_states[visual_token_mask].reshape(
+                -1, self.hidden_size)
 
             text_router_logits, _ = self.text_experts_gate(text_hidden_states)
-            final_hidden_states[text_token_mask] = self.text_experts(hidden_states=text_hidden_states,
-                                                                    router_logits=text_router_logits).flatten()
-            
-            image_router_logits, _ = self.image_experts_gate(image_hidden_states)
-            final_hidden_states[visual_token_mask]  = self.image_experts(hidden_states=image_hidden_states,
-                                                                    router_logits=image_router_logits).flatten()
+            final_hidden_states[text_token_mask] = self.text_experts(
+                hidden_states=text_hidden_states,
+                router_logits=text_router_logits).flatten()
+
+            image_router_logits, _ = self.image_experts_gate(
+                image_hidden_states)
+            final_hidden_states[visual_token_mask] = self.image_experts(
+                hidden_states=image_hidden_states,
+                router_logits=image_router_logits).flatten()
         else:
             # text modal input processing directly
             text_router_logits, _ = self.text_experts_gate(hidden_states)
 
-            final_hidden_states = self.text_experts(hidden_states=hidden_states,
-                                           router_logits=text_router_logits)
+            final_hidden_states = self.text_experts(
+                hidden_states=hidden_states, router_logits=text_router_logits)
 
         if self.has_shared_experts and \
               shared_output is not None:
@@ -379,7 +379,7 @@ class Ernie4_5_VLDecoderLayer(nn.Module):
             min_moe_layer_start_index = min(moe_layer_start_index)
         else:
             min_moe_layer_start_index = moe_layer_start_index
-        
+
         moe_layer_end_index = getattr(config, "moe_layer_end_index",
                                       config.num_hidden_layers - 1)
         if isinstance(moe_layer_end_index, list):
@@ -402,8 +402,8 @@ class Ernie4_5_VLDecoderLayer(nn.Module):
                 and layer_idx >= min_moe_layer_start_index
                 and layer_idx <= max_moe_layer_end_index):
             self.mlp = Ernie4_5_VLMoE(config=config,
-                                       quant_config=quant_config,
-                                       prefix=f"{prefix}.mlp")
+                                      quant_config=quant_config,
+                                      prefix=f"{prefix}.mlp")
         else:
             self.mlp = Ernie4_5_VLMLP(
                 hidden_size=config.hidden_size,
@@ -443,16 +443,17 @@ class Ernie4_5_VLDecoderLayer(nn.Module):
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        
+
         if isinstance(self.mlp, Ernie4_5_VLMoE):
-            hidden_states = self.mlp(hidden_states, visual_token_mask, **kwargs)
+            hidden_states = self.mlp(hidden_states, visual_token_mask,
+                                     **kwargs)
         else:
             hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
 
 
-# Since Ernie VL distinguishes between text experts and multimodal experts, 
+# Since Ernie VL distinguishes between text experts and multimodal experts,
 # enabling torch.compile will cause errors.
 # @support_torch_compile(
 #     dynamic_arg_dims={
@@ -489,9 +490,9 @@ class Ernie4_5_VLModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Ernie4_5_VLDecoderLayer(config=config,
-                                                    cache_config=cache_config,
-                                                    quant_config=quant_config,
-                                                    prefix=prefix),
+                                                   cache_config=cache_config,
+                                                   quant_config=quant_config,
+                                                   prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 
@@ -530,7 +531,8 @@ class Ernie4_5_VLModel(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states, residual = layer(positions, hidden_states, residual, visual_token_mask, **kwargs)
+            hidden_states, residual = layer(positions, hidden_states, residual,
+                                            visual_token_mask, **kwargs)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -543,8 +545,7 @@ class Ernie4_5_VLModel(nn.Module):
         return hidden_states
 
 
-
-class  Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
+class Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -566,7 +567,7 @@ class  Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
         self.config = config
         self.quant_config = quant_config
         self.model = Ernie4_5_VLModel(vllm_config=vllm_config,
-                                       prefix=maybe_prefix(prefix, "model"))
+                                      prefix=maybe_prefix(prefix, "model"))
 
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(config.vocab_size,
@@ -664,24 +665,28 @@ class  Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
                     if is_text_expert:
                         name = name.replace(".experts.", ".text_experts.")
                     else:
-                        name = name.replace(f".experts.{moe_offset}", f".image_experts.{moe_offset-image_expert_start_idx}")
-                
+                        name = name.replace(
+                            f".experts.{moe_offset}",
+                            f".image_experts.{moe_offset-image_expert_start_idx}"
+                        )
+
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
 
                     if weight_name not in name:
                         continue
-                    
+
                     # Distinguish between image experts and text experts
                     moe_offset = int(name.split(".")[-3])
-                    is_text_expert = True if moe_offset <= self.config.moe_num_experts[0] - 1 else False
+                    is_text_expert = True if moe_offset <= self.config.moe_num_experts[
+                        0] - 1 else False
 
                     name = name.replace(weight_name, param_name)
                     if is_text_expert:
                         name = name.replace(".experts.", ".text_experts.")
                     else:
                         name = name.replace(".experts.", ".image_experts.")
-                    
+
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
@@ -702,10 +707,12 @@ class  Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
                 else:
                     # Distinguish between image expert gate and text expert gate
                     if name.endswith("mlp.gate.weight"):
-                        name = name.replace("gate.weight", "text_experts_gate.weight")
+                        name = name.replace("gate.weight",
+                                            "text_experts_gate.weight")
                         loaded_weight = loaded_weight.T
                     elif name.endswith("mlp.gate.weight_1"):
-                        name = name.replace("gate.weight_1", "image_experts_gate.weight")
+                        name = name.replace("gate.weight_1",
+                                            "image_experts_gate.weight")
                         loaded_weight = loaded_weight.T
 
                     if "e_score_correction_bias" in name:
@@ -722,7 +729,7 @@ class  Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
                     name = maybe_remap_kv_scale_name(name, params_dict)
                     if name is None:
                         continue
-                    
+
                     param = params_dict[name]
 
                     weight_loader = getattr(param, "weight_loader",
