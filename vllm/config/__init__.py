@@ -196,15 +196,55 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
 
     try:
         cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
-    except (OSError, KeyError, TypeError):
-        # getsource() fails in Python 3.13+ - use dataclass introspection
+    except (OSError, KeyError, TypeError) as e:
+        # HACK: getsource() fails in Python 3.13+ - try alternative approaches
         if is_dataclass(cls):
-            docs = {}
-            for field_obj in fields(cls):
-                docs[field_obj.name] = f"Configuration for {field_obj.name}."
-            return docs
+            # Get source from class file using inspect
+            source_file = inspect.getfile(cls)
+            with open(source_file) as f:
+                source_lines = f.readlines()
+
+            # Find the class definition line
+            class_line_no = None
+            for i, line in enumerate(source_lines):
+                if f"class {cls.__name__}" in line and ":" in line:
+                    class_line_no = i
+                    break
+
+            if class_line_no is not None:
+                # Extract class body and try to parse it
+                class_source_lines = []
+                indent_level = None
+
+                for i in range(class_line_no, len(source_lines)):
+                    line = source_lines[i]
+                    # Determine base indentation from first non-empty
+                    # line after class definition
+                    if (indent_level is None and line.strip()
+                            and i > class_line_no):
+                        indent_level = len(line) - len(line.lstrip())
+                    # Stop when we reach a line with same or less indentation
+                    # (end of class)
+                    if (indent_level is not None and line.strip()
+                            and i > class_line_no
+                            and (len(line) - len(line.lstrip()))
+                            <= (indent_level - 4 if "class "
+                                in source_lines[class_line_no] else 0)):
+                        break
+                    class_source_lines.append(line)
+
+                # Try to parse the extracted class source
+                class_source = ''.join(class_source_lines)
+                cls_node = ast.parse(textwrap.dedent(class_source)).body[0]
+
+                if isinstance(cls_node, ast.ClassDef):
+                    # Successfully parsed, continue with normal processing
+                    pass
+                else:
+                    raise TypeError(
+                        "Parsed node is not a class definition.") from e
         else:
-            return {}
+            raise TypeError("Class is not a dataclass.") from e
 
     if not isinstance(cls_node, ast.ClassDef):
         raise TypeError("Given object was not a class.")
