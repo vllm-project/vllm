@@ -106,9 +106,9 @@ class XPUPlatform(Platform):
             model_config.dtype = torch.float16
 
         compilation_config = vllm_config.compilation_config
-        if compilation_config.cudagraph_mode is None and \
+        if compilation_config.cudagraph_mode is None or \
                 compilation_config.cudagraph_mode.max_cudagraph_mode() \
-                    != CUDAGraphMode.FULL:
+                    != CUDAGraphMode.NONE:
             logger.info("[XPU] CUDA graph is not supported on XPU, "
                         "disabling cudagraphs.")
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
