@@ -189,6 +189,9 @@ class DummyLogitsProcessor(LogitsProcessor):
                         self.req_info.pop(bdx, None)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        if not self.req_info:
+            return logits
+
         # Save target values before modification
         rows_list = list(self.req_info.keys())
         cols = torch.tensor([self.req_info[i] for i in rows_list],
