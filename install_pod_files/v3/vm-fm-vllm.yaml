@@ -16,41 +16,40 @@ spec:
         app: llama-3-8b
     spec:
       volumes:
-      - name: cache-volume
-        persistentVolumeClaim:
-          claimName: llama-3-8b
-      # vLLM needs to access the host's shared memory for tensor parallel inference.
-      - name: shm
-        emptyDir:
-          medium: Memory
-          sizeLimit: "2Gi"
-      containers:
-      - name: llama-3-8b
-        image: vllm/vllm-openai:latest
-        command: ["/bin/sh", "-c", "while true; do sleep 10000; done"]
-        env:
-        - name: HUGGING_FACE_HUB_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: hf-token-secret-llama3
-              key: token
-        resources:
-          limits:
-            cpu: "10"
-            memory: 20G
-            nvidia.com/gpu: "1"
-          requests:
-            cpu: "2"
-            memory: 6G
-            nvidia.com/gpu: "1"
-        volumeMounts:
-        - mountPath: /root/.cache/huggingface
-          name: cache-volume
+        - name: cache-volume
+          persistentVolumeClaim:
+            claimName: llama-3-8b
+        # vLLM needs to access the host's shared memory for tensor parallel inference.
         - name: shm
-          mountPath: /dev/shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "2Gi"
+      containers:
+        - name: llama-3-8b
+          image: vllm/vllm-openai:latest
+          command: ["/bin/sh", "-c", "while true; do sleep 10000; done"]
+          env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret-llama3
+                  key: token
+          resources:
+            limits:
+              cpu: "10"
+              memory: 200G
+              nvidia.com/gpu: "1"
+            requests:
+              cpu: "2"
+              memory: 60G
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - mountPath: /root/.cache/huggingface
+              name: cache-volume
+            - name: shm
+              mountPath: /dev/shm
 
 ---
-
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -63,4 +62,3 @@ spec:
     requests:
       storage: 300Gi
   storageClassName: ocs-storagecluster-cephfs
-
