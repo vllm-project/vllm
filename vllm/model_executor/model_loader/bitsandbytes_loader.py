@@ -427,14 +427,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             elif isinstance(module, FusedMoE) and hasattr(
                     module.quant_method, "quant_config"):
                 # TODO: support FusedMoE with prequant and 8bit.
-                if self.pre_quant:
+                if self.pre_quant and self.load_8bit:
                     raise ValueError(
-                        "Prequant BitsAndBytes models with FusedMoE is not "
-                        "supported yet.")
-                if self.load_8bit:
-                    raise ValueError(
-                        "BitsAndBytes 8bit quantization with FusedMoE is not "
-                        "supported yet.")
+                        "Prequant BitsAndBytes 8bit models with FusedMoE "
+                        "is not supported yet.")
                 # Get the corresponding weight name using module name and
                 # expert_params_mapping.
 
