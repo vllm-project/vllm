@@ -277,8 +277,7 @@ class MambaMixer(MambaBase, CustomOp):
 
         if has_prefill:
             # 2.a Prefill: Convolution sequence transformation
-            conv_input_p = hidden_states_BC_p
-            conv_out_p = causal_conv1d_fn(conv_input_p,
+            conv_out_p = causal_conv1d_fn(hidden_states_BC_p,
                                           conv_weights,
                                           self.conv1d.bias,
                                           activation=self.activation,
@@ -311,9 +310,8 @@ class MambaMixer(MambaBase, CustomOp):
 
         if has_decode:
             # 2.b Decode: Convolution sequence transformation
-            conv_input_d = hidden_states_BC_d.transpose(0, 1)
             conv_out_d = causal_conv1d_update(
-                conv_input_d,
+                hidden_states_BC_d.transpose(0, 1),
                 conv_state,
                 conv_weights,
                 self.conv1d.bias,
