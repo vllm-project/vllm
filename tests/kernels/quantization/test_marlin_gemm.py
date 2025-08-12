@@ -275,8 +275,8 @@ def test_gptq_marlin_gemm(k_chunk, n_chunk, quant_type, group_size,
     workspace = marlin_make_workspace_new(w_ref.device)
 
     opcheck(torch.ops._C.gptq_marlin_gemm,
-            (a_input, None, marlin_q_w, marlin_s, marlin_s2, marlin_zp, g_idx,
-             sort_indices, workspace, quant_type.id, a_input.shape[0],
+            (a_input, None, marlin_q_w, None, marlin_s, marlin_s2, marlin_zp,
+             g_idx, sort_indices, workspace, quant_type.id, a_input.shape[0],
              b_weight.shape[1], a_input.shape[1], is_k_full, use_atomic_add,
              use_fp32_reduce, False),
             test_utils=DEFAULT_OPCHECK_TEST_UTILS)
