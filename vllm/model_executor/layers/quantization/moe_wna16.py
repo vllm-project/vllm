@@ -397,7 +397,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
         def moe_wna16_weight_loader(param: torch.nn.Parameter,
                                     loaded_weight: torch.Tensor,
                                     weight_name: str, shard_id: str,
-                                    expert_id: int):
+                                    expert_id: int,
+                                    return_success: bool = False):
             if "g_idx" in weight_name:
                 return
             if not layer.quant_config.has_zp and "qzeros" in weight_name:
