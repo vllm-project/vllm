@@ -126,6 +126,29 @@ def run_chameleon(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+def run_command_a_vision(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "CohereLabs/command-a-vision-07-2025"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=32768,
+        tensor_parallel_size=4,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    prompts = [
+        f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|><|IMG_PATCH|>{question}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Deepseek-VL2
 def run_deepseek_vl2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1417,6 +1440,7 @@ model_example_map = {
     "aya_vision": run_aya_vision,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
+    "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
     "florence2": run_florence2,
     "fuyu": run_fuyu,
