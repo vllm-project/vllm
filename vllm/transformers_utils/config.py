@@ -34,19 +34,14 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              KimiVLConfig, MedusaConfig,
                                              MLPSpeculatorConfig,
                                              Nemotron_Nano_VL_Config,
-                                             NemotronConfig, OvisConfig,
-                                             RWConfig, SpeculatorsConfig,
+                                             NemotronConfig,
+                                             OvisConfig, RWConfig,
+                                             SpeculatorsConfig,
                                              Step3TextConfig, Step3VLConfig,
                                              UltravoxConfig)
 
-try:
-    from vllm.transformers_utils.configs.mllama import MllamaConfig
-except ImportError:
-    MllamaConfig = None
-
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
-from vllm.transformers_utils.configs.nvlm_d import NVLM_D_Config
 from vllm.transformers_utils.utils import check_gguf_file
 
 if envs.VLLM_USE_MODELSCOPE:
@@ -101,6 +96,20 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
+}
+
+_AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
+    "internvl_chat": {
+        "has_no_defaults_at_init": True
+    },
+    # transformers regards mllama as is_encoder_decoder=False
+    # vllm needs is_encoder_decoder=True to enable cross-attention
+    "mllama": {
+        "is_encoder_decoder": True
+    },
+    "NVLM_D": {
+        "has_no_defaults_at_init": True
+    },
 }
 
 
@@ -924,22 +933,19 @@ def get_hf_file_bytes(file_name: str,
     file_path = try_get_local_file(model=model,
                                    file_name=file_name,
                                    revision=revision)
-
+    
     if file_path is None:
         try:
-            hf_hub_file = hf_hub_download(model,
-                                          file_name,
-                                          revision=revision,
-                                          token=_get_hf_token())
+            hf_hub_file = hf_hub_download(model, file_name, revision=revision, token=_get_hf_token())
             file_path = Path(hf_hub_file)
         except Exception:
             return None
-
+    
     if file_path is not None and file_path.is_file():
         try:
             with open(file_path, 'rb') as file:
                 return file.read()
         except Exception:
             return None
-
+    
     return None
