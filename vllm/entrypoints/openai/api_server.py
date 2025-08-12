@@ -1913,6 +1913,11 @@ if __name__ == "__main__":
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser = make_arg_parser(parser)
     args = parser.parse_args()
+    
+    # If model is specified as positional arg, it takes precedence
+    if hasattr(args, 'model_tag') and args.model_tag is not None:
+        args.model = args.model_tag
+    
     validate_parsed_serve_args(args)
 
     uvloop.run(run_server(args))
