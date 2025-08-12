@@ -304,13 +304,14 @@ class Hermes2ProToolParser(ToolParser):
             logger.debug("against new ones: %s", cur_arguments)
 
             # Handle tool call with no argument
-            if tool_call_end and cur_arguments == {} and prev_arguments == {}:
+            if tool_call_end and not self.streamed_args_for_tool[self.current_tool_id] and (cur_arguments is None or cur_arguments == {}):
                 delta = DeltaMessage(tool_calls=[
                     DeltaToolCall(index=self.current_tool_id,
                                   function=DeltaFunctionCall(
                                       arguments=json.dumps({})).model_dump(
                                           exclude_none=True))
                 ])
+                self.streamed_args_for_tool[self.current_tool_id] = "{}"
             # case -- no arguments have been created yet. skip sending a delta.
             elif not cur_arguments and not prev_arguments:
                 logger.debug("Skipping text %s - no arguments", delta_text)
