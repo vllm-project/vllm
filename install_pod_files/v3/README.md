@@ -19,8 +19,17 @@ VLLM_USE_PRECOMPILED=1 pip install -e vllm
 1- Run in terminal 1:
 >> VLLM_LOGGING_LEVEL=DEBUG vllm serve meta-llama/Llama-3.2-1B
 
+or a 8B parameters using:
+>> VLLM_LOGGING_LEVEL=DEBUG vllm serve meta-llama/Llama-3.1-8B-Instruct
+
 2- Run in terminal 2:
+>> python3 vllm/benchmarks/benchmark_serving.py --backend vllm --model meta-llama/Llama-3.1-8B-Instruct --endpoint /v1/completions --dataset-name sharegpt --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json --num-prompts 10
+
+or a 8B parameters using:
 >> python3 vllm/benchmarks/benchmark_serving.py --backend vllm --model meta-llama/Llama-3.2-1B --endpoint /v1/completions --dataset-name sharegpt --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json --num-prompts 10
+
+Also, there is a new version of using 
+>> vllm bench serve --backend vllm --model meta-llama/Llama-3.2-1B --endpoint /v1/completions --dataset-name sharegpt --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json --num-prompts 10
 
 If you need to download the dataset (shareGPT) do:
 wget <https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json>
