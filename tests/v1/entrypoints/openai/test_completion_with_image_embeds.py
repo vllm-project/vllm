@@ -38,7 +38,8 @@ def default_image_embeds_server_args() -> list[str]:
 @pytest.fixture(scope="module")
 def server_with_image_embeds(default_image_embeds_server_args):
     with RemoteOpenAIServer(MODEL_NAME,
-                            default_image_embeds_server_args) as remote_server:
+                            default_image_embeds_server_args,
+                            max_wait_seconds=600) as remote_server:
         yield remote_server
 
 
