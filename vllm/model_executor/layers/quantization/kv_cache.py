@@ -127,6 +127,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
 
         # These are used in the final Attention.forward()
         layer._q_scale.copy_(q_scale)
+        layer._q_scale_float = q_scale
+
         layer._prob_scale.copy_(prob_scale)
         if layer.kv_cache_dtype == "fp8" and (q_scale == 1.0
                                               or prob_scale == 1.0):
