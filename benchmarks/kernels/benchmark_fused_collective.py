@@ -17,7 +17,6 @@ import argparse
 import itertools
 import os
 import time
-from datetime import datetime
 from typing import Optional
 
 import torch  # type: ignore
@@ -538,10 +537,6 @@ def benchmark_operation(
     operation_func, *args, warmup: int = 5, trials: int = 20, **kwargs
 ):
     """Benchmark a single operation using CUDA graphs."""
-    # Warmup without CUDA graphs
-    for _ in range(warmup):
-        operation_func(*args, **kwargs)
-    torch.cuda.synchronize()
 
     # Create CUDA graph
     graph = torch.cuda.CUDAGraph()
@@ -552,6 +547,10 @@ def benchmark_operation(
     with graph_capture(device=device), torch.cuda.graph(graph):
         for _ in range(num_op_per_cudagraph):
             operation_func(*args, **kwargs)
+
+    for _ in range(warmup):
+        graph.replay()
+    torch.cuda.synchronize()
 
     # Benchmark with CUDA graph
     torch.cuda.synchronize()
@@ -1035,12 +1034,7 @@ def save_results_to_file(
         logger.warning("No results to save")
         return
 
-    # Determine output file path
-    if args.output_file:
-        output_path = args.output_file
-    else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = f"benchmark_results_{timestamp}.md"
+    output_path = args.output_file
 
     try:
         markdown_content = format_results_markdown(all_results, world_size, args)
@@ -1250,7 +1244,7 @@ def main():
                 )
 
         # Save results to markdown file
-        if rank == 0:
+        if args.output_file and rank == 0:
             save_results_to_file(all_results, world_size, args, rank)
 
     finally:
