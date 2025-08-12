@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 import asyncio
+import logging
+import os
+import time
+from collections import deque
+
 import aiohttp
 from quart import Quart, make_response, request, Response
-from collections import deque
-import time
-import logging
+
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -119,8 +122,7 @@ async def forward_request(url, data):
                 else:
                     # Handle backend service errors
                     error_text = await response.text()
-                    logger.error("Backend service error: %s-%s",
-                                 response.status, error_text)
+                    logger.error("error: %s-%s",response.status, error_text)
                     yield b'{"error": "Backend service error"}'
         except aiohttp.ClientError as e:
             # Handle connection errors
@@ -159,7 +161,7 @@ async def process_request():
         return Response(
             response=b'{"error": "Internal server error"}',
             status=500,
-            content_type="application/json"
+            content_type="application/json",
         )
 
 
@@ -174,7 +176,7 @@ async def handle_request():
         return Response(
             response=b'{"error": "Server busy, try again later"}',
             status=503,
-            content_type="application/json"
+            content_type="application/json",
         )
 
     try:
@@ -186,7 +188,7 @@ async def handle_request():
         return Response(
             response=b'{"error": "Request cancelled"}',
             status=503,
-            content_type="application/json"
+            content_type="application/json",
         )
 
 
