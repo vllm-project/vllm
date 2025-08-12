@@ -3648,10 +3648,10 @@ void paged_attention(
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale,
     const std::optional<torch::Tensor>& fp8_out_scale,
-    int mfma_option) {
+    int64_t mfma_option) {
   // clang-format on
   bool is_navi = is_navi_gpu();
-
+  printf("\nkv, mfma is_navi = %s %d %d", kv_cache_dtype.c_str(), mfma_option, is_navi);
   const int head_size = query.size(2);
   if (kv_cache_dtype == "auto") {
     if (query.dtype() == at::ScalarType::Half) {
