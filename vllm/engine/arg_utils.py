@@ -833,6 +833,10 @@ class EngineArgs:
             title="VllmConfig",
             description=VllmConfig.__doc__,
         )
+        # We construct SpeculativeConfig using fields from other configs in
+        # create_engine_config. So we set the type to a JSON string here to
+        # delay the Pydantic validation that comes with SpeculativeConfig.
+        vllm_kwargs["speculative_config"]["type"] = optional_type(json.loads)
         vllm_group.add_argument("--speculative-config",
                                 **vllm_kwargs["speculative_config"])
         vllm_group.add_argument("--kv-transfer-config",
