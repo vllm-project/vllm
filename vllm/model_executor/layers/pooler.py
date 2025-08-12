@@ -5,7 +5,7 @@ from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from enum import IntEnum
 from itertools import groupby
-from typing import Callable, Optional, TypeVar, Union
+from typing import Callable, Optional, TypeVar, Union, cast
 
 import torch
 import torch.nn as nn
@@ -44,14 +44,15 @@ class ResolvedPoolingConfig:
     task: PoolingTask
 
     @classmethod
-    def from_config(
+    def from_config_with_defaults(
         cls,
         task: PoolingTask,
         pooler_config: PoolerConfig,
+        pooling_type: PoolingType,
     ) -> "ResolvedPoolingConfig":
-        assert pooler_config.pooling_type is not None
         return cls(task=task,
-                   pooling_type=PoolingType[pooler_config.pooling_type])
+                   pooling_type=PoolingType[pooler_config.pooling_type]
+                   if pooler_config.pooling_type is not None else pooling_type)
 
 
 @dataclass(frozen=True)
@@ -67,32 +68,48 @@ class Pooler(nn.Module, ABC):
     """The interface required for all poolers used in pooling models in vLLM."""
 
     @staticmethod
-    def for_encode(pooler_config: PoolerConfig):
-        if pooler_config.pooling_type == "STEP":
-            return StepPooler()
+    def for_encode(
+        pooler_config: PoolerConfig,
+        *,
+        default_pooling_type: PoolingType = PoolingType.ALL,
+    ):
+        resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
+            task="encode",
+            pooler_config=pooler_config,
+            pooling_type=default_pooling_type,
+        )
 
-        resolved_config = ResolvedPoolingConfig(task="encode",
-                                                pooling_type=PoolingType.ALL)
+        if resolved_config.pooling_type == PoolingType.STEP:
+            return StepPooler()
 
         return SimplePooler.from_config(resolved_config)
 
     @staticmethod
-    def for_embed(pooler_config: PoolerConfig):
-        resolved_config = ResolvedPoolingConfig.from_config(
+    def for_embed(
+        pooler_config: PoolerConfig,
+        *,
+        default_pooling_type: PoolingType = PoolingType.LAST,
+        projector: Optional[nn.Module] = None,
+    ):
+        resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
             task="embed",
             pooler_config=pooler_config,
+            pooling_type=default_pooling_type,
         )
 
-        return SimplePooler.from_config(resolved_config)
+        return SimplePooler.from_config(resolved_config, projector=projector)
 
     @staticmethod
     def for_classify(
         pooler_config: PoolerConfig,
         classifier: Optional[ClassifierFn],
+        *,
+        default_pooling_type: PoolingType = PoolingType.LAST,
     ):
-        resolved_config = ResolvedPoolingConfig.from_config(
+        resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
             task="classify",
             pooler_config=pooler_config,
+            pooling_type=default_pooling_type,
         )
 
         pooling = PoolingMethod.from_pooling_type(resolved_config.pooling_type)
@@ -454,24 +471,89 @@ class PoolerHead(nn.Module):
 
 class EmbeddingPoolerHead(PoolerHead):
 
-    def __init__(self) -> None:
+    def __init__(self, projector: Optional[nn.Module] = None) -> None:
         super().__init__(activation=PoolerNormalize())
+        self.projector = projector
+        self._dim_checked = False
+
+    def _ensure_projector_device_and_dtype(self,
+                                           ref_tensor: torch.Tensor) -> None:
+        """Ensure projector is on correct device with float32 dtype."""
+        if self.projector is None:
+            return
+
+        projector = cast(nn.Module, self.projector)
+        try:
+            proj_device = next(projector.parameters()).device
+            if proj_device != ref_tensor.device:
+                projector.to(device=ref_tensor.device, dtype=torch.float32)
+            # Ensure all parameters are float32
+            for param in projector.parameters():
+                param.data = param.data.to(torch.float32)
+        except StopIteration:
+            # Empty projector, skip device check
+            pass
+
+    def _validate_projector_dimensions(self, ref_tensor: torch.Tensor) -> None:
+        """Validate projector input dimensions match pooled output."""
+        if self.projector is None:
+            return
+
+        projector = cast(nn.Module, self.projector)
+        first_linear = None
+        for module in projector.modules():
+            if isinstance(module, nn.Linear):
+                first_linear = module
+                break
+
+        if first_linear is not None:
+            expected_dim = first_linear.in_features
+            actual_dim = ref_tensor.shape[-1]
+            if expected_dim != actual_dim:
+                raise ValueError(
+                    f"Dimension mismatch: Dense projector expects "
+                    f"input dim {expected_dim}, but pooled output "
+                    f"has dim {actual_dim}")
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
 
+        # Step 1: Apply ST projector (e.g., 1024 → 1792)
+        if self.projector is not None:
+            projector = cast(nn.Module, self.projector)
+            ref = pooled_data[0] if isinstance(pooled_data,
+                                               list) else pooled_data
+
+            # Ensure projector is on correct device with float32 dtype
+            self._ensure_projector_device_and_dtype(ref)
+
+            # Check dimension compatibility on first run
+            if not self._dim_checked:
+                self._validate_projector_dimensions(ref)
+                self._dim_checked = True
+
+            # Apply projection with fp32 computation for stability
+            def _proj(x: torch.Tensor) -> torch.Tensor:
+                orig_dtype = x.dtype
+                y = projector(x.to(torch.float32))
+                return y.to(orig_dtype)
+
+            if isinstance(pooled_data, torch.Tensor):
+                pooled_data = _proj(pooled_data)
+            else:
+                pooled_data = [_proj(t) for t in pooled_data]
+
         pooling_params = get_pooling_params(pooling_metadata)
 
-        # for matryoshka representation
+        # Step 2: Handle Matryoshka dimension truncation if specified
         dimensions_list = [
             pooling_param.dimensions for pooling_param in pooling_params
         ]
         if any(d is not None for d in dimensions_list):
-            # change the output dimension
             assert len(pooled_data) == len(dimensions_list)
             if len(set(dimensions_list)) == 1 and not isinstance(
                     pooled_data, list):
-                # if all dimensions are the same
+                # All dimensions are the same
                 d = dimensions_list[0]
                 pooled_data = pooled_data[..., :d]
             else:
@@ -480,7 +562,7 @@ class EmbeddingPoolerHead(PoolerHead):
                     for vecs, d in zip(pooled_data, dimensions_list)
                 ]
 
-        # for normalize
+        # Step 3: Apply normalization
         flags = [p.normalize for p in pooling_params]
         if len(set(flags)) == 1:
             if flags[0]:
@@ -530,14 +612,15 @@ class SimplePooler(Pooler):
     def from_config(
         cls,
         pooler_config: ResolvedPoolingConfig,
+        projector: Optional[nn.Module] = None,
     ) -> "SimplePooler":
         pooling = PoolingMethod.from_pooling_type(pooler_config.pooling_type)
         if pooler_config.task == "embed":
-            head = EmbeddingPoolerHead()
+            head = EmbeddingPoolerHead(projector=projector)  # 传递 projector
         elif pooler_config.task == "encode":
-            head = RewardPoolerHead()
+            head = RewardPoolerHead()  # encode 不需要 projector
         else:
-            raise NotImplementedError(f"Unknown task: {pooler_config.task}")
+            raise ValueError(f"Unknown task: {pooler_config.task}")
         return cls(pooling, head)
 
     def __init__(self, pooling: PoolingMethod, head: PoolerHead) -> None:
