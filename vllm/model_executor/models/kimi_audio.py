@@ -3,7 +3,7 @@
 """Inference-only Kimi-Audio model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Optional, TypedDict, Union, Dict
+from typing import Optional, TypedDict, Union
 
 import os
 import numpy as np
@@ -12,7 +12,6 @@ import torch.nn as nn
 import transformers
 
 from transformers import BatchFeature
-from vllm import SamplingParams
 from vllm.config import VllmConfig
 from ...transformers_utils.configs import KimiAudioConfig
 from vllm.model_executor.sampling_metadata import SamplingMetadata
