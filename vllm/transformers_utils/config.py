@@ -38,9 +38,14 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              RWConfig, SpeculatorsConfig,
                                              Step3TextConfig, Step3VLConfig,
                                              UltravoxConfig)
+
+try:
+    from vllm.transformers_utils.configs.mllama import MllamaConfig
+except ImportError:
+    MllamaConfig = None
+
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
-from vllm.transformers_utils.configs.mllama import MllamaConfig
 from vllm.transformers_utils.configs.nvlm_d import NVLM_D_Config
 from vllm.transformers_utils.utils import check_gguf_file
 
