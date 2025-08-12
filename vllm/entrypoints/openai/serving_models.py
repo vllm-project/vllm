@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
-import pathlib
 from asyncio import Lock
 from collections import defaultdict
 from dataclasses import dataclass
@@ -11,7 +9,7 @@ from typing import Optional, Union
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.protocol import (ErrorResponse,
+from vllm.entrypoints.openai.protocol import (ErrorInfo, ErrorResponse,
                                               LoadLoRAAdapterRequest,
                                               ModelCard, ModelList,
                                               ModelPermission,
@@ -19,7 +17,6 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.utils import AtomicCounter
 
 logger = init_logger(__name__)
@@ -29,12 +26,6 @@ logger = init_logger(__name__)
 class BaseModelPath:
     name: str
     model_path: str
-
-
-@dataclass
-class PromptAdapterPath:
-    name: str
-    local_path: str
 
 
 @dataclass
@@ -60,17 +51,17 @@ class OpenAIServingModels:
         base_model_paths: list[BaseModelPath],
         *,
         lora_modules: Optional[list[LoRAModulePath]] = None,
-        prompt_adapters: Optional[list[PromptAdapterPath]] = None,
     ):
         super().__init__()
 
         self.base_model_paths = base_model_paths
+
         self.max_model_len = model_config.max_model_len
         self.engine_client = engine_client
         self.model_config = model_config
 
         self.static_lora_modules = lora_modules
-        self.lora_requests: list[LoRARequest] = []
+        self.lora_requests: dict[str, LoRARequest] = {}
         self.lora_id_counter = AtomicCounter(0)
 
         self.lora_resolvers: list[LoRAResolver] = []
@@ -79,20 +70,6 @@ class OpenAIServingModels:
             self.lora_resolvers.append(
                 LoRAResolverRegistry.get_resolver(lora_resolver_name))
         self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
-
-        self.prompt_adapter_requests = []
-        if prompt_adapters is not None:
-            for i, prompt_adapter in enumerate(prompt_adapters, start=1):
-                with pathlib.Path(prompt_adapter.local_path,
-                                  "adapter_config.json").open() as f:
-                    adapter_config = json.load(f)
-                    num_virtual_tokens = adapter_config["num_virtual_tokens"]
-                self.prompt_adapter_requests.append(
-                    PromptAdapterRequest(
-                        prompt_adapter_name=prompt_adapter.name,
-                        prompt_adapter_id=i,
-                        prompt_adapter_local_path=prompt_adapter.local_path,
-                        prompt_adapter_num_virtual_tokens=num_virtual_tokens))
 
     async def init_static_loras(self):
         """Loads all static LoRA modules.
@@ -105,7 +82,7 @@ class OpenAIServingModels:
             load_result = await self.load_lora_adapter(
                 request=load_request, base_model_name=lora.base_model_name)
             if isinstance(load_result, ErrorResponse):
-                raise ValueError(load_result.message)
+                raise ValueError(load_result.error.message)
 
     def is_base_model(self, model_name) -> bool:
         return any(model.name == model_name for model in self.base_model_paths)
@@ -138,16 +115,9 @@ class OpenAIServingModels:
                       parent=lora.base_model_name if lora.base_model_name else
                       self.base_model_paths[0].name,
                       permission=[ModelPermission()])
-            for lora in self.lora_requests
-        ]
-        prompt_adapter_cards = [
-            ModelCard(id=prompt_adapter.prompt_adapter_name,
-                      root=self.base_model_paths[0].name,
-                      permission=[ModelPermission()])
-            for prompt_adapter in self.prompt_adapter_requests
+            for lora in self.lora_requests.values()
         ]
         model_cards.extend(lora_cards)
-        model_cards.extend(prompt_adapter_cards)
         return ModelList(data=model_cards)
 
     async def load_lora_adapter(
@@ -155,53 +125,60 @@ class OpenAIServingModels:
             request: LoadLoRAAdapterRequest,
             base_model_name: Optional[str] = None
     ) -> Union[ErrorResponse, str]:
-        error_check_ret = await self._check_load_lora_adapter_request(request)
-        if error_check_ret is not None:
-            return error_check_ret
+        lora_name = request.lora_name
 
-        lora_name, lora_path = request.lora_name, request.lora_path
-        unique_id = self.lora_id_counter.inc(1)
-        lora_request = LoRARequest(lora_name=lora_name,
-                                   lora_int_id=unique_id,
-                                   lora_path=lora_path)
-        if base_model_name is not None and self.is_base_model(base_model_name):
-            lora_request.base_model_name = base_model_name
+        # Ensure atomicity based on the lora name
+        async with self.lora_resolver_lock[lora_name]:
+            error_check_ret = await self._check_load_lora_adapter_request(
+                request)
+            if error_check_ret is not None:
+                return error_check_ret
 
-        # Validate that the adapter can be loaded into the engine
-        # This will also pre-load it for incoming requests
-        try:
-            await self.engine_client.add_lora(lora_request)
-        except BaseException as e:
-            error_type = "BadRequestError"
-            status_code = HTTPStatus.BAD_REQUEST
-            if "No adapter found" in str(e):
-                error_type = "NotFoundError"
-                status_code = HTTPStatus.NOT_FOUND
+            lora_path = request.lora_path
+            unique_id = self.lora_id_counter.inc(1)
+            lora_request = LoRARequest(lora_name=lora_name,
+                                       lora_int_id=unique_id,
+                                       lora_path=lora_path)
+            if base_model_name is not None and self.is_base_model(
+                    base_model_name):
+                lora_request.base_model_name = base_model_name
 
-            return create_error_response(message=str(e),
-                                         err_type=error_type,
-                                         status_code=status_code)
+            # Validate that the adapter can be loaded into the engine
+            # This will also pre-load it for incoming requests
+            try:
+                await self.engine_client.add_lora(lora_request)
+            except Exception as e:
+                error_type = "BadRequestError"
+                status_code = HTTPStatus.BAD_REQUEST
+                if "No adapter found" in str(e):
+                    error_type = "NotFoundError"
+                    status_code = HTTPStatus.NOT_FOUND
 
-        self.lora_requests.append(lora_request)
-        logger.info("Loaded new LoRA adapter: name '%s', path '%s'", lora_name,
-                    lora_path)
-        return f"Success: LoRA adapter '{lora_name}' added successfully."
+                return create_error_response(message=str(e),
+                                             err_type=error_type,
+                                             status_code=status_code)
+
+            self.lora_requests[lora_name] = lora_request
+            logger.info("Loaded new LoRA adapter: name '%s', path '%s'",
+                        lora_name, lora_path)
+            return f"Success: LoRA adapter '{lora_name}' added successfully."
 
     async def unload_lora_adapter(
             self,
             request: UnloadLoRAAdapterRequest) -> Union[ErrorResponse, str]:
-        error_check_ret = await self._check_unload_lora_adapter_request(request
-                                                                        )
-        if error_check_ret is not None:
-            return error_check_ret
-
         lora_name = request.lora_name
-        self.lora_requests = [
-            lora_request for lora_request in self.lora_requests
-            if lora_request.lora_name != lora_name
-        ]
-        logger.info("Removed LoRA adapter: name '%s'", lora_name)
-        return f"Success: LoRA adapter '{lora_name}' removed successfully."
+
+        # Ensure atomicity based on the lora name
+        async with self.lora_resolver_lock[lora_name]:
+            error_check_ret = await self._check_unload_lora_adapter_request(
+                request)
+            if error_check_ret is not None:
+                return error_check_ret
+
+            # Safe to delete now since we hold the lock
+            del self.lora_requests[lora_name]
+            logger.info("Removed LoRA adapter: name '%s'", lora_name)
+            return f"Success: LoRA adapter '{lora_name}' removed successfully."
 
     async def _check_load_lora_adapter_request(
             self, request: LoadLoRAAdapterRequest) -> Optional[ErrorResponse]:
@@ -213,8 +190,7 @@ class OpenAIServingModels:
                 status_code=HTTPStatus.BAD_REQUEST)
 
         # Check if the lora adapter with the given name already exists
-        if any(lora_request.lora_name == request.lora_name
-               for lora_request in self.lora_requests):
+        if request.lora_name in self.lora_requests:
             return create_error_response(
                 message=
                 f"The lora adapter '{request.lora_name}' has already been "
@@ -227,17 +203,16 @@ class OpenAIServingModels:
     async def _check_unload_lora_adapter_request(
             self,
             request: UnloadLoRAAdapterRequest) -> Optional[ErrorResponse]:
-        # Check if either 'lora_name' or 'lora_int_id' is provided
-        if not request.lora_name and not request.lora_int_id:
+        # Check if 'lora_name' is not provided return an error
+        if not request.lora_name:
             return create_error_response(
                 message=
-                "either 'lora_name' and 'lora_int_id' needs to be provided.",
+                "'lora_name' needs to be provided to unload a LoRA adapter.",
                 err_type="InvalidUserInput",
                 status_code=HTTPStatus.BAD_REQUEST)
 
         # Check if the lora adapter with the given name exists
-        if not any(lora_request.lora_name == request.lora_name
-                   for lora_request in self.lora_requests):
+        if request.lora_name not in self.lora_requests:
             return create_error_response(
                 message=
                 f"The lora adapter '{request.lora_name}' cannot be found.",
@@ -260,9 +235,8 @@ class OpenAIServingModels:
         """
         async with self.lora_resolver_lock[lora_name]:
             # First check if this LoRA is already loaded
-            for existing in self.lora_requests:
-                if existing.lora_name == lora_name:
-                    return existing
+            if lora_name in self.lora_requests:
+                return self.lora_requests[lora_name]
 
             base_model_name = self.model_config.model
             unique_id = self.lora_id_counter.inc(1)
@@ -279,7 +253,7 @@ class OpenAIServingModels:
 
                     try:
                         await self.engine_client.add_lora(lora_request)
-                        self.lora_requests.append(lora_request)
+                        self.lora_requests[lora_name] = lora_request
                         logger.info(
                             "Resolved and loaded LoRA adapter '%s' using %s",
                             lora_name, resolver.__class__.__name__)
@@ -310,6 +284,5 @@ def create_error_response(
         message: str,
         err_type: str = "BadRequestError",
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
-    return ErrorResponse(message=message,
-                         type=err_type,
-                         code=status_code.value)
+    return ErrorResponse(error=ErrorInfo(
+        message=message, type=err_type, code=status_code.value))

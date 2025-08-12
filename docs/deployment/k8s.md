@@ -5,7 +5,7 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 - [Deployment with CPUs](#deployment-with-cpus)
 - [Deployment with GPUs](#deployment-with-gpus)
 - [Troubleshooting](#troubleshooting)
-  - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
+    - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
 - [Conclusion](#conclusion)
 
 Alternatively, you can deploy vLLM to Kubernetes using any of the following:
@@ -13,6 +13,7 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 - [Helm](frameworks/helm.md)
 - [InftyAI/llmaz](integrations/llmaz.md)
 - [KServe](integrations/kserve.md)
+- [KubeRay](integrations/kuberay.md)
 - [kubernetes-sigs/lws](frameworks/lws.md)
 - [meta-llama/llama-stack](integrations/llamastack.md)
 - [substratusai/kubeai](integrations/kubeai.md)

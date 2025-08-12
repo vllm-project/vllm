@@ -1,19 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Set
+from typing import Optional, Union
 
-from array import array
-from typing import Optional
-
+import numpy as np
 import torch
 import torch.nn as nn
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import PoolerHead
+from vllm.model_executor.layers.pooler import (DispatchPooler, Pooler,
+                                               PoolerHead, PoolerNormalize,
+                                               PoolingParamsUpdate,
+                                               build_output, get_prompt_lens,
+                                               get_prompt_token_ids)
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.pooling_metadata import (PoolingMetadata,
-                                                  PoolingTensors)
-from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
+from vllm.model_executor.pooling_metadata import PoolingMetadata
+from vllm.sequence import PoolerOutput
+from vllm.tasks import PoolingTask
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .interfaces import SupportsV0Only
@@ -21,7 +25,8 @@ from .interfaces import SupportsV0Only
 logger = init_logger(__name__)
 
 
-class GritLMPooler(nn.Module):
+class GritLMMeanPool(nn.Module):
+    """As `MeanPool`, but only includes non-instruction tokens."""
 
     def __init__(self, model_config: ModelConfig):
         super().__init__()
@@ -39,8 +44,8 @@ class GritLMPooler(nn.Module):
             for tok in ["<s>", "▁<", "<", "|", "embed", ">", "<0x0A>", "user"]
         }
 
-        def tokens_to_ids(tokens: list[str]) -> array:
-            return array("i", [self.token_ids[token] for token in tokens])
+        def tokens_to_ids(tokens: list[str]) -> np.ndarray:
+            return np.array([self.token_ids[token] for token in tokens])
 
         self.user_pattern_ids = tokens_to_ids(
             ["▁<", "|", "user", "|", ">", "<0x0A>"])
@@ -49,32 +54,44 @@ class GritLMPooler(nn.Module):
         self.embed_pattern_ids = tokens_to_ids(
             ["▁<", "|", "embed", "|", ">", "<0x0A>"])
 
-        self.head = PoolerHead(normalize=True, softmax=False)
-
-    def _find_array(self, arr: array, target: array, start_idx: int) -> int:
+    def _find_array(
+        self,
+        arr: np.ndarray,
+        target: np.ndarray,
+        start_idx: int = 0,
+        end_idx: Optional[int] = None,
+    ) -> int:
         """
-        Find the first occurrence of target in arr starting from start_idx.
+        Find the first occurrence of `target` in `arr` starting from
+        `start_idx`.
 
         Args:
-        arr: The array to search within
-        target: The consecutive subsequence to find
-        start_idx: The starting index to search from
+            arr: The array to search within.
+            target: The consecutive subsequence to find.
+            start_idx: The starting index to search from (inclusive).
+            end_idx: The ending index to search from (exclusive).
 
         Returns:
-        int: The index of the first occurrence of target in arr.
+            The index of the first occurrence of `target` in `arr`.
         """
         if start_idx < 0:
-            raise ValueError("start_idx must be non-negative")
-        if not target or not arr:
-            raise ValueError("Empty arr or target not allowed")
+            raise ValueError("`start_idx` must be non-negative")
+        if len(arr) == 0 or len(target) == 0:
+            raise ValueError("Empty `arr` or `target` not allowed")
 
+        arr_len = len(arr)
         target_len = len(target)
-        for i in range(start_idx, len(arr) - target_len + 1):
-            if arr[i:i + target_len] == target:
+
+        if end_idx is None:
+            end_idx = arr_len
+
+        for i in range(start_idx, min(end_idx, arr_len - target_len + 1)):
+            if (arr[i:i + target_len] == target).all():
                 return i
+
         return -1
 
-    def _get_instruction_len(self, prompt_token_ids: array) -> int:
+    def _get_instruction_len(self, prompt_token_ids: np.ndarray) -> int:
         """
         Get the length of the instruction in the prompt.
 
@@ -84,7 +101,6 @@ class GritLMPooler(nn.Module):
         The pattern matching is done using integers instead of strings
         because the prompt is given as a list of token IDs.
         """
-
         instruction_len = 0
 
         # Return no instruction in case of missing BOS token.
@@ -99,7 +115,8 @@ class GritLMPooler(nn.Module):
         embed_pattern_ids = self.embed_pattern_ids
         if self._find_array(prompt_token_ids,
                             self.user_pattern_ids,
-                            start_idx=1) == 1:
+                            start_idx=1,
+                            end_idx=2) == 1:
             embed_pattern_ids = self.embed_newline_pattern_ids
 
         # Find the embed pattern in the prompt.
@@ -117,64 +134,85 @@ class GritLMPooler(nn.Module):
 
         return instruction_len
 
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return {"encode", "embed"}
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return PoolingParamsUpdate(requires_token_ids=True)
+
+    def forward_one(
+        self,
+        hidden_states: torch.Tensor,
+        prompt_len: Optional[torch.Tensor] = None,
+        instr_len: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        assert prompt_len is None or prompt_len == hidden_states.shape[0], \
+            "partial prefill not supported with MEAN pooling"
+
+        return hidden_states[instr_len:].mean(dim=0, dtype=torch.float32)
+
+    def forward_all(
+        self,
+        hidden_states: torch.Tensor,
+        prompt_lens: torch.Tensor,
+        instr_lens: torch.Tensor,
+    ) -> Union[list[torch.Tensor], torch.Tensor]:
+        offset = 0
+        pooled_data = list[torch.Tensor]()
+
+        for prompt_len, instr_len in zip(prompt_lens, instr_lens):
+            pooled_data.append(hidden_states[offset + instr_len:offset +
+                                             prompt_len].mean(
+                                                 dim=0, dtype=torch.float32))
+            offset += prompt_len
+
+        return pooled_data
+
+    def forward(
+        self,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+        pooling_metadata: PoolingMetadata,
+    ) -> Union[list[torch.Tensor], torch.Tensor]:
+        prompt_lens = get_prompt_lens(hidden_states, pooling_metadata)
+        instr_lens = torch.tensor(
+            [
+                self._get_instruction_len(token_ids.cpu().numpy())
+                for token_ids in get_prompt_token_ids(pooling_metadata)
+            ],
+            device=prompt_lens.device,
+        )
+
+        if isinstance(hidden_states, list):
+            return [
+                self.forward_one(h, prompt_len, instr_len) for h, prompt_len,
+                instr_len in zip(hidden_states, prompt_lens, instr_lens)
+            ]
+
+        return self.forward_all(hidden_states, prompt_lens, instr_lens)
+
+
+class GritLMPooler(Pooler):
+
+    def __init__(self, model_config: ModelConfig):
+        super().__init__()
+
+        self.pooling = GritLMMeanPool(model_config)
+        self.head = PoolerHead(PoolerNormalize())
+
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return self.pooling.get_supported_tasks()
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return self.pooling.get_pooling_updates(task)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
-        """
-        Pool the hidden states by summing the embeddings of
-        non-instruction tokens.
-        """
-        prompts_token_ids = [
-            token_ids.prompt_token_ids_array
-            for _, token_ids in pooling_metadata.seq_data.items()
-        ]
-
-        instruction_lens = torch.tensor(
-            [
-                self._get_instruction_len(prompt_token_ids)
-                for prompt_token_ids in prompts_token_ids
-            ],
-            device=hidden_states.device,
-        )
-
-        prompt_lens = PoolingTensors.from_pooling_metadata(
-            pooling_metadata, hidden_states.device).prompt_lens
-
-        mask = torch.zeros_like(hidden_states, dtype=torch.bool)
-
-        start_idx = 0
-        for prompt_len, instruction_len in zip(prompt_lens, instruction_lens):
-            end_idx = start_idx + prompt_len
-            mask[start_idx + instruction_len:end_idx] = True
-            start_idx = end_idx
-
-        masked_hidden_states = hidden_states.masked_fill(~mask, 0.0)
-
-        sum_embeddings = torch.zeros(len(prompt_lens),
-                                     hidden_states.size(1),
-                                     device=hidden_states.device)
-
-        start_idx = 0
-        for i, prompt_len in enumerate(prompt_lens):
-            end_idx = start_idx + prompt_len
-            sum_embeddings[i] = masked_hidden_states[start_idx:end_idx].sum(
-                dim=0)
-            start_idx = end_idx
-
-        num_non_instruction_tokens = prompt_lens - instruction_lens
-        mean_embeddings = sum_embeddings / num_non_instruction_tokens.unsqueeze(
-            1)
-
-        pooled_data = self.head(mean_embeddings,
-                                pooling_metadata=pooling_metadata)
-
-        pooled_outputs = [
-            PoolingSequenceGroupOutput(data) for data in pooled_data
-        ]
-
-        return PoolerOutput(outputs=pooled_outputs)
+        pooled_data = self.pooling(hidden_states, pooling_metadata)
+        pooled_data = self.head(pooled_data, pooling_metadata)
+        return build_output(pooled_data)
 
 
 class GritLM(LlamaForCausalLM, SupportsV0Only):
@@ -195,30 +233,30 @@ class GritLM(LlamaForCausalLM, SupportsV0Only):
     - "<|user|>\nPROMPT\n<|assistant|>\n"
     """
 
+    is_pooling_model = True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
         **kwargs,
     ) -> None:
-        # Use full attention for pooling
+        # Use full attention for pooling (this is why V1 is not supported yet)
         if vllm_config.model_config.runner_type == "pooling":
             hf_config = vllm_config.model_config.hf_config
             hf_config.is_causal = False
 
             vllm_config.cache_config.sliding_window = None
 
-            for attr in ("sliding_window", "interleaved_sliding_window"):
-                if hasattr(hf_config, attr):
-                    delattr(hf_config, attr)
+            hf_config.sliding_window = None
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
-        self._pooler = GritLMPooler(vllm_config.model_config)
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
+        pooler_config = vllm_config.model_config.pooler_config
+        if pooler_config is not None:
+            self.pooler = DispatchPooler({
+                "encode":
+                Pooler.for_encode(pooler_config),
+                "embed":
+                GritLMPooler(vllm_config.model_config),
+            })

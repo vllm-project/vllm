@@ -55,7 +55,7 @@ def chat(system_prompt: str | None, model_name: str, client: OpenAI) -> None:
         try:
             input_message = input("> ")
         except EOFError:
-            return
+            break
         conversation.append({"role": "user", "content": input_message})
 
         chat_completion = client.chat.completions.create(model=model_name,
@@ -118,7 +118,7 @@ class ChatCommand(CLISubcommand):
             try:
                 input_message = input("> ")
             except EOFError:
-                return
+                break
             conversation.append({"role": "user", "content": input_message})
 
             chat_completion = client.chat.completions.create(
@@ -130,28 +130,33 @@ class ChatCommand(CLISubcommand):
             conversation.append(response_message)  # type: ignore
             print(output)
 
-    def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
-        chat_parser = subparsers.add_parser(
-            "chat",
-            help="Generate chat completions via the running API server.",
-            description="Generate chat completions via the running API server.",
-            usage="vllm chat [options]")
-        _add_query_options(chat_parser)
-        chat_parser.add_argument(
+    @staticmethod
+    def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+        """Add CLI arguments for the chat command."""
+        _add_query_options(parser)
+        parser.add_argument(
             "--system-prompt",
             type=str,
             default=None,
             help=("The system prompt to be added to the chat template, "
                   "used for models that support system prompts."))
-        chat_parser.add_argument("-q",
-                                 "--quick",
-                                 type=str,
-                                 metavar="MESSAGE",
-                                 help=("Send a single prompt as MESSAGE "
-                                       "and print the response, then exit."))
-        return chat_parser
+        parser.add_argument("-q",
+                            "--quick",
+                            type=str,
+                            metavar="MESSAGE",
+                            help=("Send a single prompt as MESSAGE "
+                                  "and print the response, then exit."))
+        return parser
+
+    def subparser_init(
+            self,
+            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+        parser = subparsers.add_parser(
+            "chat",
+            help="Generate chat completions via the running API server.",
+            description="Generate chat completions via the running API server.",
+            usage="vllm chat [options]")
+        return ChatCommand.add_cli_args(parser)
 
 
 class CompleteCommand(CLISubcommand):
@@ -170,31 +175,39 @@ class CompleteCommand(CLISubcommand):
 
         print("Please enter prompt to complete:")
         while True:
-            input_prompt = input("> ")
+            try:
+                input_prompt = input("> ")
+            except EOFError:
+                break
             completion = client.completions.create(model=model_name,
                                                    prompt=input_prompt)
             output = completion.choices[0].text
             print(output)
 
-    def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
-        complete_parser = subparsers.add_parser(
-            "complete",
-            help=("Generate text completions based on the given prompt "
-                  "via the running API server."),
-            description=("Generate text completions based on the given prompt "
-                         "via the running API server."),
-            usage="vllm complete [options]")
-        _add_query_options(complete_parser)
-        complete_parser.add_argument(
+    @staticmethod
+    def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+        """Add CLI arguments for the complete command."""
+        _add_query_options(parser)
+        parser.add_argument(
             "-q",
             "--quick",
             type=str,
             metavar="PROMPT",
             help=
             "Send a single prompt and print the completion output, then exit.")
-        return complete_parser
+        return parser
+
+    def subparser_init(
+            self,
+            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+        parser = subparsers.add_parser(
+            "complete",
+            help=("Generate text completions based on the given prompt "
+                  "via the running API server."),
+            description=("Generate text completions based on the given prompt "
+                         "via the running API server."),
+            usage="vllm complete [options]")
+        return CompleteCommand.add_cli_args(parser)
 
 
 def cmd_init() -> list[CLISubcommand]:

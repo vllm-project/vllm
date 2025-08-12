@@ -4,6 +4,9 @@
 # vllm-flash-attn built from source
 vllm/vllm_flash_attn/*
 
+# triton jit 
+.triton
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -146,6 +149,7 @@ venv.bak/
 
 # mkdocs documentation
 /site
+docs/argparse
 docs/examples
 
 # mypy

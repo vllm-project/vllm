@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any, ClassVar, Optional
+from typing import ClassVar, Optional
 
 import torch
 
@@ -11,14 +11,15 @@ from vllm.attention.backends.abstract import (AttentionType,
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
                                          is_flashmla_supported)
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonDecodeMetadata,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
+from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.block_table import BlockTable
 
 logger = init_logger(__name__)
 
@@ -54,17 +55,36 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = True  # Decode-only
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.PURE_DECODE_ONLY
 
-    def __init__(self, runner, kv_cache_spec: AttentionSpec,
-                 block_table: BlockTable):
-        super().__init__(runner, kv_cache_spec, block_table, FlashMLAMetadata)
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device,
+                         FlashMLAMetadata)
 
-        self.num_q_heads = self.runner.model_config.get_num_attention_heads(
-            self.runner.parallel_config)
+        self.compilation_config = vllm_config.compilation_config
+        self.num_q_heads = vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config)
 
         self.cg_buf_tile_scheduler_metadata = None
         self.cg_buf_num_splits = None
+
+        device_properties = torch.cuda.get_device_properties(self.device)
+        num_sms = device_properties.multi_processor_count
+
+        if self.compilation_config.full_cuda_graph:
+            self.cg_buf_tile_scheduler_metadata = torch.zeros(
+                # Upper bound on size (<= #SMs, TileSchedulerMetaDataSize)
+                # TileSchedulerMetaDataSize = 8
+                (num_sms, 8),
+                device=self.device,
+                dtype=torch.int32,
+            )
+            self.cg_buf_num_splits = torch.empty(
+                (vllm_config.scheduler_config.max_num_seqs + 1),
+                device=self.device,
+                dtype=torch.int32)
 
     def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor) -> FlashMLADecodeMetadata:
@@ -75,29 +95,29 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             1, # MQA for the decode path
         )
 
-        if self.runner.full_cuda_graph:
-            # First time around (CUDAGraph capture), allocate the static buffer
-            if self.cg_buf_tile_scheduler_metadata is None:
-                self.cg_buf_tile_scheduler_metadata = tile_scheduler_metadata
-                self.cg_buf_num_splits = num_splits
-            else:
-                assert self.cg_buf_num_splits is not None
+        if self.compilation_config.full_cuda_graph:
+            assert self.cg_buf_tile_scheduler_metadata is not None
+            assert self.cg_buf_num_splits is not None
 
-                # Metadata per-SM, fixed size (#SMs, TileMetadataSize)
-                assert (self.cg_buf_tile_scheduler_metadata.size() ==
-                        tile_scheduler_metadata.size())
-                self.cg_buf_tile_scheduler_metadata.\
-                    copy_(tile_scheduler_metadata)
-                tile_scheduler_metadata = self.cg_buf_tile_scheduler_metadata
+            sm_parts = tile_scheduler_metadata.size(0)
+            # Metadata per-SM, upper bound on size (<= #SMs, TileMetadataSize)
+            assert sm_parts <= self.cg_buf_tile_scheduler_metadata.size(0)
+            tile_scheduler_metadata_view = \
+                self.cg_buf_tile_scheduler_metadata[:sm_parts]
+            tile_scheduler_metadata_view.copy_(tile_scheduler_metadata)
+            tile_scheduler_metadata = tile_scheduler_metadata_view
 
-                # Num splits is per-batch, varying size (batch_size,)
-                n = num_splits.size(0)
-                # make sure static buffer is large enough
-                assert n <= self.cg_buf_num_splits.size(0)
-                num_splits_view = self.cg_buf_num_splits[:n]
-                num_splits_view.copy_(num_splits)
-                self.cg_buf_num_splits[n:].fill_(0)  # fill the rest with 0s
-                num_splits = num_splits_view
+            # Num splits is per-batch, varying size (batch_size,)
+            n = num_splits.size(0)
+            # make sure static buffer is large enough
+            assert n <= self.cg_buf_num_splits.size(0)
+            num_splits_view = self.cg_buf_num_splits[:n]
+            num_splits_view.copy_(num_splits)
+            # Num splits needs to monotonically increasing
+            # (with: https://github.com/vllm-project/FlashMLA/pull/3, otherwise
+            #  it needs to monotonically increasing by 1)
+            self.cg_buf_num_splits[n:].fill_(num_splits[-1])
+            num_splits = num_splits_view
 
         return FlashMLADecodeMetadata(
             block_table=block_table_tensor,
@@ -118,7 +138,6 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             alibi_slopes: Optional[list[float]],
             sliding_window: Optional[int],
             kv_cache_dtype: str,
-            blocksparse_params: Optional[dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
             kv_sharing_target_layer_name: Optional[str],
@@ -126,20 +145,17 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             **mla_args) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
-                         blocksparse_params, logits_soft_cap, attn_type,
+                         logits_soft_cap, attn_type,
                          kv_sharing_target_layer_name, **mla_args)
 
         assert is_flashmla_supported(), \
             "FlashMLA is not supported on this device"
 
-        unsupported_features = [
-            alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
-        ]
+        unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
                 "FlashMLAImpl does not support one of the following: "
-                "alibi_slopes, sliding_window, blocksparse_params, "
-                "logits_soft_cap")
+                "alibi_slopes, sliding_window, logits_soft_cap")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "

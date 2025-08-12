@@ -15,6 +15,7 @@ import torch
 import uvloop
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
+from typing_extensions import deprecated
 
 from benchmark_dataset import (
     AIMODataset,
@@ -167,7 +168,8 @@ async def run_vllm_async(
     from vllm import SamplingParams
 
     async with build_async_engine_client_from_engine_args(
-        engine_args, disable_frontend_multiprocessing
+        engine_args,
+        disable_frontend_multiprocessing=disable_frontend_multiprocessing,
     ) as llm:
         model_config = await llm.get_model_config()
         assert all(
@@ -356,6 +358,7 @@ def get_requests(args, tokenizer):
     elif args.dataset_name == "burstgpt":
         dataset_cls = BurstGPTDataset
     elif args.dataset_name == "hf":
+        common_kwargs["no_stream"] = args.no_stream
         if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
             dataset_cls = VisionArenaDataset
             common_kwargs["dataset_subset"] = None
@@ -380,6 +383,10 @@ def get_requests(args, tokenizer):
     return dataset_cls(**common_kwargs).sample(**sample_kwargs)
 
 
+@deprecated(
+    "benchmark_throughput.py is deprecated and will be removed in a "
+    "future version. Please use 'vllm bench throughput' instead.",
+)
 def main(args: argparse.Namespace):
     if args.seed is None:
         args.seed = 0
@@ -609,6 +616,11 @@ def create_argument_parser():
         choices=["sharegpt", "random", "sonnet", "burstgpt", "hf"],
         help="Name of the dataset to benchmark on.",
         default="sharegpt",
+    )
+    parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="Do not load the dataset in streaming mode.",
     )
     parser.add_argument(
         "--dataset",

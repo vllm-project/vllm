@@ -9,7 +9,6 @@ from typing import Annotated, Any, Optional, Union
 
 import msgspec
 from pydantic import BaseModel
-from typing_extensions import deprecated
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
@@ -84,27 +83,6 @@ class GuidedDecodingParams:
                 "You can only use one kind of guided decoding but multiple are "
                 f"specified: {self.__dict__}")
 
-        if self.backend is not None and ":" in self.backend:
-            self._extract_backend_options()
-
-    @deprecated(
-        "Passing guided decoding backend options inside backend in the format "
-        "'backend:...' is deprecated. This will be removed in v0.10.0. Please "
-        "use the dedicated arguments '--disable-fallback', "
-        "'--disable-any-whitespace' and '--disable-additional-properties' "
-        "instead.")
-    def _extract_backend_options(self):
-        """Extract backend options from the backend string."""
-        assert isinstance(self.backend, str)
-        self.backend, options = self.backend.split(":")
-        options_set = set(options.strip().split(","))
-        if "no-fallback" in options_set:
-            self.disable_fallback = True
-        if "disable-any-whitespace" in options_set:
-            self.disable_any_whitespace = True
-        if "no-additional-properties" in options_set:
-            self.disable_additional_properties = True
-
 
 class RequestOutputKind(Enum):
     # Return entire output so far in every RequestOutput
@@ -125,112 +103,89 @@ class SamplingParams(
     Overall, we follow the sampling parameters from the OpenAI text completion
     API (https://platform.openai.com/docs/api-reference/completions/create).
     In addition, we support beam search, which is not supported by OpenAI.
-
-    Args:
-        n: Number of output sequences to return for the given prompt.
-        best_of: Number of output sequences that are generated from the prompt.
-            From these `best_of` sequences, the top `n` sequences are returned.
-            `best_of` must be greater than or equal to `n`. By default,
-            `best_of` is set to `n`. Warning, this is only supported in V0.
-        presence_penalty: Float that penalizes new tokens based on whether they
-            appear in the generated text so far. Values > 0 encourage the model
-            to use new tokens, while values < 0 encourage the model to repeat
-            tokens.
-        frequency_penalty: Float that penalizes new tokens based on their
-            frequency in the generated text so far. Values > 0 encourage the
-            model to use new tokens, while values < 0 encourage the model to
-            repeat tokens.
-        repetition_penalty: Float that penalizes new tokens based on whether
-            they appear in the prompt and the generated text so far. Values > 1
-            encourage the model to use new tokens, while values < 1 encourage
-            the model to repeat tokens.
-        temperature: Float that controls the randomness of the sampling. Lower
-            values make the model more deterministic, while higher values make
-            the model more random. Zero means greedy sampling.
-        top_p: Float that controls the cumulative probability of the top tokens
-            to consider. Must be in (0, 1]. Set to 1 to consider all tokens.
-        top_k: Integer that controls the number of top tokens to consider. Set
-            to 0 (or -1) to consider all tokens.
-        min_p: Float that represents the minimum probability for a token to be
-            considered, relative to the probability of the most likely token.
-            Must be in [0, 1]. Set to 0 to disable this.
-        seed: Random seed to use for the generation.
-        stop: list of strings that stop the generation when they are generated.
-            The returned output will not contain the stop strings.
-        stop_token_ids: list of tokens that stop the generation when they are
-            generated. The returned output will contain the stop tokens unless
-            the stop tokens are special tokens.
-        bad_words: list of words that are not allowed to be generated.
-            More precisely, only the last token of a corresponding
-            token sequence is not allowed when the next generated token
-            can complete the sequence.
-        include_stop_str_in_output: Whether to include the stop strings in
-            output text. Defaults to False.
-        ignore_eos: Whether to ignore the EOS token and continue generating
-            tokens after the EOS token is generated.
-        max_tokens: Maximum number of tokens to generate per output sequence.
-        min_tokens: Minimum number of tokens to generate per output sequence
-            before EOS or stop_token_ids can be generated
-        logprobs: Number of log probabilities to return per output token.
-            When set to None, no probability is returned. If set to a non-None
-            value, the result includes the log probabilities of the specified
-            number of most likely tokens, as well as the chosen tokens.
-            Note that the implementation follows the OpenAI API: The API will
-            always return the log probability of the sampled token, so there
-            may be up to `logprobs+1` elements in the response.
-        prompt_logprobs: Number of log probabilities to return per prompt token.
-        detokenize: Whether to detokenize the output. Defaults to True.
-        skip_special_tokens: Whether to skip special tokens in the output.
-        spaces_between_special_tokens: Whether to add spaces between special
-            tokens in the output.  Defaults to True.
-        logits_processors: list of functions that modify logits based on
-            previously generated tokens, and optionally prompt tokens as
-            a first argument.
-        truncate_prompt_tokens: If set to -1, will use the truncation size
-            supported by the model. If set to an integer k, will use only
-            the last k tokens from the prompt (i.e., left truncation).
-            Defaults to None (i.e., no truncation).
-        guided_decoding: If provided, the engine will construct a guided
-            decoding logits processor from these parameters. Defaults to None.
-        logit_bias: If provided, the engine will construct a logits processor
-            that applies these logit biases. Defaults to None.
-        allowed_token_ids: If provided, the engine will construct a logits
-            processor which only retains scores for the given token ids.
-            Defaults to None.
-        extra_args: Arbitrary additional args, that can be used by custom
-            sampling implementations, plugins, etc. Not used by any in-tree
-            sampling implementations.
     """
 
     n: int = 1
+    """Number of output sequences to return for the given prompt."""
     best_of: Optional[int] = None
+    """Number of output sequences that are generated from the prompt. From
+    these `best_of` sequences, the top `n` sequences are returned. `best_of`
+    must be greater than or equal to `n`. By default, `best_of` is set to `n`.
+    Warning, this is only supported in V0."""
     _real_n: Optional[int] = None
     presence_penalty: float = 0.0
+    """Penalizes new tokens based on whether they appear in the generated text
+    so far. Values > 0 encourage the model to use new tokens, while values < 0
+    encourage the model to repeat tokens."""
     frequency_penalty: float = 0.0
+    """Penalizes new tokens based on their frequency in the generated text so
+    far. Values > 0 encourage the model to use new tokens, while values < 0
+    encourage the model to repeat tokens."""
     repetition_penalty: float = 1.0
+    """Penalizes new tokens based on whether they appear in the prompt and the
+    generated text so far. Values > 1 encourage the model to use new tokens,
+    while values < 1 encourage the model to repeat tokens."""
     temperature: float = 1.0
+    """Controls the randomness of the sampling. Lower values make the model
+    more deterministic, while higher values make the model more random. Zero
+    means greedy sampling."""
     top_p: float = 1.0
+    """Controls the cumulative probability of the top tokens to consider. Must
+    be in (0, 1]. Set to 1 to consider all tokens."""
     top_k: int = 0
+    """Controls the number of top tokens to consider. Set to 0 (or -1) to
+    consider all tokens."""
     min_p: float = 0.0
+    """Represents the minimum probability for a token to be considered,
+    relative to the probability of the most likely token. Must be in [0, 1].
+    Set to 0 to disable this."""
     seed: Optional[int] = None
+    """Random seed to use for the generation."""
     stop: Optional[Union[str, list[str]]] = None
+    """String(s) that stop the generation when they are generated. The returned
+    output will not contain the stop strings."""
     stop_token_ids: Optional[list[int]] = None
+    """Token IDs that stop the generation when they are generated. The returned
+    output will contain the stop tokens unless the stop tokens are special
+    tokens."""
     ignore_eos: bool = False
+    """Whether to ignore the EOS token and continue generating
+    tokens after the EOS token is generated."""
     max_tokens: Optional[int] = 16
+    """Maximum number of tokens to generate per output sequence."""
     min_tokens: int = 0
+    """Minimum number of tokens to generate per output sequence before EOS or
+    `stop_token_ids` can be generated"""
     logprobs: Optional[int] = None
+    """Number of log probabilities to return per output token. When set to
+    `None`, no probability is returned. If set to a non-`None` value, the
+    result includes the log probabilities of the specified number of most
+    likely tokens, as well as the chosen tokens. Note that the implementation
+    follows the OpenAI API: The API will always return the log probability of
+    the sampled token, so there may be up to `logprobs+1` elements in the
+    response. When set to -1, return all `vocab_size` log probabilities."""
     prompt_logprobs: Optional[int] = None
+    """Number of log probabilities to return per prompt token."""
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.
     detokenize: bool = True
+    """Whether to detokenize the output."""
     skip_special_tokens: bool = True
+    """Whether to skip special tokens in the output."""
     spaces_between_special_tokens: bool = True
+    """Whether to add spaces between special tokens in the output."""
     # Optional[list[LogitsProcessor]] type. We use Any here because
     # Optional[list[LogitsProcessor]] type is not supported by msgspec.
     logits_processors: Optional[Any] = None
+    """Functions that modify logits based on previously generated tokens, and
+    optionally prompt tokens as a first argument."""
     include_stop_str_in_output: bool = False
+    """Whether to include the stop strings in output text."""
     truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
+    """If set to -1, will use the truncation size supported by the model. If
+    set to an integer k, will use only the last k tokens from the prompt
+    (i.e., left truncation). If set to `None`, truncation is disabled."""
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
 
     # The below fields are not supposed to be used as an input.
@@ -240,12 +195,24 @@ class SamplingParams(
 
     # Fields used to construct logits processors
     guided_decoding: Optional[GuidedDecodingParams] = None
+    """If provided, the engine will construct a guided decoding logits
+    processor from these parameters."""
     logit_bias: Optional[dict[int, float]] = None
+    """If provided, the engine will construct a logits processor that applies
+    these logit biases."""
     allowed_token_ids: Optional[list[int]] = None
+    """If provided, the engine will construct a logits processor which only
+    retains scores for the given token ids."""
     extra_args: Optional[dict[str, Any]] = None
+    """Arbitrary additional args, that can be used by custom sampling
+    implementations, plugins, etc. Not used by any in-tree sampling
+    implementations."""
 
     # Fields used for bad words
     bad_words: Optional[list[str]] = None
+    """Words that are not allowed to be generated. More precisely, only the
+    last token of a corresponding token sequence is not allowed when the next
+    generated token can complete the sequence."""
     _bad_words_token_ids: Optional[list[list[int]]] = None
 
     @staticmethod
@@ -436,9 +403,10 @@ class SamplingParams(
             raise ValueError(
                 f"min_tokens must be less than or equal to "
                 f"max_tokens={self.max_tokens}, got {self.min_tokens}.")
-        if self.logprobs is not None and self.logprobs < 0:
+        if (self.logprobs is not None and self.logprobs != -1
+                and self.logprobs < 0):
             raise ValueError(
-                f"logprobs must be non-negative, got {self.logprobs}.")
+                f"logprobs must be non-negative or -1, got {self.logprobs}.")
         if self.prompt_logprobs is not None and self.prompt_logprobs < 0:
             raise ValueError(f"prompt_logprobs must be non-negative, got "
                              f"{self.prompt_logprobs}.")

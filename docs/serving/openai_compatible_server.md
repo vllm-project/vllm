@@ -45,17 +45,17 @@ To call the server, in your preferred text editor, create a script that uses an 
 We currently support the following OpenAI APIs:
 
 - [Completions API][completions-api] (`/v1/completions`)
-    - Only applicable to [text generation models](../models/generative_models.md) (`--task generate`).
+    - Only applicable to [text generation models](../models/generative_models.md).
     - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API][chat-api] (`/v1/chat/completions`)
-    - Only applicable to [text generation models](../models/generative_models.md) (`--task generate`) with a [chat template][chat-template].
+    - Only applicable to [text generation models](../models/generative_models.md) with a [chat template][chat-template].
     - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
 - [Embeddings API][embeddings-api] (`/v1/embeddings`)
-    - Only applicable to [embedding models](../models/pooling_models.md) (`--task embed`).
+    - Only applicable to [embedding models](../models/pooling_models.md).
 - [Transcriptions API][transcriptions-api] (`/v1/audio/transcriptions`)
-    - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
+    - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 - [Translation API][translations-api] (`/v1/audio/translations`)
-    - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
+    - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 
 In addition, we have the following custom APIs:
 
@@ -64,14 +64,14 @@ In addition, we have the following custom APIs:
 - [Pooling API][pooling-api] (`/pooling`)
     - Applicable to all [pooling models](../models/pooling_models.md).
 - [Classification API][classification-api] (`/classify`)
-    - Only applicable to [classification models](../models/pooling_models.md) (`--task classify`).
+    - Only applicable to [classification models](../models/pooling_models.md).
 - [Score API][score-api] (`/score`)
-    - Applicable to embedding models and [cross-encoder models](../models/pooling_models.md) (`--task score`).
+    - Applicable to [embedding models and cross-encoder models](../models/pooling_models.md).
 - [Re-rank API][rerank-api] (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
     - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
     - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
-    - Only applicable to [cross-encoder models](../models/pooling_models.md) (`--task score`).
+    - Only applicable to [cross-encoder models](../models/pooling_models.md).
 
 [](){ #chat-template }
 
@@ -206,6 +206,7 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
 [Audio](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in)-related parameters;
 see our [Multimodal Inputs](../features/multimodal_inputs.md) guide for more information.
+
 - *Note: `image_url.detail` parameter is not supported.*
 
 Code example: <gh-file:examples/online_serving/openai_chat_completion_client.py>
@@ -250,14 +251,14 @@ and passing a list of `messages` in the request. Refer to the examples below for
     To serve the model:
 
     ```bash
-    vllm serve TIGER-Lab/VLM2Vec-Full --task embed \
+    vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
       --trust-remote-code \
       --max-model-len 4096 \
       --chat-template examples/template_vlm2vec.jinja
     ```
 
     !!! important
-        Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--task embed`
+        Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--runner pooling`
         to run this model in embedding mode instead of text generation mode.
 
         The custom chat template is completely different from the original one for this model,
@@ -296,14 +297,14 @@ and passing a list of `messages` in the request. Refer to the examples below for
     To serve the model:
 
     ```bash
-    vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embed \
+    vllm serve MrLight/dse-qwen2-2b-mrl-v1 --runner pooling \
       --trust-remote-code \
       --max-model-len 8192 \
       --chat-template examples/template_dse_qwen2_vl.jinja
     ```
 
     !!! important
-        Like with VLM2Vec, we have to explicitly pass `--task embed`.
+        Like with VLM2Vec, we have to explicitly pass `--runner pooling`.
 
         Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
         by a custom chat template: <gh-file:examples/template_dse_qwen2_vl.jinja>
@@ -350,6 +351,11 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 
 Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
 <!-- TODO: api enforced limits + uploading audios -->
+
+#### API Enforced Limits
+
+Set the maximum audio file size (in MB) that VLLM will accept, via the
+`VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` environment variable. Default is 25 MB.
 
 #### Extra Parameters
 
@@ -537,7 +543,7 @@ The following extra parameters are supported:
 
 ### Score API
 
-Our Score API can apply a cross-encoder model or an embedding model to predict scores for sentence pairs. When using an embedding model the score corresponds to the cosine similarity between each embedding pair.
+Our Score API can apply a cross-encoder model or an embedding model to predict scores for sentence or multimodal pairs. When using an embedding model the score corresponds to the cosine similarity between each embedding pair.
 Usually, the score for a sentence pair refers to the similarity between two sentences, on a scale of 0 to 1.
 
 You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
@@ -676,6 +682,55 @@ The total number of pairs is `len(text_2)`.
     }
     ```
 
+#### Multi-modal inputs
+
+You can pass multi-modal inputs to scoring models by passing `content` including a list of multi-modal input (image, etc.) in the request. Refer to the examples below for illustration.
+
+=== "JinaVL-Reranker"
+
+    To serve the model:
+
+    ```bash
+    vllm serve jinaai/jina-reranker-m0
+    ```
+
+    Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
+
+    ??? Code
+
+        ```python
+        import requests
+
+        response = requests.post(
+            "http://localhost:8000/v1/score",
+            json={
+                "model": "jinaai/jina-reranker-m0",
+                "text_1": "slm markdown",
+                "text_2": {
+                  "content": [
+                          {
+                              "type": "image_url",
+                              "image_url": {
+                                  "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+                              },
+                          },
+                          {
+                              "type": "image_url",
+                              "image_url": {
+                                  "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
+                              },
+                          },
+                      ]
+                  }
+                },
+        )
+        response.raise_for_status()
+        response_json = response.json()
+        print("Scoring output:", response_json["data"][0]["score"])
+        print("Scoring output:", response_json["data"][1]["score"])
+        ```
+Full example: <gh-file:examples/online_serving/openai_cross_encoder_score_for_multimodal.py>
+
 #### Extra parameters
 
 The following [pooling parameters][pooling-params] are supported.
@@ -695,8 +750,7 @@ The following extra parameters are supported:
 ### Re-rank API
 
 Our Re-rank API can apply an embedding model or a cross-encoder model to predict relevant scores between a single query, and
-each of a list of documents. Usually, the score for a sentence pair refers to the similarity between two sentences, on
-a scale of 0 to 1.
+each of a list of documents. Usually, the score for a sentence pair refers to the similarity between two sentences or multi-modal inputs (image, etc.), on a scale of 0 to 1.
 
 You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 

@@ -4,7 +4,7 @@
 import itertools
 from dataclasses import dataclass
 from functools import cache
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, List, Optional, Tuple, Type
 
 import torch
 
@@ -19,6 +19,8 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import use_rocm_custom_paged_attention
 
@@ -492,21 +494,18 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing is not supported in V0.")
+            raise NotImplementedError("KV sharing is not supported in V0 "
+                                      "ROCM_FLASH backend.")
         if use_irope:
             logger.warning_once(
                 "Using irope in ROCm Flash Attention is not supported yet, it "
                 "will fail back to global attention for long context.")
-        if blocksparse_params is not None:
-            raise ValueError(
-                "ROCmFlashAttention does not support blocksparse attention.")
         if use_irope:
             logger.warning(
                 "Using irope in V0 is not supported yet, it will fall back "
@@ -598,10 +597,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                                                     head_dim))
 
     def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
-                                     group_shape: tuple[int, int]):
+                                     group_shape: GroupShape):
         if self.use_triton_flash_attn:
             return dtype == current_platform.fp8_dtype(
-            ) and static and group_shape == (-1, -1)  # per-tensor
+            ) and static and group_shape == GroupShape.PER_TENSOR
 
         # Only supported in the Triton backend
         return False

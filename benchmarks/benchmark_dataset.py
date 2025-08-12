@@ -52,7 +52,7 @@ class SampleRequest:
     prompt: Union[str, Any]
     prompt_len: int
     expected_output_len: int
-    multi_modal_data: Optional[Union[MultiModalDataDict, dict]] = None
+    multi_modal_data: Optional[Union[MultiModalDataDict, dict, list[dict]]] = None
     lora_request: Optional[LoRARequest] = None
 
 
@@ -324,6 +324,9 @@ class RandomDataset(BenchmarkDataset):
         input_low = int(real_input_len * (1 - range_ratio))
         input_high = int(real_input_len * (1 + range_ratio))
         output_low = int(output_len * (1 - range_ratio))
+        # Ensure the lower bound for output length is at least 1 to prevent
+        # sampling 0 tokens, which can cause request failures.
+        output_low = max(output_low, 1)
         output_high = int(output_len * (1 + range_ratio))
 
         # Add logging for debugging
@@ -701,6 +704,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         self,
         dataset_path: str,
         dataset_split: str,
+        no_stream: bool = False,
         dataset_subset: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -708,6 +712,7 @@ class HuggingFaceDataset(BenchmarkDataset):
 
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
+        self.load_stream = not no_stream
         self.load_data()
 
     def load_data(self) -> None:
@@ -716,7 +721,7 @@ class HuggingFaceDataset(BenchmarkDataset):
             self.dataset_path,
             name=self.dataset_subset,
             split=self.dataset_split,
-            streaming=True,
+            streaming=self.load_stream,
         )
         self.data = self.data.shuffle(seed=self.random_seed)
 

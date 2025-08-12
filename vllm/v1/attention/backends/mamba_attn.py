@@ -1,32 +1,55 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import ClassVar, Optional
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.model_executor.layers.mamba.mamba2_metadata import (
-    _query_start_loc_to_chunk_indices_offsets)
-from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
-                                              CommonAttentionMetadata)
-from vllm.v1.kv_cache_interface import MambaSpec
-from vllm.v1.worker.block_table import BlockTable
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.attention.backends.utils import PAD_SLOT_ID
+from vllm.config import VllmConfig
+from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                              AttentionMetadataBuilder,
+                                              CommonAttentionMetadata,
+                                              split_decodes_and_prefills)
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 
-def get_mamba2_chunk_size(vllm_config: VllmConfig) -> int:
-    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-    layers = get_layers_from_vllm_config(vllm_config, MambaMixer2)
-    chunk_sizes = set(layer.chunk_size for layer in layers.values())
-    assert len(
-        chunk_sizes) == 1, "All Mamba2 layers must have the same chunk size"
-    return chunk_sizes.pop()
+def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
+                                              chunk_size: int,
+                                              total_seqlens: int):
+
+    cu_seqlens = query_start_loc[1:]  # remove prepended 0
+
+    # outputs will have length expansion of chunks that do not divide
+    # chunk_size
+    N = math.ceil(total_seqlens / chunk_size) + (cu_seqlens[:-1] % chunk_size
+                                                 > 0).sum()
+    chunk_indices = torch.arange(N,
+                                 dtype=torch.int,
+                                 device=query_start_loc.device)
+    chunk_offsets = torch.zeros((N, ),
+                                dtype=torch.int,
+                                device=query_start_loc.device)
+
+    p = 0  # num of insertions
+    for s, e in zip(cu_seqlens[:-1], cu_seqlens[1:]):
+
+        # if does not divide chunk_size, then there is one chunk insertion
+        p += (s % chunk_size > 0)
+
+        # get the dimensions
+        # - the + 1 for _e is to shift the boundary by one chunk
+        # - this shifting is not needed if chunk_size divides e
+        _s, _e = s // chunk_size + p, e // chunk_size + p + (e % chunk_size
+                                                             > 0)
+
+        # adjust indices and offsets
+        chunk_indices[_s:_e] -= p
+        chunk_offsets[_s] = s % chunk_size
+
+    return chunk_indices, chunk_offsets
 
 
 class Mamba2AttentionBackend(AttentionBackend):
@@ -53,82 +76,41 @@ class Mamba2AttentionMetadata:
     chunk_offsets: torch.Tensor
 
     state_indices_tensor: torch.Tensor  # shape: [batch,]
+    nums_dict: Optional[dict] = None
+    cu_seqlen: Optional[int] = None
+    batch_ptr: Optional[torch.tensor] = None
+    token_chunk_offset_ptr: Optional[torch.tensor] = None
 
 
 class Mamba2AttentionMetadataBuilder(
         AttentionMetadataBuilder[Mamba2AttentionMetadata]):
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.PURE_DECODE_ONLY
 
-    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: MambaSpec,
-                 block_table: BlockTable):
-        self.runner = runner
+    reorder_batch_threshold: ClassVar[int] = 1
+
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
+        assert isinstance(kv_cache_spec, MambaSpec)
         self.kv_cache_spec = kv_cache_spec
-        self.block_table = block_table
-        self.chunk_size = get_mamba2_chunk_size(runner.vllm_config)
+        self.chunk_size = vllm_config.model_config.get_mamba_chunk_size()
+        self.vllm_config = vllm_config
+        self.compilation_config = vllm_config.compilation_config
+        assert self.chunk_size is not None, (
+            "chunk_size needs to be set in the model config for Mamba2 models")
+        self.decode_cudagraph_max_bs = min(
+            self.vllm_config.scheduler_config.max_num_seqs,
+            self.compilation_config.max_capture_size)
+        self.state_indices_tensor = torch.empty(
+            (self.decode_cudagraph_max_bs, ),
+            dtype=torch.int32,
+            device=device,
+        )
 
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        # NOTE (Chen): Copied from MLACommonMetadataBuilder and
-        # FlashInferMetadataBuilder. Should be refactored later to avoid code
-        # duplication of these 3 functions.
-        # We now want to reorder the batch so that the "decode" requests are and
-        # the front and the "prefill" requests are at the using the least amount
-        # swaps possible. (NOTE for now we loosely use "decode" to mean requests
-        # where attention is likely memory-bound and "prefill" to mean requests
-        # where attention is likely compute-bound, TODO(lucas): figure out a
-        # better naming here)
-        decodes = []
-        prefills = []
-        num_decode_tokens = 0
-        num_prefill_tokens = 0
-
-        for i, req_id in enumerate(input_batch.req_ids):
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            # for now treat 1 scheduled token as "decode" even if its not,
-            # we should update this to something like < 8 in the future but
-            # currently the decode run only supports num_tokens = 1
-            if num_tokens == 1:
-                decodes.append(i)
-                num_decode_tokens += num_tokens
-            else:
-                prefills.append(i)
-                num_prefill_tokens += num_tokens
-
-        # We hope that this is fairly minimal since decodes
-        # should be around for a number of iterations so hopefully they are
-        # relatively stationary (and new request are generally appended to the
-        # persistent batch so already should be at the back)
-        # To achieve this we loop over the decodes in descending order and
-        # the prefills in ascending order. We swap decodes from the  "back"
-        # i.e. past where the last decode should be in the reodorered with
-        # prefills from the front of the batch.
-        # `decodes` and `prefills` are already in ascending order just based on
-        # the above loop
-        num_decodes = len(decodes)
-        num_prefills = len(prefills)
-        modified_batch = False
-
-        for i in range(1, min(num_decodes, num_prefills) + 1):
-            # If the decode is at the "back" of the batch, i, we can swap it
-            # with the prefill closest to the front of the batch
-            decode_idx = decodes[num_decodes - i]
-            if decode_idx < num_decodes:
-                break
-
-            input_batch.swap_states(prefills[i - 1], decode_idx)
-            modified_batch = True
-
-        # Save for next `build` call
-        # TODO(lucas): this is a bit of a hack, we should probably have a
-        # better way of doing this
-        self._num_decodes = num_decodes
-        self._num_prefills = num_prefills
-        self._num_decode_tokens = num_decode_tokens
-        self._num_prefill_tokens = num_prefill_tokens
-
-        return modified_batch
-
-    def build(self, common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata):
+    def build(self,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
+              fast_build: bool = False) -> Mamba2AttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
@@ -140,29 +122,31 @@ class Mamba2AttentionMetadataBuilder(
         has_initial_states = None
         prep_initial_states = False
 
-        state_indices_tensor = self.block_table.block_table[:num_reqs, 0]
+        state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
+
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+            split_decodes_and_prefills(common_attn_metadata,
+                                       decode_threshold=1))
 
         # Compute seq_idx, chunk_indices and chunk_offsets for prefill only
-        if self._num_prefills > 0:
+        if num_prefills > 0:
             #[batch,]
             has_initial_states_cpu = (
-                self.runner.input_batch.
-                num_computed_tokens_cpu_tensor[num_reqs -
-                                               self._num_prefills:num_reqs]
-                > 0)
+                common_attn_metadata.
+                num_computed_tokens_cpu[num_reqs - num_prefills:num_reqs] > 0)
             prep_initial_states = torch.any(has_initial_states_cpu).item()
             has_initial_states = has_initial_states_cpu.to(
                 query_start_loc.device)
 
             query_start_loc_p = common_attn_metadata.query_start_loc[
-                -self._num_prefills - 1:] - self._num_decode_tokens
+                -num_prefills - 1:] - num_decode_tokens
 
-            seq_idx = torch.repeat_interleave(
-                torch.arange(self._num_prefills,
-                             dtype=torch.int32,
-                             device=query_start_loc_p.device),
-                query_start_loc_p.diff(),
-                output_size=self._num_prefill_tokens)
+            seq_idx = torch.repeat_interleave(torch.arange(
+                num_prefills,
+                dtype=torch.int32,
+                device=query_start_loc_p.device),
+                                              query_start_loc_p.diff(),
+                                              output_size=num_prefill_tokens)
             seq_idx.unsqueeze_(0)
 
             # We compute metadata for chunked prefill once at the top level
@@ -172,13 +156,21 @@ class Mamba2AttentionMetadataBuilder(
                 chunk_indices, chunk_offsets = (
                     _query_start_loc_to_chunk_indices_offsets(
                         query_start_loc_p, self.chunk_size,
-                        self._num_prefill_tokens))
+                        num_prefill_tokens))
+
+        elif num_decodes <= self.decode_cudagraph_max_bs:
+            # Pad state tensor for CUDA graph
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decodes)
+            self.state_indices_tensor[:num_decodes].copy_(state_indices_tensor,
+                                                          non_blocking=True)
+            state_indices_tensor = self.state_indices_tensor[:num_input_tokens]
+            state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
         attn_metadata = Mamba2AttentionMetadata(
-            num_prefills=self._num_prefills,
-            num_prefill_tokens=self._num_prefill_tokens,
-            num_decodes=self._num_decodes,
-            num_decode_tokens=self._num_decode_tokens,
+            num_prefills=num_prefills,
+            num_prefill_tokens=num_prefill_tokens,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
             has_initial_states=has_initial_states,
@@ -190,3 +182,23 @@ class Mamba2AttentionMetadataBuilder(
             state_indices_tensor=state_indices_tensor,
         )
         return attn_metadata
+
+    def build_for_cudagraph_capture(
+            self, common_attn_metadata: CommonAttentionMetadata):
+        """
+        This method builds the metadata for full cudagraph capture.
+        Currently, only decode is supported for full cudagraphs with Mamba.
+        """
+        m = common_attn_metadata
+
+        assert m.num_reqs == m.num_actual_tokens, \
+            "Mamba only supports decode-only full CUDAGraph capture. " \
+            "Make sure all cudagraph capture sizes <= max_num_seq."
+
+        m.max_query_len = 1  # decode-only
+
+        return self.build(0, m)
+
+    def can_run_in_cudagraph(
+            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
+        return common_attn_metadata.max_query_len == 1

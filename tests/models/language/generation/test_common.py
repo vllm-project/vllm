@@ -53,7 +53,7 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
-            "THUDM/chatglm3-6b",  # chatglm (text-only)
+            "zai-org/chatglm3-6b",  # chatglm (text-only)
         ),
         pytest.param(
             "meta-llama/Llama-3.2-1B-Instruct",  # llama
@@ -90,7 +90,7 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model],
         ),
         pytest.param(
-            "Qwen/Qwen1.5-MoE-A2.7B-Chat",
+            "allenai/OLMoE-1B-7B-0924-Instruct",
             marks=[pytest.mark.cpu_model],
         )
     ])

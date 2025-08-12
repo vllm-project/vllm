@@ -5,22 +5,27 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import torch
-from packaging.version import Version
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
-from transformers import __version__ as TRANSFORMERS_VERSION
 from typing_extensions import TypeVar
 
-from vllm.jsontree import JSONTree, json_map_leaves
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import resolve_mm_processor_kwargs
+from vllm.utils import get_allowed_kwarg_only_overrides
+from vllm.utils.jsontree import JSONTree, json_map_leaves
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.multimodal import (MultiModalDataDict, MultiModalPlaceholderDict,
                                  MultiModalRegistry)
     from vllm.sequence import SequenceData
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
+else:
+    ModelConfig = Any
+    MultiModalDataDict = Any
+    MultiModalPlaceholderDict = Any
+    MultiModalRegistry = Any
+    SequenceData = Any
+    AnyTokenizer = Any
 
 _T = TypeVar("_T")
 _C = TypeVar("_C", bound=PretrainedConfig, default=PretrainedConfig)
@@ -36,7 +41,7 @@ class InputContext:
     modify the inputs.
     """
 
-    model_config: "ModelConfig"
+    model_config: ModelConfig
     """The configuration of the model."""
 
     def get_hf_config(
@@ -130,13 +135,9 @@ class InputProcessingContext(InputContext):
         /,
         **kwargs: object,
     ) -> _P:
-        # Transformers 4.53.0 has issue with passing tokenizer to
-        # initialize processor. We disable it for this version.
-        # See: https://github.com/vllm-project/vllm/issues/20224
-        if Version(TRANSFORMERS_VERSION) != Version("4.53.0"):
-            kwargs["tokenizer"] = self.tokenizer
         return super().get_hf_processor(
             typ,
+            tokenizer=self.tokenizer,
             **kwargs,
         )
 
@@ -153,14 +154,11 @@ class InputProcessingContext(InputContext):
         assert callable(hf_processor)
 
         mm_config = self.model_config.get_multimodal_config()
-        base_kwargs = mm_config.mm_processor_kwargs
-        if base_kwargs is None:
-            base_kwargs = {}
+        merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
 
-        merged_kwargs = resolve_mm_processor_kwargs(
-            base_kwargs,
-            kwargs,
+        allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
+            merged_kwargs,
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
@@ -172,7 +170,9 @@ class InputProcessingContext(InputContext):
             return x
 
         try:
-            output = hf_processor(**data, **merged_kwargs, return_tensors="pt")
+            output = hf_processor(**data,
+                                  **allowed_kwargs,
+                                  return_tensors="pt")
             # this emulates output.to(dtype=self.model_config.dtype)
             if isinstance(output, BatchFeature):
                 cast_output = json_map_leaves(maybe_cast_dtype, output.data)
@@ -188,7 +188,7 @@ class InputProcessingContext(InputContext):
 
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "
-                   f"on data={data} with kwargs={merged_kwargs}")
+                   f"on data={data} with kwargs={allowed_kwargs}")
 
             raise ValueError(msg) from exc
 
@@ -200,9 +200,9 @@ class DummyData(NamedTuple):
     Note: This is only used in V0.
     """
 
-    seq_data: "SequenceData"
-    multi_modal_data: Optional["MultiModalDataDict"] = None
-    multi_modal_placeholders: Optional["MultiModalPlaceholderDict"] = None
+    seq_data: SequenceData
+    multi_modal_data: Optional[MultiModalDataDict] = None
+    multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
 
 
 class InputRegistry:
@@ -212,9 +212,9 @@ class InputRegistry:
 
     def dummy_data_for_profiling(
         self,
-        model_config: "ModelConfig",
+        model_config: ModelConfig,
         seq_len: int,
-        mm_registry: "MultiModalRegistry",
+        mm_registry: MultiModalRegistry,
         is_encoder_data: bool = False,
     ) -> DummyData:
         """

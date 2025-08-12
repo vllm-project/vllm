@@ -27,7 +27,7 @@ from typing import Optional, Union
 
 import torch
 from torch import nn
-from transformers import CohereConfig
+from transformers import Cohere2Config, CohereConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -89,7 +89,7 @@ class CohereMLP(nn.Module):
 
     def __init__(
         self,
-        config: CohereConfig,
+        config: Union[CohereConfig, Cohere2Config],
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
@@ -124,7 +124,7 @@ class CohereAttention(nn.Module):
 
     def __init__(
         self,
-        config: CohereConfig,
+        config: Union[CohereConfig, Cohere2Config],
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -182,18 +182,13 @@ class CohereAttention(nn.Module):
         )
 
         # Model v2 has interleaved sliding windows, v1 does not
-        interleaved_sliding_window = getattr(config,
-                                             "interleaved_sliding_window",
-                                             None)
-        self.v1 = interleaved_sliding_window is None
+        self.v1 = isinstance(config, CohereConfig)
 
-        layer_idx = extract_layer_index(prefix)
-        layer_has_sliding_window = (
-            getattr(config, "sliding_window_pattern", False)
-            and (layer_idx + 1) % self.config.sliding_window_pattern != 0)
-
-        self.sliding_window = (interleaved_sliding_window
-                               if layer_has_sliding_window else None)
+        self.sliding_window = None
+        if not self.v1:
+            layer_idx = extract_layer_index(prefix)
+            if config.layer_types[layer_idx] == "sliding_attention":
+                self.sliding_window = config.sliding_window
 
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -239,7 +234,7 @@ class CohereAttention(nn.Module):
 class CohereDecoderLayer(nn.Module):
 
     def __init__(self,
-                 config: CohereConfig,
+                 config: Union[CohereConfig, Cohere2Config],
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):

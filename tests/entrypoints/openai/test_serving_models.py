@@ -32,8 +32,7 @@ async def _async_serving_models_init() -> OpenAIServingModels:
     serving_models = OpenAIServingModels(engine_client=mock_engine_client,
                                          base_model_paths=BASE_MODEL_PATHS,
                                          model_config=mock_model_config,
-                                         lora_modules=None,
-                                         prompt_adapters=None)
+                                         lora_modules=None)
     await serving_models.init_static_loras()
 
     return serving_models
@@ -57,7 +56,8 @@ async def test_load_lora_adapter_success():
     response = await serving_models.load_lora_adapter(request)
     assert response == LORA_LOADING_SUCCESS_MESSAGE.format(lora_name='adapter')
     assert len(serving_models.lora_requests) == 1
-    assert serving_models.lora_requests[0].lora_name == "adapter"
+    assert "adapter" in serving_models.lora_requests
+    assert serving_models.lora_requests["adapter"].lora_name == "adapter"
 
 
 @pytest.mark.asyncio
@@ -66,8 +66,8 @@ async def test_load_lora_adapter_missing_fields():
     request = LoadLoRAAdapterRequest(lora_name="", lora_path="")
     response = await serving_models.load_lora_adapter(request)
     assert isinstance(response, ErrorResponse)
-    assert response.type == "InvalidUserInput"
-    assert response.code == HTTPStatus.BAD_REQUEST
+    assert response.error.type == "InvalidUserInput"
+    assert response.error.code == HTTPStatus.BAD_REQUEST
 
 
 @pytest.mark.asyncio
@@ -84,8 +84,8 @@ async def test_load_lora_adapter_duplicate():
                                      lora_path="/path/to/adapter1")
     response = await serving_models.load_lora_adapter(request)
     assert isinstance(response, ErrorResponse)
-    assert response.type == "InvalidUserInput"
-    assert response.code == HTTPStatus.BAD_REQUEST
+    assert response.error.type == "InvalidUserInput"
+    assert response.error.code == HTTPStatus.BAD_REQUEST
     assert len(serving_models.lora_requests) == 1
 
 
@@ -110,8 +110,8 @@ async def test_unload_lora_adapter_missing_fields():
     request = UnloadLoRAAdapterRequest(lora_name="", lora_int_id=None)
     response = await serving_models.unload_lora_adapter(request)
     assert isinstance(response, ErrorResponse)
-    assert response.type == "InvalidUserInput"
-    assert response.code == HTTPStatus.BAD_REQUEST
+    assert response.error.type == "InvalidUserInput"
+    assert response.error.code == HTTPStatus.BAD_REQUEST
 
 
 @pytest.mark.asyncio
@@ -120,5 +120,5 @@ async def test_unload_lora_adapter_not_found():
     request = UnloadLoRAAdapterRequest(lora_name="nonexistent_adapter")
     response = await serving_models.unload_lora_adapter(request)
     assert isinstance(response, ErrorResponse)
-    assert response.type == "NotFoundError"
-    assert response.code == HTTPStatus.NOT_FOUND
+    assert response.error.type == "NotFoundError"
+    assert response.error.code == HTTPStatus.NOT_FOUND

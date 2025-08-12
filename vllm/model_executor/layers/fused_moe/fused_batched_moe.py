@@ -1,21 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused batched MoE kernel."""
-from typing import Optional
+from typing import Any, Optional
 
 import torch
-import triton
-import triton.language as tl
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_dtype_str, try_get_optimal_moe_config)
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate, TopKWeightAndReduceNaiveBatched)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input, normalize_batched_scales_shape,
     normalize_scales_shape)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     group_broadcast)
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit
@@ -495,18 +496,15 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return self.num_dispatchers_
 
     def prepare(
-        self,
-        a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool,
+        self, a1: torch.Tensor, a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor], topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor, num_experts: int,
+        expert_map: Optional[torch.Tensor], apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+        extra_prepare_args: Optional[dict[str, Any]]
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
         assert a1.dim() == 2
         assert topk_ids.dim() == 2
         assert topk_ids.size(0) == a1.size(0)
@@ -587,34 +585,25 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         assert b_a1_scale is None or b_a1_scale.ndim == 3
 
-        return b_a1, b_a1_scale, tokens_per_expert, None, None
+        expert_tokens_meta = mk.ExpertTokensMetadata(
+            expert_num_tokens=tokens_per_expert, expert_num_tokens_cpu=None)
 
-    def finalize(
-        self,
-        output: torch.Tensor,
-        fused_expert_output: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
-    ) -> None:
-        num_tokens = topk_ids.size(0)
-        num_local_experts = fused_expert_output.size(0)
-        K = fused_expert_output.size(-1)
-        assert output.size(0) == num_tokens and output.size(1) == K
+        return b_a1, b_a1_scale, expert_tokens_meta, None, None
 
-        output.fill_(0)
-
-        first_expert = num_local_experts * self.rank
-        last_expert = first_expert + num_local_experts
-
-        for expert_id in range(first_expert, last_expert):
-            matching_tokens = topk_ids == expert_id
-            topks = torch.any(matching_tokens, dim=1).flatten()
-            rows = torch.count_nonzero(topks)
-            rhs = fused_expert_output[expert_id - first_expert, :rows, :]
-            if not apply_router_weight_on_input:
-                rhs.mul_(topk_weights[matching_tokens].view(rhs.size(0), 1))
-            output[topks] = output[topks] + rhs
+    def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
+                 topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+                 apply_router_weight_on_input: bool,
+                 weight_and_reduce_impl: mk.TopKWeightAndReduce,
+                 extra_finalize_args: Optional[dict[str, Any]]) -> None:
+        if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
+            weight_and_reduce_impl = TopKWeightAndReduceNaiveBatched(self.rank)
+        weight_and_reduce_impl.apply(
+            output=output,
+            fused_expert_output=fused_expert_output,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )
 
 
 class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -632,6 +621,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
+        use_mxfp4_w4a4: bool = False,
         block_shape: Optional[list[int]] = None,
         per_act_token_quant: bool = False,
     ):
@@ -641,12 +631,14 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 use_int8_w8a8=use_int8_w8a8,
                 use_int8_w8a16=use_int8_w8a16,
                 use_int4_w4a16=use_int4_w4a16,
+                use_mxfp4_w4a4=use_mxfp4_w4a4,
                 per_act_token_quant=per_act_token_quant,
                 block_shape=block_shape,
             ))
         assert not use_int8_w8a8, "NYI"
         assert not use_int8_w8a16, "NYI"
         assert not use_int4_w4a16, "NYI"
+        assert not use_mxfp4_w4a4, "NYI"
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -663,6 +655,10 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return False
 
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        # Let PrepareAndFinalize::finalize() decide the impl.
+        return TopKWeightAndReduceDelegate()
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -673,6 +669,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
         num_dp = self.num_dispatchers
@@ -691,28 +688,21 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         else:
             return t.to(f32) * group_broadcast(scale, t.shape)
 
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str,
-        global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
-    ):
+    def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
+              w1: torch.Tensor, w2: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor, activation: str, global_num_experts: int,
+              expert_map: Optional[torch.Tensor],
+              w1_scale: Optional[torch.Tensor],
+              w2_scale: Optional[torch.Tensor], w1_zp: Optional[torch.Tensor],
+              w2_zp: Optional[torch.Tensor], a1q_scale: Optional[torch.Tensor],
+              a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
+              workspace2: torch.Tensor,
+              expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+              apply_router_weight_on_input: bool,
+              extra_expert_args: Optional[dict[str, Any]]):
         assert hidden_states.dim() == 3
-        assert expert_num_tokens is not None
+        assert expert_tokens_meta is not None
+        expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
         num_local_experts = w1.size(0)
         assert num_local_experts == w1.size(0), (
@@ -838,6 +828,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
+        use_mxfp4_w4a4: bool = False,
         per_act_token_quant: bool = False,
         block_shape: Optional[list[int]] = None,
     ):
@@ -847,18 +838,21 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 use_int8_w8a8=use_int8_w8a8,
                 use_int8_w8a16=use_int8_w8a16,
                 use_int4_w4a16=use_int4_w4a16,
+                use_mxfp4_w4a4=use_mxfp4_w4a4,
                 per_act_token_quant=per_act_token_quant,
                 block_shape=block_shape,
             ))
         assert not use_int8_w8a8, "NYI"
         assert not use_int8_w8a16, "NYI"
         assert not use_int4_w4a16, "NYI"
+        assert not use_mxfp4_w4a4, "NYI"
         assert max_num_tokens > 0
         assert num_dispatchers > 0
         self.use_fp8_w8a8 = use_fp8_w8a8
         self.use_int8_w8a8 = use_int8_w8a8
         self.use_int4_w4a16 = use_int4_w4a16
         self.use_int8_w8a16 = use_int8_w8a16
+        self.use_mxfp4_w4a4 = use_mxfp4_w4a4
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -875,6 +869,10 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return False
 
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        # Let PrepareAndFinalize::finalize() decide the impl.
+        return TopKWeightAndReduceDelegate()
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -885,6 +883,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
         num_dp = self.num_dispatchers
@@ -895,26 +894,18 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         output = (num_experts, max_num_tokens * num_dp, K)
         return (workspace13, workspace2, output, a.dtype)
 
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str,
-        global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
-    ):
+    def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
+              w1: torch.Tensor, w2: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor, activation: str, global_num_experts: int,
+              expert_map: Optional[torch.Tensor],
+              w1_scale: Optional[torch.Tensor],
+              w2_scale: Optional[torch.Tensor], w1_zp: Optional[torch.Tensor],
+              w2_zp: Optional[torch.Tensor], a1q_scale: Optional[torch.Tensor],
+              a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
+              workspace2: torch.Tensor,
+              expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+              apply_router_weight_on_input: bool,
+              extra_expert_args: Optional[dict[str, Any]]):
         # Check constraints.
         if self.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), (
@@ -931,6 +922,9 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert hidden_states.dtype in [
             torch.float32, torch.float16, torch.bfloat16, torch.float8_e4m3fn
         ]
+        assert expert_tokens_meta is not None
+
+        expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
         E, max_num_tokens, N, K, top_k_num = mk._moe_problem_size(
             hidden_states, w1, w2, topk_ids)
@@ -941,6 +935,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         config_dtype = get_config_dtype_str(use_fp8_w8a8=self.use_fp8_w8a8,
                                             use_int8_w8a16=self.use_int8_w8a16,
                                             use_int4_w4a16=self.use_int4_w4a16,
+                                            use_mxfp4_w4a4=self.use_mxfp4_w4a4,
                                             dtype=hidden_states.dtype)
 
         config = try_get_optimal_moe_config(

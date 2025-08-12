@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
-from typing import Optional
+from typing import Optional, Union
 from weakref import WeakValueDictionary
 
 import torch
@@ -138,6 +138,14 @@ class DeviceCommunicatorBase:
                                               input_size[dim + 1:])
         return output_tensor
 
+    def all_gatherv(
+        self,
+        input_: Union[torch.Tensor, list[torch.Tensor]],
+        dim: int = 0,
+        sizes: Optional[list[int]] = None
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+        raise NotImplementedError
+
     def reduce_scatter(self,
                        input_: torch.Tensor,
                        dim: int = -1) -> torch.Tensor:
@@ -172,6 +180,12 @@ class DeviceCommunicatorBase:
         # Reshape before returning
         return output_tensor.movedim(0, dim).contiguous()
 
+    def reduce_scatterv(self,
+                        input_: torch.Tensor,
+                        dim: int = -1,
+                        sizes: Optional[list[int]] = None) -> torch.Tensor:
+        raise NotImplementedError
+
     def gather(self,
                input_: torch.Tensor,
                dst: int = 0,
@@ -205,7 +219,7 @@ class DeviceCommunicatorBase:
         return output_tensor
 
     def send(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
-        """Sends a tensor to the destination rank in a non-blocking way"""
+        """Sends a tensor to the destination rank in a blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
@@ -240,8 +254,7 @@ class DeviceCommunicatorBase:
             if module.__class__.__name__ == "FusedMoE"
         ]
         for module in moe_modules:
-            module.quant_method.init_prepare_finalize(module.moe_config,
-                                                      module.quant_config)
+            module.quant_method.init_prepare_finalize(module.moe_config)
 
     def dispatch(
             self, hidden_states: torch.Tensor,
