@@ -309,7 +309,8 @@ def report_usage_stats(
             vllm_config.cache_config.block_size,
             "gpu_memory_utilization":
             vllm_config.cache_config.gpu_memory_utilization,
-
+            "kv_cache_memory":
+            vllm_config.cache_config.kv_cache_memory,
             # Quantization
             "quantization":
             vllm_config.model_config.quantization,
