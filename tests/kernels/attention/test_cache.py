@@ -745,7 +745,6 @@ def test_gather_and_maybe_dequant_cache_mla(kv_lora_rank, qk_rope_head_dim,
 
     dst = torch.zeros((total_tokens, entry_size), dtype=dtype, device=device)
 
-    # TODO - do dequant here
     expected_batches = []
     for b in range(batch_size):
         s = seq_len_tensor[b]
@@ -756,9 +755,23 @@ def test_gather_and_maybe_dequant_cache_mla(kv_lora_rank, qk_rope_head_dim,
 
         gathered_rows = []
         for i in range(tot - 1):
-            gathered_rows.append(src_cache[blocks[i]])
+            block_data = src_cache[blocks[i]]
+            if kv_cache_dtype == "fp8":
+                dequantized_block = torch.empty_like(block_data, dtype=dtype)
+                ops.convert_fp8(dequantized_block, block_data, scale.item())
+                gathered_rows.append(dequantized_block)
+            else:
+                gathered_rows.append(block_data)
         remaining = s - (tot - 1) * block_size
-        gathered_rows.append(src_cache[blocks[-1], :remaining, :])
+        last_block_data = src_cache[blocks[-1], :remaining, :]
+        if kv_cache_dtype == "fp8":
+            dequantized_last_block = torch.empty_like(last_block_data,
+                                                      dtype=dtype)
+            ops.convert_fp8(dequantized_last_block, last_block_data,
+                            scale.item())
+            gathered_rows.append(dequantized_last_block)
+        else:
+            gathered_rows.append(last_block_data)
 
         batch_expected = torch.cat(gathered_rows, dim=0)
         expected_batches.append(batch_expected)
