@@ -781,23 +781,11 @@ class NixlConnectorWorker:
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
             num_blocks=self.num_blocks,
             block_len=self.block_len,
-<<<<<<< HEAD
             attn_backend_name=self.backend_name,
             kv_cache_layout=self.kv_cache_layout)
-        ready_event = threading.Event()
-        self._nixl_handshake_listener_t = threading.Thread(
-            target=self._nixl_handshake_listener,
-            args=(metadata, ready_event, self.side_channel_port, self.tp_rank),
-            daemon=True,
-            name="nixl_handshake_listener")
-        self._nixl_handshake_listener_t.start()
-        ready_event.wait()  # Wait for listener ZMQ socket to be ready.
-=======
-            attn_backend_name=self.backend_name)
 
         # Setup handshake strategy listener
         self._handshake_strategy.setup_listener(self.xfer_metadata)
->>>>>>> 04ce2070c (initial manual rebase)
 
     def add_remote_agent(self,
                          nixl_agent_meta: NixlAgentMetadata,
