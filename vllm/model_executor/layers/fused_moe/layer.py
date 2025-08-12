@@ -682,14 +682,14 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
                 assigned to the current rank.
 
         Returns:
-            str: A string mapping from global to local index.
+            str: A string mapping from local to global index.
                 Using str to support hashing for logging once only.
         """
     global_indices = torch.where(expert_map != -1)[0]
     local_indices = expert_map[global_indices]
     return ", ".join(
-        f"{global_index.item()}->{local_index.item()}"
-        for global_index, local_index in zip(global_indices, local_indices))
+        f"{local_index.item()}->{global_index.item()}"
+        for local_index, global_index in zip(local_indices, global_indices))
 
 
 class FusedMoE(torch.nn.Module):
