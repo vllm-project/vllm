@@ -402,8 +402,8 @@ class Worker(WorkerBase):
             next_comp_set = warmup_sizes_set.difference(self._token_compiled_cudagraphs)
             if len(next_comp_set) != 0:
                 next_comp = list(next_comp_set)
-            self._token_compiled_cudagraphs.add(next_comp[0])
-            compile_cuda_graph(next_comp[0])
+                self._token_compiled_cudagraphs.add(next_comp[0])
+                compile_cuda_graph(next_comp[0])
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
