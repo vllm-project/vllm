@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 # yapf: enable
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import KVTransferConfig, VllmConfig
 
 logger = init_logger(__name__)
 
