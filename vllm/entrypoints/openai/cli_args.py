@@ -265,6 +265,15 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     )
 
     parser.add_argument(
+        "--use-harmony",
+        action="store_true",
+        default=False,
+        help="Enable Harmony message format integration for GPT-OSS models. "
+        "This enables reasoning token parsing and message format compatibility. "
+        "Requires openai-harmony package to be installed.",
+    )
+
+    parser.add_argument(
         "--log-config-file",
         type=str,
         default=envs.VLLM_LOGGING_CONFIG_PATH,

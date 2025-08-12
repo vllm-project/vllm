@@ -41,14 +41,19 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (load_chat_template,
-                                         resolve_hf_chat_template,
-                                         resolve_mistral_chat_template)
+from vllm.entrypoints.chat_utils import (
+    load_chat_template,
+    resolve_hf_chat_template,
+    resolve_mistral_chat_template,
+)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.cli_args import (log_non_default_args,
-                                              make_arg_parser,
-                                              validate_parsed_serve_args)
+from vllm.entrypoints.openai.cli_args import (
+    log_non_default_args,
+    make_arg_parser,
+    validate_parsed_serve_args,
+)
+
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -62,6 +67,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingChatRequest,
                                               EmbeddingCompletionRequest,
                                               EmbeddingRequest,
+                                              ResponsesRequest,
+                                              ResponsesResponse,
                                               EmbeddingResponse, ErrorResponse,
                                               LoadLoRAAdapterRequest,
                                               PoolingChatRequest,
@@ -76,30 +83,30 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               UnloadLoRAAdapterRequest)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_classification import (
-    ServingClassification)
+from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
+from vllm.entrypoints.openai.serving_classification import ServingClassification
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
-from vllm.entrypoints.openai.serving_models import (BaseModelPath,
-                                                    OpenAIServingModels)
+from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
 from vllm.entrypoints.openai.serving_score import ServingScores
-from vllm.entrypoints.openai.serving_tokenization import (
-    OpenAIServingTokenization)
-from vllm.entrypoints.openai.serving_transcription import (
-    OpenAIServingTranscription)
+from vllm.entrypoints.openai.serving_tokenization import OpenAIServingTokenization
+from vllm.entrypoints.openai.serving_transcription import OpenAIServingTranscription
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
-                                    with_cancellation)
+from vllm.entrypoints.utils import cli_env_setup, load_aware_call, with_cancellation
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.transformers_utils.config import (
-    maybe_register_config_serialize_by_value)
+from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
-                        is_valid_ipv6_address, set_ulimit)
+from vllm.utils import (
+    Device,
+    FlexibleArgumentParser,
+    get_open_zmq_ipc_path,
+    is_valid_ipv6_address,
+    set_ulimit,
+)
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -108,7 +115,7 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
-logger = init_logger('vllm.entrypoints.openai.api_server')
+logger = init_logger("vllm.entrypoints.openai.api_server")
 
 _running_tasks: set[asyncio.Task] = set()
 
@@ -121,7 +128,7 @@ async def lifespan(app: FastAPI):
 
             async def _force_log():
                 while True:
-                    await asyncio.sleep(10.)
+                    await asyncio.sleep(10.0)
                     await engine_client.do_log_stats()
 
             task = asyncio.create_task(_force_log())
@@ -155,8 +162,8 @@ async def build_async_engine_client(
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
     async with build_async_engine_client_from_engine_args(
-            engine_args, args.disable_frontend_multiprocessing,
-            client_config) as engine:
+        engine_args, args.disable_frontend_multiprocessing, client_config
+    ) as engine:
         yield engine
 
 
@@ -183,12 +190,13 @@ async def build_async_engine_client_from_engine_args(
         if disable_frontend_multiprocessing:
             logger.warning(
                 "V1 is enabled, but got --disable-frontend-multiprocessing. "
-                "To disable frontend multiprocessing, set VLLM_USE_V1=0.")
+                "To disable frontend multiprocessing, set VLLM_USE_V1=0."
+            )
 
         from vllm.v1.engine.async_llm import AsyncLLM
+
         async_llm: Optional[AsyncLLM] = None
-        client_index = client_config.pop(
-            "client_index") if client_config else 0
+        client_index = client_config.pop("client_index") if client_config else 0
         try:
             async_llm = AsyncLLM.from_vllm_config(
                 vllm_config=vllm_config,
@@ -196,7 +204,8 @@ async def build_async_engine_client_from_engine_args(
                 disable_log_requests=engine_args.disable_log_requests,
                 disable_log_stats=engine_args.disable_log_stats,
                 client_addresses=client_config,
-                client_index=client_index)
+                client_index=client_index,
+            )
 
             # Don't keep the dummy data in memory
             await async_llm.reset_mm_cache()
@@ -207,8 +216,10 @@ async def build_async_engine_client_from_engine_args(
                 async_llm.shutdown()
 
     # V0 AsyncLLM.
-    elif (MQLLMEngineClient.is_unsupported_config(vllm_config)
-          or disable_frontend_multiprocessing):
+    elif (
+        MQLLMEngineClient.is_unsupported_config(vllm_config)
+        or disable_frontend_multiprocessing
+    ):
 
         engine_client: Optional[EngineClient] = None
         try:
@@ -216,7 +227,8 @@ async def build_async_engine_client_from_engine_args(
                 vllm_config=vllm_config,
                 usage_context=usage_context,
                 disable_log_requests=engine_args.disable_log_requests,
-                disable_log_stats=engine_args.disable_log_stats)
+                disable_log_stats=engine_args.disable_log_stats,
+            )
             yield engine_client
         finally:
             if engine_client and hasattr(engine_client, "shutdown"):
@@ -230,19 +242,18 @@ async def build_async_engine_client_from_engine_args(
             #   cleaned up upon exit.
             global prometheus_multiproc_dir
             prometheus_multiproc_dir = tempfile.TemporaryDirectory()
-            os.environ[
-                "PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
+            os.environ["PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
         else:
             logger.warning(
                 "Found PROMETHEUS_MULTIPROC_DIR was set by user. "
                 "This directory must be wiped between vLLM runs or "
                 "you will find inaccurate metrics. Unset the variable "
-                "and vLLM will properly handle cleanup.")
+                "and vLLM will properly handle cleanup."
+            )
 
         # Select random path for IPC.
         ipc_path = get_open_zmq_ipc_path()
-        logger.debug("Multiprocessing frontend to use %s for IPC Path.",
-                     ipc_path)
+        logger.debug("Multiprocessing frontend to use %s for IPC Path.", ipc_path)
 
         # Start RPCServer in separate process (holds the LLMEngine).
         # the current process might have CUDA context,
@@ -255,12 +266,18 @@ async def build_async_engine_client_from_engine_args(
         # The Process can raise an exception during startup, which may
         # not actually result in an exitcode being reported. As a result
         # we use a shared variable to communicate the information.
-        engine_alive = multiprocessing.Value('b', True, lock=False)
+        engine_alive = multiprocessing.Value("b", True, lock=False)
         engine_process = context.Process(
             target=run_mp_engine,
-            args=(vllm_config, UsageContext.OPENAI_API_SERVER, ipc_path,
-                  engine_args.disable_log_stats,
-                  engine_args.disable_log_requests, engine_alive))
+            args=(
+                vllm_config,
+                UsageContext.OPENAI_API_SERVER,
+                ipc_path,
+                engine_args.disable_log_stats,
+                engine_args.disable_log_requests,
+                engine_alive,
+            ),
+        )
         engine_process.start()
         engine_pid = engine_process.pid
         assert engine_pid is not None, "Engine process failed to start."
@@ -275,21 +292,21 @@ async def build_async_engine_client_from_engine_args(
         atexit.register(_cleanup_ipc_path)
 
         # Build RPCClient, which conforms to EngineClient Protocol.
-        build_client = partial(MQLLMEngineClient, ipc_path, vllm_config,
-                               engine_pid)
+        build_client = partial(MQLLMEngineClient, ipc_path, vllm_config, engine_pid)
         mq_engine_client = await asyncio.get_running_loop().run_in_executor(
-            None, build_client)
+            None, build_client
+        )
         try:
             while True:
                 try:
                     await mq_engine_client.setup()
                     break
                 except TimeoutError:
-                    if (not engine_process.is_alive()
-                            or not engine_alive.value):
+                    if not engine_process.is_alive() or not engine_alive.value:
                         raise RuntimeError(
                             "Engine process failed to start. See stack "
-                            "trace for the root cause.") from None
+                            "trace for the root cause."
+                        ) from None
 
             yield mq_engine_client  # type: ignore[misc]
         finally:
@@ -310,6 +327,7 @@ async def build_async_engine_client_from_engine_args(
             # before prometheus_client is imported.
             # See https://prometheus.github.io/client_python/multiprocess/
             from prometheus_client import multiprocess
+
             multiprocess.mark_process_dead(engine_process.pid)
 
 
@@ -317,9 +335,9 @@ async def validate_json_request(raw_request: Request):
     content_type = raw_request.headers.get("content-type", "").lower()
     media_type = content_type.split(";", maxsplit=1)[0]
     if media_type != "application/json":
-        raise RequestValidationError(errors=[
-            "Unsupported Media Type: Only 'application/json' is allowed"
-        ])
+        raise RequestValidationError(
+            errors=["Unsupported Media Type: Only 'application/json' is allowed"]
+        )
 
 
 router = APIRouter()
@@ -369,6 +387,10 @@ def models(request: Request) -> OpenAIServingModels:
 
 def chat(request: Request) -> Optional[OpenAIServingChat]:
     return request.app.state.openai_serving_chat
+
+
+def responses(request: Request) -> Optional[OpenAIServingResponses]:
+    return request.app.state.openai_serving_responses
 
 
 def completion(request: Request) -> Optional[OpenAIServingCompletion]:
@@ -429,8 +451,7 @@ async def get_server_load_metrics(request: Request):
     # - /rerank
     # - /v1/rerank
     # - /v2/rerank
-    return JSONResponse(
-        content={'server_load': request.app.state.server_load_metrics})
+    return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
 
 
 @router.get("/ping", response_class=Response)
@@ -440,22 +461,16 @@ async def ping(raw_request: Request) -> Response:
     return await health(raw_request)
 
 
-@router.post("/tokenize",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.NOT_FOUND.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.NOT_IMPLEMENTED.value: {
-                     "model": ErrorResponse
-                 },
-             })
+@router.post(
+    "/tokenize",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
+    },
+)
 @with_cancellation
 async def tokenize(request: TokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
@@ -463,34 +478,31 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
     try:
         generator = await handler.create_tokenize(request, raw_request)
     except NotImplementedError as e:
-        raise HTTPException(status_code=HTTPStatus.NOT_IMPLEMENTED.value,
-                            detail=str(e)) from e
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_IMPLEMENTED.value, detail=str(e)
+        ) from e
     except Exception as e:
-        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-                            detail=str(e)) from e
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
 
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+        return JSONResponse(content=generator.model_dump(), status_code=generator.code)
     elif isinstance(generator, TokenizeResponse):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
 
 
-@router.post("/detokenize",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.NOT_FOUND.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 },
-             })
+@router.post(
+    "/detokenize",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
 @with_cancellation
 async def detokenize(request: DetokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
@@ -500,12 +512,12 @@ async def detokenize(request: DetokenizeRequest, raw_request: Request):
     except OverflowError as e:
         raise RequestValidationError(errors=[str(e)]) from e
     except Exception as e:
-        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-                            detail=str(e)) from e
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
 
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+        return JSONResponse(content=generator.model_dump(), status_code=generator.code)
     elif isinstance(generator, DetokenizeResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -526,38 +538,29 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
-@router.post("/v1/chat/completions",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.OK.value: {
-                     "content": {
-                         "text/event-stream": {}
-                     }
-                 },
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.NOT_FOUND.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 }
-             })
+@router.post(
+    "/v1/chat/completions",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
 @with_cancellation
 @load_aware_call
-async def create_chat_completion(request: ChatCompletionRequest,
-                                 raw_request: Request):
+async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
     handler = chat(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Chat Completions API")
+            message="The model does not support Chat Completions API"
+        )
 
     generator = await handler.create_chat_completion(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+        return JSONResponse(content=generator.model_dump(), status_code=generator.code)
 
     elif isinstance(generator, ChatCompletionResponse):
         return JSONResponse(content=generator.model_dump())
@@ -565,101 +568,116 @@ async def create_chat_completion(request: ChatCompletionRequest,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post("/v1/completions",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.OK.value: {
-                     "content": {
-                         "text/event-stream": {}
-                     }
-                 },
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.NOT_FOUND.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 },
-             })
+@router.post(
+    "/v1/responses",
+    dependencies=[Depends(validate_json_request)],
+    response_model=ResponsesResponse,
+)
+async def create_response(
+    request: ResponsesRequest,
+    raw_request: Request,
+    handler: OpenAIServingResponses = Depends(responses),
+):
+    if handler is None:
+        raise HTTPException(
+            status_code=503, detail="The model does not support Responses API"
+        )
+
+    generator = await handler.create_response(request, None, raw_request)
+
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(), status_code=generator.code)
+    elif isinstance(generator, ResponsesResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+@router.post(
+    "/v1/completions",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
 @with_cancellation
 @load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
     handler = completion(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Completions API")
+            message="The model does not support Completions API"
+        )
 
     try:
         generator = await handler.create_completion(request, raw_request)
     except OverflowError as e:
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
-                            detail=str(e)) from e
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value, detail=str(e)
+        ) from e
     except Exception as e:
-        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-                            detail=str(e)) from e
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
 
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+        return JSONResponse(content=generator.model_dump(), status_code=generator.code)
     elif isinstance(generator, CompletionResponse):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post("/v1/embeddings",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 },
-             })
+@router.post(
+    "/v1/embeddings",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
 @with_cancellation
 @load_aware_call
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     handler = embedding(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Embeddings API")
+            message="The model does not support Embeddings API"
+        )
 
     generator = await handler.create_embedding(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+        return JSONResponse(content=generator.model_dump(), status_code=generator.code)
     elif isinstance(generator, EmbeddingResponse):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
 
 
-@router.post("/pooling",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 },
-             })
+@router.post(
+    "/pooling",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
 @with_cancellation
 @load_aware_call
 async def create_pooling(request: PoolingRequest, raw_request: Request):
     handler = pooling(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Pooling API")
+            message="The model does not support Pooling API"
+        )
 
     generator = await handler.create_pooling(request, raw_request)
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+        return JSONResponse(content=generator.model_dump(), status_code=generator.code)
     elif isinstance(generator, PoolingResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -669,17 +687,16 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
 @router.post("/classify", dependencies=[Depends(validate_json_request)])
 @with_cancellation
 @load_aware_call
-async def create_classify(request: ClassificationRequest,
-                          raw_request: Request):
+async def create_classify(request: ClassificationRequest, raw_request: Request):
     handler = classify(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Classification API")
+            message="The model does not support Classification API"
+        )
 
     generator = await handler.create_classify(request, raw_request)
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+        return JSONResponse(content=generator.model_dump(), status_code=generator.code)
 
     elif isinstance(generator, ClassificationResponse):
         return JSONResponse(content=generator.model_dump())
@@ -687,88 +704,76 @@ async def create_classify(request: ClassificationRequest,
     assert_never(generator)
 
 
-@router.post("/score",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 },
-             })
+@router.post(
+    "/score",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
 @with_cancellation
 @load_aware_call
 async def create_score(request: ScoreRequest, raw_request: Request):
     handler = score(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Score API")
+            message="The model does not support Score API"
+        )
 
     generator = await handler.create_score(request, raw_request)
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+        return JSONResponse(content=generator.model_dump(), status_code=generator.code)
     elif isinstance(generator, ScoreResponse):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
 
 
-@router.post("/v1/score",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 },
-             })
+@router.post(
+    "/v1/score",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
 @with_cancellation
 @load_aware_call
 async def create_score_v1(request: ScoreRequest, raw_request: Request):
     logger.warning(
         "To indicate that Score API is not part of standard OpenAI API, we "
-        "have moved it to `/score`. Please update your client accordingly.")
+        "have moved it to `/score`. Please update your client accordingly."
+    )
 
     return await create_score(request, raw_request)
 
 
-@router.post("/v1/audio/transcriptions",
-             responses={
-                 HTTPStatus.OK.value: {
-                     "content": {
-                         "text/event-stream": {}
-                     }
-                 },
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.UNPROCESSABLE_ENTITY.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 },
-             })
+@router.post(
+    "/v1/audio/transcriptions",
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.UNPROCESSABLE_ENTITY.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
 @with_cancellation
 @load_aware_call
-async def create_transcriptions(raw_request: Request,
-                                request: Annotated[TranscriptionRequest,
-                                                   Form()]):
+async def create_transcriptions(
+    raw_request: Request, request: Annotated[TranscriptionRequest, Form()]
+):
     handler = transcription(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Transcriptions API")
+            message="The model does not support Transcriptions API"
+        )
 
     audio_data = await request.file.read()
-    generator = await handler.create_transcription(audio_data, request,
-                                                   raw_request)
+    generator = await handler.create_transcription(audio_data, request, raw_request)
 
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+        return JSONResponse(content=generator.model_dump(), status_code=generator.code)
 
     elif isinstance(generator, TranscriptionResponse):
         return JSONResponse(content=generator.model_dump())
@@ -776,63 +781,58 @@ async def create_transcriptions(raw_request: Request,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post("/rerank",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 },
-             })
+@router.post(
+    "/rerank",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
 @with_cancellation
 @load_aware_call
 async def do_rerank(request: RerankRequest, raw_request: Request):
     handler = rerank(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Rerank (Score) API")
+            message="The model does not support Rerank (Score) API"
+        )
     generator = await handler.do_rerank(request, raw_request)
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+        return JSONResponse(content=generator.model_dump(), status_code=generator.code)
     elif isinstance(generator, RerankResponse):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
 
 
-@router.post("/v1/rerank",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 },
-             })
+@router.post(
+    "/v1/rerank",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
 @with_cancellation
 async def do_rerank_v1(request: RerankRequest, raw_request: Request):
     logger.warning_once(
         "To indicate that the rerank API is not part of the standard OpenAI"
         " API, we have located it at `/rerank`. Please update your client "
-        "accordingly. (Note: Conforms to JinaAI rerank API)")
+        "accordingly. (Note: Conforms to JinaAI rerank API)"
+    )
 
     return await do_rerank(request, raw_request)
 
 
-@router.post("/v2/rerank",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 },
-             })
+@router.post(
+    "/v2/rerank",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
 @with_cancellation
 async def do_rerank_v2(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
@@ -847,12 +847,8 @@ TASK_HANDLERS: dict[str, dict[str, tuple]] = {
         "messages": (EmbeddingChatRequest, create_embedding),
         "default": (EmbeddingCompletionRequest, create_embedding),
     },
-    "score": {
-        "default": (RerankRequest, do_rerank)
-    },
-    "rerank": {
-        "default": (RerankRequest, do_rerank)
-    },
+    "score": {"default": (RerankRequest, do_rerank)},
+    "rerank": {"default": (RerankRequest, do_rerank)},
     "reward": {
         "messages": (PoolingChatRequest, create_pooling),
         "default": (PoolingCompletionRequest, create_pooling),
@@ -912,19 +908,15 @@ if envs.VLLM_SERVER_DEV_MODE:
         return JSONResponse(content={"is_sleeping": is_sleeping})
 
 
-@router.post("/invocations",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.UNSUPPORTED_MEDIA_TYPE.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 },
-             })
+@router.post(
+    "/invocations",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.UNSUPPORTED_MEDIA_TYPE.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
 async def invocations(raw_request: Request):
     """
     For SageMaker, routes requests to other handlers based on model `task`.
@@ -932,8 +924,9 @@ async def invocations(raw_request: Request):
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
-        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
-                            detail=f"JSON decode error: {e}") from e
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value, detail=f"JSON decode error: {e}"
+        ) from e
 
     task = raw_request.app.state.task
 
@@ -941,7 +934,8 @@ async def invocations(raw_request: Request):
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported task: '{task}' for '/invocations'. "
-            f"Expected one of {set(TASK_HANDLERS.keys())}")
+            f"Expected one of {set(TASK_HANDLERS.keys())}",
+        )
 
     handler_config = TASK_HANDLERS[task]
     if "messages" in body:
@@ -957,7 +951,8 @@ async def invocations(raw_request: Request):
 if envs.VLLM_TORCH_PROFILER_DIR:
     logger.warning(
         "Torch Profiler is enabled in the API server. This should ONLY be "
-        "used for local development!")
+        "used for local development!"
+    )
 
     @router.post("/start_profile")
     async def start_profile(raw_request: Request):
@@ -977,29 +972,32 @@ if envs.VLLM_TORCH_PROFILER_DIR:
 if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
     logger.warning(
         "LoRA dynamic loading & unloading is enabled in the API server. "
-        "This should ONLY be used for local development!")
+        "This should ONLY be used for local development!"
+    )
 
-    @router.post("/v1/load_lora_adapter",
-                 dependencies=[Depends(validate_json_request)])
-    async def load_lora_adapter(request: LoadLoRAAdapterRequest,
-                                raw_request: Request):
+    @router.post("/v1/load_lora_adapter", dependencies=[Depends(validate_json_request)])
+    async def load_lora_adapter(request: LoadLoRAAdapterRequest, raw_request: Request):
         handler = models(raw_request)
         response = await handler.load_lora_adapter(request)
         if isinstance(response, ErrorResponse):
-            return JSONResponse(content=response.model_dump(),
-                                status_code=response.code)
+            return JSONResponse(
+                content=response.model_dump(), status_code=response.code
+            )
 
         return Response(status_code=200, content=response)
 
-    @router.post("/v1/unload_lora_adapter",
-                 dependencies=[Depends(validate_json_request)])
-    async def unload_lora_adapter(request: UnloadLoRAAdapterRequest,
-                                  raw_request: Request):
+    @router.post(
+        "/v1/unload_lora_adapter", dependencies=[Depends(validate_json_request)]
+    )
+    async def unload_lora_adapter(
+        request: UnloadLoRAAdapterRequest, raw_request: Request
+    ):
         handler = models(raw_request)
         response = await handler.unload_lora_adapter(request)
         if isinstance(response, ErrorResponse):
-            return JSONResponse(content=response.model_dump(),
-                                status_code=response.code)
+            return JSONResponse(
+                content=response.model_dump(), status_code=response.code
+            )
 
         return Response(status_code=200, content=response)
 
@@ -1011,17 +1009,17 @@ def load_log_config(log_config_file: Optional[str]) -> Optional[dict]:
         with open(log_config_file) as f:
             return json.load(f)
     except Exception as e:
-        logger.warning("Failed to load log config from file %s: error %s",
-                       log_config_file, e)
+        logger.warning(
+            "Failed to load log config from file %s: error %s", log_config_file, e
+        )
         return None
 
 
 def build_app(args: Namespace) -> FastAPI:
     if args.disable_fastapi_docs:
-        app = FastAPI(openapi_url=None,
-                      docs_url=None,
-                      redoc_url=None,
-                      lifespan=lifespan)
+        app = FastAPI(
+            openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
+        )
     else:
         app = FastAPI(lifespan=lifespan)
     app.include_router(router)
@@ -1039,14 +1037,15 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException):
-        err = ErrorResponse(message=exc.detail,
-                            type=HTTPStatus(exc.status_code).phrase,
-                            code=exc.status_code)
+        err = ErrorResponse(
+            message=exc.detail,
+            type=HTTPStatus(exc.status_code).phrase,
+            code=exc.status_code,
+        )
         return JSONResponse(err.model_dump(), status_code=exc.status_code)
 
     @app.exception_handler(RequestValidationError)
-    async def validation_exception_handler(_: Request,
-                                           exc: RequestValidationError):
+    async def validation_exception_handler(_: Request, exc: RequestValidationError):
         exc_str = str(exc)
         errors_str = str(exc.errors())
 
@@ -1055,11 +1054,12 @@ def build_app(args: Namespace) -> FastAPI:
         else:
             message = exc_str
 
-        err = ErrorResponse(message=message,
-                            type=HTTPStatus.BAD_REQUEST.phrase,
-                            code=HTTPStatus.BAD_REQUEST)
-        return JSONResponse(err.model_dump(),
-                            status_code=HTTPStatus.BAD_REQUEST)
+        err = ErrorResponse(
+            message=message,
+            type=HTTPStatus.BAD_REQUEST.phrase,
+            code=HTTPStatus.BAD_REQUEST,
+        )
+        return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
     if token := args.api_key or envs.VLLM_API_KEY:
@@ -1070,41 +1070,42 @@ def build_app(args: Namespace) -> FastAPI:
                 return await call_next(request)
             url_path = request.url.path
             if app.root_path and url_path.startswith(app.root_path):
-                url_path = url_path[len(app.root_path):]
+                url_path = url_path[len(app.root_path) :]
             if not url_path.startswith("/v1"):
                 return await call_next(request)
             if request.headers.get("Authorization") != "Bearer " + token:
-                return JSONResponse(content={"error": "Unauthorized"},
-                                    status_code=401)
+                return JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return await call_next(request)
 
     if args.enable_request_id_headers:
         logger.warning(
             "CAUTION: Enabling X-Request-Id headers in the API Server. "
-            "This can harm performance at high QPS.")
+            "This can harm performance at high QPS."
+        )
 
         @app.middleware("http")
         async def add_request_id(request: Request, call_next):
-            request_id = request.headers.get(
-                "X-Request-Id") or uuid.uuid4().hex
+            request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
             response = await call_next(request)
             response.headers["X-Request-Id"] = request_id
             return response
 
     if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
-        logger.warning("CAUTION: Enabling log response in the API Server. "
-                       "This can include sensitive information and should be "
-                       "avoided in production.")
+        logger.warning(
+            "CAUTION: Enabling log response in the API Server. "
+            "This can include sensitive information and should be "
+            "avoided in production."
+        )
 
         @app.middleware("http")
         async def log_response(request: Request, call_next):
             response = await call_next(request)
-            response_body = [
-                section async for section in response.body_iterator
-            ]
+            response_body = [section async for section in response.body_iterator]
             response.body_iterator = iterate_in_threadpool(iter(response_body))
-            logger.info("response_body={%s}",
-                        response_body[0].decode() if response_body else None)
+            logger.info(
+                "response_body={%s}",
+                response_body[0].decode() if response_body else None,
+            )
             return response
 
     for middleware in args.middleware:
@@ -1115,8 +1116,9 @@ def build_app(args: Namespace) -> FastAPI:
         elif inspect.iscoroutinefunction(imported):
             app.middleware("http")(imported)
         else:
-            raise ValueError(f"Invalid middleware {middleware}. "
-                             f"Must be a function or a class.")
+            raise ValueError(
+                f"Invalid middleware {middleware}. " f"Must be a function or a class."
+            )
 
     return app
 
@@ -1138,8 +1140,7 @@ async def init_app_state(
         request_logger = RequestLogger(max_log_len=args.max_log_len)
 
     base_model_paths = [
-        BaseModelPath(name=name, model_path=args.model)
-        for name in served_model_names
+        BaseModelPath(name=name, model_path=args.model) for name in served_model_names
     ]
 
     state.engine_client = engine_client
@@ -1155,7 +1156,8 @@ async def init_app_state(
         if isinstance(tokenizer, MistralTokenizer):
             # The warning is logged in resolve_mistral_chat_template.
             resolved_chat_template = resolve_mistral_chat_template(
-                chat_template=resolved_chat_template)
+                chat_template=resolved_chat_template
+            )
         else:
             hf_chat_template = resolve_hf_chat_template(
                 tokenizer=tokenizer,
@@ -1169,7 +1171,9 @@ async def init_app_state(
                     "Using supplied chat template: %s\n"
                     "It is different from official chat template '%s'. "
                     "This discrepancy may lead to performance degradation.",
-                    resolved_chat_template, args.model)
+                    resolved_chat_template,
+                    args.model,
+                )
 
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
@@ -1179,61 +1183,106 @@ async def init_app_state(
         prompt_adapters=args.prompt_adapters,
     )
     await state.openai_serving_models.init_static_loras()
-    state.openai_serving_chat = OpenAIServingChat(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        args.response_role,
-        request_logger=request_logger,
-        chat_template=resolved_chat_template,
-        chat_template_content_format=args.chat_template_content_format,
-        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-        enable_auto_tools=args.enable_auto_tool_choice,
-        tool_parser=args.tool_call_parser,
-        reasoning_parser=args.reasoning_parser,
-        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-    ) if model_config.runner_type == "generate" else None
-    state.openai_serving_completion = OpenAIServingCompletion(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger,
-        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-    ) if model_config.runner_type == "generate" else None
-    state.openai_serving_pooling = OpenAIServingPooling(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger,
-        chat_template=resolved_chat_template,
-        chat_template_content_format=args.chat_template_content_format,
-    ) if model_config.runner_type == "pooling" else None
-    state.openai_serving_embedding = OpenAIServingEmbedding(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger,
-        chat_template=resolved_chat_template,
-        chat_template_content_format=args.chat_template_content_format,
-    ) if model_config.task == "embed" else None
-    state.openai_serving_scores = ServingScores(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger) if model_config.task in (
-            "score", "embed", "pooling") else None
-    state.openai_serving_classification = ServingClassification(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger,
-    ) if model_config.task == "classify" else None
-    state.jinaai_serving_reranking = ServingScores(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger
-    ) if model_config.task == "score" else None
+    state.openai_serving_chat = (
+        OpenAIServingChat(
+            engine_client,
+            model_config,
+            state.openai_serving_models,
+            args.response_role,
+            request_logger=request_logger,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+            return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+            enable_auto_tools=args.enable_auto_tool_choice,
+            tool_parser=args.tool_call_parser,
+            reasoning_parser=args.reasoning_parser,
+            enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+            use_harmony=args.use_harmony,
+        )
+        if model_config.runner_type == "generate"
+        else None
+    )
+
+    state.openai_serving_responses = (
+        OpenAIServingResponses(
+            engine_client,
+            model_config,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+            return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+            use_harmony=args.use_harmony,
+        )
+        if model_config.runner_type == "generate" and args.use_harmony
+        else None
+    )
+
+    state.openai_serving_completion = (
+        OpenAIServingCompletion(
+            engine_client,
+            model_config,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        )
+        if model_config.runner_type == "generate"
+        else None
+    )
+    state.openai_serving_pooling = (
+        OpenAIServingPooling(
+            engine_client,
+            model_config,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+        )
+        if model_config.runner_type == "pooling"
+        else None
+    )
+    state.openai_serving_embedding = (
+        OpenAIServingEmbedding(
+            engine_client,
+            model_config,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+        )
+        if model_config.task == "embed"
+        else None
+    )
+    state.openai_serving_scores = (
+        ServingScores(
+            engine_client,
+            model_config,
+            state.openai_serving_models,
+            request_logger=request_logger,
+        )
+        if model_config.task in ("score", "embed", "pooling")
+        else None
+    )
+    state.openai_serving_classification = (
+        ServingClassification(
+            engine_client,
+            model_config,
+            state.openai_serving_models,
+            request_logger=request_logger,
+        )
+        if model_config.task == "classify"
+        else None
+    )
+    state.jinaai_serving_reranking = (
+        ServingScores(
+            engine_client,
+            model_config,
+            state.openai_serving_models,
+            request_logger=request_logger,
+        )
+        if model_config.task == "score"
+        else None
+    )
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
@@ -1242,12 +1291,16 @@ async def init_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
     )
-    state.openai_serving_transcription = OpenAIServingTranscription(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger,
-    ) if model_config.runner_type == "transcription" else None
+    state.openai_serving_transcription = (
+        OpenAIServingTranscription(
+            engine_client,
+            model_config,
+            state.openai_serving_models,
+            request_logger=request_logger,
+        )
+        if model_config.runner_type == "transcription"
+        else None
+    )
     state.task = model_config.task
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
@@ -1269,17 +1322,18 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
 
 def validate_api_server_args(args):
     valid_tool_parses = ToolParserManager.tool_parsers.keys()
-    if args.enable_auto_tool_choice \
-            and args.tool_call_parser not in valid_tool_parses:
-        raise KeyError(f"invalid tool call parser: {args.tool_call_parser} "
-                       f"(chose from {{ {','.join(valid_tool_parses)} }})")
+    if args.enable_auto_tool_choice and args.tool_call_parser not in valid_tool_parses:
+        raise KeyError(
+            f"invalid tool call parser: {args.tool_call_parser} "
+            f"(chose from {{ {','.join(valid_tool_parses)} }})"
+        )
 
     valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
-    if args.reasoning_parser \
-        and args.reasoning_parser not in valid_reasoning_parses:
+    if args.reasoning_parser and args.reasoning_parser not in valid_reasoning_parses:
         raise KeyError(
             f"invalid reasoning parser: {args.reasoning_parser} "
-            f"(chose from {{ {','.join(valid_reasoning_parses)} }})")
+            f"(chose from {{ {','.join(valid_reasoning_parses)} }})"
+        )
 
 
 def setup_server(args):
@@ -1312,8 +1366,7 @@ def setup_server(args):
 
     addr, port = sock_addr
     is_ssl = args.ssl_keyfile and args.ssl_certfile
-    host_part = f"[{addr}]" if is_valid_ipv6_address(
-        addr) else addr or "0.0.0.0"
+    host_part = f"[{addr}]" if is_valid_ipv6_address(addr) else addr or "0.0.0.0"
     listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
 
     return listen_address, sock
@@ -1325,11 +1378,9 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
 
 
-async def run_server_worker(listen_address,
-                            sock,
-                            args,
-                            client_config=None,
-                            **uvicorn_kwargs) -> None:
+async def run_server_worker(
+    listen_address, sock, args, client_config=None, **uvicorn_kwargs
+) -> None:
     """Run a single API server worker."""
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
@@ -1340,7 +1391,7 @@ async def run_server_worker(listen_address,
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
     if log_config is not None:
-        uvicorn_kwargs['log_config'] = log_config
+        uvicorn_kwargs["log_config"] = log_config
 
     async with build_async_engine_client(args, client_config) as engine_client:
         app = build_app(args)
@@ -1348,8 +1399,7 @@ async def run_server_worker(listen_address,
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
 
-        logger.info("Starting vLLM API server %d on %s", server_index,
-                    listen_address)
+        logger.info("Starting vLLM API server %d on %s", server_index, listen_address)
         shutdown_task = await serve_http(
             app,
             sock=sock,
@@ -1381,7 +1431,8 @@ if __name__ == "__main__":
     # entrypoints.
     cli_env_setup()
     parser = FlexibleArgumentParser(
-        description="vLLM OpenAI-Compatible RESTful API server.")
+        description="vLLM OpenAI-Compatible RESTful API server."
+    )
     parser = make_arg_parser(parser)
     args = parser.parse_args()
     validate_parsed_serve_args(args)

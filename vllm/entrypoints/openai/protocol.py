@@ -581,6 +581,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
             structural_tag=self.structural_tag,
         )
 
+        # Merge default stop token IDs with request stop token IDs
+        merged_stop_token_ids = list(self.stop_token_ids or [])
+        default_stop_token_ids = default_sampling_params.get("stop_token_ids", [])
+        if default_stop_token_ids:
+            merged_stop_token_ids.extend(default_stop_token_ids)
+
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -593,7 +599,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             min_p=min_p,
             seed=self.seed,
             stop=self.stop,
-            stop_token_ids=self.stop_token_ids,
+            stop_token_ids=merged_stop_token_ids,
             logprobs=self.top_logprobs if self.logprobs else None,
             prompt_logprobs=prompt_logprobs,
             ignore_eos=self.ignore_eos,
@@ -2044,3 +2050,61 @@ class TranscriptionResponseVerbose(OpenAIBaseModel):
 
     words: Optional[list[TranscriptionWord]] = None
     """Extracted words and their corresponding timestamps."""
+
+
+# Responses API Protocol Classes for GPT-OSS Integration
+class ResponseInputOutputItem(OpenAIBaseModel):
+    """Input/output item for the Responses API."""
+
+    type: str
+    role: Optional[str] = None
+    content: Optional[Union[str, list[dict[str, str]]]] = None
+    call_id: Optional[str] = None
+    output: Optional[str] = None
+    name: Optional[str] = None
+    arguments: Optional[str] = None
+
+
+class ResponsesRequest(OpenAIBaseModel):
+    """Request for the Responses API compatible with OpenAI's format."""
+
+    model: str
+    input: Optional[list[ResponseInputOutputItem]] = None
+    tool_choice: Optional[str] = Field(default="auto")
+    tools: Optional[list[dict[str, Any]]] = None
+    temperature: Optional[float] = Field(default=0.7, ge=0.0, le=2.0)
+    top_p: Optional[float] = Field(default=1.0, gt=0.0, le=1.0)
+    stream: Optional[bool] = Field(default=False)
+    reasoning_effort: Optional[Literal["high", "medium", "low"]] = Field(
+        default="medium",
+        description="The reasoning effort for models that support reasoning",
+    )
+    guided_decoding_backend: Optional[str] = None
+
+
+class InputTokensDetails(OpenAIBaseModel):
+    cached_tokens: int
+
+
+class OutputTokensDetails(OpenAIBaseModel):
+    reasoning_tokens: int
+
+
+class ResponseUsage(OpenAIBaseModel):
+    """Usage information for Responses API."""
+
+    completion_tokens: int = 0
+    prompt_tokens: int = 0
+    total_tokens: int = 0
+    reasoning_tokens: Optional[int] = None
+
+
+class ResponsesResponse(OpenAIBaseModel):
+    """Response for the Responses API compatible with OpenAI's format."""
+
+    id: str = Field(default_factory=lambda: f"resp-{random_uuid()}")
+    model: str
+    output: list[Any]  # ResponseOutputItem types from openai package
+    usage: ResponseUsage
+    created: int = Field(default_factory=lambda: int(time.time()))
+    object: Literal["responses.response"] = "responses.response"
