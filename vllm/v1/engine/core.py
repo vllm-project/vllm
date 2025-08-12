@@ -101,7 +101,7 @@ class EngineCore:
                     tp_size=vllm_config.parallel_config.tensor_parallel_size,
                     is_worker=False,
                 )
-            except Exception as e:
+            except ImportError as e:
                 raise ImportError(
                     "kvcached is not found. Please install kvcached with "
                     "`pip install kvcached --no-build-isolation` to use elastic"
@@ -221,7 +221,7 @@ class EngineCore:
 
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
-        
+
         `request_wave`: indicate which wave of requests this is expected to
         belong to in DP case
         """
@@ -420,7 +420,7 @@ class EngineCore:
     def preprocess_add_request(
             self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.
-        
+
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward
         """

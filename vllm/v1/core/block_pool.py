@@ -382,7 +382,7 @@ class ElasticBlockPool(BlockPool):
         try:
             from kvcached.integration.vllm.interfaces import (
                 get_kv_cache_manager)
-        except Exception as e:
+        except ImportError as e:
             raise ImportError(
                 "kvcached is not found. Please install kvcached with "
                 "`pip install kvcached --no-build-isolation` to use elastic "

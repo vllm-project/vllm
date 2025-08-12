@@ -317,7 +317,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.is_elastic:
             try:
                 import kvcached.integration.vllm.interfaces as kvcached_ifaces
-            except Exception as e:
+            except ImportError as e:
                 raise ImportError(
                     "kvcached is not found. Please install kvcached with "
                     "`pip install kvcached --no-build-isolation` to use elastic"
