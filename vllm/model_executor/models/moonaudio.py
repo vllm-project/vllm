@@ -210,6 +210,21 @@ class MoonshotDecoderLayer(nn.Module):
         return hidden_states, residual
     
 
+class VQAdaptor(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(config.kimia_adaptor_input_dim, config.hidden_size, bias=True),
+            nn.SiLU(),
+            nn.Dropout(0.0),
+            nn.Linear(config.hidden_size, config.hidden_size, bias=True),
+            nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps, bias=True),
+        )
+
+    def forward(self, x):
+        return self.layers(x)
+    
+    
 def make_layers(
     num_hidden_layers: int,
     num_all_layers: int,
@@ -367,14 +382,18 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
         else:
             self.mimo_norm = PPMissingLayer()
 
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor = None,
-        positions: torch.Tensor = None,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: torch.Tensor = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         mimo_hidden_states, mimo_residual = None, None
@@ -412,9 +431,11 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
                 "mimo_residual": mimo_residual,
             })
         
+        # NOTE: Current vLLM does not support multi-modal outputs,
+        # so we only return the final hidden states of the MIMO stream.
         hidden_states, _ = self.norm(hidden_states, residual)
         mimo_hidden_states, _ = self.mimo_norm(mimo_hidden_states, mimo_residual)
-        return hidden_states, mimo_hidden_states
+        return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -467,134 +488,3 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
                 loader(param, loaded_weight)
                 loaded.add(name)
         return loaded
-    
-
-class MoonshotKimiaVllmWrapper(nn.Module):
-    """Wrapper for KimiAudioModel to integrate with VLLM"""
-
-    def __init__(self, kimi_model: MoonshotKimiaModel, config: KimiAudioConfig):
-        super().__init__()
-        self.kimia = kimi_model
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
-    def forward(self,
-                input_ids: torch.Tensor = None,
-                positions: torch.Tensor = None,
-                intermediate_tensors: Optional[IntermediateTensors] = None,
-                inputs_embeds: torch.Tensor = None
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        out = self.kimia(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-        )
-        if isinstance(out, IntermediateTensors):
-            return out
-
-        main_hidden = out
-
-        main_hidden, _ = self.norm(main_hidden, torch.zeros_like(main_hidden))
-        return main_hidden
-
-
-class MoonshotKimiaForCausalLM(Qwen2PreTrainedModel):
-    _tied_weights_keys = ["lm_head.weight", "mimo_output.weight"]
-    config_class = KimiAudioConfig
-
-    def __init__(self, config):
-        super().__init__(config)
-        self.model = MoonshotKimiaModel(config)
-        self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.mimo_output = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.model.embed_tokens = value
-
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
-
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        text_input_ids: torch.LongTensor = None,
-        whisper_input_feature: Optional[torch.FloatTensor] = None,
-        is_continuous_mask: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        generation_mode: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
-
-        output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else self.config.output_attentions
-        )
-        output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else self.config.output_hidden_states
-        )
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
-
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs: tuple | BaseModelOutputWithPast= self.model(
-            input_ids=input_ids,
-            text_input_ids=text_input_ids,
-            whisper_input_feature=whisper_input_feature,
-            is_continuous_mask=is_continuous_mask,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-        if return_dict:
-            hidden_states, mimo_hidden_states = (
-                outputs.last_hidden_state[0],
-                outputs.last_hidden_state[1],
-            )
-        else:
-            hidden_states, mimo_hidden_states = outputs[0], outputs[1]
-
-        audio_logits = self.lm_head(hidden_states)
-        text_logits = self.mimo_output(mimo_hidden_states)
-
-        if not return_dict:
-            output = (text_logits, audio_logits) + outputs[2:]
-            return output
-        return CausalLMOutputWithPast(
-            loss=None,
-            logits=(text_logits, audio_logits),
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
