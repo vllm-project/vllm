@@ -29,7 +29,8 @@ from vllm.model_executor.layers.pooler import (AllPool, PoolerHead,
                                                PoolerIdentity, SimplePooler)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
-    IsAttentionFree, MultiModalEmbeddings, SupportsMultiModalWithRawInput)
+    IsAttentionFree, MultiModalEmbeddings, SupportsMultiModalWithRawInput,
+    default_pooling_type)
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -142,6 +143,7 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         )
 
 
+@default_pooling_type("All")
 @MULTIMODAL_REGISTRY.register_processor(
     PrithviGeoSpatialMAEMultiModalProcessor,
     info=PrithviGeoSpatialMAEProcessingInfo,
