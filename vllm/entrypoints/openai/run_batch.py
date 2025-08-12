@@ -358,6 +358,7 @@ async def run_batch(
         chat_template=None,
         chat_template_content_format="auto",
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+        enable_force_include_usage=args.enable_force_include_usage,
     ) if "generate" in supported_tasks else None
     openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,

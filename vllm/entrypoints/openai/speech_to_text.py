@@ -193,8 +193,7 @@ class OpenAISpeechToText(OpenAIServing):
         if request.stream:
             return stream_generator_method(request, list_result_generator,
                                            request_id, request_metadata,
-                                           duration_s,
-                                           self.enable_force_include_usage)
+                                           duration_s)
         # Non-streaming response.
         try:
             assert list_result_generator is not None
