@@ -30,8 +30,8 @@ from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
-                                             KimiVLConfig, MedusaConfig,
                                              EAGLEConfig, JAISConfig,
+                                             KimiVLConfig, MedusaConfig,
                                              MLPSpeculatorConfig,
                                              Nemotron_Nano_VL_Config,
                                              NemotronConfig, OvisConfig,
@@ -924,9 +924,9 @@ def get_hf_file_bytes(file_name: str,
                       model: Union[str, Path],
                       revision: Optional[str] = 'main') -> Optional[bytes]:
     file_path = try_get_local_file(model=model,
-                                    file_name=file_name,
-                                    revision=revision)
-    
+                                   file_name=file_name,
+                                   revision=revision)
+
     if file_path is None:
         try:
             hf_hub_file = hf_hub_download(model,
@@ -936,12 +936,12 @@ def get_hf_file_bytes(file_name: str,
             file_path = Path(hf_hub_file)
         except Exception:
             return None
-    
+
     if file_path is not None and file_path.is_file():
         try:
             with open(file_path, 'rb') as file:
                 return file.read()
         except Exception:
             return None
-    
+
     return None
