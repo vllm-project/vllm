@@ -37,6 +37,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              RWConfig, SpeculatorsConfig,
                                              Step3TextConfig, Step3VLConfig,
                                              UltravoxConfig)
+
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
@@ -65,11 +66,6 @@ def _get_hf_token() -> Optional[str]:
         return token
     return None
 
-
-_CONFIG_REGISTRY_OVERRIDE_HF: dict[str, type[PretrainedConfig]] = {
-    "mllama": MllamaConfig
-}
-
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
     "deepseek_vl_v2": DeepseekVLV2Config,
@@ -83,7 +79,6 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "eagle": EAGLEConfig,
     "speculators": SpeculatorsConfig,
     "nemotron": NemotronConfig,
-    "NVLM_D": NVLM_D_Config,
     "ovis": OvisConfig,
     "ultravox": UltravoxConfig,
     "step3_vl": Step3VLConfig,
@@ -928,9 +923,9 @@ def get_hf_file_bytes(file_name: str,
                       model: Union[str, Path],
                       revision: Optional[str] = 'main') -> Optional[bytes]:
     file_path = try_get_local_file(model=model,
-                                   file_name=file_name,
-                                   revision=revision)
-
+                                    file_name=file_name,
+                                    revision=revision)
+    
     if file_path is None:
         try:
             hf_hub_file = hf_hub_download(model,
@@ -940,12 +935,12 @@ def get_hf_file_bytes(file_name: str,
             file_path = Path(hf_hub_file)
         except Exception:
             return None
-
+    
     if file_path is not None and file_path.is_file():
         try:
             with open(file_path, 'rb') as file:
                 return file.read()
         except Exception:
             return None
-
+    
     return None
