@@ -8,15 +8,16 @@ import torch
 from tests.conftest import HfRunner
 from tests.utils import multi_gpu_test
 
-from .mteb_utils import RerankModelInfo, mteb_test_rerank_models
+from ...utils import LASTPoolingRerankModelInfo, RerankModelInfo
+from .mteb_utils import mteb_test_rerank_models
 
 RERANK_MODELS = [
-    RerankModelInfo("Qwen/Qwen3-Reranker-0.6B",
-                    architecture="Qwen3ForSequenceClassification",
-                    enable_test=True),
-    RerankModelInfo("Qwen/Qwen3-Reranker-4B",
-                    architecture="Qwen3ForSequenceClassification",
-                    enable_test=False)
+    LASTPoolingRerankModelInfo("Qwen/Qwen3-Reranker-0.6B",
+                               architecture="Qwen3ForSequenceClassification",
+                               enable_test=True),
+    LASTPoolingRerankModelInfo("Qwen/Qwen3-Reranker-4B",
+                               architecture="Qwen3ForSequenceClassification",
+                               enable_test=False)
 ]
 
 
