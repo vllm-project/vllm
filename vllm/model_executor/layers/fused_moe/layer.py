@@ -724,13 +724,14 @@ class FusedMoE(torch.nn.Module):
 
         # we padding globally so EP buffer allocation works
         if quant_config and quant_config.get_name() == "mxfp4":
-            if current_platform.is_device_capability(90):
+            if not current_platform.is_device_capability(100):
                 if not is_torch_equal_or_newer("2.8.0"):
                     raise RuntimeError(
-                        "Mxfp4 on hopper requires torch >= 2.8.0")
+                        "Mxfp4 on non-blackwell requires torch >= 2.8.0")
                 if not has_triton_kernels():
                     raise NotImplementedError(
-                        "Triton kernels must be installed for mxfp4 on hopper")
+                        "triton_kernels must be installed for "
+                        "mxfp4 on non-blackwell")
             if (current_platform.is_rocm()
                     or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
                     or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
