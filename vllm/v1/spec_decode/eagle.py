@@ -262,11 +262,17 @@ class EagleProposer:
         if self.use_cuda_graph and \
             batch_size <= self.cudagraph_batch_sizes[-1]:
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
+            if self.use_full_cuda_graph:
+                assert self.attn_metadata_cudagraph
+                self.attn_metadata_cudagraph.block_table[:batch_size] = (
+                    attn_metadata.block_table)
+                attn_metadata = self.attn_metadata_cudagraph
         else:
             input_batch_size = batch_size
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
-        attn_metadata.query_start_loc = self.arange[:batch_size + 1]
+        attn_metadata.query_start_loc[:batch_size +
+                                      1] = self.arange[:batch_size + 1]
         for _ in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
@@ -294,20 +300,27 @@ class EagleProposer:
                                             self.max_model_len)
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
-            attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
+            attn_metadata.seq_lens[:batch_size].masked_fill_(
+                exceeds_max_model_len, 1)
 
             # Compute the slot mapping.
             block_numbers = clamped_positions // self.block_size
             block_ids = attn_metadata.block_table.gather(
                 dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
-            attn_metadata.slot_mapping = (block_ids * self.block_size +
-                                          clamped_positions % self.block_size)
+            slot_mapping = (block_ids * self.block_size +
+                            clamped_positions % self.block_size)
+            if self.use_full_cuda_graph:
+                attn_metadata.slot_mapping[:batch_size] = slot_mapping
+            else:
+                # In eager mode attention, slot_mapping's shape is used to
+                # determine the number of actual tokens.
+                attn_metadata.slot_mapping = slot_mapping
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with the
             # padding tokens.
-            attn_metadata.slot_mapping.masked_fill_(exceeds_max_model_len,
-                                                    PADDING_SLOT_ID)
+            attn_metadata.slot_mapping[:batch_size].masked_fill_(
+                exceeds_max_model_len, PADDING_SLOT_ID)
 
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
@@ -321,23 +334,6 @@ class EagleProposer:
             else:
                 inputs_embeds = None
                 input_ids = self.input_ids[:input_batch_size]
-
-            if (self.use_full_cuda_graph
-                    and batch_size <= self.cudagraph_batch_sizes[-1]):
-                assert self.attn_metadata_cudagraph
-                self.attn_metadata_cudagraph.seq_lens[:batch_size] = (
-                    attn_metadata.seq_lens)
-                self.attn_metadata_cudagraph.slot_mapping[:batch_size] = (
-                    attn_metadata.slot_mapping)
-                if token_index == 0:
-                    self.attn_metadata_cudagraph.query_start_loc[:batch_size +
-                                                                 1] = (
-                                                                     attn_metadata
-                                                                     .
-                                                                     query_start_loc
-                                                                 )
-                    self.attn_metadata_cudagraph.block_table[:batch_size] = (
-                        attn_metadata.block_table)
 
             # Run the model.
             with set_forward_context(per_layer_attn_metadata,
@@ -679,6 +675,7 @@ class EagleProposer:
         attn_metadata: Optional[dict[str, Any]] = None,
     ) -> None:
         if attn_metadata is not None and self.attn_metadata_cudagraph is None:
+            # attn_metadata is shared across all draft layers
             self.attn_metadata_cudagraph = attn_metadata[
                 self.attn_layer_names[0]]
         with set_forward_context(attn_metadata,
