@@ -39,6 +39,7 @@ from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_ray_initialized
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
+from vllm.transformers_utils.config import is_interleaved
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
@@ -178,23 +179,12 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         kwargs[name] = {"default": default, "help": help}
 
         # Set other kwargs based on the type hints
-        json_tip = """Should either be a valid JSON string or JSON keys
-passed individually. For example, the following sets of arguments are
-equivalent:
-
-- `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`\n
-- `--json-arg.key1 value1 --json-arg.key2.key3 value2`
-
-Additionally, list elements can be passed individually using `+`:
-
-- `--json-arg '{"key4": ["value3", "value4", "value5"]}'`\n
-- `--json-arg.key4+ value3 --json-arg.key4+='value4,value5'`"""
+        json_tip = ("Should either be a valid JSON string or JSON keys passed "
+                    "individually.")
         if dataclass_cls is not None:
 
             def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
                 try:
-                    if hasattr(cls, "from_cli"):
-                        return cls.from_cli(val)
                     return TypeAdapter(cls).validate_json(val)
                 except ValidationError as e:
                     raise argparse.ArgumentTypeError(repr(e)) from e
@@ -455,9 +445,9 @@ class EngineArgs:
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
         # CompilationConfig object
-        if isinstance(self.compilation_config, (int, dict)):
-            self.compilation_config = CompilationConfig.from_cli(
-                str(self.compilation_config))
+        if isinstance(self.compilation_config, dict):
+            self.compilation_config = CompilationConfig(
+                **self.compilation_config)
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
@@ -836,6 +826,10 @@ class EngineArgs:
             title="VllmConfig",
             description=VllmConfig.__doc__,
         )
+        # We construct SpeculativeConfig using fields from other configs in
+        # create_engine_config. So we set the type to a JSON string here to
+        # delay the Pydantic validation that comes with SpeculativeConfig.
+        vllm_kwargs["speculative_config"]["type"] = optional_type(json.loads)
         vllm_group.add_argument("--speculative-config",
                                 **vllm_kwargs["speculative_config"])
         vllm_group.add_argument("--kv-transfer-config",
@@ -1092,6 +1086,13 @@ class EngineArgs:
                 "DualChunkFlashAttention is not supported on V1 engine. "
                 "To run the model in V0 engine, try set 'VLLM_USE_V1=0'")
 
+        sliding_window: Optional[int] = None
+        if not is_interleaved(model_config.hf_text_config):
+            # Only set CacheConfig.sliding_window if the model is all sliding
+            # window. Otherwise CacheConfig.sliding_window will override the
+            # global layers in interleaved sliding window models.
+            sliding_window = model_config.get_sliding_window()
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1099,7 +1100,7 @@ class EngineArgs:
             cache_dtype=self.kv_cache_dtype,
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
-            sliding_window=model_config.get_sliding_window(),
+            sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
@@ -1603,11 +1604,10 @@ class EngineArgs:
         else:
 
             pooling_type = model_config.pooler_config.pooling_type
-
-            # TODO: when encoder models are supported we'll have to
-            # check for causal attention here.
-            incremental_prefill_supported = (pooling_type is not None and
-                                             pooling_type.lower() == "last")
+            is_causal = getattr(model_config.hf_config, "is_causal", True)
+            incremental_prefill_supported = (pooling_type is not None
+                                             and pooling_type.lower() == "last"
+                                             and is_causal)
 
             action = "Enabling" if \
                 incremental_prefill_supported else "Disabling"
@@ -1833,13 +1833,3 @@ def human_readable_int(value):
 
     # Regular plain number.
     return int(value)
-
-
-# These functions are used by sphinx to build the documentation
-def _engine_args_parser():
-    return EngineArgs.add_cli_args(FlexibleArgumentParser())
-
-
-def _async_engine_args_parser():
-    return AsyncEngineArgs.add_cli_args(FlexibleArgumentParser(),
-                                        async_args_only=True)
