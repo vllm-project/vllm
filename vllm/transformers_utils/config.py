@@ -84,7 +84,6 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "ultravox": UltravoxConfig,
     "step3_vl": Step3VLConfig,
     "step3_text": Step3TextConfig,
-    **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
