@@ -1,17 +1,5 @@
 nav:
-  - Home:
-    - README.md
-    - User Guide:
-      - usage/README.md
-      - getting_started/quickstart.md
-      - getting_started/installation/README.md
-      - examples/README.md
-    - Developer Guide: contributing/README.md
-    - API Reference: api/README.md
-    - CLI Reference: cli/README.md
-    - Timeline:
-      - Roadmap: https://roadmap.vllm.ai
-      - Releases: https://github.com/vllm-project/vllm/releases
+  - Home: README.md
   - User Guide:
     - usage/README.md
     - Getting Started:
