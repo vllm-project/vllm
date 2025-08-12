@@ -799,7 +799,7 @@ class FusedMoE(torch.nn.Module):
                 global_num_experts=self.global_num_experts)
             logger.info_once(
                 "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
-                " number of experts: %s/%s. Experts global to local index map:"
+                " number of experts: %s/%s. Experts local to global index map:"
                 " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
                 self.global_num_experts,
                 get_compressed_expert_map(self.expert_map))
