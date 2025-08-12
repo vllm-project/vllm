@@ -209,7 +209,7 @@ class M3SparsePooler(Pooler):
                 pooled_data = pooled_data[1:]
             if token_ids[-1] == self.eos_token_id:
                 pooled_data = pooled_data[:-1]
-            pooled_outputs.append(pooled_data)
+            pooled_outputs.append(pooled_data.squeeze())
 
         return PoolerOutput(outputs=build_output(pooled_outputs))
 
