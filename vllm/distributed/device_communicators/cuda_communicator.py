@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import cache
 from typing import Optional, Union
 
 import torch
@@ -13,6 +14,14 @@ from vllm.platforms import current_platform
 from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
+
+
+@cache
+def is_rocm_aiter_custom_allreduce_enabled() -> bool:
+    """Check if aiter custom allreduce is enabled for ROCm platform."""
+    return current_platform.is_rocm() \
+        and envs.VLLM_ROCM_USE_AITER \
+        and envs.VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE
 
 
 class CudaCommunicator(DeviceCommunicatorBase):
@@ -38,8 +47,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_custom_allreduce = use_custom_allreduce
 
         # lazy import to avoid documentation build error
-        from vllm.distributed.device_communicators.custom_all_reduce import (
-            CustomAllreduce)
+        if is_rocm_aiter_custom_allreduce_enabled():
+            from aiter.dist.custom_all_reduce import CustomAllreduce
+            logger.info("Using aiter.dist.custom_all_reduce for ROCm platform")
+        else:
+            from vllm.distributed.device_communicators.custom_all_reduce import (  # noqa: E501
+                CustomAllreduce)
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
         from vllm.distributed.device_communicators.quick_all_reduce import (
