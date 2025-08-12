@@ -25,7 +25,6 @@ from pydantic import (ConfigDict, SkipValidation, field_validator,
                       model_validator)
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from typing_extensions import Self, assert_never, runtime_checkable
 
 import vllm.envs as envs
@@ -1490,13 +1489,6 @@ class ModelConfig:
             # Hybrid model Jamba
             layers_block_type_value = getattr(self.hf_config,
                                               "layers_block_type", None)
-
-            # Hybrid models in transformers >= 4.54.0
-            # populate a `layer_types` attribute
-            if layers_block_type_value is None:
-                layers_block_type_value = getattr(self.hf_text_config,
-                                                  "layer_types", None)
-
             if layers_block_type_value is not None:
                 if hasattr(self.hf_text_config,
                            "model_type") and (self.hf_text_config.model_type
@@ -1506,16 +1498,8 @@ class ModelConfig:
                                    for t in layers_block_type_value[start:end])
                     else:
                         return self.get_num_layers(parallel_config)
-
-                # Support with hybrid transformers configs >= 4.54.0
-                if attn_block_type:
-                    attn_layer_types = (a for a in ALLOWED_LAYER_TYPES
-                                        if "attention" in a)
-                    return sum(t in ("attention", *attn_layer_types)
-                               for t in layers_block_type_value[start:end])
-                else:
-                    return sum(t == block_type.value
-                               for t in layers_block_type_value[start:end])
+                return sum(t == block_type.value
+                           for t in layers_block_type_value[start:end])
 
             # Hybrid model Minimax
             attn_type_list = getattr(self.hf_config, "attn_type_list", None)
