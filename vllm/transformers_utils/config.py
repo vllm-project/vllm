@@ -32,15 +32,16 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              EAGLEConfig, JAISConfig,
                                              KimiVLConfig, MedusaConfig,
-                                             MllamaConfig, MLPSpeculatorConfig,
+                                             MLPSpeculatorConfig,
                                              Nemotron_Nano_VL_Config,
-                                             NemotronConfig, NVLM_D_Config,
-                                             OvisConfig, RWConfig,
-                                             SpeculatorsConfig,
+                                             NemotronConfig, OvisConfig,
+                                             RWConfig, SpeculatorsConfig,
                                              Step3TextConfig, Step3VLConfig,
                                              UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
+from vllm.transformers_utils.configs.mllama import MllamaConfig
+from vllm.transformers_utils.configs.nvlm_d import NVLM_D_Config
 from vllm.transformers_utils.utils import check_gguf_file
 
 if envs.VLLM_USE_MODELSCOPE:
