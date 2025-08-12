@@ -10,8 +10,7 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm._custom_ops import (cutlass_scaled_fp4_mm, flashinfer_scaled_fp4_mm,
-                              scaled_fp4_quant)
+from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -39,7 +38,8 @@ from vllm.model_executor.parameter import (ModelWeightParameter,
                                            PerTensorScaleParameter)
 from vllm.scalar_type import scalar_types
 from vllm.utils import next_power_of_2
-from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_moe
+from vllm.utils.flashinfer import (flashinfer_scaled_fp4_mm, has_flashinfer,
+                                   has_flashinfer_moe)
 
 logger = init_logger(__name__)
 
@@ -843,7 +843,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.weight = Parameter(weight, requires_grad=False)
         else:
             swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
-
             layer.weight_scale_swizzled = Parameter(swizzled_weight_scale,
                                                     requires_grad=False)
             layer.weight = Parameter(layer.weight.data, requires_grad=False)
