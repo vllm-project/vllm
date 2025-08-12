@@ -27,7 +27,7 @@
 
 import math
 from collections import defaultdict
-from typing import Any, Optional, Union, TypedDict
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
@@ -101,19 +101,6 @@ def smart_resize(
 
 
 IDS_TYPE_FLAG = {"text": 0, "image": 1, "video": 2, "audio": 3}
-
-
-
-class OutputsType(TypedDict):
-    input_ids: list[Any]
-    token_type_ids: list[Any]
-    position_ids: list[Any]
-    images: list[Any]
-    grid_thw: list[Any]
-    image_type_ids: list[Any]
-    cur_position: int
-    pic_cnt: int
-    video_cnt: int
 
 
 class Ernie4_5_VLProcessor(ProcessorMixin):
@@ -218,7 +205,7 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
         Convert chat messages into model inputs.
         Returns a dict with input_ids, token_type_ids, position_ids, images, grid_thw, image_type_ids, labels.
         """
-        outputs: OutputsType = {
+        outputs = {
             "input_ids": [],
             "token_type_ids": [],
             "position_ids": [],
@@ -247,10 +234,10 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
         for text_with_image in texts.split(self.VID_START + "<|video@placeholder|>" + self.VID_END):
             new_text_seg = True
             if not new_video_seg:
-                self._add_video(videos[outputs["video_cnt"]], outputs)
+                self._add_video(videos[outputs["video_cnt"]], outputs)  # type: ignore
             for text in text_with_image.split(self.IMG_START + "<|image@placeholder|>" + self.IMG_END):
                 if not new_text_seg:
-                    self._add_image(images[outputs["pic_cnt"]], outputs)
+                    self._add_image(images[outputs["pic_cnt"]], outputs)  # type: ignore
                 self._add_text(text, outputs)
                 new_text_seg = False
             new_video_seg = False
@@ -278,7 +265,7 @@ class Ernie4_5_VLProcessor(ProcessorMixin):
         outputs["input_ids"].append(token_id)
         outputs["token_type_ids"].append(self.token_type_mapping[token])
         pos = outputs["cur_position"]
-        outputs["position_ids"].append([pos] * 3)
+        outputs["position_ids"].append([pos] * 3)  # type: ignore
         outputs["cur_position"] += 1
 
     def _add_text(self, text: str, outputs: dict) -> None:
