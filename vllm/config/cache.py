@@ -48,12 +48,6 @@ class CacheConfig:
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
     set the GPU memory utilization to 0.5 for each instance."""
-    kv_cache_memory: Optional[float] = None
-    """Size of KV Cache per GPU (in GiB). By default, this is set to None
-    and vllm can automatically infer the kv cache size based on
-    gpu_memory_utilization. However, pro users may want to manually specify
-    the kv cache memory size. Note that this config would not respect
-    gpu_memory_utilization."""
     swap_space: float = 4
     """Size of the CPU swap space per GPU (in GiB)."""
     cache_dtype: CacheDType = "auto"
@@ -124,6 +118,13 @@ class CacheConfig:
     attention metadata for eligible layers to be overriden with metadata
     necessary for implementating this optimization in some models (e.g. Gemma3n)
     """
+
+    kv_cache_memory: Optional[float] = None
+    """Size of KV Cache per GPU (in GiB). By default, this is set to None
+    and vllm can automatically infer the kv cache size based on
+    gpu_memory_utilization. However, pro users may want to manually specify
+    the kv cache memory size. Note that this config would not respect
+    gpu_memory_utilization."""
 
     def compute_hash(self) -> str:
         """
