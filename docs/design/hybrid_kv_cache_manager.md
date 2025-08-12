@@ -25,11 +25,10 @@ To serve these models efficiently, our KVCacheManager must:
 2. **block**: the memory reserved for kv cache are divided into multiple *blocks* with the same *page size* (defined below)
 3. **block size**: number of tokens inside a block
 4. **page size**: the physical memory size of a block, defined as
-
 $$
 \text{num_layers} \times \text{block_size} \times \text{kv_hidden_size}
-$$ Note:
-
+$$
+    Note:
     - It is different from `KVCacheSpec.page_size_bytes` in the code, which is defined as
 $$
 \text{block_size} \times \text{kv_hidden_size}
@@ -108,7 +107,7 @@ Unfortunately, not all models have such a beautiful ratio, and approach in Case 
 * Group 0: full.0 \- full.9
 * Group 1: sw.0 \- sw.9
 * Group 2: sw.10 \- sw.19
-  …
+* ...
 * Group 6: sw.40 \- sw.49
 * Group 7: sw.50, sw.51, and 8 padding layers.
 
@@ -126,12 +125,12 @@ The current algorithm is:
    $$
    \text{block_size} \times \text{kv_hidden_size}_{\text{att}} \ge \text{state_size}_{\text{mamba}}
    $$
-<!-- markdownlint-enable MD049 -->
 2. Pad the mamba state per layer to
 $$
 \text{block_size} \times \text{kv_hidden_size}_{\text{att}}
 $$
 3. Apply the grouping strategy in case 3\.
+<!-- markdownlint-enable MD049 -->
 
 Note that this can lead to more than 400 block\_size for attention layers, which is too large. Another padding strategy is to increase block\_size until
 <!-- markdownlint-disable MD049 -->
