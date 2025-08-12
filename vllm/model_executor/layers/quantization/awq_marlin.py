@@ -10,7 +10,8 @@ import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
+    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported,
+    UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
                                                set_weight_attrs)
@@ -141,6 +142,9 @@ class AWQMarlinConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             from vllm.model_executor.layers.quantization.moe_wna16 import (
                 MoeWNA16Config)
+            if is_layer_skipped_awq(
+                    prefix, getattr(self, "modules_to_not_convert", [])):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
             if not check_moe_marlin_supports_layer(layer, self.group_size):
                 logger.warning_once(
                     f"Layer '{prefix}' is not supported by AWQMoeMarlin. "
