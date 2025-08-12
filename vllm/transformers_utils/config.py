@@ -31,6 +31,7 @@ from vllm.logger import init_logger
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              KimiVLConfig, MedusaConfig,
+                                             EAGLEConfig, JAISConfig,
                                              MLPSpeculatorConfig,
                                              Nemotron_Nano_VL_Config,
                                              NemotronConfig, OvisConfig,
