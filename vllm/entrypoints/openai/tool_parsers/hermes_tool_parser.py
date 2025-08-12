@@ -304,7 +304,9 @@ class Hermes2ProToolParser(ToolParser):
             logger.debug("against new ones: %s", cur_arguments)
 
             # Handle tool call with no argument
-            if tool_call_end and not self.streamed_args_for_tool[self.current_tool_id] and (cur_arguments is None or cur_arguments == {}):
+            if tool_call_end and not \
+                self.streamed_args_for_tool[self.current_tool_id] and \
+                (cur_arguments is None or cur_arguments == {}):
                 delta = DeltaMessage(tool_calls=[
                     DeltaToolCall(index=self.current_tool_id,
                                   function=DeltaFunctionCall(
