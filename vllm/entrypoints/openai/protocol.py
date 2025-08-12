@@ -17,8 +17,9 @@ from openai.types.chat.chat_completion_audio import (
 from openai.types.chat.chat_completion_message import (
     Annotation as OpenAIAnnotation)
 # yapf: enable
-from openai.types.responses import (ResponseInputParam, ResponseOutputItem,
-                                    ResponseOutputMessage, ResponsePrompt,
+from openai.types.responses import (ResponseFunctionToolCall,
+                                    ResponseInputItemParam, ResponseOutputItem,
+                                    ResponsePrompt, ResponseReasoningItem,
                                     ResponseStatus, ResponseTextConfig)
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
@@ -77,12 +78,15 @@ class OpenAIBaseModel(BaseModel):
         return result
 
 
-class ErrorResponse(OpenAIBaseModel):
-    object: str = "error"
+class ErrorInfo(OpenAIBaseModel):
     message: str
     type: str
     param: Optional[str] = None
     code: int
+
+
+class ErrorResponse(OpenAIBaseModel):
+    error: ErrorInfo
 
 
 class ModelPermission(OpenAIBaseModel):
@@ -234,6 +238,11 @@ def get_logits_processors(processors: Optional[LogitsProcessors],
     return None
 
 
+ResponseInputOutputItem: TypeAlias = Union[ResponseInputItemParam,
+                                           ResponseReasoningItem,
+                                           ResponseFunctionToolCall]
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -248,7 +257,7 @@ class ResponsesRequest(OpenAIBaseModel):
             "reasoning.encrypted_content",
         ],
     ]] = None
-    input: Union[str, ResponseInputParam]
+    input: Union[str, list[ResponseInputOutputItem]]
     instructions: Optional[str] = None
     max_output_tokens: Optional[int] = None
     max_tool_calls: Optional[int] = None
@@ -1721,13 +1730,20 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
 
 
-class ResponseReasoningItem(OpenAIBaseModel):
-    id: str = Field(default_factory=lambda: f"rs_{random_uuid()}")
-    text: str
-    summary: list = Field(default_factory=list)
-    type: Literal["reasoning"] = "reasoning"
-    encrypted_content: Optional[str] = None
-    status: Optional[Literal["in_progress", "completed", "incomplete"]]
+class InputTokensDetails(OpenAIBaseModel):
+    cached_tokens: int
+
+
+class OutputTokensDetails(OpenAIBaseModel):
+    reasoning_tokens: int
+
+
+class ResponseUsage(OpenAIBaseModel):
+    input_tokens: int
+    input_tokens_details: InputTokensDetails
+    output_tokens: int
+    output_tokens_details: OutputTokensDetails
+    total_tokens: int
 
 
 class ResponsesResponse(OpenAIBaseModel):
@@ -1739,7 +1755,7 @@ class ResponsesResponse(OpenAIBaseModel):
     metadata: Optional[Metadata] = None
     model: str
     object: Literal["response"] = "response"
-    output: list[Union[ResponseOutputMessage, ResponseReasoningItem]]
+    output: list[ResponseOutputItem]
     parallel_tool_calls: bool
     temperature: float
     tool_choice: ToolChoice
@@ -1756,7 +1772,7 @@ class ResponsesResponse(OpenAIBaseModel):
     text: Optional[ResponseTextConfig] = None
     top_logprobs: int
     truncation: Literal["auto", "disabled"]
-    usage: Optional[UsageInfo] = None
+    usage: Optional[ResponseUsage] = None
     user: Optional[str] = None
 
     @classmethod
@@ -1768,7 +1784,7 @@ class ResponsesResponse(OpenAIBaseModel):
         created_time: int,
         output: list[ResponseOutputItem],
         status: ResponseStatus,
-        usage: Optional[UsageInfo] = None,
+        usage: Optional[ResponseUsage] = None,
     ) -> "ResponsesResponse":
         return cls(
             id=request.request_id,

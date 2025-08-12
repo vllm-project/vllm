@@ -3,7 +3,10 @@
 
 import dataclasses
 import gc
+import itertools
 import time
+from collections import defaultdict
+from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
@@ -14,9 +17,9 @@ import torch.nn as nn
 from tqdm import tqdm
 
 import vllm.envs as envs
-from vllm.attention import AttentionType, get_attn_backend
+from vllm.attention import Attention, AttentionType
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.layer import Attention
+from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config, update_config)
@@ -32,6 +35,7 @@ from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
+                                                   supports_eagle3,
                                                    supports_transcription)
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
@@ -50,7 +54,6 @@ from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     make_kv_sharing_fast_prefill_attention_metadata,
-    make_local_attention_virtual_batches,
     reorder_batch_to_split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
@@ -73,8 +76,8 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import (
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from ..sample.logits_processor import LogitsProcessorManager
-from .utils import (MultiModalBudget, bind_kv_cache, gather_mm_placeholders,
-                    initialize_kv_cache_for_kv_sharing,
+from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
+                    gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
 if TYPE_CHECKING:
@@ -127,7 +130,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
-        self.is_multimodal_model = model_config.is_multimodal_model
         self.is_pooling_model = model_config.pooler_config is not None
         self.is_encoder_only_model = False
         self.is_multimodal_raw_input_supported = (
@@ -147,6 +149,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
+        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
+            model_config)
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
@@ -162,8 +166,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
-        self.attn_metadata_builders: list[AttentionMetadataBuilder] = []
-        self.attn_backends: list[type[AttentionBackend]] = []
+        # indexes: [kv_cache_group_id][attn_group]
+        self.attn_groups: list[list[AttentionGroup]] = []
         # self.kv_cache_config: KVCacheConfig
 
         # req_id -> (input_id -> encoder_output)
@@ -328,9 +332,45 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.mm_registry,
             max_model_len=self.max_model_len,
             max_num_reqs=self.max_num_reqs,
-        ) if self.is_multimodal_model else None)
+        ) if self.supports_mm_inputs \
+            else None)
 
         self.reorder_batch_threshold: Optional[int] = None
+
+    def _init_model_kwargs(self, num_tokens: int):
+        model_kwargs = dict[str, Any]()
+        num_reqs = self.input_batch.num_reqs
+
+        pooling_params = self.input_batch.pooling_metadata.pooling_params
+
+        num_pooling_reqs = len(pooling_params)
+
+        if num_pooling_reqs == 0:
+            return model_kwargs
+
+        assert num_pooling_reqs == num_reqs
+
+        token_type_id_requests = dict[int, Any]()
+        for i, param in enumerate(pooling_params):
+            if param.extra_kwargs is not None and \
+            (token_types := param.extra_kwargs.get(
+                "compressed_token_type_ids")) is not None:
+                token_type_id_requests[i] = token_types
+
+        if len(token_type_id_requests) == 0:
+            return model_kwargs
+
+        seq_lens = self.seq_lens[:num_reqs]
+        token_type_ids = []
+
+        for i in range(num_reqs):
+            pos = token_type_id_requests.get(i, seq_lens[i])
+            ids = (torch.arange(seq_lens[i]) >= pos).int()
+            token_type_ids.append(ids)
+
+        model_kwargs["token_type_ids"] = torch.concat(token_type_ids).to(
+            device=self.device)
+        return model_kwargs
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -787,7 +827,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Prepare encoder attention metadata separately
         # (encoder layers are not in KV cache groups)
         if self.is_encoder_only_model:
-            common_attn_metadata, encoder_attn_metadata = \
+
+            per_layer_metadata = \
                 self._build_encoder_only_attn_metadata(
                 scheduler_output)
 
@@ -796,6 +837,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.vllm_config, Attention)
             for layer_name, attn_module in attention_layers.items():
                 if attn_module.attn_type == AttentionType.ENCODER_ONLY:
+                    common_attn_metadata, encoder_attn_metadata =\
+                        per_layer_metadata[layer_name]
                     attn_metadata[layer_name] = encoder_attn_metadata
 
         # Prepare the attention metadata for each KV cache group and make layers
@@ -830,81 +873,51 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 spec_decode_common_attn_metadata is None:
                 spec_decode_common_attn_metadata = common_attn_metadata
 
-            if isinstance(kv_cache_group_spec.kv_cache_spec,
-                          ChunkedLocalAttentionSpec):
-                common_attn_metadata = make_local_attention_virtual_batches(
-                    kv_cache_group_spec.kv_cache_spec.attention_chunk_size,
-                    common_attn_metadata, self.cache_config.block_size)
+            for attn_group in self.attn_groups[kv_cache_group_id]:
+                # Prepare for cascade attention if enabled & beneficial.
+                common_prefix_len = 0
+                builder = attn_group.metadata_builder
+                if self.cascade_attn_enabled:
+                    common_prefix_len = self._compute_cascade_attn_prefix_len(
+                        num_scheduled_tokens,
+                        scheduler_output.
+                        num_common_prefix_blocks[kv_cache_group_id],
+                        kv_cache_group_spec.kv_cache_spec,
+                        builder,
+                    )
 
-            # Prepare for cascade attention if enabled & beneficial.
-            common_prefix_len = 0
-            builder = self.attn_metadata_builders[kv_cache_group_id]
-            if self.cascade_attn_enabled:
-                common_prefix_len = self._compute_cascade_attn_prefix_len(
-                    num_scheduled_tokens,
-                    scheduler_output.
-                    num_common_prefix_blocks[kv_cache_group_id],
-                    kv_cache_group_spec.kv_cache_spec,
-                    builder,
-                )
-
-            attn_metadata_i = (builder.build(
-                common_prefix_len=common_prefix_len,
-                common_attn_metadata=common_attn_metadata,
-            ))
-
-            fast_prefill_metadata = attn_metadata_i
-            if (self.cache_config.kv_sharing_fast_prefill
-                    and self.kv_sharing_fast_prefill_eligible_layers):
-                # Dynamically create a a dataclass type that inherits
-                # from attention metadata type but includes additional
-                # fields logits_indices_padded and num_logits_indices
-                # which are required for prefill truncation
-                fast_prefill_metadata_type = (
-                    make_kv_sharing_fast_prefill_attention_metadata(
-                        metadata_cls=type(attn_metadata_i), ))
-                fast_prefill_metadata = fast_prefill_metadata_type(
-                    **dataclasses.asdict(attn_metadata_i),
-                    logits_indices_padded=logits_indices_padded,
-                    num_logits_indices=logits_indices.size(0),
-                )
-
-            for layer_name in kv_cache_group_spec.layer_names:
-                if (self.cache_config.kv_sharing_fast_prefill and layer_name
-                        in self.kv_sharing_fast_prefill_eligible_layers):
-                    attn_metadata[layer_name] = fast_prefill_metadata
-                    continue
-
-                attn_metadata[layer_name] = attn_metadata_i
-
-            # Hack for now to fix chunked local attention + no hybrid kv cache
-            # manager we can remove this once
-            # https://github.com/vllm-project/vllm/pull/21588
-            # is merged (i.e. properly handle different attention backends for
-            # the same kv_cache_spec)
-            if self.attention_chunk_size is not None \
-                    and self.scheduler_config.disable_hybrid_kv_cache_manager:
-                if not hasattr(self, "local_attention_layers"):
-                    self.local_attention_layers = []
-                    attn_layers = get_layers_from_vllm_config(
-                        self.vllm_config, Attention)
-                    for layer_name, attn_module in attn_layers.items():
-                        if attn_module.use_irope:
-                            self.local_attention_layers.append(layer_name)
-
-                local_attn_metadata_i = (builder.build(
-                    common_prefix_len=0,
-                    common_attn_metadata=make_local_attention_virtual_batches(
-                        self.attention_chunk_size, common_attn_metadata,
-                        self.cache_config.block_size),
+                attn_metadata_i = (builder.build(
+                    common_prefix_len=common_prefix_len,
+                    common_attn_metadata=common_attn_metadata,
                 ))
 
-                for layer_name in self.local_attention_layers:
-                    attn_metadata[layer_name] = local_attn_metadata_i
+                fast_prefill_metadata = attn_metadata_i
+                if (self.cache_config.kv_sharing_fast_prefill
+                        and self.kv_sharing_fast_prefill_eligible_layers):
+                    # Dynamically create a a dataclass type that inherits
+                    # from attention metadata type but includes additional
+                    # fields logits_indices_padded and num_logits_indices
+                    # which are required for prefill truncation
+                    fast_prefill_metadata_type = (
+                        make_kv_sharing_fast_prefill_attention_metadata(
+                            metadata_cls=type(attn_metadata_i), ))
+                    fast_prefill_metadata = fast_prefill_metadata_type(
+                        **dataclasses.asdict(attn_metadata_i),
+                        logits_indices_padded=logits_indices_padded,
+                        num_logits_indices=logits_indices.size(0),
+                    )
+
+                for layer_name in attn_group.layer_names:
+                    if (self.cache_config.kv_sharing_fast_prefill
+                            and layer_name
+                            in self.kv_sharing_fast_prefill_eligible_layers):
+                        attn_metadata[layer_name] = fast_prefill_metadata
+                        continue
+                    attn_metadata[layer_name] = attn_metadata_i
 
         attention_cuda_graphs = all(
-            b.can_run_in_cudagraph(common_attn_metadata)
-            for b in self.attn_metadata_builders)
+            g.metadata_builder.can_run_in_cudagraph(common_attn_metadata)
+            for g in self._attn_group_iterator())
 
         # Hot-Swap lora model
         if self.lora_config:
@@ -1263,7 +1276,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not is_pooling_model(model):
             return []
 
-        return list(model.pooler.get_supported_tasks())
+        supported_tasks = list(model.pooler.get_supported_tasks())
+
+        if (self.scheduler_config.chunked_prefill_enabled
+                and "encode" in supported_tasks):
+            supported_tasks.remove("encode")
+
+            logger.info_once("Chunked prefill is not supported with "
+                             "encode task which using ALL pooling. "
+                             "Please turn off chunked prefill by "
+                             "`--no-enable-chunked-prefill` before using it.")
+
+        return supported_tasks
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks = list[SupportedTask]()
@@ -1507,14 +1531,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
-        if self.is_multimodal_model:
+        if self.supports_mm_inputs:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
             mm_embeds = []
 
-        if self.is_multimodal_model and get_pp_group().is_first_rank:
+        if self.supports_mm_inputs and get_pp_group().is_first_rank:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
@@ -1530,12 +1554,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             input_ids = None
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
             model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
+            model_kwargs = self._init_model_kwargs(num_scheduled_tokens)
         else:
             # For text-only models, we use token ids as input.
             # While it is possible to use embeddings as input just like the
             # multimodal models, it is not desirable for performance since
             # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids[:num_input_tokens]
+            model_kwargs = self._init_model_kwargs(num_input_tokens)
             inputs_embeds = None
             model_mm_kwargs = {}
         if self.uses_mrope:
@@ -1574,6 +1600,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     model_mm_kwargs,
                     device=self.device,
                 ),
+                **model_kwargs,
             )
 
         if self.use_aux_hidden_state_outputs:
@@ -1845,7 +1872,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     target_hidden_states = hidden_states[token_indices]
             mm_embeds = None
-            if self.is_multimodal_model:
+            if self.supports_mm_inputs:
                 mm_embeds = self._gather_mm_embeddings(scheduler_output,
                                                        shift_computed_tokens=1)
 
@@ -1955,8 +1982,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
             if self.use_aux_hidden_state_outputs:
-                self.model.set_aux_hidden_state_layers(
-                    self.model.get_eagle3_aux_hidden_state_layers())
+                if supports_eagle3(self.model):
+                    self.model.set_aux_hidden_state_layers(
+                        self.model.get_eagle3_aux_hidden_state_layers())
+                else:
+                    raise RuntimeError(
+                        "Model does not support EAGLE3 interface but "
+                        "aux_hidden_state_outputs was requested")
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
         logger.info("Model loading took %.4f GiB and %.6f seconds",
@@ -2229,15 +2261,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     block_table[kv_cache_group_id].slot_mapping[:num_tokens],
                     causal=True)
 
-                attn_metadata_i = self.attn_metadata_builders[
-                    kv_cache_group_id].build_for_cudagraph_capture(
-                        common_attn_metadata)
-                for layer_name in kv_cache_group_spec.layer_names:
-                    attn_metadata[layer_name] = attn_metadata_i
+                for attn_group in self.attn_groups[kv_cache_group_id]:
+                    attn_metadata_i = attn_group.metadata_builder\
+                        .build_for_cudagraph_capture(common_attn_metadata)
+                    for layer_name in kv_cache_group_spec.layer_names:
+                        attn_metadata[layer_name] = attn_metadata_i
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
-            if self.is_multimodal_model:
+            model_kwargs = self._init_model_kwargs(num_tokens)
+            if self.supports_mm_inputs:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
                 model_mm_kwargs = self._dummy_mm_kwargs(num_reqs)
@@ -2278,6 +2311,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         model_mm_kwargs,
                         device=self.device,
                     ),
+                    **model_kwargs,
                 )
 
             if self.use_aux_hidden_state_outputs:
@@ -2445,7 +2479,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
-        if self.is_multimodal_model:
+        if self.supports_mm_inputs:
             mm_budget = self.mm_budget
             assert mm_budget is not None
 
@@ -2565,112 +2599,134 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
 
-    def _initialize_single_attn_backend(
-        self, kv_cache_spec: KVCacheSpec, layer_names: list[str]
-    ) -> tuple[AttentionBackend, AttentionMetadataBuilder]:
-        if isinstance(kv_cache_spec, AttentionSpec):
-            attn_backend_i = get_attn_backend(
-                kv_cache_spec.head_size,
-                self.dtype,
-                kv_cache_spec.dtype,
-                kv_cache_spec.block_size,
-                self.model_config.is_attention_free,
-                use_mla=kv_cache_spec.use_mla,
-            )
-            if attn_backend_i is None:
-                error_msg = (f"Error with get_attn_backend: "
-                             f"{kv_cache_spec.head_size=}, "
-                             f"{self.dtype=}, {kv_cache_spec.dtype=}, "
-                             f"{kv_cache_spec.block_size=}, "
-                             f"{self.model_config.is_attention_free=}, "
-                             f"{kv_cache_spec.use_mla=}")
-                logger.error(error_msg)
-                raise NotImplementedError(
-                    "Non-Attention backend is not supported by V1 "
-                    "GPUModelRunner.")
-        elif isinstance(kv_cache_spec, MambaSpec):
-            attn_backend_i = get_mamba_attn_backend(kv_cache_spec.mamba_type)
-        else:
-            raise ValueError(
-                f"Unknown KV cache spec type: {type(kv_cache_spec)}")
-
-        attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
-            kv_cache_spec,
-            layer_names,
-            self.vllm_config,
-            self.device,
-        )
-
-        if self.full_cuda_graph:
-            if attn_metadata_builder_i.attn_cudagraph_support == \
-                AttentionCGSupport.NEVER:
-                raise ValueError(f"Full CUDAGraph not supported for "
-                                 f"{attn_backend_i.__name__}. Turn off "
-                                 f"CompilationConfig.full_cuda_graph or use a "
-                                 f" different attention backend.")
-            if attn_metadata_builder_i.attn_cudagraph_support == \
-                AttentionCGSupport.PURE_DECODE_ONLY:
-                # Limit the max cudagraph size to the max number of
-                # sequences for pure decode only cudagraph backend,
-                # whose max_query_len is 1.
-                self.cudagraph_batch_sizes = [
-                    size for size in self.cudagraph_batch_sizes
-                    if size <= self.scheduler_config.max_num_seqs
-                ]
-        return attn_backend_i, attn_metadata_builder_i
-
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize the attention backends and attention metadata builders.
         """
-        assert len(self.attn_backends) == 0 and len(
-            self.attn_metadata_builders
-        ) == 0, "Attention backends are already initialized"
-        for i, kv_cache_group_spec in enumerate(
-                kv_cache_config.kv_cache_groups):
-            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+        assert len(self.attn_groups) == 0, \
+            "Attention backends are already initialized"
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
 
-            attn_backend_i, attn_metadata_builder_i = (
-                self._initialize_single_attn_backend(
-                    kv_cache_spec, kv_cache_group_spec.layer_names))
-            self.attn_backends.append(attn_backend_i)
-            self.attn_metadata_builders.append(attn_metadata_builder_i)
+        def get_attn_backends_for_layers(
+                layer_names: list[str]
+        ) -> dict[type[AttentionBackend], list[str]]:
+            attn_backends = {}
+            attn_backend_layers = defaultdict(list)
+            # Dedupe based on full class name; this is a bit safer than using
+            # using the class itself as the key because when we create dynamic
+            # attention backend subclasses (e.g. ChunkedLocalAttention) unless
+            # they are cached correctly, there will be different objects per
+            # layer.
+            for layer_name in layer_names:
+                attn_backend = attn_layers[layer_name].get_attn_backend()
+                key = attn_backend.full_cls_name()
+                attn_backends[key] = attn_backend
+                attn_backend_layers[key].append(layer_name)
+            return {
+                attn_backends[k]: v
+                for k, v in attn_backend_layers.items()
+            }
+
+        def create_attn_groups(
+            attn_backends_map: dict[AttentionBackend, list[str]],
+            kv_cache_spec: KVCacheSpec,
+        ) -> list[AttentionGroup]:
+            attn_groups: list[AttentionGroup] = []
+            for attn_backend, layer_names in attn_backends_map.items():
+                attn_metadata_builder_i = attn_backend.get_builder_cls()(
+                    kv_cache_spec,
+                    layer_names,
+                    self.vllm_config,
+                    self.device,
+                )
+                attn_group = AttentionGroup(attn_backend,
+                                            attn_metadata_builder_i,
+                                            layer_names)
+                attn_groups.append(attn_group)
+
+                if self.full_cuda_graph:
+                    if attn_metadata_builder_i.attn_cudagraph_support == \
+                        AttentionCGSupport.NEVER:
+                        raise ValueError(
+                            f"Full CUDAGraph not supported for "
+                            f"{attn_backend.__name__}. Turn off "
+                            f"CompilationConfig.full_cuda_graph or use a "
+                            f" different attention backend.")
+                    if attn_metadata_builder_i.attn_cudagraph_support == \
+                        AttentionCGSupport.PURE_DECODE_ONLY:
+                        # Limit the max cudagraph size to the max number of
+                        # sequences for pure decode only cudagraph backend,
+                        # whose max_query_len is 1.
+                        self.cudagraph_batch_sizes = [
+                            size for size in self.cudagraph_batch_sizes
+                            if size <= self.scheduler_config.max_num_seqs
+                        ]
+
+            return attn_groups
+
+        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+            if isinstance(kv_cache_spec, AttentionSpec):
+                attn_backends = get_attn_backends_for_layers(
+                    kv_cache_group_spec.layer_names)
+            # TODO(lucas): move `get_mamba_attn_backend` into the mamba
+            # layers like above
+            elif isinstance(kv_cache_spec, MambaSpec):
+                attn_backends = {
+                    get_mamba_attn_backend(kv_cache_spec.mamba_type):
+                    kv_cache_group_spec.layer_names
+                }
+            else:
+                raise ValueError(
+                    f"Unknown KV cache spec type: {type(kv_cache_spec)}")
+
+            self.attn_groups.append(
+                create_attn_groups(attn_backends, kv_cache_spec))
 
         # Calculate reorder batch threshold (if neeeded)
         self.calculate_reorder_batch_threshold()
 
-        if len(self.attn_backends) > 0:
+        if len(self.attn_groups) > 0:
             return
 
         # Check if model is encoder-only
         block_size = self.vllm_config.cache_config.block_size
         use_mla = self.vllm_config.model_config.use_mla
-        attn_specs = list[AttentionSpec]()
-        attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
-        for attn_module in attn_layers.values():
+        attn_specs: dict[AttentionSpec, list[str]] = defaultdict(list)
+        for layer_name, attn_module in attn_layers.items():
 
             if attn_module.attn_type == AttentionType.ENCODER_ONLY:
-                assert attn_module.sliding_window is None, "Sliding "
-                "window attention is not supported for encoder-only models"
+                if attn_module.sliding_window is None:
+                    attn_spec: AttentionSpec = FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        use_mla=use_mla)
+                else:
+                    attn_spec = SlidingWindowSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        sliding_window=attn_module.sliding_window,
+                        use_mla=use_mla)
+                attn_specs[attn_spec].append(layer_name)
 
-                attn_specs.append(
-                    FullAttentionSpec(block_size=block_size,
-                                      num_kv_heads=attn_module.num_kv_heads,
-                                      head_size=attn_module.head_size,
-                                      dtype=self.kv_cache_dtype,
-                                      use_mla=use_mla))
             else:
                 raise ValueError("Expected only encoder-only layers")
 
         if len(attn_specs) > 0:
-            assert len(attn_specs) == len(attn_layers), \
-                "All or none of the layers are expected to be encoder-only"
+            total_layers = 0
+            for attn_spec, layer_names in attn_specs.items():
 
-            attn_backend, attn_metadata_builder = (
-                self._initialize_single_attn_backend(attn_specs[0],
-                                                     attn_layers.keys()))
-            self.attn_backends.append(attn_backend)
-            self.attn_metadata_builders.append(attn_metadata_builder)
+                attn_backends = get_attn_backends_for_layers(layer_names)
+                total_layers += len(layer_names)
+
+                self.attn_groups.append(
+                    create_attn_groups(attn_backends, attn_spec))
+            assert total_layers == len(attn_layers), \
+                "All or none of the layers are expected to be encoder-only"
             self.is_encoder_only_model = True
 
     def calculate_reorder_batch_threshold(self) -> None:
@@ -2678,7 +2734,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Check that if any backends reorder batches; that the reordering
         is compatible (e.g., decode threshold is the same)
         """
-        for attn_metadata_builder_i in self.attn_metadata_builders:
+        for group in self._attn_group_iterator():
+            attn_metadata_builder_i = group.metadata_builder
+
             # check that if any backends reorder batches; that the reordering
             # is compatible (e.g., decode threshold is the same)
             reorder_batch_threshold_i = (
@@ -2752,6 +2810,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )), "Some layers are not correctly initialized"
         return kv_cache_raw_tensors
 
+    def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
+        return itertools.chain.from_iterable(self.attn_groups)
+
+    def _kv_cache_spec_attn_group_iterator(
+            self) -> Iterator[tuple[KVCacheSpec, AttentionGroup]]:
+        if not self.kv_cache_config.kv_cache_groups:
+            return
+        for kv_cache_spec_id, attn_groups in enumerate(self.attn_groups):
+            for attn_group in attn_groups:
+                yield self.kv_cache_config.kv_cache_groups[
+                    kv_cache_spec_id].kv_cache_spec, attn_group
+
     def _reshape_kv_cache_tensors(
         self,
         kv_cache_config: KVCacheConfig,
@@ -2770,23 +2840,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         kv_caches: dict[str, torch.Tensor] = {}
         has_attn, has_mamba = False, False
-        for i, kv_cache_group_spec in enumerate(
-                kv_cache_config.kv_cache_groups):
-            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-            for layer_name in kv_cache_group_spec.layer_names:
+        for kv_cache_spec, group in self._kv_cache_spec_attn_group_iterator():
+            attn_backend = group.backend
+            for layer_name in group.layer_names:
                 raw_tensor = kv_cache_raw_tensors[layer_name]
                 assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
                 num_blocks = (raw_tensor.numel() //
                               kv_cache_spec.page_size_bytes)
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
-                    kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
+                    kv_cache_shape = attn_backend.get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
                     try:
-                        kv_cache_stride_order = self.attn_backends[
-                            i].get_kv_cache_stride_order()
+                        kv_cache_stride_order = \
+                            attn_backend.get_kv_cache_stride_order()
                         assert len(kv_cache_stride_order) == len(
                             kv_cache_shape)
                     except (AttributeError, NotImplementedError):
@@ -2850,15 +2919,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_cache_raw_tensors: The KV cache buffer of each layer.
         """
 
-        for i, kv_cache_group_spec in enumerate(
-                kv_cache_config.kv_cache_groups):
-            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-            for layer_name in kv_cache_group_spec.layer_names:
+        for kv_cache_spec, group in self._kv_cache_spec_attn_group_iterator():
+            for layer_name in group.layer_names:
                 raw_tensor = kv_cache_raw_tensors[layer_name]
                 num_blocks = (raw_tensor.numel() //
                               kv_cache_spec.page_size_bytes)
                 if isinstance(kv_cache_spec, AttentionSpec):
-                    kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
+
+                    kv_cache_shape = group.backend.get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                     if kv_cache_shape[0] != num_blocks or kv_cache_shape[
@@ -2893,6 +2961,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.shared_kv_cache_layers,
                 kv_cache_config.kv_cache_groups,
                 kv_caches,
+                self.attn_groups,
             )
             attn_layers = get_layers_from_vllm_config(self.vllm_config,
                                                       Attention)
@@ -2958,9 +3027,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 continue
 
             # TODO: Support other attention modules, e.g., cross-attention
+            # TODO(lucas): move the attention specs into the model layers like
+            # the attention backends
             if attn_module.attn_type == AttentionType.DECODER:
-                use_local_attention = (self.attention_chunk_size is not None
-                                       and attn_module.use_irope)
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
@@ -2969,10 +3038,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
                         use_mla=use_mla)
-                    assert not use_local_attention, (
-                        "attention module can not be with ",
-                        "both local attention and sliding window")
-                elif use_local_attention:
+                elif self.attention_chunk_size is not None \
+                        and isinstance(attn_module, ChunkedLocalAttention):
                     kv_cache_spec[layer_name] = ChunkedLocalAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
@@ -3024,7 +3091,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _build_encoder_only_attn_metadata(
             self, scheduler_output: "SchedulerOutput") -> \
-                tuple[CommonAttentionMetadata, Any]:
+                dict[str, tuple[CommonAttentionMetadata, Any]]:
         """Prepare encoder attention metadata for encoder-only models.
 
         Args:
@@ -3041,10 +3108,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         max_num_scheduled_tokens = max(tokens)
 
-        # Use the first attention metadata builder
-        # to create encoder attention metadata
-        builder = self.attn_metadata_builders[0]
-
         dummy_block_table = torch.zeros((num_reqs, 1),
                                         dtype=torch.int32,
                                         device=self.device)
@@ -3052,22 +3115,38 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                          dtype=torch.int32,
                                          device=self.device)
 
-        common_metadata = CommonAttentionMetadata(
-            query_start_loc=self.query_start_loc[:num_reqs + 1],
-            query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
-            seq_lens=self.seq_lens[:num_reqs],
-            seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
-            num_computed_tokens_cpu=self.input_batch.
-            num_computed_tokens_cpu_tensor[:num_reqs],
-            num_reqs=num_reqs,
-            num_actual_tokens=total_num_scheduled_tokens,
-            max_query_len=max_num_scheduled_tokens,
-            block_table_tensor=dummy_block_table,
-            slot_mapping=dummy_slot_mapping,
-            causal=False,
-        )
+        group_metadata = dict[str, tuple[CommonAttentionMetadata, Any]]()
 
-        return common_metadata, builder.build(
-            common_prefix_len=0,  # No cascade for encoder
-            common_attn_metadata=common_metadata,
-        )
+        for attn_group_list in self.attn_groups:
+
+            assert len(attn_group_list) == 1
+            attn_group = attn_group_list[0]
+
+            # Use the first attention metadata builder
+            # to create encoder attention metadata
+            builder = attn_group.metadata_builder
+
+            common_metadata = CommonAttentionMetadata(
+                query_start_loc=self.query_start_loc[:num_reqs + 1],
+                query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
+                seq_lens=self.seq_lens[:num_reqs],
+                seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
+                num_computed_tokens_cpu=self.input_batch.
+                num_computed_tokens_cpu_tensor[:num_reqs],
+                num_reqs=num_reqs,
+                num_actual_tokens=total_num_scheduled_tokens,
+                max_query_len=max_num_scheduled_tokens,
+                block_table_tensor=dummy_block_table,
+                slot_mapping=dummy_slot_mapping,
+                causal=False,
+            )
+
+            metadata = builder.build(
+                common_prefix_len=0,  # No cascade for encoder
+                common_attn_metadata=common_metadata,
+            )
+
+            for layer_name in attn_group.layer_names:
+                group_metadata[layer_name] = (common_metadata, metadata)
+
+        return group_metadata

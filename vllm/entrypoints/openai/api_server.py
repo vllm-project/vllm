@@ -8,6 +8,7 @@ import importlib
 import inspect
 import json
 import multiprocessing
+import multiprocessing.forkserver as forkserver
 import os
 import signal
 import socket
@@ -61,7 +62,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DetokenizeRequest,
                                               DetokenizeResponse,
                                               EmbeddingRequest,
-                                              EmbeddingResponse, ErrorResponse,
+                                              EmbeddingResponse, ErrorInfo,
+                                              ErrorResponse,
                                               LoadLoRAAdapterRequest,
                                               PoolingRequest, PoolingResponse,
                                               RerankRequest, RerankResponse,
@@ -92,6 +94,8 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription, OpenAIServingTranslation)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.entrypoints.tool_server import (DemoToolServer, MCPToolServer,
+                                          ToolServer)
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     log_non_default_args, with_cancellation)
 from vllm.logger import init_logger
@@ -153,6 +157,15 @@ async def build_async_engine_client(
     disable_frontend_multiprocessing: Optional[bool] = None,
     client_config: Optional[dict[str, Any]] = None,
 ) -> AsyncIterator[EngineClient]:
+
+    if os.getenv("VLLM_WORKER_MULTIPROC_METHOD") == "forkserver":
+        # The executor is expected to be mp.
+        # Pre-import heavy modules in the forkserver process
+        logger.debug("Setup forkserver with pre-imports")
+        multiprocessing.set_start_method('forkserver')
+        multiprocessing.set_forkserver_preload(["vllm.v1.engine.async_llm"])
+        forkserver.ensure_running()
+        logger.debug("Forkserver setup complete!")
 
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
@@ -495,7 +508,7 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
     elif isinstance(generator, TokenizeResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -529,7 +542,7 @@ async def detokenize(request: DetokenizeRequest, raw_request: Request):
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
     elif isinstance(generator, DetokenizeResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -545,7 +558,7 @@ def maybe_register_tokenizer_info_endpoint(args):
             """Get comprehensive tokenizer information."""
             result = await tokenization(raw_request).get_tokenizer_info()
             return JSONResponse(content=result.model_dump(),
-                                status_code=result.code if isinstance(
+                                status_code=result.error.code if isinstance(
                                     result, ErrorResponse) else 200)
 
 
@@ -592,7 +605,7 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
     elif isinstance(generator, ResponsesResponse):
         return JSONResponse(content=generator.model_dump())
     return StreamingResponse(content=generator, media_type="text/event-stream")
@@ -609,7 +622,7 @@ async def retrieve_responses(response_id: str, raw_request: Request):
 
     if isinstance(response, ErrorResponse):
         return JSONResponse(content=response.model_dump(),
-                            status_code=response.code)
+                            status_code=response.error.code)
     return JSONResponse(content=response.model_dump())
 
 
@@ -624,7 +637,7 @@ async def cancel_responses(response_id: str, raw_request: Request):
 
     if isinstance(response, ErrorResponse):
         return JSONResponse(content=response.model_dump(),
-                            status_code=response.code)
+                            status_code=response.error.code)
     return JSONResponse(content=response.model_dump())
 
 
@@ -659,7 +672,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
 
     elif isinstance(generator, ChatCompletionResponse):
         return JSONResponse(content=generator.model_dump())
@@ -704,7 +717,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
     elif isinstance(generator, CompletionResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -733,7 +746,7 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
     elif isinstance(generator, EmbeddingResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -761,7 +774,7 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
     generator = await handler.create_pooling(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
     elif isinstance(generator, PoolingResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -781,7 +794,7 @@ async def create_classify(request: ClassificationRequest,
     generator = await handler.create_classify(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
 
     elif isinstance(generator, ClassificationResponse):
         return JSONResponse(content=generator.model_dump())
@@ -810,7 +823,7 @@ async def create_score(request: ScoreRequest, raw_request: Request):
     generator = await handler.create_score(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
     elif isinstance(generator, ScoreResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -870,7 +883,7 @@ async def create_transcriptions(raw_request: Request,
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
 
     elif isinstance(generator, TranscriptionResponse):
         return JSONResponse(content=generator.model_dump())
@@ -911,7 +924,7 @@ async def create_translations(request: Annotated[TranslationRequest,
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
 
     elif isinstance(generator, TranslationResponse):
         return JSONResponse(content=generator.model_dump())
@@ -939,7 +952,7 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
     generator = await handler.do_rerank(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
     elif isinstance(generator, RerankResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -1164,7 +1177,7 @@ async def invocations(raw_request: Request):
     msg = ("Cannot find suitable handler for request. "
            f"Expected one of: {type_names}")
     res = base(raw_request).create_error_response(message=msg)
-    return JSONResponse(content=res.model_dump(), status_code=res.code)
+    return JSONResponse(content=res.model_dump(), status_code=res.error.code)
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
@@ -1200,7 +1213,7 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         response = await handler.load_lora_adapter(request)
         if isinstance(response, ErrorResponse):
             return JSONResponse(content=response.model_dump(),
-                                status_code=response.code)
+                                status_code=response.error.code)
 
         return Response(status_code=200, content=response)
 
@@ -1212,7 +1225,7 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         response = await handler.unload_lora_adapter(request)
         if isinstance(response, ErrorResponse):
             return JSONResponse(content=response.model_dump(),
-                                status_code=response.code)
+                                status_code=response.error.code)
 
         return Response(status_code=200, content=response)
 
@@ -1491,9 +1504,10 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException):
-        err = ErrorResponse(message=exc.detail,
+        err = ErrorResponse(
+            error=ErrorInfo(message=exc.detail,
                             type=HTTPStatus(exc.status_code).phrase,
-                            code=exc.status_code)
+                            code=exc.status_code))
         return JSONResponse(err.model_dump(), status_code=exc.status_code)
 
     @app.exception_handler(RequestValidationError)
@@ -1507,9 +1521,9 @@ def build_app(args: Namespace) -> FastAPI:
         else:
             message = exc_str
 
-        err = ErrorResponse(message=message,
-                            type=HTTPStatus.BAD_REQUEST.phrase,
-                            code=HTTPStatus.BAD_REQUEST)
+        err = ErrorResponse(error=ErrorInfo(message=message,
+                                            type=HTTPStatus.BAD_REQUEST.phrase,
+                                            code=HTTPStatus.BAD_REQUEST))
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
 
@@ -1620,6 +1634,14 @@ async def init_app_state(
                     "This discrepancy may lead to performance degradation.",
                     resolved_chat_template, args.model)
 
+    if args.tool_server == "demo":
+        tool_server: Optional[ToolServer] = DemoToolServer()
+    elif args.tool_server:
+        tool_server = MCPToolServer()
+        await tool_server.add_tool_server(args.tool_server)
+    else:
+        tool_server = None
+
     # Merge default_mm_loras into the static lora_modules
     default_mm_loras = (vllm_config.lora_config.default_mm_loras
                         if vllm_config.lora_config is not None else {})
@@ -1654,6 +1676,7 @@ async def init_app_state(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
+        tool_server=tool_server,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
@@ -1754,6 +1777,12 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     return sock
 
 
+def create_server_unix_socket(path: str) -> socket.socket:
+    sock = socket.socket(family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+    sock.bind(path)
+    return sock
+
+
 def validate_api_server_args(args):
     valid_tool_parses = ToolParserManager.tool_parsers.keys()
     if args.enable_auto_tool_choice \
@@ -1784,8 +1813,11 @@ def setup_server(args):
     # workaround to make sure that we bind the port before the engine is set up.
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
-    sock_addr = (args.host or "", args.port)
-    sock = create_server_socket(sock_addr)
+    if args.uds:
+        sock = create_server_unix_socket(args.uds)
+    else:
+        sock_addr = (args.host or "", args.port)
+        sock = create_server_socket(sock_addr)
 
     # workaround to avoid footguns where uvicorn drops requests with too
     # many concurrent requests active
@@ -1797,12 +1829,14 @@ def setup_server(args):
 
     signal.signal(signal.SIGTERM, signal_handler)
 
-    addr, port = sock_addr
-    is_ssl = args.ssl_keyfile and args.ssl_certfile
-    host_part = f"[{addr}]" if is_valid_ipv6_address(
-        addr) else addr or "0.0.0.0"
-    listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
-
+    if args.uds:
+        listen_address = f"unix:{args.uds}"
+    else:
+        addr, port = sock_addr
+        is_ssl = args.ssl_keyfile and args.ssl_certfile
+        host_part = f"[{addr}]" if is_valid_ipv6_address(
+            addr) else addr or "0.0.0.0"
+        listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
     return listen_address, sock
 
 

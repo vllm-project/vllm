@@ -18,7 +18,6 @@ from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
 from vllm.config import VllmConfig
 from vllm.inputs import InputProcessingContext
-from vllm.jsontree import json_map_leaves
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -34,6 +33,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.jsontree import json_map_leaves
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
