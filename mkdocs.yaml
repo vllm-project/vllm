@@ -34,6 +34,8 @@ theme:
     - content.action.edit
     - content.code.copy
     - content.tabs.link
+    - navigation.instant
+    - navigation.instant.progress
     - navigation.tracking
     - navigation.tabs
     - navigation.tabs.sticky
