@@ -684,7 +684,7 @@ setup(
                   "mistral_common[audio]"],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         # FlashInfer should be updated together with the Dockerfile
-        "flashinfer": ["flashinfer-python==0.2.10"],
+        "flashinfer": ["flashinfer-python==0.2.11"],
     },
     cmdclass=cmdclass,
     package_data=package_data,
