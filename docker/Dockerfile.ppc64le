@@ -223,7 +223,7 @@ ARG GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 # this step installs vllm and populates uv cache
 # with all the transitive dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
-    dnf install llvm15 llvm15-devel -y && \
+    dnf install llvm15 llvm15-devel protobuf-lite-devel -y && \
     source /opt/rh/gcc-toolset-13/enable && \
     git clone https://github.com/huggingface/xet-core.git && cd xet-core/hf_xet/ && \
     uv pip install maturin && \
