@@ -17,12 +17,19 @@ from ...transformers_utils.configs import KimiAudioConfig
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs)
+from vllm.multimodal.inputs import (
+    MultiModalDataDict,
+    MultiModalFieldConfig,
+    MultiModalKwargs,
+)
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
-from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate, PromptUpdateDetails)
+from vllm.multimodal.processing import (
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from .moonaudio import MoonshotKimiaModel
@@ -34,15 +41,14 @@ from packaging import version
 
 assert version.parse(transformers.__version__) >= version.parse("4.34.1")
 
-if version.parse(transformers.__version__) \
-    >= version.parse("4.35.0"):
+if version.parse(transformers.__version__) >= version.parse("4.35.0"):
     from transformers.utils import is_flash_attn_2_available as is_flash_attn_available
 else:
     from transformers.utils import is_flash_attn_available
 
 if is_flash_attn_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
-    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
+    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
 else:
     raise RuntimeError("flash attention must be installed")
 
@@ -51,7 +57,9 @@ from vllm.sequence import IntermediateTensors
 from .utils import maybe_prefix
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
+    DEFAULT_VOCAB_PADDING_SIZE,
+    ParallelLMHead,
+)
 
 
 class KimiAudioMultiModalProjector(nn.Module):
@@ -81,69 +89,49 @@ class KimiAudioInputs(TypedDict):
 
     whisper_input_feature: list[torch.Tensor]
     """Shape: `(num_audios, seq_len, feature_dim)`"""
-    
+
 
 class KimiAudioProcessingInfo(BaseProcessingInfo):
-    
+
     def get_hf_config(self) -> KimiAudioConfig:
         return self.ctx.get_hf_config(KimiAudioConfig)
-    
+
     def get_hf_processor(self, **kwargs: object) -> KimiAudioProcessor:
         return self.ctx.get_hf_processor(KimiAudioProcessor, **kwargs)
-        
+
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
 
-    def get_max_audio_array_len(self) -> int:
+    def get_max_audio_len(self) -> int:
         processor: KimiAudioProcessor = self.get_hf_processor()
-        return processor.get_max_audio_array_len()
-    
+        audio_tokenizer = processor.audio_tokenizer
+        sampling_rate = getattr(audio_tokenizer, "sampling_rate", 16000)
+        chunk_length = getattr(audio_tokenizer, "chunk_length", 30)
+        return int(sampling_rate * chunk_length)
+
 
 class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo]):
-    
+
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         return ""
-    
+
     def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
-        target_length = self.info.get_max_audio_array_len()
+        target_length = self.info.get_max_audio_len()
         return {
-            "audio":
-            self._get_dummy_audios(length=target_length, num_audios=num_audios)
+            "audio": self._get_dummy_audios(length=target_length, num_audios=num_audios)
         }
 
 
 class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingInfo]):
 
-    @property
-    def whisper_processor(self, **kwargs):
-        if self._whisper_processor is None:
-            self._whisper_processor = WhisperEncoder()
-        return self._whisper_processor
-    
     def _get_data_parser(self) -> MultiModalDataParser:
         return MultiModalDataParser(target_sr=16000)
-    
-    def _process_audio_to_features(
-        self,
-        audio_data: np.ndarray,
-        sampling_rate: int = 16000
-    ) -> torch.Tensor:
-        # TODO(HelloWorldU) use whisper encoder to 
-        # blend audio and text features in processer
-        inputs = self.whisper_processor(
-            audio_data,
-            sampling_rate=sampling_rate,
-            return_tensors="pt"
-        )
-        
-        mel_features = inputs.input_features
-        return mel_features
-    
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -163,22 +151,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
             mm_kwargs=mm_kwargs,
             tok_kwargs=tok_kwargs,
         )
-    
-    def _create_continuous_mask(
-        self, 
-        input_ids: torch.Tensor,
-        config: KimiAudioConfig
-    ) -> torch.Tensor:
-        mask = torch.zeros_like(input_ids, dtype=torch.bool)
-        
-        media_begin_indices = (input_ids == config.kimia_media_begin).nonzero(as_tuple=True)[0]
-        media_end_indices = (input_ids == config.kimia_media_end).nonzero(as_tuple=True)[0]
-        
-        for begin, end in zip(media_begin_indices, media_end_indices):
-            mask[begin+1:end] = True
-        
-        return mask.unsqueeze(0)
-    
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -195,7 +168,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
             is_continuous_mask=MultiModalFieldConfig.batched("audio"),
             text_input_ids=MultiModalFieldConfig.batched("audio"),
         )
-    
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -207,25 +180,25 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
 
         media_begin_token = tokenizer.decode([vocab.kimia_media_begin])
         media_end_token = tokenizer.decode([vocab.kimia_media_end])
-        
+
         def get_replacement_kimi_audio(item_idx: int):
             whisper_features = out_mm_kwargs.get("whisper_input_feature", [])
             if item_idx < len(whisper_features):
                 feature_len = whisper_features[item_idx].shape[1]
             else:
-                feature_len = 100
-            
+                feature_len = 30
+
             replacement_ids = (
-                [vocab.kimia_media_begin] + 
-                [vocab.kimia_media_pad] * feature_len + 
-                [vocab.kimia_media_end]
+                [vocab.kimia_media_begin]
+                + [vocab.kimia_media_pad] * feature_len
+                + [vocab.kimia_media_end]
             )
-            
+
             return PromptUpdateDetails.select_token_id(
                 replacement_ids,
                 embed_token_id=vocab.kimia_media_pad,
             )
-        
+
         return [
             PromptReplacement(
                 modality="audio",
@@ -238,18 +211,17 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
 @MULTIMODAL_REGISTRY.register_processor(
     KimiAudioMultiModalProcessor,
     info=KimiAudioProcessingInfo,
-    dummy_inputs=KimiAudioDummyInputsBuilder
+    dummy_inputs=KimiAudioDummyInputsBuilder,
 )
-class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                        SupportsPP):
-    
+class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("audio"):
             return "<|im_media_begin|><|im_media_end|>"
-        
+
         raise ValueError("Only audio modality is supported")
-    
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         model_config = vllm_config.model_config
@@ -260,7 +232,7 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.kimia_text_eos = config.kimia_text_eos_token_id
         self.kimia_text_blank = config.kimia_text_blank_token_id
         self.kimia_audio_eos = config.kimia_audio_eos_token_id
-        
+
         mel_batch_size = getattr(config, "mel_batch_size", 20)
         encoder_path = os.path.join(model_config.model, "whisper-large-v3")
         self.audio_tower = WhisperEncoder(
@@ -269,63 +241,74 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         )
         self.multi_modal_projector = KimiAudioMultiModalProjector(self.config)
         self.language_model = MoonshotKimiaModel(
-            config=config,
+            vllm_config=config,
             prefix=maybe_prefix(prefix, "multi_modal_model"),
         )
-        
+
         # text only
         self.lm_head = ParallelLMHead(
             self.config.vocab_size,
             self.config.hidden_size,
             org_num_embeddings=self.config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE)
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+        )
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(self.config.vocab_size,
-                                                self.config.vocab_size, logit_scale)
-        
+        self.logits_processor = LogitsProcessor(
+            self.config.vocab_size, self.config.vocab_size, logit_scale
+        )
+
         self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors)
-    
-    def _validate_and_reshape_mm_tensor(self, mm_input: object, name: str) -> torch.Tensor:
+            self.language_model.make_empty_intermediate_tensors
+        )
+
+    def _validate_and_reshape_mm_tensor(
+        self, mm_input: object, name: str
+    ) -> torch.Tensor:
         if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(f"Incorrect type of {name}. Got type: {type(mm_input)}")
-        
+            raise ValueError(
+                f"Incorrect type of {name}. \
+                             Got type: {type(mm_input)}"
+            )
+
         if isinstance(mm_input, torch.Tensor):
             return torch.concat(list(mm_input))
         else:
             return torch.concat(mm_input)
-    
-    def _parse_and_validate_audio_input(self, **kwargs: object) -> Optional[KimiAudioInputs]:
-        audio_input_ids = kwargs.pop('audio_input_ids', None)
+
+    def _parse_and_validate_audio_input(
+        self, **kwargs: object
+    ) -> Optional[KimiAudioInputs]:
+        audio_input_ids = kwargs.pop("audio_input_ids", None)
         # text_input_ids = kwargs.pop('text_input_ids', None)
-        is_continuous_mask = kwargs.pop('is_continuous_mask', None)
-        whisper_input_feature = kwargs.pop('whisper_input_feature', None)
+        is_continuous_mask = kwargs.pop("is_continuous_mask", None)
+        whisper_input_feature = kwargs.pop("whisper_input_feature", None)
 
         if whisper_input_feature is None:
             return None
-        
+
         if is_continuous_mask is not None:
             is_continuous_mask = self._validate_and_reshape_mm_tensor(
-                is_continuous_mask, 'is_continuous_mask'
+                is_continuous_mask, "is_continuous_mask"
             )
         else:
             return None
-        
+
         return KimiAudioInputs(
             audio_input_ids=audio_input_ids,
             # text_input_ids= text_input_ids,
             is_continuous_mask=is_continuous_mask,
             whisper_input_feature=whisper_input_feature,
         )
-    
+
     def _process_audio_input(self, audio_input: KimiAudioInputs) -> torch.Tensor:
         audio_input_ids = audio_input["audio_input_ids"]
         # text_input_ids = audio_input["text_input_ids"]
         whisper_input_feature = audio_input["whisper_input_feature"]
         is_continuous_mask = audio_input["is_continuous_mask"]
-        is_continuous_mask = torch.tensor([is_continuous_mask],
-                                          dtype=torch.bool)
-        whisper_input_feature = self.audio_tower.tokenize_waveform(whisper_input_feature)
+        is_continuous_mask = torch.tensor([is_continuous_mask], dtype=torch.bool)
+        whisper_input_feature = self.audio_tower.tokenize_waveform(
+            whisper_input_feature
+        )
         whisper_input_feature = whisper_input_feature.reshape(
             whisper_input_feature.shape[0],
             int(whisper_input_feature.shape[1] // 4),
@@ -347,9 +330,10 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal,
             whisper_dtype = whisper_input_feature[0].dtype
             projector_device = self.multi_modal_projector.layers[0].weight.device
             expanded_whisper = torch.zeros(
-                audio_emb.shape[1], whisper_input_dim,
+                audio_emb.shape[1],
+                whisper_input_dim,
                 dtype=whisper_dtype,
-                device=projector_device
+                device=projector_device,
             )
             for (seg_idx, start_idx), (_, end_idx) in zip(
                 media_start_idx, media_end_idx
@@ -357,9 +341,9 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal,
                 feat_len = end_idx - (start_idx + 1)
                 whisper_input_feature_i = whisper_input_feature[seg_idx].squeeze(0)
                 assert feat_len == is_continuous_mask[seg_idx].sum()
-                expanded_whisper[start_idx + 1 : end_idx, :] = (
-                    whisper_input_feature_i[:feat_len, :]
-                )
+                expanded_whisper[start_idx + 1 : end_idx, :] = whisper_input_feature_i[
+                    :feat_len, :
+                ]
 
             expanded_whisper = expanded_whisper.unsqueeze(0)
             whisper_emb = self.multi_modal_projector(expanded_whisper)
@@ -370,33 +354,27 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal,
             encoder_input_addwith_discrete_token = (
                 audio_emb + whisper_emb
             ) * torch.sqrt(
-                torch.tensor(
-                    2.0, dtype=whisper_emb.dtype, 
-                    device=whisper_emb.device
-                )
+                torch.tensor(2.0, dtype=whisper_emb.dtype, device=whisper_emb.device)
             )
             audio_emb = (
                 audio_emb * (~is_continuous_mask[:, :, None])
-                + encoder_input_addwith_discrete_token
-                * is_continuous_mask[:, :, None]
+                + encoder_input_addwith_discrete_token * is_continuous_mask[:, :, None]
             )
         return audio_emb
-    
+
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
-    
+
     def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
             return None
-        
+
         processed_features = self._process_audio_input(audio_input)
         return processed_features
-    
+
     def _merge_multimodal_embeddings(
-        self, 
-        inputs_embeds: torch.Tensor,
-        audio_emb: MultiModalEmbeddings
+        self, inputs_embeds: torch.Tensor, audio_emb: MultiModalEmbeddings
     ) -> torch.Tensor:
         inputs_embeds += audio_emb
         return inputs_embeds
@@ -407,16 +385,16 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        
-        if multimodal_embeddings is not None and \
-            len(multimodal_embeddings) != 0:
+
+        if multimodal_embeddings is not None and len(multimodal_embeddings) != 0:
             # customized merge
             inputs_embeds = self._merge_multimodal_embeddings(
-                inputs_embeds, multimodal_embeddings,
+                inputs_embeds,
+                multimodal_embeddings,
             )
-        
+
         return inputs_embeds
-    
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -432,17 +410,16 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                        multimodal_embeddings)
+            inputs_embeds = self.get_input_embeddings(input_ids, multimodal_embeddings)
             input_ids = None
-        
+
         hidden_states = self.language_model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
-    
+
         return hidden_states
 
     def compute_logits(
@@ -453,12 +430,13 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[torch.Tensor]:
         # TODO(HelloWorldU): Since currently only text logits
         # are supported, we can add multimodal logits in the future.
-        text_logits = self.logits_processor(self.lm_head, hidden_states,
-                                            sampling_metadata, **kwargs)
+        text_logits = self.logits_processor(
+            self.lm_head, hidden_states, sampling_metadata, **kwargs
+        )
 
         # return text_logits to vLLM; vLLM sampler will sample from text_logits
         return text_logits
-    
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
