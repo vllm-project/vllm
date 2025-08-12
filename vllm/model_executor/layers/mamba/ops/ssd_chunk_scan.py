@@ -415,13 +415,13 @@ def _chunk_scan_fwd(
     dA_cumsum,
     C,
     states,
+    out,
     seq_idx,
     D=None,
     z=None,
     chunk_indices=None,
     chunk_offsets=None,
     initial_states=None,
-    out=None,
 ):
     assert seq_idx is not None, "this implementation requires seq_idx"
 

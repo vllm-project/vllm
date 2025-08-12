@@ -31,6 +31,7 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    B,
                                    C,
                                    chunk_size,
+                                   out,
                                    D=None,
                                    z=None,
                                    dt_bias=None,
@@ -41,8 +42,7 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    cu_seqlens=None,
                                    dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
-                                   state_dtype=None,
-                                   out=None):
+                                   state_dtype=None):
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
     seqlen, nheads, headdim = x.shape
     _, ngroups, dstate = B.shape
@@ -147,13 +147,13 @@ def _mamba_chunk_scan_combined_fwd(x,
         dA_cumsum,
         C,
         states,
+        out,  # in-place update
+        seq_idx,
         D=D,
         z=z,
-        seq_idx=seq_idx,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
         initial_states=initial_states,
-        out=out,  # in-place update
     )
 
     varlen_states = chunk_state_varlen(
@@ -178,6 +178,7 @@ def mamba_chunk_scan_combined_varlen(
         chunk_size,
         cu_seqlens,
         seq_idx,
+        out,
         D=None,
         z=None,
         dt_bias=None,
@@ -186,7 +187,6 @@ def mamba_chunk_scan_combined_varlen(
         chunk_offsets=None,
         dt_softplus=False,
         dt_limit=(0.0, float("inf")),
-        out=None,
         state_dtype=None,
 ):
     """
@@ -199,6 +199,7 @@ def mamba_chunk_scan_combined_varlen(
         chunk_size: int
         seq_idx: (seqlen)
         cu_seqlens: (batch + 1)
+        out: (seqlen, nheads, headdim) preallocated output tensor
         D: (nheads, headdim) or (nheads,)
         z: (seqlen, nheads, headdim)
         dt_bias: (nheads,)
@@ -220,6 +221,7 @@ def mamba_chunk_scan_combined_varlen(
         B,
         C,
         chunk_size,
+        out,
         D=D,
         z=z,
         dt_bias=dt_bias,
@@ -230,7 +232,6 @@ def mamba_chunk_scan_combined_varlen(
         cu_seqlens=cu_seqlens,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
-        out=out,
         state_dtype=state_dtype)
 
     return varlen_states
