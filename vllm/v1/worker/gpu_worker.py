@@ -366,6 +366,17 @@ class Worker(WorkerBase):
         #     self._token_compiled_cudagraphs.add(scheduler_output.total_num_scheduled_tokens)
         #     self.model_runner.capture_model(scheduler_output.total_num_scheduled_tokens)
 
+        def compile_cuda_graph(input_size: int):
+            gc.freeze()
+            start_time = time.perf_counter()
+            self.model_runner._dummy_run(input_size,
+                                         capture_attn_cudagraph=False,
+                                         skip_eplb=True)
+            end_time = time.perf_counter()
+            gc.unfreeze()
+            elapsed_time = end_time - start_time
+            logger.info("Graph capturing finished in %.3f secs", elapsed_time)
+
         # ATTENTION: This code is duplicated in compile_or_warm_up_model method
         # so we should clean this part before creating the vllm PR
         # warm up sizes that are not in cudagraph capture sizes,
@@ -378,23 +389,21 @@ class Worker(WorkerBase):
                 self.vllm_config.compilation_config.cudagraph_capture_sizes
             ]
 
+        warmup_sizes_set = set(warmup_sizes)
         # Just compilation with dummy run
-        if scheduler_output.total_num_scheduled_tokens not in self._token_compiled_cudagraphs and scheduler_output.total_num_scheduled_tokens in warmup_sizes and scheduler_output.total_num_scheduled_tokens != 0:
+        if scheduler_output.total_num_scheduled_tokens not in self._token_compiled_cudagraphs and scheduler_output.total_num_scheduled_tokens in warmup_sizes_set and scheduler_output.total_num_scheduled_tokens != 0:
             logger.info(
                 "DIEGO: CUDAgraph in execution time for %d input tokens",
                 scheduler_output.total_num_scheduled_tokens)
             self._token_compiled_cudagraphs.add(
                 scheduler_output.total_num_scheduled_tokens)
-            gc.freeze()
-            start_time = time.perf_counter()
-            self.model_runner._dummy_run(
-                scheduler_output.total_num_scheduled_tokens,
-                capture_attn_cudagraph=False,
-                skip_eplb=True)
-            end_time = time.perf_counter()
-            gc.unfreeze()
-            elapsed_time = end_time - start_time
-            logger.info("Graph capturing finished in %.3f secs", elapsed_time)
+            compile_cuda_graph(scheduler_output.total_num_scheduled_tokens)
+        else:
+            next_comp = list(
+                warmup_sizes_set.difference(
+                    self._token_compiled_cudagraphs))[0]
+            self._token_compiled_cudagraphs.add(next_comp)
+            compile_cuda_graph(next_comp)
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
