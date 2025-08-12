@@ -1100,6 +1100,10 @@ class LLM:
                 "Try passing `--runner pooling` to use the model as a "
                 "pooling model.")
 
+        if pooling_task not in self.supported_tasks:
+            raise ValueError(
+                f"pooling_task must be one of {self.supported_tasks}.")
+
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, list[str]]], prompts),

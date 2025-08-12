@@ -26,7 +26,7 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 
-from .interfaces import SupportsCrossEncoding, SupportsV0Only
+from .interfaces import SupportsCrossEncoding, default_pooling_type
 from .utils import WeightsMapper, maybe_prefix
 
 
@@ -92,16 +92,14 @@ class ModernBertAttention(nn.Module):
             bias=config.attention_bias,
         )
 
+        sliding_window = None
         if layer_id % config.global_attn_every_n_layers != 0:
-            self.local_attention = (config.local_attention // 2,
-                                    config.local_attention // 2)
+            sliding_window = config.local_attention // 2
+            rope_theta = config.local_rope_theta if config.local_rope_theta \
+                    is not None else config.global_rope_theta
         else:
-            self.local_attention = (-1, -1)
+            rope_theta = config.global_rope_theta
 
-        rope_theta = config.global_rope_theta
-        if self.local_attention != (
-                -1, -1) and config.local_rope_theta is not None:
-            rope_theta = config.local_rope_theta
         self.rotary_emb = ModernBertRotaryEmbedding(config=config,
                                                     head_size=self.head_dim,
                                                     dim=self.head_dim,
@@ -110,7 +108,8 @@ class ModernBertAttention(nn.Module):
                               self.head_dim,
                               self.scaling,
                               prefix=f"{layer_id}.attn",
-                              attn_type=AttentionType.ENCODER_ONLY)
+                              attn_type=AttentionType.ENCODER_ONLY,
+                              per_layer_sliding_window=sliding_window)
         self.Wo = RowParallelLinear(config.hidden_size,
                                     config.hidden_size,
                                     bias=config.attention_bias)
@@ -201,6 +200,7 @@ class ModernBertEncoderLayer(nn.Module):
 
 
 @support_torch_compile
+@default_pooling_type("CLS")
 class ModernBertModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"layers.": "encoder_layer.layers."})
@@ -264,7 +264,6 @@ class ModernBertPooler(Pooler):
         self.pooling = PoolingMethod.from_pooling_type(pooling_type)
         self.dense = nn.Linear(config.hidden_size, config.hidden_size,
                                config.classifier_bias)
-        self.pooling_type = config.classifier_pooling
         self.act = nn.GELU()
         self.norm = nn.LayerNorm(config.hidden_size,
                                  eps=config.norm_eps,
@@ -277,6 +276,7 @@ class ModernBertPooler(Pooler):
         return self.pooling.get_pooling_updates(task)
 
     def _head(self, pooled_output: torch.Tensor):
+        pooled_output = pooled_output.to(self.dense.weight.dtype)
         return self.norm(self.act(self.dense(pooled_output)))
 
     def forward(
@@ -294,8 +294,8 @@ class ModernBertPooler(Pooler):
         return pooled_output
 
 
-class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
-                                          SupportsCrossEncoding):
+@default_pooling_type("CLS")
+class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
     is_pooling_model = True
 
@@ -306,6 +306,7 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
         self.model = ModernBertModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "modernbert"))
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        self.pooling = ModernBertPooler(config)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -315,14 +316,14 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
             Pooler.for_encode(pooler_config),
             "classify":
             ClassifierPooler(
-                pooling=ModernBertPooler(config),
+                pooling=self.pooling,
                 classifier=self.classifier,
                 act_fn=ClassifierPooler.act_fn_for_seq_cls(
                     vllm_config.model_config),
             ),
             "score":
             ClassifierPooler(
-                pooling=ModernBertPooler(config),
+                pooling=self.pooling,
                 classifier=self.classifier,
                 act_fn=ClassifierPooler.act_fn_for_cross_encoder(
                     vllm_config.model_config),
@@ -351,7 +352,7 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
             if name.startswith("head"):
-                param = params_dict["_pooler.pooler." + name[len("head") + 1:]]
+                param = params_dict["pooling." + name[len("head") + 1:]]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
@@ -366,5 +367,5 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
         return self.model(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
-            position_ids=positions,
+            positions=positions,
         )

@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import TYPE_CHECKING, Any, Optional
 
-from openai_harmony import ToolNamespaceConfig
+from openai_harmony import ToolDescription, ToolNamespaceConfig
 
 from vllm.entrypoints.tool import HarmonyBrowserTool, HarmonyPythonTool, Tool
 from vllm.logger import init_logger
@@ -105,7 +105,6 @@ class MCPToolServer(ToolServer):
         self.harmony_tool_descriptions = {}
 
     async def add_tool_server(self, server_url: str):
-        from mcp.types import ToolDescription
         tool_urls = server_url.split(",")
         self.harmony_tool_descriptions = {}
         self.urls: dict[str, str] = {}
@@ -133,6 +132,8 @@ class MCPToolServer(ToolServer):
                 logger.warning(
                     "Tool %s already exists. Ignoring duplicate tool server %s",
                     tool_from_mcp.name, url)
+        logger.info("MCPToolServer initialized with tools: %s",
+                    list(self.harmony_tool_descriptions.keys()))
 
     def has_tool(self, tool_name: str):
         return tool_name in self.harmony_tool_descriptions
