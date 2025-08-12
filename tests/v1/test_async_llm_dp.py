@@ -158,3 +158,5 @@ async def test_load(output_kind: RequestOutputKind,
 
             assert slogger.finished_req_count > NUM_REQUESTS // (
                 DP_SIZE + 1), f"requests are imbalanced: {stats_loggers}"
+
+        core_client.shutdown()
