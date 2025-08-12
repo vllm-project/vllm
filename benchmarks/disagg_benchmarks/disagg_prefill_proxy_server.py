@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 # Timeout for backend service requests (seconds)
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=300)
 # Maximum concurrent requests to backend services
-MAX_CONCURRENT_REQUESTS = 10
-REQUEST_QUEUE_SIZE = 50  # Maximum number of requests in the queue
-RATE_LIMIT = 5  # Maximum requests per second (rate limiting)
+MAX_CONCURRENT_REQUESTS = 100
+REQUEST_QUEUE_SIZE = 500  # Maximum number of requests in the queue
+RATE_LIMIT = 100  # Maximum requests per second (rate limiting)
 # Prefill service endpoint
 PRE_SERVICE_URL = "http://localhost:8100/v1/completions"
 # Decode service endpoint
