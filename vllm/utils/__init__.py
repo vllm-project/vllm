@@ -87,9 +87,6 @@ DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
-# an arbitrary factor to estimate the cudagraph memory usage
-_CUDAGRAPH_MEMORY_ESTIMATION_FACTOR = 4
-
 # Exception strings for non-implemented encoder/decoder scenarios
 
 # Reminder: Please update docs/features/compatibility_matrix.md
@@ -2662,7 +2659,6 @@ class MemoryProfilingResult:
     torch_peak_increase: int = 0
     non_torch_increase: int = 0
     weights_memory: float = 0
-    cudagraph_memory: float = 0
     before_create: MemorySnapshot = field(default_factory=MemorySnapshot)
     before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
@@ -2681,9 +2677,8 @@ class MemoryProfilingResult:
 
 @contextlib.contextmanager
 def memory_profiling(
-        baseline_snapshot: MemorySnapshot, weights_memory: int,
-        vllm_config: VllmConfig
-) -> Generator[MemoryProfilingResult, None, None]:
+        baseline_snapshot: MemorySnapshot,
+        weights_memory: int) -> Generator[MemoryProfilingResult, None, None]:
     """Memory profiling context manager.
     baseline_snapshot: the memory snapshot before the current vLLM instance.
     weights_memory: memory used by PyTorch when loading the model weights.
@@ -2757,25 +2752,7 @@ def memory_profiling(
 
     non_torch_memory = result.non_torch_increase
     peak_activation_memory = result.torch_peak_increase
-
-    # cudagraph memory
-    # peak_activation_memory is measured with max_num_batched_tokens
-    # but max_capture_size is the maximum batch size for cudagraph
-    # capture. So we scale peak_activation_memory and give some
-    # buffers via cudagraph_memory_factor.
-    assert vllm_config.scheduler_config.max_num_batched_tokens > 0, (
-        "max_num_batched_tokens is expected to be positive "
-        "for estimating CUDAGraph memory usage. Please file an issue.")
-    estimated_cudagraph_memory = peak_activation_memory * (
-        vllm_config.compilation_config.max_capture_size /
-        vllm_config.scheduler_config.max_num_batched_tokens
-    ) * _CUDAGRAPH_MEMORY_ESTIMATION_FACTOR
-    result.cudagraph_memory = (estimated_cudagraph_memory
-                               if vllm_config.compilation_config.use_cudagraph
-                               else 0)
-    result.non_kv_cache_memory = (non_torch_memory + peak_activation_memory +
-                                  result.cudagraph_memory +
-                                  result.weights_memory)
+    result.non_kv_cache_memory = non_torch_memory + peak_activation_memory + result.weights_memory  # noqa
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501

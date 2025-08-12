@@ -236,12 +236,21 @@ class Worker(WorkerBase):
         torch.cuda.reset_peak_memory_stats()
         GiB = lambda b: b / GiB_bytes
 
+        if kv_cache_memory := self.cache_config.kv_cache_memory:
+            msg = (f"(Reserved {kv_cache_memory:.2f}GiB memory for KV Cache "
+                   "as specified by kv_cache_memory config and skipped "
+                   "memory profiling. This does does not respect the "
+                   "gpu_memory_utilization config. Only use kv_cache_memory "
+                   "config when you want manual control of KV cache memory "
+                   "size.")
+            logger.debug(msg)
+            return int(kv_cache_memory * GiB_bytes)
+
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(
                 self.init_snapshot,
                 weights_memory=int(self.model_runner.model_memory_usage),
-                vllm_config=self.vllm_config,
         ) as profile_result:
             self.model_runner.profile_run()
 
