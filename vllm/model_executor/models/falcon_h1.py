@@ -10,6 +10,7 @@ from transformers import FalconH1Config
 
 from vllm import envs
 from vllm.attention.layer import Attention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
@@ -23,7 +24,8 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba2_metadata import (
     Mamba2Metadata, prepare_mamba2_metadata)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-from vllm.model_executor.layers.mamba.mamba_utils import get_mamba_state_shape
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateShapeCalculator)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -179,13 +181,15 @@ class FalconH1SSMDecoderLayer(nn.Module):
         mamba2_metadata: Mamba2Metadata,
         **kwargs,
     ):
-        hidden_states = self.mamba(
+        output = torch.empty_like(hidden_states)
+        self.mamba(
             hidden_states,
+            output,
             mamba_cache_params,
             mamba2_metadata=mamba2_metadata,
             mup_vector=self.mup_vector,
         )
-        return hidden_states, residual
+        return output, residual
 
 
 class FalconH1AttentionDecoderLayer(nn.Module):
@@ -398,6 +402,7 @@ class FalconH1ParallelHybrid(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class FalconH1Model(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -539,7 +544,7 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                              if hf_config.mamba_d_ssm is None else
                              hf_config.mamba_d_ssm)
 
-        return get_mamba_state_shape(
+        return MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=intermediate_size,
             tp_world_size=parallel_config.tensor_parallel_size,
             n_groups=hf_config.mamba_n_groups,

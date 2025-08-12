@@ -53,17 +53,10 @@ class EmbeddingMixin(OpenAIServing):
     ) -> Optional[ErrorResponse]:
         ctx = cast(EmbeddingServeContext, ctx)
         try:
-            (
-                ctx.lora_request,
-                ctx.prompt_adapter_request,
-            ) = self._maybe_get_adapters(ctx.request)
+            ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
             tokenizer = await self.engine_client.get_tokenizer(ctx.lora_request
                                                                )
-
-            if ctx.prompt_adapter_request is not None:
-                raise NotImplementedError("Prompt adapter is not supported "
-                                          "for embedding models")
 
             if isinstance(ctx.request, EmbeddingChatRequest):
                 (
@@ -170,8 +163,9 @@ class OpenAIServingEmbedding(EmbeddingMixin):
         for the API specification. This API mimics the OpenAI Embedding API.
         """
         model_name = self._get_model_name(request.model)
-        request_id = (f"{self.request_id_prefix}-"
-                      f"{self._base_request_id(raw_request)}")
+        request_id = (
+            f"{self.request_id_prefix}-"
+            f"{self._base_request_id(raw_request, request.request_id)}")
 
         ctx = EmbeddingServeContext(
             request=request,

@@ -6,6 +6,7 @@ from unittest import mock
 import pytest
 import torch
 
+from tests.utils import get_attn_backend_list_based_on_platform
 from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata,
                                       create_standard_kv_cache_spec,
@@ -24,13 +25,8 @@ eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 
 def _create_proposer(method: str, k: int) -> EagleProposer:
     model_config = ModelConfig(model=model_dir,
-                               task="generate",
-                               max_model_len=100,
-                               tokenizer=model_dir,
-                               tokenizer_mode="auto",
-                               dtype="auto",
-                               seed=None,
-                               trust_remote_code=False)
+                               runner="generate",
+                               max_model_len=100)
 
     # Choose model directory based on method
     draft_model_dir = eagle_dir if method == "eagle" else eagle3_dir
@@ -125,17 +121,28 @@ def test_prepare_inputs():
     assert torch.equal(token_indices, expected_token_indices)
 
 
-@pytest.mark.parametrize("method,proposer_helper", [
-    ("eagle", lambda k: _create_proposer("eagle", k)),
-    ("eagle3", lambda k: _create_proposer("eagle3", k)),
-])
+@pytest.mark.parametrize("method", ["eagle", "eagle3"])
+@pytest.mark.parametrize("attn_backend",
+                         get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("use_distinct_embed_tokens", [True, False])
 @mock.patch('vllm.v1.spec_decode.eagle.get_pp_group')
 @mock.patch('vllm.v1.spec_decode.eagle.get_layers_from_vllm_config')
 @mock.patch('vllm.v1.spec_decode.eagle.get_model')
 def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
-                    proposer_helper, pp_size, use_distinct_embed_tokens):
+                    attn_backend, pp_size, use_distinct_embed_tokens,
+                    monkeypatch):
+
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
+
+    if (attn_backend == "TRITON_ATTN_VLLM_V1"
+            and not current_platform.is_rocm()):
+        pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
+                    "multi-token eagle spec decode on current platform")
+
+    if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+
     # Setup draft model mock
     mock_model = mock.MagicMock()
     if use_distinct_embed_tokens:
@@ -182,7 +189,7 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
         target_model.lm_head = mock.MagicMock()
 
     # Create proposer using the helper function
-    proposer = proposer_helper(k=8)
+    proposer = _create_proposer(method, k=8)
 
     # Call the method under test
     proposer.load_model(target_model)
@@ -206,8 +213,22 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
             target_model.model.embed_tokens
 
 
+@pytest.mark.parametrize("method", ["eagle", "eagle3"])
+@pytest.mark.parametrize("attn_backend",
+                         get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
-def test_propose(num_speculative_tokens):
+def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
+
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
+
+    if (attn_backend == "TRITON_ATTN_VLLM_V1"
+            and not current_platform.is_rocm()):
+        pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
+                    "multi-token eagle spec decode on current platform")
+
+    if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+
     # Use GPU device
     device = torch.device(current_platform.device_type)
 
@@ -306,17 +327,29 @@ def test_propose(num_speculative_tokens):
                                    device=device)
     sampling_metadata = mock.MagicMock()
 
-    attn_metadata_builder_cls, _ = get_attention_backend(
-        _Backend.FLASH_ATTN_VLLM_V1)
+    if attn_backend == "FLASH_ATTN_VLLM_V1":
+        attn_metadata_builder_cls, _ = get_attention_backend(
+            _Backend.FLASH_ATTN_VLLM_V1)
+    elif attn_backend == "TRITON_ATTN_VLLM_V1":
+        attn_metadata_builder_cls, _ = get_attention_backend(
+            _Backend.TRITON_ATTN_VLLM_V1)
+    elif attn_backend == "TREE_ATTN":
+        attn_metadata_builder_cls, _ = get_attention_backend(
+            _Backend.TREE_ATTN)
+    else:
+        raise ValueError(f"Unsupported attention backend: {attn_backend}")
+
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
+        layer_names=proposer.attn_layer_names,
         vllm_config=proposer.vllm_config,
         device=device,
     )
 
     # Mock runner for attention metadata building
     proposer.runner = mock.MagicMock()
-    proposer.runner.attn_metadata_builders = [attn_metadata_builder]
+    proposer.runner.attn_groups.append([mock.MagicMock()])
+    proposer.runner.attn_groups[0][0].metadata_builder = attn_metadata_builder
 
     result = proposer.propose(target_token_ids=target_token_ids,
                               target_positions=target_positions,

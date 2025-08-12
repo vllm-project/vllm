@@ -10,12 +10,14 @@ from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING, Callable, Optional, Union
+from unittest.mock import patch
 
 import msgspec
 import zmq
 
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import get_mp_context, get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.v1.engine.coordinator import DPCoordinator
@@ -105,10 +107,13 @@ class CoreEngineProcManager:
                 "client_handshake_address"] = client_handshake_address
 
         self.processes: list[BaseProcess] = []
+        local_dp_ranks = []
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
+
             # Start EngineCore in background process.
+            local_dp_ranks.append(local_index)
             self.processes.append(
                 context.Process(target=target_fn,
                                 name=f"EngineCore_{global_index}",
@@ -118,9 +123,14 @@ class CoreEngineProcManager:
                                 }))
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
+
+        data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
-            for proc in self.processes:
-                proc.start()
+            for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
+                with set_device_control_env_var(
+                        vllm_config, local_dp_rank) if (
+                            data_parallel) else contextlib.nullcontext():
+                    proc.start()
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():
@@ -143,6 +153,30 @@ class CoreEngineProcManager:
             proc.name: proc.exitcode
             for proc in self.processes if proc.exitcode is not None
         }
+
+
+@contextlib.contextmanager
+def set_device_control_env_var(vllm_config: VllmConfig,
+                               local_dp_rank: int) -> Iterator[None]:
+    """
+    Temporarily set CUDA_VISIBLE_DEVICES or equivalent
+    for engine subprocess.
+    """
+    world_size = vllm_config.parallel_config.world_size
+    evar = current_platform.device_control_env_var
+    try:
+        value = ",".join(
+            str(current_platform.device_id_to_physical_device_id(i))
+            for i in range(local_dp_rank * world_size, (local_dp_rank + 1) *
+                           world_size))
+    except IndexError as e:
+        raise Exception(f"Error setting {evar}: "
+                        f"local range: [{local_dp_rank * world_size}, "
+                        f"{(local_dp_rank + 1) * world_size}) "
+                        "base value: "
+                        f"\"{os.getenv(evar)}\"") from e
+    with patch.dict(os.environ, values=((evar, value), )):
+        yield
 
 
 class CoreEngineActorManager:
@@ -215,10 +249,9 @@ class CoreEngineActorManager:
 
         self.placement_group_is_local = []
         refs = []
-        for index in range(dp_size):
-            local_index = local_dp_ranks[index]
+        for index, local_index, pg in zip(range(dp_size), local_dp_ranks,
+                                          placement_groups):
             dp_vllm_config = copy.deepcopy(vllm_config)
-            pg = placement_groups[index]
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
             actor = ray.remote(DPEngineCoreActor).options(
@@ -264,11 +297,10 @@ class CoreEngineActorManager:
         local_engine_count = \
             vllm_config.parallel_config.data_parallel_size_local
 
-        nodes = list_nodes()
-        nodes = sorted(list_nodes(),
+        nodes = sorted(list_nodes(filters=[("state", "=", "ALIVE")]),
                        key=lambda node: node.node_ip != dp_master_ip)
         assert nodes[0].node_ip == dp_master_ip, (
-            "The first node must be the head node")
+            "The head node is missing or dead")
         assert len(nodes) == 1 or nodes[1].node_ip != dp_master_ip, (
             "There can only be one head node")
 
@@ -280,6 +312,8 @@ class CoreEngineActorManager:
         for node in nodes:
             node_ip = node.node_ip
             node_resources = available_resources[node.node_id]
+            if "GPU" not in node_resources:
+                continue
             # For now, each DP rank can only be assigned to one node
             # TODO(rui): support allocating a single DP rank
             # to multiple nodes
@@ -314,6 +348,13 @@ class CoreEngineActorManager:
                     )
                     placement_groups.append(pg)
                     local_dp_ranks.append(i)
+        if len(placement_groups) < num_pg_to_create:
+            raise ValueError(
+                f"Not enough resources to allocate {num_pg_to_create} "
+                "placement groups, only created "
+                f"{len(placement_groups)} placement groups. "
+                "Available resources: "
+                f"{available_resources}")
         return placement_groups, local_dp_ranks
 
     @staticmethod
@@ -544,7 +585,8 @@ def launch_core_engines(
     local_start_index = parallel_config.data_parallel_rank_local
     dp_rank = parallel_config.data_parallel_rank
     host = parallel_config.data_parallel_master_ip
-    external_dp_lb = parallel_config.data_parallel_external_lb
+    local_engines_only = (parallel_config.data_parallel_hybrid_lb
+                          or parallel_config.data_parallel_external_lb)
 
     # In offline mode there is an LLM instance per DP rank and
     # one core engine per LLM, see
@@ -553,8 +595,8 @@ def launch_core_engines(
 
     # client_local_only = True for cases where this front-end
     # sends requests only to colocated engines.
-    client_local_only = offline_mode or external_dp_lb or (local_engine_count
-                                                           == dp_size)
+    client_local_only = (offline_mode or local_engines_only
+                         or (local_engine_count == dp_size))
 
     # Set up input and output addresses.
     addresses = EngineZmqAddresses(
@@ -598,13 +640,26 @@ def launch_core_engines(
         yield engine_actor_manager, coordinator, addresses
         return
 
-    if offline_mode or (external_dp_lb and dp_rank > 0):
+    if offline_mode:
         assert local_engine_count == 1
         engines_to_handshake = [CoreEngine(index=dp_rank, local=True)]
-    else:
+    elif dp_rank == 0:
+        # Rank 0 holds Coordinator, so it handshakes with all Cores
+        # in both external dplb and internal dplb mode.
+        # Note this also covers the case where we have zero local engines
+        # and rank 0 is headless.
         engines_to_handshake = [
             CoreEngine(index=i, local=(i < local_engine_count))
             for i in range(dp_size)
+        ]
+    else:
+        # Rank > 0 handshakes with just the local cores it is managing.
+        assert local_engines_only, (
+            "Attempting to launch core_engines from dp_rank > 0, but "
+            "found internal DPLB, which is incompatible.")
+        engines_to_handshake = [
+            CoreEngine(index=i, local=True)
+            for i in range(dp_rank, dp_rank + local_engine_count)
         ]
 
     # Whether the started engines will handshake only with co-located
@@ -616,7 +671,7 @@ def launch_core_engines(
     handshake_address = get_engine_client_zmq_addr(
         handshake_local_only, host, parallel_config.data_parallel_rpc_port)
 
-    if external_dp_lb and dp_rank > 0:
+    if local_engines_only and dp_rank > 0:
         assert not handshake_local_only
         local_handshake_address = get_open_zmq_ipc_path()
         client_handshake_address = local_handshake_address
@@ -631,8 +686,6 @@ def launch_core_engines(
 
         # Start local engines.
         if local_engine_count:
-            # In server mode, start_index and local_start_index will
-            # both be 0.
             local_engine_manager = CoreEngineProcManager(
                 EngineCoreProc.run_engine_core,
                 vllm_config=vllm_config,
@@ -678,6 +731,9 @@ def wait_for_engine_startup(
     poller = zmq.Poller()
     poller.register(handshake_socket, zmq.POLLIN)
 
+    remote_should_be_headless = not parallel_config.data_parallel_hybrid_lb \
+        and not parallel_config.data_parallel_external_lb
+
     if proc_manager is not None:
         for sentinel in proc_manager.sentinels():
             poller.register(sentinel, zmq.POLLIN)
@@ -713,12 +769,23 @@ def wait_for_engine_startup(
             raise RuntimeError(f"Message from engine with unexpected data "
                                f"parallel rank: {eng_index}")
         msg = msgspec.msgpack.decode(ready_msg_bytes)
-        status, local = msg["status"], msg["local"]
+        status, local, headless = msg["status"], msg["local"], msg["headless"]
         if local != engine.local:
             raise RuntimeError(f"{status} message from "
                                f"{'local' if local else 'remote'} "
                                f"engine {eng_index}, expected it to be "
                                f"{'local' if engine.local else 'remote'}")
+
+        # Remote engines must be headless iff we aren't in hybrid dp lb mode.
+        if not local and headless != remote_should_be_headless:
+            if headless:
+                raise RuntimeError(f"Remote engine {eng_index} must not use "
+                                   f"--headless in external or hybrid dp lb "
+                                   f"mode")
+            else:
+                raise RuntimeError(f"Remote engine {eng_index} must use "
+                                   f"--headless unless in external or hybrid "
+                                   f"dp lb mode")
 
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
 

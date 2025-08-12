@@ -29,17 +29,15 @@ from vllm import envs
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
-                                             DbrxConfig, DeepseekVLV2Config,
-                                             EAGLEConfig, ExaoneConfig,
-                                             JAISConfig, KimiVLConfig,
-                                             MedusaConfig, MiniMaxText01Config,
-                                             MiniMaxVL01Config, MllamaConfig,
-                                             MLPSpeculatorConfig, MPTConfig,
-                                             NemotronConfig, NVLM_D_Config,
-                                             OvisConfig, RWConfig,
-                                             SkyworkR1VChatConfig, SolarConfig,
-                                             Telechat2Config, UltravoxConfig)
+from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
+                                             EAGLEConfig, JAISConfig,
+                                             KimiVLConfig, MedusaConfig,
+                                             MLPSpeculatorConfig,
+                                             Nemotron_Nano_VL_Config,
+                                             NemotronConfig, OvisConfig,
+                                             RWConfig, SpeculatorsConfig,
+                                             Step3TextConfig, Step3VLConfig,
+                                             UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
@@ -69,38 +67,41 @@ def _get_hf_token() -> Optional[str]:
     return None
 
 
-_CONFIG_REGISTRY_OVERRIDE_HF: dict[str, type[PretrainedConfig]] = {
-    "mllama": MllamaConfig
-}
-
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
-    "cohere2": Cohere2Config,
-    "dbrx": DbrxConfig,
     "deepseek_vl_v2": DeepseekVLV2Config,
     "kimi_vl": KimiVLConfig,
-    "mpt": MPTConfig,
+    "Llama_Nemotron_Nano_VL": Nemotron_Nano_VL_Config,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
     "jais": JAISConfig,
     "mlp_speculator": MLPSpeculatorConfig,
     "medusa": MedusaConfig,
     "eagle": EAGLEConfig,
-    "exaone": ExaoneConfig,
-    "minimax_text_01": MiniMaxText01Config,
-    "minimax_vl_01": MiniMaxVL01Config,
+    "speculators": SpeculatorsConfig,
     "nemotron": NemotronConfig,
-    "NVLM_D": NVLM_D_Config,
     "ovis": OvisConfig,
-    "solar": SolarConfig,
-    "skywork_chat": SkyworkR1VChatConfig,
-    "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
-    **_CONFIG_REGISTRY_OVERRIDE_HF
+    "step3_vl": Step3VLConfig,
+    "step3_text": Step3TextConfig,
 }
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
+}
+
+_AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
+    "internvl_chat": {
+        "has_no_defaults_at_init": True
+    },
+    # transformers regards mllama as is_encoder_decoder=False
+    # vllm needs is_encoder_decoder=True to enable cross-attention
+    "mllama": {
+        "is_encoder_decoder": True
+    },
+    "NVLM_D": {
+        "has_no_defaults_at_init": True
+    },
 }
 
 
@@ -260,7 +261,8 @@ def _uses_mrope(config: PretrainedConfig) -> bool:
 
 def uses_mrope(config: PretrainedConfig) -> bool:
     """Detect if the model with this config uses M-ROPE."""
-    return _uses_mrope(config) or thinker_uses_mrope(config)
+    return _uses_mrope(config) or _uses_mrope(
+        config.get_text_config()) or thinker_uses_mrope(config)
 
 
 def thinker_uses_mrope(config: PretrainedConfig) -> bool:
@@ -278,11 +280,32 @@ def thinker_uses_mrope(config: PretrainedConfig) -> bool:
 
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
     """Detect if the model with this config is used as an encoder/decoder."""
-    text_config = getattr(config, "text_config", None)
-    if text_config is not None:
-        return is_encoder_decoder(text_config)
 
-    return getattr(config, "is_encoder_decoder", False)
+    def _is_encoder_decoder(config: PretrainedConfig) -> bool:
+        return getattr(config, "is_encoder_decoder", False)
+
+    return (_is_encoder_decoder(config)
+            or _is_encoder_decoder(config.get_text_config()))
+
+
+def is_interleaved(config: PretrainedConfig) -> bool:
+    """
+    Detect if the model with this config is used with interleaved attention.
+    """
+    text_config = config.get_text_config()
+    if layer_types := getattr(text_config, "layer_types", None):
+        interleaved_types = {"full_attention", "sliding_attention"}
+        return interleaved_types.issubset(layer_types)
+    return False
+
+
+def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
+    """
+    Update kwargs for AutoConfig initialization based on model_type
+    """
+    if model_type in _AUTO_CONFIG_KWARGS_OVERRIDES:
+        kwargs.update(_AUTO_CONFIG_KWARGS_OVERRIDES[model_type])
+    return kwargs
 
 
 def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
@@ -291,10 +314,39 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
         if hasattr(config, old_attr):
             if not hasattr(config, new_attr):
                 config.update({new_attr: getattr(config, old_attr)})
-            delattr(config, old_attr)
             logger.debug("Remapped config attribute '%s' to '%s'", old_attr,
                          new_attr)
     return config
+
+
+def maybe_override_with_speculators_target_model(
+    model: str,
+    tokenizer: str,
+    trust_remote_code: bool,
+    revision: Optional[str] = None,
+    **kwargs,
+) -> tuple[str, str]:
+    """
+    If running a speculators config, override running model with target model
+    """
+    is_gguf = check_gguf_file(model)
+    if is_gguf:
+        kwargs["gguf_file"] = Path(model).name
+        gguf_model_repo = Path(model).parent
+    else:
+        gguf_model_repo = None
+    config_dict, _ = PretrainedConfig.get_config_dict(
+        model if gguf_model_repo is None else gguf_model_repo,
+        revision=revision,
+        trust_remote_code=trust_remote_code,
+        token=_get_hf_token(),
+        **kwargs,
+    )
+    spec_config = config_dict.get("speculators_config", None)
+    # Return the target model
+    if spec_config is not None:
+        model = tokenizer = spec_config["verifier"]["name_or_path"]
+    return model, tokenizer
 
 
 def get_config(
@@ -355,9 +407,12 @@ def get_config(
             token=_get_hf_token(),
             **kwargs,
         )
-
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
+        if model_type is None:
+            model_type = "speculators" if config_dict.get(
+                "speculators_config") is not None else model_type
+
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
@@ -369,15 +424,14 @@ def get_config(
             )
         else:
             try:
+                kwargs = _maybe_update_auto_config_kwargs(
+                    kwargs, model_type=model_type)
                 config = AutoConfig.from_pretrained(
                     model,
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
                     token=_get_hf_token(),
-                    # some old custom model's config needs
-                    # `has_no_defaults_at_init=True` to work.
-                    has_no_defaults_at_init=trust_remote_code,
                     **kwargs,
                 )
             except ValueError as e:
@@ -395,6 +449,23 @@ def get_config(
                     raise e
         config = _maybe_remap_hf_config_attrs(config)
 
+        # Phi4Flash misuses this config as list[int]. Convert it to int and add
+        # the layer_types list[str] to make it HF compatible
+        if (config.model_type == "phi4flash"):
+            # TODO: Remove after the following PR is merged:
+            # https://huggingface.co/microsoft/Phi-4-mini-flash-reasoning/discussions/6
+            if not hasattr(config, "layer_types"):
+                config.layer_types = [
+                    "sliding_attention" if i < config.num_hidden_layers // 2
+                    and i % 2 == 1 else "full_attention"
+                    for i in range(config.num_hidden_layers)
+                ]
+            # TODO: Remove after the following PR is merged:
+            # https://huggingface.co/microsoft/Phi-4-mini-flash-reasoning/discussions/7
+            if isinstance(config.sliding_window, list):
+                config.sliding_window = next(
+                    filter(None, config.sliding_window), None)
+
     elif config_format == ConfigFormat.MISTRAL:
         # This function loads a params.json config which
         # should be used when loading models in mistral format
@@ -406,6 +477,18 @@ def get_config(
             config_dict["max_position_embeddings"] = max_position_embeddings
 
         config = adapt_config_dict(config_dict)
+
+        # Mistral configs may define sliding_window as list[int]. Convert it
+        # to int and add the layer_types list[str] to make it HF compatible
+        if ((sliding_window := getattr(config, "sliding_window", None))
+                and isinstance(sliding_window, list)):
+            pattern_repeats = config.num_hidden_layers // len(sliding_window)
+            layer_types = sliding_window * pattern_repeats
+            config.layer_types = [
+                "full_attention" if layer_type is None else "sliding_attention"
+                for layer_type in layer_types
+            ]
+            config.sliding_window = next(filter(None, sliding_window), None)
     else:
         supported_formats = [
             fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
@@ -423,6 +506,20 @@ def get_config(
                 f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
+
+    # ModelOpt 0.31.0 and after saves the quantization config in the model
+    # config file.
+    quantization_config = config_dict.get("quantization_config", None)
+
+    # ModelOpt 0.29.0 and before saves the quantization config in a separate
+    # "hf_quant_config.json" in the same directory as the model config file.
+    if quantization_config is None \
+        and file_or_path_exists(model, "hf_quant_config.json", revision):
+        quantization_config = get_hf_file_to_dict("hf_quant_config.json",
+                                                  model, revision)
+
+    if quantization_config is not None:
+        config.quantization_config = quantization_config
 
     if hf_overrides_kw:
         logger.debug("Overriding HF config with %s", hf_overrides_kw)
@@ -570,17 +667,15 @@ def get_pooling_config_name(pooling_name: str) -> Union[str, None]:
     supported_pooling_types = ['LAST', 'ALL', 'CLS', 'STEP', 'MEAN']
     pooling_type_name = pooling_name.upper()
 
-    try:
-        if pooling_type_name in supported_pooling_types:
-            return pooling_type_name
-    except NotImplementedError as e:
-        logger.debug("Pooling type not supported", e)
-        return None
-    return None
+    if pooling_type_name in supported_pooling_types:
+        return pooling_type_name
+
+    raise NotImplementedError(
+        f"Pooling type {pooling_type_name} not supported")
 
 
 @cache
-def get_sentence_transformer_tokenizer_config(model: str,
+def get_sentence_transformer_tokenizer_config(model: Union[str, Path],
                                               revision: Optional[str] = 'main'
                                               ):
     """
@@ -588,7 +683,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
     given Sentence Transformer BERT model.
 
     Parameters:
-    - model (str): The name of the Sentence Transformer
+    - model (str|Path): The name of the Sentence Transformer
     BERT model.
     - revision (str, optional): The revision of the m
     odel to use. Defaults to 'main'.
@@ -616,7 +711,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
             if encoder_dict:
                 break
 
-    if not encoder_dict and not model.startswith("/"):
+    if not encoder_dict and not Path(model).is_absolute():
         try:
             # If model is on HuggingfaceHub, get the repo files
             repo_files = list_repo_files(model,

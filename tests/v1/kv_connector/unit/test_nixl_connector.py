@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
+import inspect
+import os
+import tempfile
+import textwrap
 import time
 import uuid
 from collections import defaultdict
@@ -8,6 +13,7 @@ from typing import Optional
 from unittest.mock import patch
 
 import pytest
+import ray
 
 from vllm import LLM
 from vllm.config import KVTransferConfig
@@ -20,78 +26,15 @@ from vllm.sampling_params import SamplingParams
 from .utils import create_request, create_scheduler, create_vllm_config
 
 
-def test_basic_interface():
-    """Unit test for basic NixlConnector interface functionality."""
-
-    vllm_config = create_vllm_config()
-    scheduler = create_scheduler(vllm_config)
-
-    # 2 Full Blocks and 1 Half Block.
-    BLOCK_SIZE = vllm_config.cache_config.block_size
-    NUM_EXTERNAL_FULL_BLOCKS = 2
-    NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
-
-    request = create_request(request_id=1,
-                             num_tokens=NUM_TOKENS,
-                             do_remote_prefill=True)
-    request_id = request.request_id
-
-    scheduler.add_request(request)
-
-    # Remote Prefill, triggers NixlConnectorMetadata.
-    scheduler_output = scheduler.schedule()
-    kv_connector_metadata = scheduler_output.kv_connector_metadata
-    assert kv_connector_metadata is not None
-    assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
-
-    assert len(kv_connector_metadata.reqs_to_recv) == 1
-    assert request_id in kv_connector_metadata.reqs_to_recv
-    req_meta = kv_connector_metadata.reqs_to_recv[request_id]
-
-    for block_id, block in zip(
-            req_meta.local_block_ids, scheduler.kv_cache_manager.coordinator.
-            single_type_managers[0].req_to_blocks[request_id]):
-        assert block_id == block.block_id
-
-
-def test_prompt_less_than_block_size():
-    """
-    Test that we can handle case where prompt is < block.
-
-    In this case, the P worker will send empty remote_block_ids.
-    The D worker should not schedule an async read in this case,
-    since there is nothing to pull.
-    """
-    vllm_config = create_vllm_config()
-    scheduler = create_scheduler(vllm_config)
-
-    # Half of a block.
-    BLOCK_SIZE = vllm_config.cache_config.block_size
-    NUM_TOKENS = int(BLOCK_SIZE * 0.5)
-
-    # Request will have 0 remote blocks.
-    request = create_request(request_id=1,
-                             num_tokens=NUM_TOKENS,
-                             do_remote_prefill=True,
-                             num_remote_blocks=0)
-    scheduler.add_request(request)
-    scheduler_output = scheduler.schedule()
-
-    # This request should not have to read async.
-    kv_connector_metadata = scheduler_output.kv_connector_metadata
-    assert kv_connector_metadata is not None
-    assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
-    assert len(kv_connector_metadata.reqs_to_recv) == 0
-
-    # This request should be scheduled regularly.
-    assert len(scheduler_output.scheduled_new_reqs) == 1
-
-
 class FakeNixlWrapper:
     """Mock implementation of NixlWrapper for testing.
-    
+
     We don't inherit from nixl._api.nixl_agent because nixl may not be
     installed.
+    
+    Note: The complete source of this class is also used in the
+    `_make_fake_nixl_pkg` function to create a fake nixl package
+    for Ray workers.
     """
 
     AGENT_METADATA = b"fake_agent_metadata"
@@ -156,6 +99,105 @@ class FakeNixlWrapper:
     def set_cycles_before_xfer_done(self, cycles: int):
         """Set the number of cycles before a transfer is considered done."""
         self._cycles_before_xfer_done = cycles
+
+
+@contextlib.contextmanager
+def _make_fake_nixl_pkg():
+    """Context manager that creates a temporary package making
+       `from nixl._api import nixl_agent` resolve to our FakeNixlWrapper.
+       
+    Automatically cleans up the temporary directory when done.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        pkg_root = os.path.join(td, "nixl", "_api")
+        os.makedirs(pkg_root, exist_ok=True)
+
+        # Get the source code of FakeNixlWrapper class and dedent it
+        fake_nixl_source = inspect.getsource(FakeNixlWrapper)
+        fake_nixl_source = textwrap.dedent(fake_nixl_source)
+
+        stub = f"""\
+# Copy of FakeNixlWrapper implementation for Ray workers
+import uuid
+from collections import defaultdict
+from typing import Optional
+
+{fake_nixl_source}
+
+# Export as nixl_agent
+nixl_agent = FakeNixlWrapper
+"""
+        with open(os.path.join(pkg_root, "__init__.py"), "w") as f:
+            f.write(stub)
+
+        # touch parent package
+        open(os.path.join(td, "nixl", "__init__.py"), "w").close()
+        yield td
+
+
+def test_basic_interface():
+    """Unit test for basic NixlConnector interface functionality."""
+
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+
+    # 2 Full Blocks and 1 Half Block.
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    NUM_EXTERNAL_FULL_BLOCKS = 2
+    NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
+
+    request = create_request(request_id=1,
+                             num_tokens=NUM_TOKENS,
+                             do_remote_prefill=True)
+    request_id = request.request_id
+
+    scheduler.add_request(request)
+
+    # Remote Prefill, triggers NixlConnectorMetadata.
+    scheduler_output = scheduler.schedule()
+    kv_connector_metadata = scheduler_output.kv_connector_metadata
+    assert kv_connector_metadata is not None
+    assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
+
+    assert len(kv_connector_metadata.reqs_to_recv) == 1
+    assert request_id in kv_connector_metadata.reqs_to_recv
+    req_meta = kv_connector_metadata.reqs_to_recv[request_id]
+
+    for block_id, block in zip(
+            req_meta.local_block_ids, scheduler.kv_cache_manager.coordinator.
+            single_type_managers[0].req_to_blocks[request_id]):
+        assert block_id == block.block_id
+
+
+def test_prompt_less_than_block_size():
+    """
+    Test that we can handle case where prompt is < block.
+
+    In this case, the P worker will still send remote_block_ids of the
+    partial block. The D worker should schedule an async read
+    in this case.
+    """
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+
+    # Half of a block.
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    NUM_TOKENS = int(BLOCK_SIZE * 0.5)
+
+    # Request will have 1 partial remote block.
+    request = create_request(request_id=1,
+                             num_tokens=NUM_TOKENS,
+                             do_remote_prefill=True,
+                             num_remote_blocks=1)
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+
+    # This request will read async.
+    kv_connector_metadata = scheduler_output.kv_connector_metadata
+    assert kv_connector_metadata is not None
+    assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
+    assert len(kv_connector_metadata.reqs_to_recv) == 1
+    assert len(scheduler_output.scheduled_new_reqs) == 0
 
 
 class FakeNixlConnectorWorker(NixlConnectorWorker):
@@ -377,16 +419,66 @@ class TestNixlHandshake:
                     return
         raise TimeoutError("Took too long to complete async handshake.")
 
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        FakeNixlWrapper)
+    def test_handshake_fails_on_kv_cache_layout_mismatch(self, dist_init):
+        """
+        Verify that adding a remote agent fails if kv_cache_layout differs.
+        This test is only relevant for heterogeneous TP.
+        """
+        vllm_config = create_vllm_config()
 
+        # Mock TP world size to 2 to force heterogeneous TP when
+        # remote_tp_size=1
+        with patch(
+                "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.get_tensor_model_parallel_world_size",  # noqa: E501
+                return_value=2):
+            # Initialize connector and worker (with fake NIXL wrapper)
+            connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+            connector.connector_worker = FakeNixlConnectorWorker(
+                vllm_config, connector.engine_id, hand_shake_latency=0)
+            worker = connector.connector_worker
+
+            # Minimal local registration params used by add_remote_agent
+            worker.slot_size_bytes = 4096
+            worker.block_len = worker.slot_size_bytes * worker.block_size
+            worker.num_blocks = 1
+            worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+
+            # Metadata with different kv_cache_layout than local worker
+            mismatched_layout = "HND" if worker.kv_cache_layout != "HND" \
+                else "NHD"
+            meta = NixlAgentMetadata(
+                engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+                kv_caches_base_addr=[0],
+                num_blocks=1,
+                block_len=worker.block_len,
+                attn_backend_name=worker.backend_name,
+                kv_cache_layout=mismatched_layout,
+            )
+
+            # We don't check layout for homogeneous TP and MLA for now, as the
+            # whole block is moved.
+            worker.add_remote_agent(meta, remote_tp_size=2)
+            with pytest.raises(AssertionError):
+                worker.add_remote_agent(meta, remote_tp_size=1)
+
+
+# NOTE: resource cleanup in mp backend is a bit finicky, so the order in which
+# we put here is important. First run ray, it will clean up the resources, then
+# the rest of the tests.
+@pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper)
-def test_abort_timeout_on_prefiller(monkeypatch):
+def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
     """
     Test lifecycle of an aborted Remote Prefill request hitting the timeout.
     -----> P 
             |  {process request}
-     <-\--- |  {result is NOT delivered, eg proxy is down}
+     <-/--- |  {result is NOT delivered, eg proxy is down}
             |
             |
             |  {eventually free blocks}
@@ -396,15 +488,37 @@ def test_abort_timeout_on_prefiller(monkeypatch):
         kv_connector="NixlConnector",
         kv_role="kv_both",
     )
+    llm_kwargs = {
+        "model": model_name,
+        "enforce_eager": True,
+        "gpu_memory_utilization": 0.5,
+        "kv_transfer_config": kv_transfer_config,
+        "distributed_executor_backend": distributed_executor_backend,
+    }
+
     timeout = 6
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", str(timeout))
-    llm = LLM(
-        model=model_name,
-        enforce_eager=True,
-        gpu_memory_utilization=0.5,
-        kv_transfer_config=kv_transfer_config,
-    )
+
+    # Build runtime_env only if we're using Ray
+    if distributed_executor_backend == "ray":
+        with _make_fake_nixl_pkg() as working_dir:
+            runtime_env = {
+                "working_dir": working_dir,  # ship fake nixl package
+                "env_vars": {
+                    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": str(timeout),
+                },
+            }
+            ray.init(runtime_env=runtime_env)
+
+            _run_abort_timeout_test(llm_kwargs, timeout)
+    else:
+        _run_abort_timeout_test(llm_kwargs, timeout)
+
+
+def _run_abort_timeout_test(llm_kwargs: dict, timeout: int):
+    """Helper function to run the abort timeout test logic."""
+    llm = LLM(**llm_kwargs)
     remote_prefill_opts = {
         "do_remote_decode": True,
         "do_remote_prefill": False,
