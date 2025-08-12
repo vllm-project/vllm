@@ -1519,6 +1519,10 @@ def build_app(args: Namespace) -> FastAPI:
         allow_headers=args.allowed_headers,
     )
 
+    if sentry_dsn := args.sentry_dsn:
+        import sentry_sdk
+        sentry_sdk.init(dsn=sentry_dsn)
+
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException):
         err = ErrorResponse(
