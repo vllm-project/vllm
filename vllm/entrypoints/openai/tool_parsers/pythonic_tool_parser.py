@@ -10,11 +10,15 @@ import regex as re
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+                                              FunctionCall, ResponsesRequest,
+                                              ToolCall)
+# yapf: enable
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.logger import init_logger
@@ -58,8 +62,10 @@ class PythonicToolParser(ToolParser):
         self.current_tool_id = value
 
     def extract_tool_calls(
-            self, model_output: str,
-            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
+        self,
+        model_output: str,
+        request: Union[ChatCompletionRequest, ResponsesRequest],
+    ) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response.
         """

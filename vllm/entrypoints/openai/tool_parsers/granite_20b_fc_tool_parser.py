@@ -11,11 +11,15 @@ import regex as re
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+                                              FunctionCall, ResponsesRequest,
+                                              ToolCall)
+# yapf: enable
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import (consume_space,
@@ -47,8 +51,10 @@ class Granite20bFCToolParser(ToolParser):
         self.tool_call_regex = re.compile(r"<function_call>\s*")
 
     def extract_tool_calls(
-            self, model_output: str,
-            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
+        self,
+        model_output: str,
+        request: Union[ChatCompletionRequest, ResponsesRequest],
+    ) -> ExtractedToolCallInformation:
         if self.tool_start_token not in model_output:
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],

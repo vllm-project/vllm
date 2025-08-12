@@ -8,11 +8,15 @@ from typing import Any, Optional, Union
 
 import regex as re
 
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+                                              FunctionCall, ResponsesRequest,
+                                              ToolCall)
+# yapf: enable
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import consume_space
@@ -86,8 +90,10 @@ class HunyuanA13BToolParser(ToolParser):
         return model_output, None
 
     def extract_tool_calls(
-            self, model_output: str,
-            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
+        self,
+        model_output: str,
+        request: Union[ChatCompletionRequest, ResponsesRequest],
+    ) -> ExtractedToolCallInformation:
         """
         Extract tool calls from a complete model output.
         """

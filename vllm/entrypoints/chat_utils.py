@@ -15,8 +15,6 @@ import jinja2.nodes
 import transformers.utils.chat_template_utils as hf_chat_utils
 # yapf conflicts with isort for this block
 # yapf: disable
-from openai.types.chat.chat_completion_message_tool_call_param import (
-    Function as FunctionCallTool)
 from openai.types.chat import (ChatCompletionAssistantMessageParam,
                                ChatCompletionContentPartImageParam,
                                ChatCompletionContentPartInputAudioParam)
@@ -30,6 +28,8 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
                                ChatCompletionToolMessageParam)
 from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
+from openai.types.chat.chat_completion_message_tool_call_param import (
+    Function as FunctionCallTool)
 from openai.types.responses import ResponseInputImageParam
 from openai_harmony import Message as OpenAIHarmonyMessage
 from PIL import Image

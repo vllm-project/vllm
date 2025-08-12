@@ -979,9 +979,11 @@ class OpenAIServing:
                 msg = "Tool usage is only supported for Chat Completions API " \
                       "and Responses API requests."
                 raise NotImplementedError(msg)
-
-            request = tool_parser(tokenizer).adjust_request(  # type: ignore
-                request=request)
+            # TODO(chauncey) remove this limitation
+            if isinstance(request, ChatCompletionRequest):
+                request = tool_parser(
+                    tokenizer).adjust_request(  # type: ignore
+                        request=request)
 
         if tokenizer is None:
             assert isinstance(request_prompt, str), (

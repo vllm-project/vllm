@@ -3,7 +3,7 @@
 
 import json
 from collections.abc import Sequence
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
@@ -12,7 +12,8 @@ from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
                                               ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+                                              FunctionCall, ResponsesRequest,
+                                              ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.logger import init_logger
@@ -43,8 +44,10 @@ class Phi4MiniJsonToolParser(ToolParser):
         self.bot_token: str = "functools"
 
     def extract_tool_calls(
-            self, model_output: str,
-            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
+        self,
+        model_output: str,
+        request: Union[ChatCompletionRequest, ResponsesRequest],
+    ) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response.
         """
