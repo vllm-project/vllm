@@ -377,15 +377,13 @@ class BlockQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
     pass
 
 
-# TODO: rename to PartitionedModelWeightParameter
-# use meta tensor for data
-# pass weight_loader_2 to this function
-# this new weight loader will call the load_*_weight functions
-# these functions will give more control to this param and be responsible for tp
 class PartitionedModelWeightParameter(ModelWeightParameter):
     """
-    Unlike other parameters, handles shared memory
-    Must be loaded with weight_loader_v2 so that param.data is not accessed
+    Parameter for weights whose partitions (shards) must be separate tensors.
+
+    For example, when applying transforms to the "gate" and "up" partitions of
+    `MergedColumnParallelLinear`, the tranform weights must stay separate
+    tensors in order to allow for tensor memory sharing between layers.
     """
 
     def __new__(cls, data_shape: Sequence[int | torch.SymInt], dtype: torch.dtype, **kwargs):
@@ -451,7 +449,10 @@ class PartitionedModelWeightParameter(ModelWeightParameter):
     
     @property
     def data(self):
-        raise ValueError()
+        raise ValueError("Accessing `data` of a "
+                         "`PartitionedModelWeightParameter` is not allowed. "
+                         "Instead, use `get_partition` to get the weight of "
+                         "the particular partition you want to access")
 
 
 def permute_param_layout_(param: BasevLLMParameter, input_dim: int,
