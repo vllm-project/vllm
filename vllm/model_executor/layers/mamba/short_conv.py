@@ -68,10 +68,7 @@ class ShortConv(CustomOp):
         # The outer list is for v0 PP virtual engine. Though this code path
         # only runs for v1, we have to do this to unify with the interface
         # of Attention + v0 PP.
-        # The inner tuple is (conv_state,)
-        self.kv_cache = [
-            (torch.tensor([])),
-        ]
+        self.kv_cache = [(torch.tensor([]), )]
 
         # For compatibility with MambaSpec utils
         self.chunk_size = 1
