@@ -19,8 +19,8 @@ from openai.types.chat.chat_completion_message import (
 # yapf: enable
 from openai.types.responses import (ResponseFunctionToolCall,
                                     ResponseInputItemParam, ResponseOutputItem,
-                                    ResponsePrompt, ResponseStatus,
-                                    ResponseTextConfig)
+                                    ResponsePrompt, ResponseReasoningItem,
+                                    ResponseStatus, ResponseTextConfig)
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
@@ -239,6 +239,7 @@ def get_logits_processors(processors: Optional[LogitsProcessors],
 
 
 ResponseInputOutputItem: TypeAlias = Union[ResponseInputItemParam,
+                                           ResponseReasoningItem,
                                            ResponseFunctionToolCall]
 
 
