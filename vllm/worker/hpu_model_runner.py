@@ -1284,6 +1284,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             seq_len = len(seq_group_metadata_list[0].seq_data[first_key].
                           prompt_token_ids)
             query_len = seq_len - ctx * self.block_size
+            if real_batch_size > 1 and self.use_merged_prefill:
+                real_batch_size = 1
             batch_size_padded = self.bucketing_manager.find_prompt_bucket(
                 real_batch_size, query_len, ctx)[0]
         else:
@@ -1678,10 +1680,12 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                         for _ in range(batch_size_padding))
 
         real_num_seqs = len(query_lens)
+        bs = len(seq_group_metadata_list)
+        if bs > 1 and self.use_merged_prefill:
+            bs = 1
         max_prompt_len = max(
-            self.bucketing_manager.find_prompt_bucket(
-                len(seq_group_metadata_list), target_query_len, ctx)[1],
-            self.block_size)
+            self.bucketing_manager.find_prompt_bucket(bs, target_query_len,
+                                                      ctx)[1], self.block_size)
 
         if self.dp_awared_padding and\
             self.vllm_config.kv_transfer_config is None:
