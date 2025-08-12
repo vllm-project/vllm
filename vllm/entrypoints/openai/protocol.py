@@ -570,9 +570,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
     return_token_ids: Optional[bool] = Field(
         default=False,
         description=(
-            "If specified, the result will include both prompt and response "
-            "token ids alongside the generated text. "
-            "This is useful for debugging or when you "
+            "If specified, the result will include token IDs alongside the "
+            "generated text. In streaming mode, prompt_token_ids is included "
+            "only in the first chunk, and token_ids contains the delta tokens "
+            "for each chunk. This is useful for debugging or when you "
             "need to map generated text back to input tokens."))
     cache_salt: Optional[str] = Field(
         default=None,
@@ -1063,9 +1064,10 @@ class CompletionRequest(OpenAIBaseModel):
     return_token_ids: Optional[bool] = Field(
         default=False,
         description=(
-            "If specified, the result will include both prompt and response "
-            "token ids alongside the generated text. "
-            "This is useful for debugging or when you "
+            "If specified, the result will include token IDs alongside the "
+            "generated text. In streaming mode, prompt_token_ids is included "
+            "only in the first chunk, and token_ids contains the delta tokens "
+            "for each chunk. This is useful for debugging or when you "
             "need to map generated text back to input tokens."))
 
     cache_salt: Optional[str] = Field(
@@ -1519,6 +1521,8 @@ class CompletionResponseStreamChoice(OpenAIBaseModel):
             "including encountering the EOS token"),
     )
     # not part of the OpenAI spec but for tracing the tokens
+    # prompt tokens is put into choice to align with CompletionResponseChoice
+    prompt_token_ids: Optional[list[int]] = None
     token_ids: Optional[list[int]] = None
 
 
@@ -1736,6 +1740,8 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
+    # not part of the OpenAI spec but for tracing the tokens
+    prompt_token_ids: Optional[list[int]] = None
 
 
 class TranscriptionResponseStreamChoice(OpenAIBaseModel):

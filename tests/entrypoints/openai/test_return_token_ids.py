@@ -154,8 +154,7 @@ async def test_chat_completion_with_tool_use(server):
             "<|im_start|>assistant\n")
 
         response_text = tokenizer.decode(response.choices[0].token_ids)
-        assert response_text.startswith(
-            "<tool_call>\n{\"name\": \"get_weather\"")
+        assert response_text.startswith('<tool_call>\n{"name": "get_weather"')
         assert response_text.endswith("</tool_call><|im_end|>")
 
         # If tool call was made, verify the response structure
@@ -253,6 +252,7 @@ async def test_comparison_with_prompt_logprobs_and_logprobs(server):
             max_tokens=30,
             temperature=0,
             stream=True,
+            echo=False,
             logprobs=1,
             extra_body={
                 "return_token_ids": True,
@@ -261,35 +261,44 @@ async def test_comparison_with_prompt_logprobs_and_logprobs(server):
         )
 
         # Collect streamed tokens
+        streamed_prompt_token_ids = []
         streamed_token_ids = []
+        streamed_logprob_token_ids = []
+        first_chunk = True
         async for chunk in stream:
-            print(chunk)
-            if chunk.choices and chunk.choices[0].logprobs:
-                for token_str in chunk.choices[0].logprobs.tokens:
-                    if token_str.startswith("token_id:"):
-                        token_id = int(token_str.removeprefix("token_id:"))
-                        streamed_token_ids.append(token_id)
+            for token_str in chunk.choices[0].logprobs.tokens:
+                # Token format is "token_id:12345" when
+                # return_tokens_as_token_ids is True
+                if token_str.startswith("token_id:"):
+                    token_id = int(token_str.removeprefix("token_id:"))
+                    streamed_logprob_token_ids.append(token_id)
+            if first_chunk:
+                streamed_prompt_token_ids = chunk.choices[0].prompt_token_ids
+                first_chunk = False
+            streamed_token_ids += chunk.choices[0].token_ids
 
-        # Verify we collected some tokens
-        assert len(streamed_token_ids) > 0
+        # Verify we collected some tokens and first chunk had prompt_token_ids
+        assert len(streamed_prompt_token_ids) > 0
+        assert streamed_token_ids == streamed_logprob_token_ids
 
 
 @pytest.mark.asyncio
 async def test_chat_completion_with_emoji_and_token_ids(server):
     """Test chat completion with emojis to verify token_ids handling."""
+    chat_messages = [
+        {
+            "role": "system",
+            "content": "You like to use emojis in your responses."
+        },
+        {
+            "role": "user",
+            "content": "Repeat after me: I love cats 🐱"
+        },
+    ]
     async with server.get_async_client() as client:
         response = await client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You like to use emojis in your responses."
-                },
-                {
-                    "role": "user",
-                    "content": "Repeat after me: I love cats 🐱"
-                },
-            ],
+            messages=chat_messages,
             max_tokens=50,
             temperature=0,
             logprobs=True,
@@ -306,6 +315,13 @@ async def test_chat_completion_with_emoji_and_token_ids(server):
 
         # Decode token_ids and verify consistency
         tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+
+        decoded_prompt = tokenizer.decode(response.prompt_token_ids)
+        assert decoded_prompt.startswith(
+            "<|im_start|>system\nYou like to use emojis in your responses.")
+        assert decoded_prompt.endswith(
+            "I love cats 🐱<|im_end|>\n<|im_start|>assistant\n")
+
         decoded_response = tokenizer.decode(response.choices[0].token_ids)
         # The content should match the response text
         # except the ending <|im_end|>
@@ -315,21 +331,43 @@ async def test_chat_completion_with_emoji_and_token_ids(server):
         # Test with streaming
         stream = await client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[{
-                "role": "user",
-                "content": "Say hello with an emoji 👋"
-            }],
-            max_tokens=20,
+            messages=chat_messages,
+            max_tokens=50,
             temperature=0,
             stream=True,
-            logprobs=True,
             extra_body={"return_token_ids": True},
         )
 
         collected_content = ""
-        async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                collected_content += chunk.choices[0].delta.content
+        collected_token_ids = []
+        first_chunk = True
 
-        # Verify we got some response
+        async for chunk in stream:
+            if first_chunk:
+                assert chunk.prompt_token_ids is not None
+                assert isinstance(chunk.prompt_token_ids, list)
+                # Check the prompt_token_ids match the initial prompt
+                decoded_prompt_stream = tokenizer.decode(
+                    chunk.prompt_token_ids)
+                assert decoded_prompt_stream == decoded_prompt
+                first_chunk = False
+            else:
+                chunk_dump = chunk.model_dump()
+                assert "prompt_token_ids" not in chunk_dump, \
+                    "Subsequent chunks should not have prompt_token_ids"
+
+            if chunk.choices:
+                if chunk.choices[0].delta.content:
+                    collected_content += chunk.choices[0].delta.content
+                # token_ids may not present in all chunks
+                choice_dump = chunk.choices[0].model_dump()
+                if "token_ids" in choice_dump:
+                    collected_token_ids.extend(chunk.choices[0].token_ids)
+
+        # Verify we got response and token_ids
         assert len(collected_content) > 0
+        assert len(collected_token_ids) > 0
+
+        # Verify token_ids decode properly
+        decoded_response = tokenizer.decode(collected_token_ids)
+        assert decoded_response == collected_content + "<|im_end|>"

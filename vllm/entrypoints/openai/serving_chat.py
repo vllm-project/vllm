@@ -567,12 +567,17 @@ class OpenAIServingChat(OpenAIServing):
                             ),
                             logprobs=None,
                             finish_reason=None)
+
+                        # return prompt_token_ids at the first chunk ever
                         chunk = ChatCompletionStreamResponse(
                             id=request_id,
                             object=chunk_object_type,
                             created=created_time,
                             choices=[choice_data],
-                            model=model_name)
+                            model=model_name,
+                            prompt_token_ids=(res.prompt_token_ids
+                                              if request.return_token_ids else
+                                              None))
 
                         # if continuous usage stats are requested, add it
                         if include_continuous_usage:
@@ -911,7 +916,9 @@ class OpenAIServingChat(OpenAIServing):
                             index=i,
                             delta=delta_message,
                             logprobs=logprobs,
-                            finish_reason=None)
+                            finish_reason=None,
+                            token_ids=(list(output.token_ids)
+                                       if request.return_token_ids else None))
 
                     # if the model is finished generating
                     else:
@@ -972,7 +979,9 @@ class OpenAIServingChat(OpenAIServing):
                             logprobs=logprobs,
                             finish_reason=output.finish_reason
                             if not auto_tools_called else "tool_calls",
-                            stop_reason=output.stop_reason)
+                            stop_reason=output.stop_reason,
+                            token_ids=(list(output.token_ids)
+                                       if request.return_token_ids else None))
 
                         finish_reason_sent[i] = True
 
