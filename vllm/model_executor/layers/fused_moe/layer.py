@@ -685,11 +685,11 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
             str: A string mapping from global to local index.
                 Using str to support hashing for logging once only.
         """
-    expert_maps_this_rank = []
-    for global_idx, local_idx in enumerate(expert_map.tolist()):
-        if local_idx != -1:
-            expert_maps_this_rank.append(f"{global_idx}->{local_idx}")
-    return ", ".join(expert_maps_this_rank)
+    global_indices = torch.where(expert_map != -1)[0]
+    local_indices = expert_map[global_indices]
+    return ", ".join(
+        f"{global_index.item()}->{local_index.item()}"
+        for global_index, local_index in zip(global_indices, local_indices))
 
 
 class FusedMoE(torch.nn.Module):
