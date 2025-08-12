@@ -537,6 +537,10 @@ def benchmark_operation(
     operation_func, *args, warmup: int = 5, trials: int = 20, **kwargs
 ):
     """Benchmark a single operation using CUDA graphs."""
+    # Warmup before graph capture
+    for _ in range(warmup):
+        operation_func(*args, **kwargs)
+    torch.cuda.synchronize()
 
     # Create CUDA graph
     graph = torch.cuda.CUDAGraph()
@@ -548,9 +552,10 @@ def benchmark_operation(
         for _ in range(num_op_per_cudagraph):
             operation_func(*args, **kwargs)
 
+    # Graph warmup
+    torch.cuda.synchronize()
     for _ in range(warmup):
         graph.replay()
-    torch.cuda.synchronize()
 
     # Benchmark with CUDA graph
     torch.cuda.synchronize()
