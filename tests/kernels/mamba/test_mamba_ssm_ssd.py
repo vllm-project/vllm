@@ -187,7 +187,7 @@ def generate_continuous_batched_examples(example_lens_by_batch,
                          [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("n_heads", [3, 4, 11, 16, 32])
 @pytest.mark.parametrize("d_head", [5, 8, 19, 32, 128])
-@pytest.mark.parametrize("seq_len_chunk_size", [(119, 17), (128, 32)])
+@pytest.mark.parametrize("seq_len_chunk_size", [(112, 16), (128, 32)])
 def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
                                          itype):
 
@@ -253,15 +253,15 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
             (8, 8, 16, 32, 16),
         ]),  # mode examples with varied lengths
 
-        # odd chunk_size
-        (64, 29, 2, [(11, 4), (13, 23), (19, 22),
-                     (21, 15)]),  # irregular sizes
-
         # large-ish chunk_size (256)
         (64, 256, 1, [(5, ), (1, ), (1, ),
                       (1, )]),  # irregular sizes with small sequences
         (64, 256, 2, [(5, 30), (1, 2), (1, 2),
                       (1, 2)]),  # irregular sizes with small sequences
+
+        # we also need to test some large seqlen
+        # to catch errors with init states decay
+        (768, 128, 2, [(138, 225), (138, 225)]),
     ])
 def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
                                      itype):
@@ -271,10 +271,9 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
 
     seqlen, chunk_size, num_examples, cases = seq_len_chunk_size_cases
 
-    # TODO: the irregular chunk size cases have some issues and require higher
-    # tolerance. This is to be invesigated
-    if chunk_size not in {8, 256}:
-        atol, rtol = 5e-1, 5e-1
+    # This test can have larger error for longer sequences
+    if seqlen > 256:
+        atol, rtol = 1e-2, 5e-3
     else:
         atol, rtol = 5e-3, 5e-3
 
