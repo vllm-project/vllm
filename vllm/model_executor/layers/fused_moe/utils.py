@@ -12,7 +12,6 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4)
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
 from vllm.utils.flashinfer import fp4_quantize
@@ -169,12 +168,11 @@ def _mxfp4_quantize(
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, None]:
     assert block_shape is None
-    if not current_platform.supports_mx():
-        A = quant_dequant_mxfp4(A)
-    else:
-        # TODO: native mxfp4 is currently not integrated in vllm,
-        # so simulating even on devices supporting this data type natively.
-        A = quant_dequant_mxfp4(A)
+    # TODO: native mxfp4 is currently not integrated in vllm,
+    # so simulating even on devices supporting this data type natively.
+    # Once integrated, `current_platform.supports_mx()` should be used to
+    # control quantize+dequantize, or simply quantize here down to mxfp4.
+    A = quant_dequant_mxfp4(A)
 
     return A, None
 
