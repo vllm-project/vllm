@@ -130,8 +130,8 @@ __global__ void act_and_mul_kernel_with_param(
 }  // namespace vllm
 namespace vllm {
 template <typename T>
-__device__ __forceinline__ T clamp_swiglu(const T& gate, const T& up,
-                                          float alpha, float limit) {
+__device__ __forceinline__ T swigluoai_and_mul(const T& gate, const T& up,
+                                               float alpha, float limit) {
   // clamp gate: min=None, max=limit
   const float gate_f = (float)gate;
   const float clamped_gate = gate_f > limit ? limit : gate_f;
@@ -152,7 +152,7 @@ __device__ __forceinline__ T clamp_swiglu(const T& gate, const T& up,
 template <typename scalar_t,
           scalar_t (*ACT_FN)(const scalar_t&, const scalar_t&, const float,
                              const float)>
-__global__ void clamp_swiglu_kernel_with_params(
+__global__ void swigluoai_and_mul_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
     const int d, const float alpha, const float limit) {
@@ -185,7 +185,7 @@ __global__ void clamp_swiglu_kernel_with_params(
                                          PARAM);                        \
       });
 
-#define LAUNCH_MUL_CLAMP_GLU_KERNEL_WITH_PARAMS(KERNEL, ALPHA, LIMIT)          \
+#define LAUNCH_SIGLUOAI_AND_MUL(KERNEL, ALPHA, LIMIT)                          \
   int d = input.size(-1) / 2;                                                  \
   int64_t num_tokens = input.numel() / input.size(-1);                         \
   dim3 grid(num_tokens);                                                       \
@@ -194,7 +194,7 @@ __global__ void clamp_swiglu_kernel_with_params(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                \
   VLLM_DISPATCH_FLOATING_TYPES(                                                \
       input.scalar_type(), "clamp_swiglu_kernel_with_params", [&] {            \
-        vllm::clamp_swiglu_kernel_with_params<scalar_t, KERNEL<scalar_t>>      \
+        vllm::swigluoai_and_mul_kernel<scalar_t, KERNEL<scalar_t>>             \
             <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),             \
                                          input.data_ptr<scalar_t>(), d, ALPHA, \
                                          LIMIT);                               \
@@ -205,10 +205,10 @@ void fatrelu_and_mul(torch::Tensor& out,    // [..., d],
                      double threshold) {
   LAUNCH_ACTIVATION_GATE_KERNEL_WITH_PARAM(vllm::fatrelu_kernel, threshold);
 }
-void swiglu_oai(torch::Tensor& out,    // [..., d]
-                torch::Tensor& input,  // [..., 2 * d]
-                double alpha, double limit) {
-  LAUNCH_MUL_CLAMP_GLU_KERNEL_WITH_PARAMS(vllm::clamp_swiglu, alpha, limit);
+void swigluoai_and_mul(torch::Tensor& out,    // [..., d]
+                       torch::Tensor& input,  // [..., 2 * d]
+                       double alpha, double limit) {
+  LAUNCH_SIGLUOAI_AND_MUL(vllm::swigluoai_and_mul, alpha, limit);
 }
 namespace vllm {
 
