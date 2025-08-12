@@ -257,7 +257,7 @@ class Hermes2ProToolParser(ToolParser):
                 if (current_tool_call is None):
                     return None
                 function_name: Union[str, None] = current_tool_call.get("name")
-                arguments: Union[dict, None] = current_tool_call.get("arguments")
+                arguments = current_tool_call.get("arguments")
                 if arguments is not None:
                     arguments = json.dumps(arguments, ensure_ascii=False)
                 if function_name:
