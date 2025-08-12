@@ -1,6 +1,6 @@
 # Hybrid KV Cache Manager
 
-Note: This doc is written based on commit 458e74eb907f96069e6d8a4f3c9f457001fef2ea on 2025-08-11. This feature is still in its early stage and things may change.
+Note: This doc is written based on commit [458e74](https://github.com/vllm-project/vllm/commit/458e74eb907f96069e6d8a4f3c9f457001fef2ea). This feature is still in its early stage and things may change.
 
 ## What's This?
 
