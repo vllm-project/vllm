@@ -232,7 +232,7 @@ class KVConnectorBase_V1(ABC):
         is shutting down to ensure that all the async operations are
         completed and the connector is cleaned up properly.
         """
-        pass
+        return None
 
     # ==============================
     # Scheduler-side methods
