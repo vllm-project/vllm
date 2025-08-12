@@ -38,7 +38,6 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              RWConfig, SpeculatorsConfig,
                                              Step3TextConfig, Step3VLConfig,
                                              UltravoxConfig)
-
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
@@ -66,6 +65,7 @@ def _get_hf_token() -> Optional[str]:
     if token and token.strip():
         return token
     return None
+
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
