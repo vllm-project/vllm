@@ -1,8 +1,8 @@
 # Common dependencies
 -r common.txt
 
-numba == 0.60.0; python_version == '3.9' # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
-numba == 0.61.2; python_version > '3.9'
+numba == 0.60.0; python_version == '3.9' and platform_machine != "s390x" # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
+numba == 0.61.2; python_version > '3.9' and platform_machine != "s390x"
 
 # Dependencies for CPUs
 packaging>=24.2
