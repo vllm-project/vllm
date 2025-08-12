@@ -304,8 +304,7 @@ class EngineCore:
         if not self.batch_queue.full():
             scheduler_output = self.scheduler.schedule()
             future = self.model_executor.execute_model(scheduler_output)
-            self.batch_queue.put_nowait(
-                (future, scheduler_output))  # type: ignore
+            self.batch_queue.put_nowait((future, scheduler_output))
             scheduled_batch = True
 
         # If no more requests can be scheduled and the job queue is not empty,
