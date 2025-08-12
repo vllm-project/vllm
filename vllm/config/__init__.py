@@ -25,6 +25,7 @@ from pydantic import (ConfigDict, SkipValidation, field_validator,
                       model_validator)
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
+from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from typing_extensions import Self, assert_never, runtime_checkable
 
 import vllm.envs as envs
@@ -1508,7 +1509,9 @@ class ModelConfig:
 
                 # Support with hybrid transformers configs >= 4.54.0
                 if attn_block_type:
-                    return sum(t in ("full_attention", "attention")
+                    attn_layer_types = (a for a in ALLOWED_LAYER_TYPES
+                                        if "attention" in a)
+                    return sum(t in ("attention", *attn_layer_types)
                                for t in layers_block_type_value[start:end])
                 else:
                     return sum(t == block_type.value
