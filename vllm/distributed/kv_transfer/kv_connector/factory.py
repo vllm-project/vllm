@@ -4,11 +4,14 @@
 import importlib
 from typing import TYPE_CHECKING, Callable
 
+# yapf: disable
 import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_connector.base import (
     KVConnectorBase, KVConnectorBaseType)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.logger import init_logger
+
+# yapf: enable
 
 if TYPE_CHECKING:
     from vllm.config import KVTransferConfig, VllmConfig
