@@ -4,7 +4,7 @@ import logging
 from enum import Enum
 
 
-class Color(str, Enum):
+class Color(Enum):
     RED = "\033[91m"
     GREEN = "\033[92m"
     BLUE = "\033[94m"
@@ -12,6 +12,9 @@ class Color(str, Enum):
     CYAN = "\033[96m"
     YELLOW = "\033[93m"
     RESET = "\033[0m"
+
+    def __str__(self):
+        return self.value
 
 
 TEXT_SEPARATOR = "-" * 100
