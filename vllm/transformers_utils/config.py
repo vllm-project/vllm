@@ -449,23 +449,6 @@ def get_config(
                     raise e
         config = _maybe_remap_hf_config_attrs(config)
 
-        # Phi4Flash misuses this config as list[int]. Convert it to int and add
-        # the layer_types list[str] to make it HF compatible
-        if (config.model_type == "phi4flash"):
-            # TODO: Remove after the following PR is merged:
-            # https://huggingface.co/microsoft/Phi-4-mini-flash-reasoning/discussions/6
-            if not hasattr(config, "layer_types"):
-                config.layer_types = [
-                    "sliding_attention" if i < config.num_hidden_layers // 2
-                    and i % 2 == 1 else "full_attention"
-                    for i in range(config.num_hidden_layers)
-                ]
-            # TODO: Remove after the following PR is merged:
-            # https://huggingface.co/microsoft/Phi-4-mini-flash-reasoning/discussions/7
-            if isinstance(config.sliding_window, list):
-                config.sliding_window = next(
-                    filter(None, config.sliding_window), None)
-
     elif config_format == ConfigFormat.MISTRAL:
         # This function loads a params.json config which
         # should be used when loading models in mistral format
