@@ -28,16 +28,6 @@ else:
         return dt
 
 
-@triton.heuristics(
-    {"HAS_DT_BIAS": lambda args: args["dt_bias_ptr"] is not None})
-@triton.heuristics({"HAS_D": lambda args: args["D_ptr"] is not None})
-@triton.heuristics({"HAS_Z": lambda args: args["z_ptr"] is not None})
-@triton.heuristics({
-    "HAS_STATE_BATCH_INDICES":
-    lambda args: args["state_batch_indices_ptr"] is not None
-})
-@triton.heuristics(
-    {"BLOCK_SIZE_DSTATE": lambda args: triton.next_power_of_2(args["dstate"])})
 @triton.jit
 def _selective_scan_update_kernel(
     # Pointers to matrices
@@ -92,12 +82,13 @@ def _selective_scan_update_kernel(
     # Meta-parameters
     DT_SOFTPLUS: tl.constexpr,
     TIE_HDIM: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
     HAS_DT_BIAS: tl.constexpr,
     HAS_D: tl.constexpr,
     HAS_Z: tl.constexpr,
     HAS_STATE_BATCH_INDICES: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
+    # tuning parameters last
+    BLOCK_SIZE_M: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
@@ -271,65 +262,78 @@ def selective_state_update(state,
     grid = lambda META: (triton.cdiv(dim, META['BLOCK_SIZE_M']), batch, nheads)
     z_strides = ((z.stride(0), z.stride(1), z.stride(2)) if z is not None else
                  (0, 0, 0))
-    # We don't want autotune since it will overwrite the state
-    # We instead tune by hand.
-    BLOCK_SIZE_M, num_warps = ((32, 4) if dstate <= 16 else
-                               ((16, 4) if dstate <= 32 else
-                                ((8, 4) if dstate <= 64 else
-                                 ((4, 4) if dstate <= 128 else ((4, 8))))))
+    # Autotuning would require to clone the state, which would consume
+    #  multiple GBs of memory. We use a heuristics instead. 
+    BLOCK_SIZE_M, num_warps, num_stages = ((32, 4, 3) if dstate <= 16 else
+                               ((16, 4, 3) if dstate <= 32 else
+                                ((8, 4, 3) if dstate <= 64 else
+                                 ((4, 4, 3) if dstate < 128 else 
+                                  ((64, 2, 8) if dstate == 128 else ((4, 8, 3)))))))
     tie_hdim = A.stride(-1) == 0 and A.stride(-2) == 0 and dt.stride(
         -1) == 0 and dt_bias.stride(-1) == 0
     with torch.cuda.device(x.device.index):
         _selective_scan_update_kernel[grid](
-            state,
-            x,
-            dt,
-            dt_bias,
-            A,
-            B,
-            C,
-            D,
-            z,
-            out,
-            state_batch_indices,
-            pad_slot_id,
-            batch,
-            nheads,
-            dim,
-            dstate,
-            nheads // ngroups,
-            state.stride(0),
-            state.stride(1),
-            state.stride(2),
-            state.stride(3),
-            x.stride(0),
-            x.stride(1),
-            x.stride(2),
-            dt.stride(0),
-            dt.stride(1),
-            dt.stride(2),
-            *(dt_bias.stride(0),
-              dt_bias.stride(1)) if dt_bias is not None else 0,
-            A.stride(0),
-            A.stride(1),
-            A.stride(2),
-            B.stride(0),
-            B.stride(1),
-            B.stride(2),
-            C.stride(0),
-            C.stride(1),
-            C.stride(2),
-            *(D.stride(0), D.stride(1)) if D is not None else 0,
-            z_strides[0],
-            z_strides[1],
-            z_strides[2],
-            out.stride(0),
-            out.stride(1),
-            out.stride(2),
-            dt_softplus,
-            tie_hdim,
-            BLOCK_SIZE_M,
+            # Pointers to matrices
+            state_ptr=state,
+            x_ptr=x,
+            dt_ptr=dt,
+            dt_bias_ptr=dt_bias,
+            A_ptr=A,
+            B_ptr=B,
+            C_ptr=C,
+            D_ptr=D,
+            z_ptr=z,
+            out_ptr=out,
+            state_batch_indices_ptr=state_batch_indices,
+            pad_slot_id=pad_slot_id,
+            # Matrix dimensions
+            batch=batch,
+            nheads=nheads,
+            dim=dim,
+            dstate=dstate,
+            nheads_ngroups_ratio=nheads // ngroups,
+            # Strides  
+            stride_state_batch=state.stride(0),
+            stride_state_head=state.stride(1),
+            stride_state_dim=state.stride(2),
+            stride_state_dstate=state.stride(3),
+            stride_x_batch=x.stride(0),
+            stride_x_head=x.stride(1),
+            stride_x_dim=x.stride(2),
+            stride_dt_batch=dt.stride(0),
+            stride_dt_head=dt.stride(1),
+            stride_dt_dim=dt.stride(2),
+            stride_dt_bias_head=dt_bias.stride(0) if dt_bias is not None else 0, 
+            stride_dt_bias_dim=dt_bias.stride(1) if dt_bias is not None else 0,
+            stride_A_head=A.stride(0),
+            stride_A_dim=A.stride(1),
+            stride_A_dstate=A.stride(2),
+            stride_B_batch=B.stride(0),
+            stride_B_group=B.stride(1),
+            stride_B_dstate=B.stride(2),
+            stride_C_batch=C.stride(0),
+            stride_C_group=C.stride(1),
+            stride_C_dstate=C.stride(2),
+            stride_D_head=D.stride(0) if D is not None else 0,
+            stride_D_dim=D.stride(1) if D is not None else 0,
+            stride_z_batch=z_strides[0],
+            stride_z_head=z_strides[1],
+            stride_z_dim=z_strides[2],
+            stride_out_batch=out.stride(0),
+            stride_out_head=out.stride(1),
+            stride_out_dim=out.stride(2),
+            # Meta-parameters 
+            DT_SOFTPLUS=dt_softplus,
+            TIE_HDIM=tie_hdim,
+            HAS_DT_BIAS=dt_bias is not None,
+            HAS_D=D is not None,
+            HAS_Z=z is not None,
+            HAS_STATE_BATCH_INDICES=state_batch_indices is not None,
+            BLOCK_SIZE_DSTATE=triton.next_power_of_2(dstate),
+            # tuning parameters last
+            BLOCK_SIZE_M=BLOCK_SIZE_M,
             num_warps=num_warps,
+            num_stages=num_stages,
         )
 
 
