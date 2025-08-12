@@ -23,8 +23,11 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include <cuda_fp8.h>
+#include "dispatch_utils.h"
 
 #include "cuda_utils.h"
+
+namespace vllm {
 
 // Get type2 from type or vice versa (applied to half and bfloat16)
 template <typename T>
@@ -34,21 +37,21 @@ struct TypeConverter {
 
 template <>
 struct TypeConverter<half2> {
-  using Type = half;
+  using Type = c10::Half;
 };
 
 template <>
-struct TypeConverter<half> {
+struct TypeConverter<c10::Half> {
   using Type = half2;
 };
 
 template <>
 struct TypeConverter<__nv_bfloat162> {
-  using Type = __nv_bfloat16;
+  using Type = c10::BFloat16;
 };
 
 template <>
-struct TypeConverter<__nv_bfloat16> {
+struct TypeConverter<c10::BFloat16> {
   using Type = __nv_bfloat162;
 };
 
@@ -180,7 +183,7 @@ __inline__ __device__ PackedVec<Type> compute_silu(PackedVec<Type>& vec,
   PackedVec<Type> result;
 #pragma unroll
   for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
-    if constexpr (std::is_same_v<Type, half>) {
+    if constexpr (std::is_same_v<Type, c10::Half>) {
       half2 val(0.5f, 0.5f);
       half2 t0 = __hmul2(vec.elts[i], val);
       half2 t1 = __hfma2(h2tanh(t0), val, val);
@@ -258,7 +261,7 @@ __device__ uint32_t silu_and_cvt_warp_fp16_to_fp4(PackedVec<Type>& vec,
 
   #pragma unroll
   for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
-    if constexpr (std::is_same_v<Type, half>) {
+    if constexpr (std::is_same_v<Type, c10::Half>) {
       fp2Vals[i] = __half22float2(out_silu.elts[i]);
     } else {
       fp2Vals[i] = __bfloat1622float2(out_silu.elts[i]);
@@ -328,73 +331,42 @@ silu_and_cvt_fp16_to_fp4(
 #endif
 }
 
-template <typename T>
-void invokeSiluFP4Quantization(int m, int n, T const* input,
-                               float const* SFScale, int64_t* output,
-                               int32_t* SFOuput, int multiProcessorCount,
-                               cudaStream_t stream) {
-  // Grid, Block size.
-  // Each thread converts 8 values.
-  dim3 block(std::min(int(n / ELTS_PER_THREAD), 1024));
-  // Get number of blocks per SM (assume we can fully utilize the SM).
-  int const numBlocksPerSM = 2048 / block.x;
-  dim3 grid(std::min(int(m), multiProcessorCount * numBlocksPerSM));
+}  // namespace vllm
 
-  // Launch the cvt kernel.
-  silu_and_cvt_fp16_to_fp4<T><<<grid, block, 0, stream>>>(
-      m, n, input, SFScale, reinterpret_cast<uint32_t*>(output),
-      reinterpret_cast<uint32_t*>(SFOuput));
-}
+// Launch activation, gating, and quantize kernel.
+#define LAUNCH_ACTIVATION_GATE_KERNEL()                                        \
+  int multiProcessorCount =                                                    \
+      get_device_attribute(cudaDevAttrMultiProcessorCount, -1);                \
+  auto input_sf_ptr = static_cast<float const*>(input_sf.data_ptr());          \
+  auto sf_out = static_cast<int32_t*>(output_sf.data_ptr());                   \
+  auto output_ptr = static_cast<int64_t*>(output.data_ptr());                  \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));            \
+  auto stream = at::cuda::getCurrentCUDAStream(input.get_device());            \
+  dim3 block(std::min(int(n / ELTS_PER_THREAD), 1024));                        \
+  int const numBlocksPerSM = 2048 / block.x;                                   \
+  dim3 grid(std::min(int(m), multiProcessorCount* numBlocksPerSM));            \
+  VLLM_DISPATCH_HALF_TYPES(                                                    \
+      input.scalar_type(), "act_and_mul_quant_kernel", [&] {                   \
+        auto input_ptr = reinterpret_cast<scalar_t const*>(input.data_ptr());  \
+        VLLM_DISPATCH_BYTE_TYPES(                                              \
+            output.scalar_type(), "fused_act_and_mul_quant_kernel_nvfp4_type", \
+            [&] {                                                              \
+              vllm::silu_and_cvt_fp16_to_fp4<scalar_t>                         \
+                  <<<grid, block, 0, stream>>>(                                \
+                      m, n, input_ptr, input_sf_ptr,                           \
+                      reinterpret_cast<uint32_t*>(output_ptr),                 \
+                      reinterpret_cast<uint32_t*>(sf_out));                    \
+            });                                                                \
+      });
 
-// Instantiate the function.
-template void invokeSiluFP4Quantization(int m, int n, half const* input,
-                                        float const* SFScale, int64_t* output,
-                                        int32_t* SFOuput,
-                                        int multiProcessorCount,
-                                        cudaStream_t stream);
-
-template void invokeSiluFP4Quantization(int m, int n,
-                                        __nv_bfloat16 const* input,
-                                        float const* SFScale, int64_t* output,
-                                        int32_t* SFOuput,
-                                        int multiProcessorCount,
-                                        cudaStream_t stream);
-
-void silu_and_mul_fp4_quant(torch::Tensor& output,  // [..., d]
-                            torch::Tensor& output_sf,
-                            torch::Tensor& input,  // [..., 2 * d]
-                            torch::Tensor& input_sf) {
+void silu_and_mul_nvfp4_quant(torch::Tensor& output,  // [..., d]
+                              torch::Tensor& output_sf,
+                              torch::Tensor& input,  // [..., 2 * d]
+                              torch::Tensor& input_sf) {
   TORCH_CHECK(input.dtype() == torch::kFloat16 ||
               input.dtype() == torch::kBFloat16);
   int32_t m = input.size(0);
   int32_t n = input.size(1) / 2;
   TORCH_CHECK(n % 16 == 0, "The N dimension must be multiple of 16.");
-  int multiProcessorCount =
-      get_device_attribute(cudaDevAttrMultiProcessorCount, -1);
-  auto input_sf_ptr = static_cast<float const*>(input_sf.data_ptr());
-  auto sf_out = static_cast<int32_t*>(output_sf.data_ptr());
-  auto output_ptr = static_cast<int64_t*>(output.data_ptr());
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
-  switch (input.scalar_type()) {
-    case torch::kHalf: {
-      auto input_ptr = reinterpret_cast<half const*>(input.data_ptr());
-      invokeSiluFP4Quantization(m, n, input_ptr, input_sf_ptr, output_ptr,
-                                sf_out, multiProcessorCount, stream);
-      break;
-    }
-    case torch::kBFloat16: {
-      auto input_ptr = reinterpret_cast<__nv_bfloat16 const*>(input.data_ptr());
-      invokeSiluFP4Quantization(m, n, input_ptr, input_sf_ptr, output_ptr,
-                                sf_out, multiProcessorCount, stream);
-      break;
-    }
-    default: {
-      std::cerr << "Observing: " << input.scalar_type()
-                << " for the input datatype which is invalid";
-      TORCH_CHECK(false,
-                  "Unsupported input data type for silu_and_mul_fp4_quant: ",
-                  input.scalar_type());
-    }
-  }
+  LAUNCH_ACTIVATION_GATE_KERNEL();
 }

@@ -116,10 +116,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
 
   ops.def(
-      "silu_and_mul_fp4_quant(Tensor! result, Tensor! result_scale, Tensor "
+      "silu_and_mul_nvfp4_quant(Tensor! result, Tensor! result_scale, Tensor "
       "input, "
       "Tensor scale) -> ()");
-  ops.impl("silu_and_mul_fp4_quant", torch::kCUDA, &silu_and_mul_fp4_quant);
+  ops.impl("silu_and_mul_nvfp4_quant", torch::kCUDA, &silu_and_mul_nvfp4_quant);
 
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
   ops.impl("mul_and_silu", torch::kCUDA, &mul_and_silu);

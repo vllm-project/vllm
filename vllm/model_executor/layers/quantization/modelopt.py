@@ -802,7 +802,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.alpha = Parameter(layer.input_scale * layer.weight_scale_2,
                                 requires_grad=False)
 
-        layer.input_scale_inv = Parameter((1 / layer.input_scale).to(torch.float32), requires_grad=False)
+        # Calcuate `1 / input_scale` so that we do not need to do so at runtime.
+        layer.input_scale_inv = Parameter(
+            (1 / layer.input_scale).to(torch.float32), requires_grad=False)
 
         # Swizzle the weight blockscale.
         # contracting dimension is input dimension

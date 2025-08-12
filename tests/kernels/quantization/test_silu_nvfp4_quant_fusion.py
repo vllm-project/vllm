@@ -52,7 +52,7 @@ def ops_impl(x: torch.Tensor, global_scale: torch.Tensor,
     out_shape = (x.shape[0], x.shape[1] // 4)
     output_scale = ref_output_scale
     out = torch.empty(out_shape, dtype=torch.uint8, device=x.device)
-    torch.ops._C.silu_and_mul_fp4_quant(out, output_scale, x, global_scale)
+    torch.ops._C.silu_and_mul_nvfp4_quant(out, output_scale, x, global_scale)
     return out, output_scale
 
 
@@ -122,5 +122,5 @@ def test_quantize_to_fp4(
 
     torch.testing.assert_close(ref_out_scale, fusion_out_scale)
 
-    opcheck(torch.ops._C.silu_and_mul_fp4_quant,
+    opcheck(torch.ops._C.silu_and_mul_nvfp4_quant,
             (fusion_out, fusion_out_scale, x, global_scale))

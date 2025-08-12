@@ -15,29 +15,34 @@ from .vllm_inductor_pass import VllmInductorPass
 logger = init_logger(__name__)
 
 
-def silu_mul_fp4_quant_pattern_static(result: torch.Tensor, output_scale: torch.Tensor,
-                                      result_silu_mul: torch.Tensor, input: torch.Tensor,
-                                      scale: torch.Tensor):
+def silu_mul_nvfp4_quant_pattern_static(result: torch.Tensor,
+                                        output_scale: torch.Tensor,
+                                        result_silu_mul: torch.Tensor,
+                                        input: torch.Tensor,
+                                        scale: torch.Tensor):
     at1 = auto_functionalized(torch.ops._C.silu_and_mul.default,
                               result=result_silu_mul,
                               input=input)
     at2 = auto_functionalized(torch.ops._C.scaled_fp4_quant.default,
                               output=result,
                               input=at1[1],
-                              output_scale = output_scale,
+                              output_scale=output_scale,
                               input_scale=scale)
     return at2[1], at2[2]
 
 
-def silu_mul_fp4_quant_replacement_static(result: torch.Tensor, output_scale: torch.Tensor,
-                                          result_silu_mul: torch.Tensor, input: torch.Tensor,
-                                          scale: torch.Tensor):
-    at = auto_functionalized(torch.ops._C.silu_and_mul_fp4_quant.default,
+def silu_mul_nvfp4_quant_replacement_static(result: torch.Tensor,
+                                            output_scale: torch.Tensor,
+                                            result_silu_mul: torch.Tensor,
+                                            input: torch.Tensor,
+                                            scale: torch.Tensor):
+    at = auto_functionalized(torch.ops._C.silu_and_mul_nvfp4_quant.default,
                              result=result,
-                             result_scale = output_scale,
+                             result_scale=output_scale,
                              input=input,
                              scale=scale)
     return at[1], at[2]
+
 
 def silu_mul_pattern_static(result: torch.Tensor,
                             result_silu_mul: torch.Tensor, input: torch.Tensor,
@@ -74,8 +79,10 @@ def empty_fp8(*args, **kwargs):
 def empty_fp32(*args, **kwargs):
     return torch.empty(*args, **kwargs, dtype=torch.float32, device="cuda")
 
+
 def empty_u8(*args, **kwargs):
     return torch.empty(*args, **kwargs, dtype=torch.uint8, device="cuda")
+
 
 def empty_i32(*args, **kwargs):
     return torch.empty(*args, **kwargs, dtype=torch.int32, device="cuda")
@@ -118,9 +125,11 @@ class ActivationQuantFusionPass(VllmInductorPass):
         self.dump_graph(graph, "after_act_quant_fusion")
         self.end_and_log()
 
-class ActivationFP4QuantFusionPass(VllmInductorPass):
+
+class ActivationNVFP4QuantFusionPass(VllmInductorPass):
     """
-    This pass fuses a pre-defined set of custom ops into fused ops.
+    This pass fuses silu_and_mul+scaled_fp4_quant custom ops into
+    fused silu_and_mul_nvfp4_quant op.
     It uses the torch pattern matcher to find the patterns and replace them.
 
     Because patterns can only be registered once, the pass is a singleton.
@@ -136,22 +145,22 @@ class ActivationFP4QuantFusionPass(VllmInductorPass):
 
         inputs = [
             empty_u8(16, 14336),  # Quant output
-            empty_i32(128, 448), # Quant output scale
+            empty_i32(128, 448),  # Quant output scale
             empty_bf16(16, 28672),  # Silu_and_mul output
             empty_bf16(16, 57344),  # Input
             empty_fp32(1, 1)  # Scale
         ]
-        register_replacement(silu_mul_fp4_quant_pattern_static,
-                             silu_mul_fp4_quant_replacement_static, inputs, fwd_only,
-                             self.patterns)
+        register_replacement(silu_mul_nvfp4_quant_pattern_static,
+                             silu_mul_nvfp4_quant_replacement_static, inputs,
+                             fwd_only, self.patterns)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        self.dump_graph(graph, "before_act_fp4_quant_fusion")
+        self.dump_graph(graph, "before_act_nvfp4_quant_fusion")
 
         count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns in ActivationFP4QuantFusionPass",
+        logger.debug("Replaced %s patterns in ActivationNVFP4QuantFusionPass",
                      count)
 
-        self.dump_graph(graph, "after_act_fp4_quant_fusion")
+        self.dump_graph(graph, "after_act_nvfp4_quant_fusion")
         self.end_and_log()
