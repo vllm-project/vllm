@@ -376,6 +376,7 @@ class ResponsesRequest(OpenAIBaseModel):
                 raise ValueError("Parameter 'cache_salt' must be a "
                                  "non-empty string if provided.")
         return data
+
     def _get_guided_json_from_tool(
             self) -> Optional[Union[str, dict, BaseModel]]:
         # user has chosen to use a named tool
@@ -460,6 +461,7 @@ class ResponsesRequest(OpenAIBaseModel):
             guided_decoding = GuidedDecodingParams.from_optional(
                 json=self._get_guided_json_from_tool())
         return guided_decoding
+
 
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation

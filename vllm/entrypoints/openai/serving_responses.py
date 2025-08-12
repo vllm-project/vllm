@@ -36,7 +36,8 @@ from vllm import envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
-                                         ChatTemplateContentFormatOption, parse_chat_tool_call)
+                                         ChatTemplateContentFormatOption,
+                                         parse_chat_tool_call)
 from vllm.entrypoints.context import (ConversationContext, HarmonyContext,
                                       SimpleContext, StreamingHarmonyContext)
 from vllm.entrypoints.harmony_utils import (
@@ -46,8 +47,7 @@ from vllm.entrypoints.harmony_utils import (
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.entrypoints.openai.protocol import (ErrorResponse,
-                                              FunctionCall,
+from vllm.entrypoints.openai.protocol import (ErrorResponse, FunctionCall,
                                               FunctionDefinition,
                                               InputTokensDetails,
                                               OutputTokensDetails,
@@ -61,7 +61,7 @@ from vllm.entrypoints.tool_server import MCPToolServer, ToolServer
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_fc_uuid, random_uuid
