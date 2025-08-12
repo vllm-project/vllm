@@ -3,7 +3,7 @@
 """Inference-only Kimi-Audio model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Optional, TypedDict, Union, Tuple, List, Dict
+from typing import Any, Optional, TypedDict, Union, Dict
 
 import os
 import numpy as np
@@ -35,7 +35,8 @@ from packaging import version
 
 assert version.parse(transformers.__version__) >= version.parse("4.34.1")
 
-if version.parse(transformers.__version__) >= version.parse("4.35.0"):
+if version.parse(transformers.__version__) \
+    >= version.parse("4.35.0"):
     from transformers.utils import is_flash_attn_2_available as is_flash_attn_available
 else:
     from transformers.utils import is_flash_attn_available
@@ -46,15 +47,12 @@ if is_flash_attn_available():
 else:
     raise RuntimeError("flash attention must be installed")
 
-from vllm.logger import init_logger
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
 from .utils import maybe_prefix
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
-
-logger = init_logger(__name__)
 
 
 class KimiAudioMultiModalProjector(nn.Module):
@@ -79,10 +77,10 @@ class KimiAudioInputs(TypedDict):
     # text_input_ids: Optional[torch.Tensor]
     # """Shape: `(num_audios, seq_len)`"""
 
-    is_continuous_mask: List[torch.Tensor]
+    is_continuous_mask: list[torch.Tensor]
     """Shape: `(num_audios, seq_len)`"""
 
-    whisper_input_feature: List[torch.Tensor]
+    whisper_input_feature: list[torch.Tensor]
     """Shape: `(num_audios, seq_len, feature_dim)`"""
     
 
@@ -205,12 +203,10 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
         media_begin_token = tokenizer.decode([vocab.kimia_media_begin])
-        media_pad_token = tokenizer.decode([vocab.kimia_media_pad])
         media_end_token = tokenizer.decode([vocab.kimia_media_end])
         
         def get_replacement_kimi_audio(item_idx: int):
@@ -429,7 +425,7 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
-    ) -> Union[Tuple[torch.Tensor], IntermediateTensors]:
+    ) -> Union[tuple[torch.Tensor], IntermediateTensors]:
         if intermediate_tensors is not None:
             inputs_embeds = None
 

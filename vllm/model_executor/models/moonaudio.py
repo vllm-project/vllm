@@ -42,9 +42,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 from collections.abc import Iterable
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Union
 import torch
-import torch.utils.checkpoint
 from torch import nn
 
 import transformers
@@ -52,22 +51,14 @@ from packaging import version
 
 assert version.parse(transformers.__version__) >= version.parse("4.34.1")
 
-from transformers.modeling_outputs import (
-    BaseModelOutputWithPast,
-    CausalLMOutputWithPast,
-)
-from transformers.utils import (
-    logging,
-)
 from ...transformers_utils.configs import KimiAudioConfig
-import torch.nn.functional as F
 from transformers.models.qwen2.modeling_qwen2 import (
     Qwen2RMSNorm,
     Qwen2PreTrainedModel,
 )
-from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb
 
-if version.parse(transformers.__version__) >= version.parse("4.35.0"):
+if version.parse(transformers.__version__) \
+    >= version.parse("4.35.0"):
     from transformers.utils import is_flash_attn_2_available as is_flash_attn_available
 else:
     from transformers.utils import is_flash_attn_available
@@ -78,32 +69,24 @@ if is_flash_attn_available():
 else:
     raise RuntimeError("flash attention must be installed")
 
-from .interfaces import MixtureOfExperts, SupportsPP
-from vllm.distributed import (get_ep_group, get_pp_group,
-                              get_tensor_model_parallel_world_size)
-from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
-                         get_current_vllm_config)
+from vllm.distributed import get_pp_group
+from vllm.config import CacheConfig, VllmConfig
 from vllm.sequence import IntermediateTensors
 from .utils import (PPMissingLayer, LayerFn,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory,
-                    maybe_prefix, maybe_offload_to_cpu)
-from .qwen2 import Qwen2MLP, Qwen2Attention
-import vllm.envs as envs
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
+                    maybe_offload_to_cpu)
+from .qwen2 import Qwen2Attention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.attention import AttentionType
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+    VocabParallelEmbedding)
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-                                               QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
+    default_weight_loader)
 from transformers.activations import ACT2FN
-
-logger = logging.get_logger(__name__)
 
 
 class MoonshotMLP(nn.Module):
