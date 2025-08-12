@@ -697,7 +697,14 @@ __global__ void Marlin(
   constexpr int sh_b_size = stages * b_sh_stage;
   int4* sh_b = sh;
   int4* sh_red = sh;
-  int4* sh_g_idx = sh_b + (sh_red_size > sh_b_size ? sh_red_size : sh_b_size);
+
+  constexpr int sh_size_b_red_min = (sh_red_size < sh_b_size ? sh_red_size : sh_b_size);
+  constexpr int sh_size_b_red_max = (sh_red_size > sh_b_size ? sh_red_size : sh_b_size);
+  constexpr int sh_bias_size = (thread_n_blocks * 16 / 8);
+  constexpr int sh_b_red_bias_size = sh_size_b_red_max > (sh_size_b_red_min + sh_bias_size) ? sh_size_b_red_max : (sh_size_b_red_min + sh_bias_size);
+
+  int4* sh_bias = sh + sh_size_b_red_min;
+  int4* sh_g_idx = sh + sh_b_red_bias_size;
   int4* sh_zp = sh_g_idx + (stages * g_idx_stage);
   constexpr int sh_s_size = has_act_order ? (act_s_max_num_groups * s_sh_stride)
                                           : (stages * s_sh_stage);
@@ -706,12 +713,7 @@ __global__ void Marlin(
   // shared memory used by weight.
   static_assert(thread_m_blocks * 16 * thread_n_blocks * 16 / 8 <=
                 stages * b_sh_stage);
-  int4* sh_bias = sh_s + sh_s_size;
-  int4* sh_a = sh_bias + (thread_n_blocks * 16 / 8);
-
-  // constexpr int shm_size_used =
-  //     stages * (g_idx_stage + zp_sh_stage) + sh_s_size +
-  //     (sh_red_size > sh_b_size ? sh_red_size : sh_b_size);
+  int4* sh_a = sh_s + sh_s_size;
 
   // Register storage for double buffer of shared memory reads.
   FragA frag_a[2][thread_m_blocks];
@@ -1674,13 +1676,16 @@ __global__ void Marlin(
           cp_async_fence();
         }
       }
+
+      thread_block_reduce();
+
       if (has_bias && last) {
+        __syncthreads();
         cp_async4_pred(&sh_bias[bias_sh_wr], &b_bias_ptr[bias_gl_rd],
                        threadIdx.x < 16 * thread_n_blocks / 8);
         cp_async_fence();
       }
 
-      thread_block_reduce();
       if constexpr (!has_act_order && group_blocks == -1 &&
                     (has_zp && dequant_skip_flop || !has_zp)) {
         if (w_type.size_bits() == 8 || (last || use_atomic_add)) {

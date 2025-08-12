@@ -188,8 +188,11 @@ int get_kernel_cache_size(thread_config_t const& th_config, int thread_m_blocks,
   int tb_m = thread_m_blocks * 16;
   int sh_a_size = pipe_stages * (tb_m * tb_k) * 2;
   int sh_b_size = pipe_stages * (tb_k * tb_n / pack_factor) * 4;
-  int sh_red_size = tb_m * (tb_n + 8);
+  int sh_red_size = tb_m * (tb_n + 8) * 2;
   int sh_bias_size = tb_n * 2;
+  int tmp_size = (sh_b_size > sh_red_size ? sh_red_size : sh_b_size) + sh_bias_size;
+  tmp_size = max(max(sh_b_size, sh_red_size), tmp_size);
+
   int sh_s_size =
       get_scales_cache_size(th_config, prob_m, prob_n, prob_k, num_bits,
                             group_size, has_act_order, is_k_full);
@@ -239,7 +242,7 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
   int cache_size = get_kernel_cache_size(
       th_config, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
       has_act_order, is_k_full, has_zp, is_zp_float);
-  return cache_size <= max_shared_mem;
+  return cache_size + 512 <= max_shared_mem;
 }
 
   #define _GET_IF(W_TYPE, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,   \

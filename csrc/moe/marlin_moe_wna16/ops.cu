@@ -213,7 +213,7 @@ int get_kernel_cache_size(thread_config_t const& th_config, bool m_block_size_8,
   // Get B size
   int tb_k = th_config.thread_k;
   int tb_n = th_config.thread_n;
-  int tb_m = thread_m_blocks * (m_block_size_8 ? 8 : 16);
+  int tb_m = thread_m_blocks * 16;
 
   // shm size for block_sorted_ids/rd_block_sorted_ids/block_topk_weights
   // both of them requires tb_m * 4 bytes (tb_m * int32 or tb_m * float32)
@@ -222,6 +222,9 @@ int get_kernel_cache_size(thread_config_t const& th_config, bool m_block_size_8,
   int sh_b_size = pipe_stages * (tb_k * tb_n / pack_factor) * 4;
   int sh_red_size = tb_m * (tb_n + 8) * 2;
   int sh_bias_size = tb_n * 2;
+  int tmp_size = (sh_b_size > sh_red_size ? sh_red_size : sh_b_size) + sh_bias_size;
+  tmp_size = max(max(sh_b_size, sh_red_size), tmp_size);
+
   int sh_s_size =
       get_scales_cache_size(th_config, prob_m, prob_n, prob_k, num_bits,
                             group_size, has_act_order, is_k_full);
@@ -236,8 +239,8 @@ int get_kernel_cache_size(thread_config_t const& th_config, bool m_block_size_8,
       sh_zp_size = sh_s_size / 2;
   }
 
-  int total_size = max(sh_b_size, sh_red_size) + sh_a_size + sh_s_size +
-                   sh_zp_size + sh_g_idx_size + sh_bias_size +
+  int total_size = tmp_size + sh_a_size + sh_s_size +
+                   sh_zp_size + sh_g_idx_size +
                    sh_block_meta_size;
 
   return total_size;
@@ -248,6 +251,7 @@ bool is_valid_config(thread_config_t const& th_config, bool m_block_size_8,
                      int num_bits, int group_size, bool has_act_order,
                      bool is_k_full, int has_zp, int is_zp_float,
                      int max_shared_mem) {
+
   // Sanity
   if (th_config.thread_k == -1 || th_config.thread_n == -1 ||
       th_config.num_threads == -1) {
@@ -273,7 +277,7 @@ bool is_valid_config(thread_config_t const& th_config, bool m_block_size_8,
   int cache_size = get_kernel_cache_size(
       th_config, m_block_size_8, thread_m_blocks, prob_m, prob_n, prob_k,
       num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float);
-  return cache_size <= max_shared_mem;
+  return cache_size + 512 <= max_shared_mem;
 }
 
   #define _GET_IF(W_TYPE, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,   \
