@@ -21,7 +21,8 @@ from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
-from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
+from vllm.model_executor.warmup.kernel_warmup import (flashinfer_autotune,
+                                                      kernel_warmup)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -313,7 +314,7 @@ class Worker(WorkerBase):
             self.model_runner._dummy_run(size, skip_eplb=True)
 
         if has_flashinfer() and current_platform.is_device_capability(100):
-            self.model_runner.flashinfer_autotune()
+            flashinfer_autotune(self.model_runner)
 
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()

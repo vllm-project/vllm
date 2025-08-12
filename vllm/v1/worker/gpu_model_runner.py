@@ -2534,27 +2534,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.encoder_cache.clear()
         gc.collect()
 
-    def flashinfer_autotune(self) -> None:
-        """
-        Autotune FlashInfer operations.
-        FlashInfer have many implementations for the same operation,
-        autotuning runs benchmarks for each implementation and stores
-        the results. The results are cached transparently and
-        future calls to FlashInfer will use the best implementation.
-        Without autotuning, FlashInfer will rely on heuristics, which may
-        be significantly slower.
-        """
-        from flashinfer.autotuner import autotune
-
-        with torch.inference_mode(), autotune():
-            # We skip EPLB here since we don't want to record dummy metrics
-            # When autotuning with number of tokens m, flashinfer will autotune
-            # operations for all number of tokens up to m.
-            # So we only need to run with the max number of tokens.
-            self._dummy_run(self.scheduler_config.max_num_batched_tokens,
-                            skip_eplb=True,
-                            is_profile=True)
-
     def capture_model(self) -> None:
         if not self.use_cuda_graph:
             logger.warning(
