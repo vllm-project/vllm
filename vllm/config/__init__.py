@@ -212,37 +212,30 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
                     break
 
             if class_line_no is not None:
-                # Extract class body and try to parse it
-                class_source_lines = []
-                indent_level = None
+                # Find the end of the class using proper indentation logic
+                class_indent = len(source_lines[class_line_no]) - len(
+                    source_lines[class_line_no].lstrip())
 
-                for i in range(class_line_no, len(source_lines)):
+                # Find class end by looking for next definition at same or
+                # less indentation
+                class_end_line = len(source_lines)
+                for i in range(class_line_no + 1, len(source_lines)):
                     line = source_lines[i]
-                    # Determine base indentation from first non-empty
-                    # line after class definition
-                    if (indent_level is None and line.strip()
-                            and i > class_line_no):
-                        indent_level = len(line) - len(line.lstrip())
-                    # Stop when we reach a line with same or less indentation
-                    # (end of class)
-                    if (indent_level is not None and line.strip()
-                            and i > class_line_no
-                            and (len(line) - len(line.lstrip()))
-                            <= (indent_level - 4 if "class "
-                                in source_lines[class_line_no] else 0)):
-                        break
-                    class_source_lines.append(line)
+                    if line.strip():  # Non-empty line
+                        line_indent = len(line) - len(line.lstrip())
+                        # If we find a line at same or less indentation that
+                        # starts a new definition
+                        if (line_indent <= class_indent
+                                and (line.lstrip().startswith(
+                                    ('def ', 'class ', '@')) or line.strip()
+                                     in ('if __name__ == "__main__":', ))):
+                            class_end_line = i
+                            break
 
-                # Try to parse the extracted class source
+                # Extract and parse the class source
+                class_source_lines = source_lines[class_line_no:class_end_line]
                 class_source = ''.join(class_source_lines)
                 cls_node = ast.parse(textwrap.dedent(class_source)).body[0]
-
-                if isinstance(cls_node, ast.ClassDef):
-                    # Successfully parsed, continue with normal processing
-                    pass
-                else:
-                    raise TypeError(
-                        "Parsed node is not a class definition.") from e
         else:
             raise TypeError("Class is not a dataclass.") from e
 
