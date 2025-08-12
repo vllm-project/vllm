@@ -5,11 +5,10 @@
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/selective_state_update.py
 
 import torch
-from packaging import version
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.utils import PAD_SLOT_ID
-from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit
@@ -253,12 +252,13 @@ def selective_state_update(state,
     z_strides = ((z.stride(0), z.stride(1), z.stride(2)) if z is not None else
                  (0, 0, 0))
     # Autotuning would require to clone the state, which would consume
-    #  multiple GBs of memory. We use a heuristics instead. 
+    #  multiple GBs of memory. We use a heuristics instead.
     BLOCK_SIZE_M, num_warps, num_stages = ((32, 4, 3) if dstate <= 16 else
-                               ((16, 4, 3) if dstate <= 32 else
-                                ((8, 4, 3) if dstate <= 64 else
-                                 ((4, 4, 3) if dstate < 128 else 
-                                  ((64, 2, 8) if dstate == 128 else ((4, 8, 3)))))))
+                                           ((16, 4, 3) if dstate <= 32 else
+                                            ((8, 4, 3) if dstate <= 64 else
+                                             ((4, 4, 3) if dstate < 128 else
+                                              ((64, 2, 8) if dstate == 128 else
+                                               ((4, 8, 3)))))))
     tie_hdim = A.stride(-1) == 0 and A.stride(-2) == 0 and dt.stride(
         -1) == 0 and dt_bias.stride(-1) == 0
     with torch.cuda.device(x.device.index):
@@ -282,7 +282,7 @@ def selective_state_update(state,
             dim=dim,
             dstate=dstate,
             nheads_ngroups_ratio=nheads // ngroups,
-            # Strides  
+            # Strides
             stride_state_batch=state.stride(0),
             stride_state_head=state.stride(1),
             stride_state_dim=state.stride(2),
@@ -293,7 +293,8 @@ def selective_state_update(state,
             stride_dt_batch=dt.stride(0),
             stride_dt_head=dt.stride(1),
             stride_dt_dim=dt.stride(2),
-            stride_dt_bias_head=dt_bias.stride(0) if dt_bias is not None else 0, 
+            stride_dt_bias_head=dt_bias.stride(0)
+            if dt_bias is not None else 0,
             stride_dt_bias_dim=dt_bias.stride(1) if dt_bias is not None else 0,
             stride_A_head=A.stride(0),
             stride_A_dim=A.stride(1),
@@ -312,7 +313,7 @@ def selective_state_update(state,
             stride_out_batch=out.stride(0),
             stride_out_head=out.stride(1),
             stride_out_dim=out.stride(2),
-            # Meta-parameters 
+            # Meta-parameters
             DT_SOFTPLUS=dt_softplus,
             TIE_HDIM=tie_hdim,
             HAS_DT_BIAS=dt_bias is not None,
