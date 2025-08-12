@@ -107,6 +107,42 @@ def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_command_a_vision(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "CohereLabs/command-a-vision-07-2025"
+
+    # NOTE: This model is 122B parameters and requires tensor parallelism
+    # Recommended to use tp=4 on H100 GPUs
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=32768,
+        tensor_parallel_size=4,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_deepseek_vl2(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "deepseek-ai/deepseek-vl2-tiny"
 
@@ -1031,6 +1067,7 @@ def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
 model_example_map = {
     "aria": load_aria,
     "aya_vision": load_aya_vision,
+    "command_a_vision": load_command_a_vision,
     "deepseek_vl_v2": load_deepseek_vl2,
     "gemma3": load_gemma3,
     "h2ovl_chat": load_h2ovl,
