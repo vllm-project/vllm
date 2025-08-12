@@ -147,7 +147,7 @@ def has_nvidia_artifactory() -> bool:
         return False
 
 
-@functools.lru_cache
+@functools.cache
 def supports_trtllm_attention() -> tuple[bool, Optional[str]]:
     """Cache result which only depends on the environment"""
     # This is a lambda, call it once
