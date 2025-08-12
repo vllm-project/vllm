@@ -182,6 +182,8 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   if (!py_result) {
     PyErr_Print();
     PyGILState_Release(gstate);
+    cuMemAddressFree(d_mem, alignedSize);
+    free(p_memHandle);
     return nullptr;
   }
   Py_DECREF(py_result);
