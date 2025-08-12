@@ -53,14 +53,41 @@ def server(default_server_args, request, monkeypatch):
                                 default_server_args) as remote_server:
             yield remote_server
     else:
-        # Patch in dummy logit processor entrypoint
-        with RemoteOpenAIServer(
-                MODEL_NAME,
-                default_server_args,
-                multiproc_method="spawn",
-                cmd_str=CMD_STR,
-        ) as remote_server:
-            yield remote_server
+        import os
+        processid = os.fork()
+
+        # processid > 0 represents the parent process
+        if processid > 0:
+            print("\nParent Process:")
+            print("Process ID:", os.getpid())
+            print("Child's process ID:", processid)
+            while True:
+                pass
+
+        # processid = 0 represents the created child process
+        else:
+            print("\nChild Process:")
+            print("Process ID:", os.getpid())
+            print("Parent's process ID:", os.getppid())
+
+            import importlib.metadata
+
+            from vllm.test_utils import entry_points as fake_entry_points
+            importlib.metadata.entry_points = fake_entry_points
+            import sys
+
+            from vllm.entrypoints.cli import main
+            sys.argv = ["vllm", "serve"] + default_server_args
+            main.main()
+
+        # # Patch in dummy logit processor entrypoint
+        # with RemoteOpenAIServer(
+        #         MODEL_NAME,
+        #         default_server_args,
+        #         multiproc_method="spawn",
+        #         cmd_str=CMD_STR,
+        # ) as remote_server:
+        #     yield remote_server
 
 
 @pytest_asyncio.fixture

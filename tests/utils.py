@@ -84,8 +84,8 @@ class RemoteOpenAIServer:
                  seed: Optional[int] = 0,
                  auto_port: bool = True,
                  max_wait_seconds: Optional[float] = None,
-                 multiproc_method: str = "spawn",
-                 cmd_str: Optional[str] = None) -> None:
+                 fork=True,
+                 worker_multiproc_method: str = "spawn") -> None:
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
                 raise ValueError("You have manually specified the port "
@@ -133,26 +133,14 @@ class RemoteOpenAIServer:
         env = os.environ.copy()
         # the current process might initialize cuda,
         # to be safe, we should use spawn method
-        env['VLLM_WORKER_MULTIPROC_METHOD'] = multiproc_method
+        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
         if env_dict is not None:
             env.update(env_dict)
-
-        shell = False
-        if cmd_str is None:
-            cli_arg_list = ["vllm", "serve", model, *vllm_serve_args]
-        else:
-            cli_arg_list = [
-                "python", "-c", f"\"{cmd_str}\"", "serve", model,
-                *vllm_serve_args
-            ]
-            shell = True
-
         self.proc = subprocess.Popen(
-            cli_arg_list,
+            ["vllm", "serve", model, *vllm_serve_args],
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,
-            shell=shell,
         )
         max_wait_seconds = max_wait_seconds or 240
         self._wait_for_server(url=self.url_for("health"),
