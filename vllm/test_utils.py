@@ -162,8 +162,8 @@ class DummyLogitsProcessor(LogitsProcessor):
         # Process added requests.
         for index, params, _, _ in batch_update.added:
             assert params is not None
-            if params.extra_args and (target_token := params.extra_args.get(
-                    "target_token", None)):
+            if params.extra_args and (target_token :=
+                                      params.extra_args.get("target_token")):
                 self.req_info[index] = target_token
 
         if self.req_info:
@@ -190,11 +190,15 @@ class DummyLogitsProcessor(LogitsProcessor):
                         self.req_info.pop(bdx, None)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        if not self.req_info:
+            return logits
+
         # Save target values before modification
         rows_list = list(self.req_info.keys())
         cols = torch.tensor([self.req_info[i] for i in rows_list],
-                            dtype=torch.long)
-        rows = torch.tensor(rows_list, dtype=torch.long)
+                            dtype=torch.long,
+                            device=logits.device)
+        rows = torch.tensor(rows_list, dtype=torch.long, device=logits.device)
         values_to_keep = logits[rows, cols].clone()
 
         # Mask all but target tokens
