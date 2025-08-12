@@ -1,7 +1,4 @@
----
-title: Structured Outputs
----
-[](){ #structured-outputs }
+# Structured Outputs
 
 vLLM supports the generation of structured outputs using
 [xgrammar](https://github.com/mlc-ai/xgrammar) or
@@ -21,7 +18,7 @@ The following parameters are supported, which must be added as extra parameters:
 - `guided_grammar`: the output will follow the context free grammar.
 - `structural_tag`: Follow a JSON schema within a set of specified tags within the generated text.
 
-You can see the complete list of supported parameters on the [OpenAI-Compatible Server][openai-compatible-server] page.
+You can see the complete list of supported parameters on the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) page.
 
 Structured outputs are supported by default in the OpenAI-Compatible Server. You
 may choose to specify the backend to use by setting the
@@ -33,7 +30,7 @@ text.
 
 Now let´s see an example for each of the cases, starting with the `guided_choice`, as it´s the easiest one:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -55,7 +52,7 @@ Now let´s see an example for each of the cases, starting with the `guided_choic
 
 The next example shows how to use the `guided_regex`. The idea is to generate an email address, given a simple regex template:
 
-??? Code
+??? code
 
     ```python
     completion = client.chat.completions.create(
@@ -79,7 +76,7 @@ For this we can use the `guided_json` parameter in two different ways:
 
 The next example shows how to use the `guided_json` parameter with a Pydantic model:
 
-??? Code
+??? code
 
     ```python
     from pydantic import BaseModel
@@ -106,7 +103,7 @@ The next example shows how to use the `guided_json` parameter with a Pydantic mo
                 "content": "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
             }
         ],
-        "response_format": {
+        response_format={
             "type": "json_schema",
             "json_schema": {
                 "name": "car-description",
@@ -127,7 +124,7 @@ difficult to use, but it´s really powerful. It allows us to define complete
 languages like SQL queries. It works by using a context free EBNF grammar.
 As an example, we can use to define a specific format of simplified SQL queries:
 
-??? Code
+??? code
 
     ```python
     simplified_sql_grammar = """
@@ -157,7 +154,7 @@ As an example, we can use to define a specific format of simplified SQL queries:
     print(completion.choices[0].message.content)
     ```
 
-See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
+See also: [full example](../examples/online_serving/structured_outputs.md)
 
 ## Reasoning Outputs
 
@@ -169,7 +166,7 @@ vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --reasoning-parser deepseek_r
 
 Note that you can use reasoning with any provided structured outputs feature. The following uses one with JSON schema:
 
-??? Code
+??? code
 
     ```python
     from pydantic import BaseModel
@@ -200,7 +197,7 @@ Note that you can use reasoning with any provided structured outputs feature. Th
     print("content: ", completion.choices[0].message.content)
     ```
 
-See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
+See also: [full example](../examples/online_serving/structured_outputs.md)
 
 ## Experimental Automatic Parsing (OpenAI API)
 
@@ -212,7 +209,7 @@ For the following examples, vLLM was setup using `vllm serve meta-llama/Llama-3.
 
 Here is a simple example demonstrating how to get structured output using Pydantic models:
 
-??? Code
+??? code
 
     ```python
     from pydantic import BaseModel
@@ -248,7 +245,7 @@ Age: 28
 
 Here is a more complex example using nested Pydantic models to handle a step-by-step math solution:
 
-??? Code
+??? code
 
     ```python
     from typing import List
@@ -308,7 +305,7 @@ These parameters can be used in the same way as the parameters from the Online
 Serving examples above. One example for the usage of the `choice` parameter is
 shown below:
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM, SamplingParams
@@ -325,4 +322,4 @@ shown below:
     print(outputs[0].outputs[0].text)
     ```
 
-See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
+See also: [full example](../examples/online_serving/structured_outputs.md)

@@ -1,7 +1,4 @@
----
-title: Cerebrium
----
-[](){ #deployment-cerebrium }
+# Cerebrium
 
 <p align="center">
     <img src="https://i.ibb.co/hHcScTT/Screenshot-2024-06-13-at-10-14-54.png" alt="vLLM_plus_cerebrium"/>
@@ -34,7 +31,7 @@ vllm = "latest"
 
 Next, let us add our code to handle inference for the LLM of your choice (`mistralai/Mistral-7B-Instruct-v0.1` for this example), add the following code to your `main.py`:
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM, SamplingParams
@@ -64,7 +61,7 @@ cerebrium deploy
 
 If successful, you should be returned a CURL command that you can call inference against. Just remember to end the url with the function name you are calling (in our case`/run`)
 
-??? Command
+??? console "Command"
 
     ```python
     curl -X POST https://api.cortex.cerebrium.ai/v4/p-xxxxxx/vllm/run \
@@ -82,7 +79,7 @@ If successful, you should be returned a CURL command that you can call inference
 
 You should get a response like:
 
-??? Response
+??? console "Response"
 
     ```python
     {

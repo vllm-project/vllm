@@ -39,6 +39,7 @@ nav:
       - models/generative_models.md
       - models/pooling_models.md
       - models/extensions
+      - Hardware Supported Models: models/hardware_supported_models
     - Features:
       - features/compatibility_matrix.md
       - features/*
@@ -54,9 +55,8 @@ nav:
       - contributing/model/registration.md
       - contributing/model/tests.md
       - contributing/model/multimodal.md
-    - Design Documents:
-      - V0: design
-      - V1: design/v1
+    - CI: contributing/ci
+    - Design Documents: design
   - API Reference:
     - Summary: api/README.md
     - Contents:

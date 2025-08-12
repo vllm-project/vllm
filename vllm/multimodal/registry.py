@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
-from typing_extensions import deprecated
 
 from vllm.envs import VLLM_MM_INPUT_CACHE_GIB
 from vllm.inputs import InputProcessingContext
@@ -105,13 +104,6 @@ class MultiModalRegistry:
 
         return True  # Success
 
-    @deprecated("Legacy input processor/mapper pipeline has been removed. "
-                "Please update your model runner to use "
-                "`seq_group_metadata.multi_modal_data` directly without "
-                "further processing.")
-    def create_input_mapper(self, model_config: "ModelConfig"):
-        return lambda data, mm_processor_kwargs: data
-
     def get_max_tokens_per_item_by_modality(
         self,
         model_config: "ModelConfig",
@@ -129,7 +121,7 @@ class MultiModalRegistry:
         seq_len = model_config.max_model_len
         mm_limits = self.get_mm_limits_per_prompt(model_config)
 
-        return profiler.get_mm_max_tokens(
+        return profiler.get_mm_max_contiguous_tokens(
             seq_len,
             {
                 modality: 1
@@ -181,16 +173,6 @@ class MultiModalRegistry:
         for profiling the memory usage of a model.
         """
         return sum(self.get_max_tokens_by_modality(model_config).values())
-
-    @deprecated("Legacy input processor/mapper pipeline has been removed. "
-                "Please update your model runner to use "
-                "`seq_group_metadata.multi_modal_data` directly without "
-                "further processing.")
-    def init_mm_limits_per_prompt(
-        self,
-        model_config: "ModelConfig",
-    ) -> None:
-        pass
 
     def get_mm_limits_per_prompt(
         self,
@@ -246,13 +228,6 @@ class MultiModalRegistry:
         model_cls, _ = get_model_architecture(model_config)
         return model_cls
 
-    @deprecated("Legacy input processor/mapper pipeline has been removed. "
-                "Please update your model runner to use "
-                "`seq_group_metadata.multi_modal_data` directly without "
-                "further processing.")
-    def has_processor(self, model_config: "ModelConfig") -> bool:
-        return True
-
     def create_processor(
         self,
         model_config: "ModelConfig",
@@ -266,7 +241,7 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             raise ValueError(f"{model_config.model} is not a multimodal model")
 
-        if tokenizer is None:
+        if tokenizer is None and not model_config.skip_tokenizer_init:
             tokenizer = cached_tokenizer_from_config(model_config)
         if disable_cache is None:
             mm_config = model_config.get_multimodal_config()

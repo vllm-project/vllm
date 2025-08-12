@@ -53,6 +53,7 @@ class CustomQuantConfig(QuantizationConfig):
 
     def __init__(self, num_bits: int = 8) -> None:
         """Initialize the quantization config."""
+        super().__init__()
         self.num_bits = num_bits
 
     def get_name(self) -> QuantizationMethods:
@@ -110,7 +111,7 @@ def test_custom_quant(vllm_runner, model, monkeypatch):
                      quantization="custom_quant",
                      enforce_eager=True) as llm:
 
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        model = llm.llm.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
         layer = model.model.layers[0]
         qkv_proj = layer.self_attn.qkv_proj
 

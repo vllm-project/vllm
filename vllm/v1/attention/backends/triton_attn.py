@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Optional
+from typing import ClassVar, Optional
 
 import torch
 
@@ -14,17 +14,14 @@ from vllm.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode)
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.ops.triton_unified_attention import unified_attention
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata,
-    make_local_attention_virtual_batches)
+from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                              AttentionMetadataBuilder,
+                                              CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.block_table import BlockTable
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -58,29 +55,24 @@ class TritonAttentionMetadata:
     scheduler_metadata: Optional[torch.Tensor] = None
     prefix_scheduler_metadata: Optional[torch.Tensor] = None
 
-    # for local attention
-    @dataclass
-    class LocalAttentionMetadata:
-        local_query_start_loc: torch.Tensor
-        local_seqused_k: torch.Tensor
-        local_block_table: torch.Tensor
-        local_max_query_len: int
-        local_max_seq_len: int
-        local_scheduler_metadata: Optional[torch.Tensor]
-
-    local_attn_metadata: Optional[LocalAttentionMetadata] = None
-
 
 class TritonAttentionMetadataBuilder(
         AttentionMetadataBuilder[TritonAttentionMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = True
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.ALWAYS
 
-    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
-                 block_table: BlockTable):
-        self.runner = runner
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
+        self.device = device
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        self.block_table = block_table
+
+        model_config = vllm_config.model_config
+        self.num_heads_q = model_config.get_num_attention_heads(
+            vllm_config.parallel_config)
+        self.num_heads_kv = model_config.get_num_kv_heads(
+            vllm_config.parallel_config)
+        self.headdim = model_config.get_head_size()
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -92,70 +84,31 @@ class TritonAttentionMetadataBuilder(
         attn_metadata.seq_lens.fill_(1)
         return attn_metadata
 
-    def build(
-        self, common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata
-    ) -> TritonAttentionMetadata:
-        num_reqs = common_attn_metadata.num_reqs
+    def build(self,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
+              fast_build: bool = False) -> TritonAttentionMetadata:
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
-        max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
+        max_seq_len = int(common_attn_metadata.seq_lens_cpu.max())
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
-        block_table = self.block_table
-        block_table_tensor = block_table.get_device_tensor()[:num_reqs]
-
-        block_table.slot_mapping[:num_actual_tokens].copy_(
-            block_table.slot_mapping_cpu[:num_actual_tokens],
-            non_blocking=True)
-        # Fill unused with -1. Needed for reshape_and_cache in full cuda graph
-        # mode.
-        block_table.slot_mapping[num_actual_tokens:].fill_(-1)
-
-        slot_mapping = block_table.slot_mapping[:num_actual_tokens]
-
-        # for local attention
-        local_attn_metadata = None
-        if self.runner.attention_chunk_size is not None:
-            seqlens_q_local_np, virt_q_cu_seqlens_np, virt_k_seqlens_np, \
-                virt_block_table_tensor = make_local_attention_virtual_batches(
-                    self.runner.attention_chunk_size,
-                    self.runner.query_start_loc_np[:num_reqs + 1],
-                    self.runner.seq_lens_np[:num_reqs],
-                    block_table_tensor,
-                    self.block_size,
-                )
-            local_query_start_loc = torch.from_numpy(virt_q_cu_seqlens_np).to(
-                self.runner.device, non_blocking=True)
-            local_seqused_k = torch.from_numpy(virt_k_seqlens_np).to(
-                self.runner.device, non_blocking=True)
-            local_max_query_len = seqlens_q_local_np.max()
-            local_max_seq_len = virt_k_seqlens_np.max()
-
-            local_attn_metadata = TritonAttentionMetadata \
-                        .LocalAttentionMetadata(
-                local_query_start_loc=local_query_start_loc,
-                local_seqused_k=local_seqused_k,
-                local_block_table=virt_block_table_tensor,
-                local_max_query_len=local_max_query_len,
-                local_max_seq_len=local_max_seq_len,
-                local_scheduler_metadata=None,
-            )
+        block_table_tensor = common_attn_metadata.block_table_tensor
+        slot_mapping = common_attn_metadata.slot_mapping
 
         use_cascade = common_prefix_len > 0
 
         if use_cascade:
             cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
                                                 dtype=torch.int32,
-                                                device=self.runner.device)
+                                                device=self.device)
             prefix_kv_lens = torch.tensor([common_prefix_len],
                                           dtype=torch.int32,
-                                          device=self.runner.device)
-            suffix_kv_lens = (self.runner.seq_lens_np[:num_reqs] -
+                                          device=self.device)
+            suffix_kv_lens = (common_attn_metadata.seq_lens_cpu -
                               common_prefix_len)
-            suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(
-                self.runner.device)
+            suffix_kv_lens = suffix_kv_lens.to(self.device)
         else:
             cu_prefix_query_lens = None
             prefix_kv_lens = None
@@ -175,7 +128,6 @@ class TritonAttentionMetadataBuilder(
             cu_prefix_query_lens=cu_prefix_query_lens,
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
-            local_attn_metadata=local_attn_metadata,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
         )
         return attn_metadata
@@ -190,9 +142,24 @@ class TritonAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
 
-    @staticmethod
-    def get_supported_head_sizes() -> list[int]:
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 96, 128, 160, 192, 224, 256]
+
+    @classmethod
+    def validate_head_size(cls, head_size: int) -> None:
+        supported_head_sizes = cls.get_supported_head_sizes()
+        if head_size not in supported_head_sizes:
+            attn_type = cls.__name__.removesuffix("Backend")
+            raise ValueError(
+                f"Head size {head_size} is not supported by {attn_type}. "
+                f"Supported head sizes are: {supported_head_sizes}. "
+                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
+                "FlexAttention backend which supports all head sizes.")
 
     @staticmethod
     def get_name() -> str:
@@ -242,15 +209,10 @@ class TritonAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
-        use_irope: bool = False,
     ) -> None:
-        if blocksparse_params is not None:
-            raise ValueError(
-                "TritonAttention does not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -269,15 +231,9 @@ class TritonAttentionImpl(AttentionImpl):
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
-        self.use_irope = use_irope
-
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        support_head_sizes = TritonAttentionBackend.get_supported_head_sizes()
-        if head_size not in support_head_sizes:
-            raise ValueError(
-                f"Head size {head_size} is not supported by TritonAttention. "
-                f"Supported head sizes are: {support_head_sizes}.")
+        TritonAttentionBackend.validate_head_size(head_size)
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
@@ -367,7 +323,7 @@ class TritonAttentionImpl(AttentionImpl):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
             num_tokens, num_heads, head_size = query.shape
-            assert layer._q_scale == 1.0, \
+            assert layer._q_scale_float == 1.0, \
                 "A non 1.0 q_scale is not currently supported."
             if not current_platform.is_rocm():
                 # Skip Q quantization on ROCm, since dequantizing back to
@@ -378,23 +334,11 @@ class TritonAttentionImpl(AttentionImpl):
                     layer._q_scale)
                 query = query.reshape((num_tokens, num_heads, head_size))
 
-        use_local_attn = \
-            (self.use_irope and attn_metadata.local_attn_metadata is not None)
-
-        if use_local_attn:
-            assert attn_metadata.local_attn_metadata is not None
-            local_metadata = attn_metadata.local_attn_metadata
-            cu_seqlens_q = local_metadata.local_query_start_loc
-            seqused_k = local_metadata.local_seqused_k
-            max_seqlen_q = local_metadata.local_max_query_len
-            max_seqlen_k = local_metadata.local_max_seq_len
-            block_table = local_metadata.local_block_table
-        else:
-            cu_seqlens_q = attn_metadata.query_start_loc
-            seqused_k = attn_metadata.seq_lens
-            max_seqlen_q = attn_metadata.max_query_len
-            max_seqlen_k = attn_metadata.max_seq_len
-            block_table = attn_metadata.block_table
+        cu_seqlens_q = attn_metadata.query_start_loc
+        seqused_k = attn_metadata.seq_lens
+        max_seqlen_q = attn_metadata.max_query_len
+        max_seqlen_k = attn_metadata.max_seq_len
+        block_table = attn_metadata.block_table
 
         if use_prefill_decode_attn:
             # Compute attention and update output up to `num_actual_tokens`.

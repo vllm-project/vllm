@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
@@ -6,7 +7,8 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager, get_manager_for_kv_cache_spec)
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec)
 from vllm.v1.request import Request
 
 
@@ -26,6 +28,7 @@ class KVCacheCoordinator(ABC):
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
+        self.enable_caching = enable_caching
 
         self.block_pool = BlockPool(kv_cache_config.num_blocks, enable_caching,
                                     enable_kv_cache_events)
@@ -123,14 +126,17 @@ class KVCacheCoordinator(ABC):
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> list[int]:
         """
-        Get the number of common prefix blocks for a request.
+        Get the number of common prefix blocks for all requests in the RUNNING
+        state for each kv cache group.
 
         Args:
             request_id: The request ID.
-            block_hashes: The block hashes of the request.
+            num_running_requests: The total number of requests in the RUNNING
+                state.
 
         Returns:
-            The number of common prefix blocks.
+            list[int]: The number of common prefix blocks for all requests in
+                the RUNNING state for each kv cache group.
         """
         num_blocks_per_group = [
             manager.get_num_common_prefix_blocks(request_id,
@@ -167,6 +173,35 @@ class KVCacheCoordinator(ABC):
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         pass
+
+
+class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
+    """
+    KV cache coordinator to use if prefix caching is disabled or unsupported.
+    In contrast to UnitaryKVCacheCoordinator and HybridKVCacheCoordinator,
+    supports arbitrary numbers of KV cache groups (including 0 groups).
+    Does not implement any features related to prefix caching.
+    """
+
+    def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
+                 use_eagle: bool, caching_hash_fn: Callable,
+                 enable_kv_cache_events: bool):
+        super().__init__(kv_cache_config, max_model_len, use_eagle, False,
+                         caching_hash_fn, enable_kv_cache_events)
+        self.num_single_type_manager = len(self.single_type_managers)
+
+    def get_num_common_prefix_blocks(self, request_id: str,
+                                     num_running_requests: int) -> list[int]:
+        return [0] * self.num_single_type_manager
+
+    def find_longest_cache_hit(
+        self,
+        block_hashes: list[BlockHash],
+        max_cache_hit_length: int,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        blocks: tuple[list[KVCacheBlock], ...] = tuple(
+            [] for _ in range(self.num_single_type_manager))
+        return blocks, 0
 
 
 class UnitaryKVCacheCoordinator(KVCacheCoordinator):
@@ -227,49 +262,49 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         one of them is full attention. Then, split the kv cache groups into full
         attention groups and other groups.
         """
-        full_attention_type_id: Optional[str] = None
-        other_type_id: Optional[str] = None
+        full_attention_spec: Optional[FullAttentionSpec] = None
+        other_spec: Optional[KVCacheSpec] = None
         self.full_attention_group_ids: list[int] = []
         self.other_group_ids: list[int] = []
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
             if isinstance(g.kv_cache_spec, FullAttentionSpec):
-                if full_attention_type_id is None:
-                    full_attention_type_id = g.kv_cache_spec.type_id
+                if full_attention_spec is None:
+                    full_attention_spec = g.kv_cache_spec
                 else:
-                    assert full_attention_type_id == g.kv_cache_spec.type_id, (
+                    assert full_attention_spec == g.kv_cache_spec, (
                         "HybridKVCacheCoordinator assumes exactly one type of "
                         "full attention groups now.")
                 self.full_attention_group_ids.append(i)
             else:
-                if other_type_id is None:
-                    other_type_id = g.kv_cache_spec.type_id
+                if other_spec is None:
+                    other_spec = g.kv_cache_spec
                 else:
-                    assert other_type_id == g.kv_cache_spec.type_id, (
+                    assert other_spec == g.kv_cache_spec, (
                         "HybridKVCacheCoordinator assumes "
                         "exactly one other type of groups now.")
                 self.other_group_ids.append(i)
 
-        assert full_attention_type_id is not None, (
+        assert full_attention_spec is not None, (
             "HybridKVCacheCoordinator assumes exactly one type of full "
             "attention groups now.")
-        assert other_type_id is not None, (
+        assert other_spec is not None, (
             "HybridKVCacheCoordinator assumes exactly one type of other "
             "groups now.")
 
         self.full_attention_manager_cls = FullAttentionManager
         self.other_attention_cls = self.single_type_managers[
             self.other_group_ids[0]].__class__
-
-        self.full_attention_spec = self.kv_cache_config.kv_cache_groups[
-            self.full_attention_group_ids[0]].kv_cache_spec
-        self.other_spec = self.kv_cache_config.kv_cache_groups[
-            self.other_group_ids[0]].kv_cache_spec
-
+        self.full_attention_spec = full_attention_spec
+        self.other_spec = other_spec
         self.full_attention_block_size = self.full_attention_spec.block_size
         self.other_block_size = self.other_spec.block_size
-        assert self.other_block_size % self.full_attention_block_size == 0, (
-            "KVCacheCoordinator assumes the block_size of full attention "
-            "layers is divisible by other layers now.")
+
+        if self.enable_caching:
+            # this requirement is only needed for the prefix caching logic
+            divisible = self.other_block_size % self.full_attention_block_size
+            assert divisible == 0, (
+                "KVCacheCoordinator assumes the block_size of full "
+                "attention layers is divisible by other layers now.")
 
         if max(self.full_attention_group_ids) < min(self.other_group_ids):
             self.full_attn_first = True
@@ -353,6 +388,10 @@ def get_kv_cache_coordinator(
         kv_cache_config: KVCacheConfig, max_model_len: int, use_eagle: bool,
         enable_caching: bool, caching_hash_fn: Callable,
         enable_kv_cache_events: bool) -> KVCacheCoordinator:
+    if not enable_caching:
+        return KVCacheCoordinatorNoPrefixCache(kv_cache_config, max_model_len,
+                                               use_eagle, caching_hash_fn,
+                                               enable_kv_cache_events)
     if len(kv_cache_config.kv_cache_groups) == 1:
         return UnitaryKVCacheCoordinator(kv_cache_config, max_model_len,
                                          use_eagle, enable_caching,

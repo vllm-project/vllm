@@ -1,7 +1,4 @@
----
-title: LoRA Adapters
----
-[](){ #lora-adapter }
+# LoRA Adapters
 
 This document shows you how to use [LoRA adapters](https://arxiv.org/abs/2106.09685) with vLLM on top of a base model.
 
@@ -29,7 +26,7 @@ We can now submit the prompts and call `llm.generate` with the `lora_request` pa
 of `LoRARequest` is a human identifiable name, the second parameter is a globally unique ID for the adapter and
 the third parameter is the path to the LoRA adapter.
 
-??? Code
+??? code
 
     ```python
     sampling_params = SamplingParams(
@@ -70,7 +67,7 @@ The server entrypoint accepts all other LoRA configuration parameters (`max_lora
 etc.), which will apply to all forthcoming requests. Upon querying the `/models` endpoint, we should see our LoRA along
 with its base model (if `jq` is not installed, you can follow [this guide](https://jqlang.org/download/) to install it.):
 
-??? Command
+??? console "Command"
 
     ```bash
     curl localhost:8000/v1/models | jq .
@@ -122,6 +119,7 @@ export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 ```
 
 ### Using API Endpoints
+
 Loading a LoRA Adapter:
 
 To dynamically load a LoRA adapter, send a POST request to the `/v1/load_lora_adapter` endpoint with the necessary
@@ -159,6 +157,7 @@ curl -X POST http://localhost:8000/v1/unload_lora_adapter \
 ```
 
 ### Using Plugins
+
 Alternatively, you can use the LoRAResolver plugin to dynamically load LoRA adapters. LoRAResolver plugins enable you to load LoRA adapters from both local and remote sources such as local file system and S3. On every request, when there's a new model name that hasn't been loaded yet, the LoRAResolver will try to resolve and load the corresponding LoRA adapter.
 
 You can set up multiple LoRAResolver plugins if you want to load LoRA adapters from different sources. For example, you might have one resolver for local files and another for S3 storage. vLLM will load the first LoRA adapter that it finds.
@@ -172,7 +171,7 @@ Alternatively, follow these example steps to implement your own plugin:
 
 1. Implement the LoRAResolver interface.
 
-    ??? Example of a simple S3 LoRAResolver implementation
+    ??? code "Example of a simple S3 LoRAResolver implementation"
 
         ```python
         import os
@@ -238,7 +237,7 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
 - The `parent` field of LoRA model `sql-lora` now links to its base model `meta-llama/Llama-2-7b-hf`. This correctly reflects the hierarchical relationship between the base model and the LoRA adapter.
 - The `root` field points to the artifact location of the lora adapter.
 
-??? Command output
+??? console "Command output"
 
     ```bash
     $ curl http://localhost:8000/v1/models
@@ -275,3 +274,80 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
         ]
     }
     ```
+
+## Default LoRA Models For Multimodal Models
+
+Some models, e.g., [Granite Speech](https://huggingface.co/ibm-granite/granite-speech-3.3-8b) and [Phi-4-multimodal-instruct](https://huggingface.co/microsoft/Phi-4-multimodal-instruct) multimodal, contain LoRA adapter(s) that are expected to always be applied when a given modality is present. This can be a bit tedious to manage with the above approaches, as it requires the user to send the `LoRARequest` (offline) or to filter requests between the base model and LoRA model (server) depending on the content of the request's multimodal data.
+
+To this end, we allow registration of default multimodal LoRAs to handle this automatically, where users can map each modality to a LoRA adapter to automatically apply it when the corresponding inputs are present. Note that currently, we only allow one LoRA per prompt; if several modalities are provided, each of which are registered to a given modality, none of them will be applied.
+
+??? code "Example usage for offline inference"
+
+    ```python
+    from transformers import AutoTokenizer
+    from vllm import LLM, SamplingParams
+    from vllm.assets.audio import AudioAsset
+
+    model_id = "ibm-granite/granite-speech-3.3-2b"
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+    def get_prompt(question: str, has_audio: bool):
+        """Build the input prompt to send to vLLM."""
+        if has_audio:
+            question = f"<|audio|>{question}"
+        chat = [
+            {
+                "role": "user",
+                "content": question
+            }
+        ]
+        return tokenizer.apply_chat_template(chat, tokenize=False)
+
+
+    llm = LLM(
+        model=model_id,
+        enable_lora=True,
+        max_lora_rank=64,
+        max_model_len=2048,
+        limit_mm_per_prompt={"audio": 1},
+        # Will always pass a `LoRARequest` with the `model_id`
+        # whenever audio is contained in the request data.
+        default_mm_loras = {"audio": model_id},
+        enforce_eager=True,
+    )
+
+    question = "can you transcribe the speech into a written format?"
+    prompt_with_audio = get_prompt(
+        question=question,
+        has_audio=True,
+    )
+    audio = AudioAsset("mary_had_lamb").audio_and_sample_rate
+
+    inputs = {
+        "prompt": prompt_with_audio,
+        "multi_modal_data": {
+            "audio": audio,
+        }
+    }
+
+
+    outputs = llm.generate(
+        inputs,
+        sampling_params=SamplingParams(
+            temperature=0.2,
+            max_tokens=64,
+        ),
+    )
+    ```
+
+You can also pass a json dictionary of `--default-mm-loras` mapping modalities to LoRA model IDs. For example, when starting the server:
+
+```bash
+vllm serve ibm-granite/granite-speech-3.3-2b \
+    --max-model-len 2048 \
+    --enable-lora \
+    --default-mm-loras '{"audio":"ibm-granite/granite-speech-3.3-2b"}' \
+    --max-lora-rank 64
+```
+
+Note: Default multimodal LoRAs are currently only available for `.generate` and chat completions.

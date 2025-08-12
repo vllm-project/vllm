@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import numpy as np
 from tqdm import tqdm
+from typing_extensions import deprecated
 
 import vllm.envs as envs
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
@@ -34,6 +35,10 @@ def save_to_pytorch_benchmark_format(
         write_to_json(pt_file, pt_records)
 
 
+@deprecated(
+    "benchmark_latency.py is deprecated and will be removed in a "
+    "future version. Please use 'vllm bench latency' instead.",
+)
 def main(args: argparse.Namespace):
     print(args)
 

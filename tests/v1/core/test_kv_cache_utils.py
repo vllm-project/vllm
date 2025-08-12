@@ -8,7 +8,7 @@ import torch
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
-from vllm.utils import GiB_bytes, sha256
+from vllm.utils import GiB_bytes, sha256, sha256_cbor_64bit
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 # disable yapf here as it formats differently than isort such that both fail
 # yapf: disable
@@ -16,7 +16,8 @@ from vllm.v1.core.kv_cache_utils import (
     FreeKVCacheBlockQueue, KVCacheBlock, PrefixCachingMetrics,
     estimate_max_model_len, generate_block_hash_extra_keys,
     get_kv_cache_config, get_max_concurrency_for_kv_cache_config,
-    hash_block_tokens, hash_request_tokens, unify_kv_cache_configs)
+    hash_block_tokens, hash_request_tokens, init_none_hash,
+    is_kv_cache_type_uniform, unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
                                         SlidingWindowSpec)
@@ -78,24 +79,27 @@ def new_sliding_window_spec(block_size=16,
                              sliding_window=sliding_window)
 
 
-def test_none_hash(monkeypatch):
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
+def test_none_hash(monkeypatch, hash_fn):
     import vllm.v1.core.kv_cache_utils
 
     # case 1: PYTHONHASHSEED is not set, use random
     with monkeypatch.context() as m:
         m.delenv('PYTHONHASHSEED', raising=False)
         reloaded_kv_cache_utils = importlib.reload(vllm.v1.core.kv_cache_utils)
+        reloaded_kv_cache_utils.init_none_hash(hash_fn)
         assert reloaded_kv_cache_utils.NONE_HASH is not None
         assert isinstance(reloaded_kv_cache_utils.NONE_HASH, int)
         assert reloaded_kv_cache_utils.NONE_HASH != 0
 
-    # case 2: PYTHONHASHSEED is set, use the seed
+    # case 2: PYTHONHASHSEED is set, use the seed and hash_fn
     with monkeypatch.context() as m:
         m.setenv('PYTHONHASHSEED', 'python hash seed')
         reloaded_kv_cache_utils = importlib.reload(vllm.v1.core.kv_cache_utils)
+        reloaded_kv_cache_utils.init_none_hash(hash_fn)
         assert reloaded_kv_cache_utils.NONE_HASH is not None
         assert isinstance(reloaded_kv_cache_utils.NONE_HASH, int)
-        assert sha256('python hash seed') == reloaded_kv_cache_utils.NONE_HASH
+        assert hash_fn('python hash seed') == reloaded_kv_cache_utils.NONE_HASH
 
 
 def test_kv_cache_block():
@@ -108,9 +112,9 @@ def test_kv_cache_block():
     assert block.block_hash is None
 
     # Test reference count manipulation
-    block.incr_ref()
+    block.ref_cnt += 1
     assert block.ref_cnt == 1
-    block.decr_ref()
+    block.ref_cnt -= 1
     assert block.ref_cnt == 0
 
     # Test block hash setting and resetting
@@ -128,8 +132,8 @@ def test_free_kv_cache_block_queue_initialization():
     block = KVCacheBlock(block_id=0)
     queue = FreeKVCacheBlockQueue([block])
     assert queue.num_free_blocks == 1
-    assert queue.free_list_head == block
-    assert queue.free_list_tail == block
+    assert queue.fake_free_list_head.next_free_block is block
+    assert queue.fake_free_list_tail.prev_free_block is block
 
 
 def test_free_kv_cache_block_queue_operations():
@@ -141,41 +145,148 @@ def test_free_kv_cache_block_queue_operations():
 
     # Check initial state
     assert queue.num_free_blocks == 5
-    assert queue.free_list_head == blocks[0]
-    assert queue.free_list_tail == blocks[4]
+    assert queue.fake_free_list_head.next_free_block is blocks[0]
+    assert queue.fake_free_list_tail.prev_free_block is blocks[4]
 
     # Pop the first block
     block1 = queue.popleft()
     assert block1 == blocks[0]
     assert queue.num_free_blocks == 4
-    assert queue.free_list_head == blocks[1]
-    assert queue.free_list_tail == blocks[4]
+    assert queue.fake_free_list_head.next_free_block is blocks[1]
+    assert queue.fake_free_list_tail.prev_free_block is blocks[4]
 
     # Remove a block from the middle
     block_to_remove = blocks[2]
     queue.remove(block_to_remove)
     assert queue.num_free_blocks == 3
-    assert blocks[1].next_free_block == blocks[3]
-    assert blocks[3].prev_free_block == blocks[1]
+    assert blocks[1].next_free_block is blocks[3]
+    assert blocks[3].prev_free_block is blocks[1]
 
     # Append a block back
     queue.append(block_to_remove)
     assert queue.num_free_blocks == 4
-    assert queue.free_list_tail == block_to_remove
-    assert block_to_remove.prev_free_block == blocks[4]
-    assert block_to_remove.next_free_block is None
+    assert queue.fake_free_list_tail.prev_free_block is block_to_remove
+    assert block_to_remove.prev_free_block is blocks[4]
+    assert block_to_remove.next_free_block is queue.fake_free_list_tail
 
     # Pop blocks until empty
     for _ in range(4):
         queue.popleft()
     assert queue.num_free_blocks == 0
-    assert queue.free_list_head is None
-    assert queue.free_list_tail is None
+    assert (queue.fake_free_list_head.next_free_block
+            is queue.fake_free_list_tail)
+    assert (queue.fake_free_list_tail.prev_free_block
+            is queue.fake_free_list_head)
 
     # Attempt to pop from an empty queue
     with pytest.raises(ValueError) as e:
         queue.popleft()
     assert str(e.value) == "No free blocks available"
+
+
+def test_free_kv_cache_block_queue_append_n():
+    # Create an empty FreeKVCacheBlockQueue with these blocks
+    queue = FreeKVCacheBlockQueue([])
+    blocks = [KVCacheBlock(block_id=i) for i in range(6)]
+    # Append 0 block
+    # fake_head->fake_tail
+    queue.append_n([])
+    assert queue.num_free_blocks == 0
+    assert (queue.fake_free_list_head.next_free_block
+            is queue.fake_free_list_tail)
+    assert (queue.fake_free_list_tail.prev_free_block
+            is queue.fake_free_list_head)
+    # Append 1 block
+    # fake_head->b0->fake_tail
+    queue.append_n(blocks[0:1])
+    assert queue.num_free_blocks == 1
+    assert queue.fake_free_list_head.next_free_block is blocks[0]
+    assert blocks[0].prev_free_block is queue.fake_free_list_head
+    assert blocks[0].next_free_block is queue.fake_free_list_tail
+    assert queue.fake_free_list_tail.prev_free_block is blocks[0]
+    # Append 2 blocks
+    # fake_head->b0->b4->b5->fake_tail
+    queue.append_n(blocks[4:6])
+    assert queue.num_free_blocks == 3
+    assert queue.fake_free_list_head.next_free_block is blocks[0]
+    assert blocks[0].prev_free_block is queue.fake_free_list_head
+    assert blocks[0].next_free_block is blocks[4]
+    assert blocks[4].prev_free_block is blocks[0]
+    assert blocks[4].next_free_block is blocks[5]
+    assert blocks[5].prev_free_block is blocks[4]
+    assert blocks[5].next_free_block is queue.fake_free_list_tail
+    assert queue.fake_free_list_tail.prev_free_block is blocks[5]
+    # Append 3 blocks
+    # fake_head->b0->b4->b5->b1->b2->b3->fake_tail
+    queue.append_n(blocks[1:4])
+    assert queue.num_free_blocks == 6
+    assert queue.fake_free_list_head.next_free_block is blocks[0]
+    assert blocks[0].prev_free_block is queue.fake_free_list_head
+    assert blocks[0].next_free_block is blocks[4]
+    assert blocks[4].prev_free_block is blocks[0]
+    assert blocks[4].next_free_block is blocks[5]
+    assert blocks[5].prev_free_block is blocks[4]
+    assert blocks[5].next_free_block is blocks[1]
+    assert blocks[1].prev_free_block is blocks[5]
+    assert blocks[1].next_free_block is blocks[2]
+    assert blocks[2].prev_free_block is blocks[1]
+    assert blocks[2].next_free_block is blocks[3]
+    assert blocks[3].prev_free_block is blocks[2]
+    assert blocks[3].next_free_block is queue.fake_free_list_tail
+    assert queue.fake_free_list_tail.prev_free_block is blocks[3]
+
+
+def test_free_kv_cache_block_queue_popleft_n():
+    blocks = [KVCacheBlock(block_id=i) for i in range(6)]
+    # Create a empty FreeKVCacheBlockQueue with these blocks
+    queue = FreeKVCacheBlockQueue(
+        [blocks[1], blocks[3], blocks[5], blocks[4], blocks[0], blocks[2]])
+    assert queue.num_free_blocks == 6
+    assert queue.fake_free_list_head.next_free_block is blocks[1]
+    assert blocks[1].prev_free_block is queue.fake_free_list_head
+    assert blocks[1].next_free_block is blocks[3]
+    assert blocks[3].prev_free_block is blocks[1]
+    assert blocks[3].next_free_block is blocks[5]
+    assert blocks[5].prev_free_block is blocks[3]
+    assert blocks[5].next_free_block is blocks[4]
+    assert blocks[4].prev_free_block is blocks[5]
+    assert blocks[4].next_free_block is blocks[0]
+    assert blocks[0].prev_free_block is blocks[4]
+    assert blocks[0].next_free_block is blocks[2]
+    assert blocks[2].prev_free_block is blocks[0]
+    assert blocks[2].next_free_block is queue.fake_free_list_tail
+    assert queue.fake_free_list_tail.prev_free_block is blocks[2]
+
+    # Pop 0 block
+    # fake_head->b1->b3->b5->b4->b0->b2->fake_tail
+    assert len(queue.popleft_n(0)) == 0
+    # Pop 1 block
+    # fake_head->b3->b5->b4->b0->b2->fake_tail
+    result_blocks = queue.popleft_n(1)
+    assert len(result_blocks) == 1
+    assert result_blocks[0] is blocks[1]
+    for block in result_blocks:
+        assert block.prev_free_block is None
+        assert block.next_free_block is None
+    # Pop 2 blocks
+    # fake_head->b4->b0->b2->fake_tail
+    result_blocks = queue.popleft_n(2)
+    assert len(result_blocks) == 2
+    assert result_blocks[0] is blocks[3]
+    assert result_blocks[1] is blocks[5]
+    for block in result_blocks:
+        assert block.prev_free_block is None
+        assert block.next_free_block is None
+    # Pop 3 blocks
+    # fake_head->fake_tail
+    result_blocks = queue.popleft_n(3)
+    assert len(result_blocks) == 3
+    assert result_blocks[0] is blocks[4]
+    assert result_blocks[1] is blocks[0]
+    assert result_blocks[2] is blocks[2]
+    for block in result_blocks:
+        assert block.prev_free_block is None
+        assert block.next_free_block is None
 
 
 def test_free_kv_cache_block_queue_get_all_free_blocks():
@@ -287,9 +398,10 @@ def test_generate_block_hash_extra_keys_cache_salt():
     assert next_mm_idx == 1
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
 def test_hash_block_tokens(hash_fn):
     import vllm.v1.core.kv_cache_utils
+    init_none_hash(hash_fn)
     parent_block_hash = 123
     curr_block_token_ids = (1, 2, 3)
     extra_keys = ("key1", "key2")
@@ -303,9 +415,10 @@ def test_hash_block_tokens(hash_fn):
     assert block_hash.extra_keys == extra_keys
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
 def test_hash_request_tokens(hash_fn):
     import vllm.v1.core.kv_cache_utils
+    init_none_hash(hash_fn)
     request = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(6)],
@@ -332,8 +445,10 @@ def test_hash_request_tokens(hash_fn):
     assert block_hashes[1].extra_keys == ("hash2", )
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
 def test_hash_tokens_different_mm_input(hash_fn):
+    init_none_hash(hash_fn)
+
     request1 = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(6)],
@@ -359,8 +474,10 @@ def test_hash_tokens_different_mm_input(hash_fn):
     assert block_hashes1[1] != block_hashes2[1]
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
 def test_hash_request_tokens_no_mm_inputs(hash_fn):
+    init_none_hash(hash_fn)
+
     request = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(6)],
@@ -568,6 +685,38 @@ def test_merge_kv_cache_spec():
     assert merged_layer_spec.sliding_window == 1
 
 
+def test_is_kv_cache_type_uniform():
+    kv_cache_spec = {
+        "layer_1": new_kv_cache_spec(num_kv_heads=32),
+        "layer_2": new_kv_cache_spec(num_kv_heads=32),
+    }
+    assert is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_kv_cache_spec(num_kv_heads=32),
+        "layer_2": new_kv_cache_spec(num_kv_heads=32, sliding_window=1),
+    }
+    assert is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_kv_cache_spec(num_kv_heads=32),
+        "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+    }
+    assert not is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+        "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+    }
+    assert is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+        "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=2),
+    }
+    assert not is_kv_cache_type_uniform(kv_cache_spec)
+
+
 @pytest.mark.parametrize(
     ("model_id", "max_model_len", "want_estimated_max_len"), [
         ("Qwen/Qwen1.5-7B", 16385, 16384),
@@ -578,11 +727,7 @@ def test_estimate_max_model_len(model_id, max_model_len,
     # Create a VllmConfig
     model_config = ModelConfig(
         model_id,
-        task="generate",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
+        runner="generate",
         dtype="float16",
         max_model_len=max_model_len,
     )
@@ -616,11 +761,7 @@ def test_get_max_concurrency_for_kv_cache_config():
     max_model_len = 16384
     model_config = ModelConfig(
         model_id,
-        task="generate",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
+        runner="generate",
         dtype="float16",
         max_model_len=max_model_len,
     )

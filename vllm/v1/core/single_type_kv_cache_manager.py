@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Callable
@@ -7,7 +8,8 @@ from typing import Callable
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
+from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
+                                        FullAttentionSpec, KVCacheSpec,
                                         MambaSpec, SlidingWindowSpec)
 from vllm.v1.request import Request
 
@@ -26,7 +28,7 @@ class SingleTypeKVCacheManager(ABC):
         caching_hash_fn: Callable,
     ) -> None:
         """
-        Initializes the SpecializedManager.
+        Initializes the SingleTypeKVCacheManager.
         Args:
             kv_cache_spec: The kv_cache_spec for this manager.
             block_pool: The block pool.
@@ -176,14 +178,17 @@ class SingleTypeKVCacheManager(ABC):
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
         """
-        Get the number of common prefix blocks for a request.
+        Get the number of common prefix blocks for all requests in the RUNNING
+        state.
 
         Args:
             request_id: The request ID.
-            block_hashes: The block hashes of the request.
+            num_running_requests: The total number of requests in the RUNNING
+                state.
 
         Returns:
-            The number of common prefix blocks.
+            The number of common prefix blocks for all requests in the RUNNING
+                state.
         """
 
         raise NotImplementedError
@@ -256,12 +261,14 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
     ) -> tuple[list[KVCacheBlock], ...]:
-        assert isinstance(kv_cache_spec, FullAttentionSpec), (
-            "FullAttentionManager can only be used for full attention groups")
+        assert isinstance(
+            kv_cache_spec, (FullAttentionSpec, ChunkedLocalAttentionSpec)
+        ), "FullAttentionManager can only be used for full attention " \
+            "and chunked local attention groups"
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids)))
         max_num_blocks = max_length // kv_cache_spec.block_size
-        for i, block_hash in zip(range(max_num_blocks), block_hashes):
+        for block_hash in itertools.islice(block_hashes, max_num_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
@@ -391,6 +398,129 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         return 0
 
 
+class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
+
+    def __init__(self, kv_cache_spec: ChunkedLocalAttentionSpec,
+                 block_pool: BlockPool, **kwargs) -> None:
+        super().__init__(kv_cache_spec, block_pool, **kwargs)
+        self.attention_chunk_size = kv_cache_spec.attention_chunk_size
+        self._null_block = block_pool.null_block
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes: list[BlockHash],
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: KVCacheSpec,
+        use_eagle: bool,
+    ) -> tuple[list[KVCacheBlock], ...]:
+        """
+        For chunked local attention, we need to find the longest cache hit
+        prefix of the blocks that is not longer than `max_length`. The prefix
+        should be a common prefix hit for all the kv cache groups in
+        `kv_cache_group_ids`. If no cache hit is found, return an empty list.
+        note we mark as computed if the whole block is outside of the local 
+        window, and set the block as null. Examples:
+
+        1. Attention chunk size of 8, block size of 4, max length of 15
+        for next token at 15th (zero-indexed), 8th - 14th tokens are in 
+        the window(needs lookup), 0th - 7th are not in the window, 
+        so they are already marked as computed. We check the complete 
+        block3 (8th - 11th tokens), Assume block 3 is hit, we will return 
+        [null, null, block 3], otherwise, we return [null, null]
+
+        2. Attention chunk size of 8, block size of 4, max length of 16
+        for next token at 16th (zero-indexed), 0th - 15th tokens are not 
+        in the window, so they are already marked as computed. 
+        we return 4 blocks[null, null, null, null]
+
+        Args:
+            block_hashes: The block hashes of the request.
+            max_length: The maximum length of the cache hit prefix.
+            kv_cache_group_ids: The ids of the kv cache groups.
+            block_pool: The block pool.
+            kv_cache_spec: The kv cache spec.
+            use_eagle: Whether to use eagle.
+
+        Returns:
+            A list of cached blocks
+        """
+        assert isinstance(kv_cache_spec, ChunkedLocalAttentionSpec), (
+            "ChunkedLocalAttentionManager can only be used for " +
+            "chunked local attention groups")
+        assert use_eagle is False, ("Hybrid KV cache is not supported for " +
+                                    "eagle + chunked local attention.")
+        max_num_blocks = max_length // kv_cache_spec.block_size
+        if max_length > 0:
+            local_attention_start_idx = (max_length //
+                                         kv_cache_spec.attention_chunk_size *
+                                         kv_cache_spec.attention_chunk_size)
+        else:
+            local_attention_start_idx = 0
+        # we marked blocks out of window as computed
+        # with null blocks, and blocks inside window based on cache lookup
+        # result [null] [null] ... [null] [hit block 1 (1st block contain
+        # last window)] [hit block 2] ... [hit block x]
+        local_attention_start_block_idx = (local_attention_start_idx //
+                                           kv_cache_spec.block_size)
+        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+            [block_pool.null_block] * local_attention_start_block_idx
+            for _ in range(len(kv_cache_group_ids)))
+        for i in range(local_attention_start_block_idx, max_num_blocks):
+            block_hash = block_hashes[i]
+            if cached_block := block_pool.get_cached_block(
+                    block_hash, kv_cache_group_ids):
+                for computed, cached in zip(computed_blocks, cached_block):
+                    computed.append(cached)
+            else:
+                break
+        return computed_blocks
+
+    def remove_skipped_blocks(self, request_id: str,
+                              num_computed_tokens: int) -> None:
+        # Remove the blocks that are no longer be in the chunked attention
+        # window and skipped during the attention computation.
+
+        # [chunk 0][chunk 1]local_attention_start_idx ... current
+        # we computed previous number of chunks to get the idx of
+        # current chunk window starting offset,
+        # e.g. for computed 1024 tokens, the 1024th token (0 indexed)
+        # is in the second chunk, there are 1 prev chunk, the start idx
+        # is 1024. for 1023, it will be 0.
+        num_cached_block = self.num_cached_block.get(request_id, 0)
+        local_attention_start_idx = (
+            num_computed_tokens
+        ) // self.attention_chunk_size * self.attention_chunk_size
+        first_useful_block_idx = local_attention_start_idx // self.block_size
+        if num_cached_block > 0:
+            # Make sure we don't delete the last cached block
+            first_useful_block_idx = min(first_useful_block_idx,
+                                         num_cached_block - 1)
+        # if block size = 128, 0 -> block 0, 1024 (= 128 * 8) ->
+        # block 8, 372 (= 128 * 2 + 116) -> block 2
+        blocks = self.req_to_blocks[request_id]
+        removed_blocks: list[KVCacheBlock] = []
+        # we need to keep the last block to get the previous hash key
+        for i in range(first_useful_block_idx - 1, -1, -1):
+            if blocks[i] == self._null_block:
+                # If the block is already a null block, the blocks before it
+                # should also have been set to null blocks by the previous calls
+                # to this function.
+                break
+            removed_blocks.append(blocks[i])
+            blocks[i] = self._null_block
+        self.block_pool.free_blocks(removed_blocks)
+
+    def get_num_common_prefix_blocks(self, request_id: str,
+                                     num_running_requests: int) -> int:
+        """
+        cascade attention is not supported by chunked local attention.
+        """
+        return 0
+
+
 class MambaManager(SingleTypeKVCacheManager):
 
     @classmethod
@@ -433,6 +563,7 @@ class MambaManager(SingleTypeKVCacheManager):
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
+    ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
     MambaSpec: MambaManager,
 }
 

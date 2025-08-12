@@ -129,3 +129,23 @@ def windows_attention_image_qwen2_5_vl():
 
     wrapped_sf = ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=[0.5])
     return build_single_image_inputs([image], [prompt], wrapped_sf)
+
+
+def video_with_metadata_glm4_1v():
+    video_array = VIDEO_ASSETS[0].np_ndarrays
+    metadata = VIDEO_ASSETS[0].metadata
+    question = "Describe the video."
+    video_prompt = "<|begin_of_video|><|video|><|end_of_video|>"
+    formatted_prompt = f"<|user|>\n{video_prompt}{question}<|assistant|>\n"
+
+    scales = [0.1, 0.2, 0.25]
+    video_input = [[(rescale_video_size(video_array, scale), metadata)]
+                   for scale in scales]
+    prompts = [formatted_prompt] * len(video_input)
+
+    return [
+        PromptWithMultiModalInput(
+            prompts=prompts,
+            video_data=video_input,
+        )
+    ]

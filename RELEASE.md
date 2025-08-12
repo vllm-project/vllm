@@ -52,3 +52,39 @@ After branch cut, we approach finalizing the release branch with clear criteria 
 * Release branch specific changes (e.g. change version identifiers or CI fixes)
 
 Please note: **No feature work allowed for cherry picks**. All PRs that are considered for cherry-picks need to be merged on trunk, the only exception are Release branch specific changes.
+
+## Manual validations
+
+### E2E Performance Validation
+
+Before each release, we perform end-to-end performance validation to ensure no regressions are introduced. This validation uses the [vllm-benchmark workflow](https://github.com/pytorch/pytorch-integration-testing/actions/workflows/vllm-benchmark.yml) on PyTorch CI.
+
+**Current Coverage:**
+
+* Models: Llama3, Llama4, and Mixtral
+* Hardware: NVIDIA H100 and AMD MI300x
+* _Note: Coverage may change based on new model releases and hardware availability_
+
+**Performance Validation Process:**
+
+**Step 1: Get Access**
+Request write access to the [pytorch/pytorch-integration-testing](https://github.com/pytorch/pytorch-integration-testing) repository to run the benchmark workflow.
+
+**Step 2: Review Benchmark Setup**
+Familiarize yourself with the benchmark configurations:
+
+* [CUDA setup](https://github.com/pytorch/pytorch-integration-testing/tree/main/vllm-benchmarks/benchmarks/cuda)
+* [ROCm setup](https://github.com/pytorch/pytorch-integration-testing/tree/main/vllm-benchmarks/benchmarks/rocm)
+
+**Step 3: Run the Benchmark**
+Navigate to the [vllm-benchmark workflow](https://github.com/pytorch/pytorch-integration-testing/actions/workflows/vllm-benchmark.yml) and configure:
+
+* **vLLM branch**: Set to the release branch (e.g., `releases/v0.9.2`)
+* **vLLM commit**: Set to the RC commit hash
+
+**Step 4: Review Results**
+Once the workflow completes, benchmark results will be available on the [vLLM benchmark dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm) under the corresponding branch and commit.
+
+**Step 5: Performance Comparison**
+Compare the current results against the previous release to verify no performance regressions have occurred. Here is an
+example of [v0.9.1 vs v0.9.2](https://hud.pytorch.org/benchmark/llms?startTime=Thu%2C%2017%20Apr%202025%2021%3A43%3A50%20GMT&stopTime=Wed%2C%2016%20Jul%202025%2021%3A43%3A50%20GMT&granularity=week&lBranch=releases/v0.9.1&lCommit=b6553be1bc75f046b00046a4ad7576364d03c835&rBranch=releases/v0.9.2&rCommit=a5dd03c1ebc5e4f56f3c9d3dc0436e9c582c978f&repoName=vllm-project%2Fvllm&benchmarkName=&modelName=All%20Models&backendName=All%20Backends&modeName=All%20Modes&dtypeName=All%20DType&deviceName=All%20Devices&archName=All%20Platforms).

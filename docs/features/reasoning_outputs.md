@@ -1,7 +1,4 @@
----
-title: Reasoning Outputs
----
-[](){ #reasoning-outputs }
+# Reasoning Outputs
 
 vLLM offers support for reasoning models like [DeepSeek R1](https://huggingface.co/deepseek-ai/DeepSeek-R1), which are designed to generate outputs containing both reasoning steps and final conclusions.
 
@@ -17,6 +14,7 @@ vLLM currently supports the following reasoning models:
 | [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `guided_json`, `guided_regex` | ✅ |
 | [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
 | [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `guided_json`, `guided_regex` | ✅ |
+| [Hunyuan A13B series](https://huggingface.co/collections/tencent/hunyuan-a13b-685ec38e5b46321e3ea7c4be) | `hunyuan_a13b` | `guided_json`, `guided_regex` | ✅ |
 
 !!! note
     IBM Granite 3.2 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
@@ -33,7 +31,7 @@ vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
 
 Next, make a request to the model that should return the reasoning content in the response.
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -70,7 +68,7 @@ The `reasoning_content` field contains the reasoning steps that led to the final
 
 Streaming chat completions are also supported for reasoning models. The `reasoning_content` field is available in the `delta` field in [chat completion response chunks](https://platform.openai.com/docs/api-reference/chat/streaming).
 
-??? Json
+??? console "Json"
 
     ```json
     {
@@ -95,7 +93,7 @@ Streaming chat completions are also supported for reasoning models. The `reasoni
 
 OpenAI Python client library does not officially support `reasoning_content` attribute for streaming output. But the client supports extra attributes in the response. You can use `hasattr` to check if the `reasoning_content` attribute is present in the response. For example:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -125,13 +123,12 @@ OpenAI Python client library does not officially support `reasoning_content` att
     printed_content = False
 
     for chunk in stream:
-        reasoning_content = None
-        content = None
-        # Check the content is reasoning_content or content
-        if hasattr(chunk.choices[0].delta, "reasoning_content"):
-            reasoning_content = chunk.choices[0].delta.reasoning_content
-        elif hasattr(chunk.choices[0].delta, "content"):
-            content = chunk.choices[0].delta.content
+        # Safely extract reasoning_content and content from delta,
+        # defaulting to None if attributes don't exist or are empty strings
+        reasoning_content = (
+            getattr(chunk.choices[0].delta, "reasoning_content", None) or None
+        )
+        content = getattr(chunk.choices[0].delta, "content", None) or None
 
         if reasoning_content is not None:
             if not printed_reasoning_content:
@@ -152,7 +149,7 @@ Remember to check whether the `reasoning_content` exists in the response before 
 
 The reasoning content is also available when both tool calling and the reasoning parser are enabled. Additionally, tool calling only parses functions from the `content` field, not from the `reasoning_content`.
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -200,7 +197,7 @@ For more examples, please refer to <gh-file:examples/online_serving/openai_chat_
 
 You can add a new `ReasoningParser` similar to <gh-file:vllm/reasoning/deepseek_r1_reasoning_parser.py>.
 
-??? Code
+??? code
 
     ```python
     # import the required packages
@@ -258,7 +255,7 @@ You can add a new `ReasoningParser` similar to <gh-file:vllm/reasoning/deepseek_
 
 Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in <gh-file:vllm/reasoning/deepseek_r1_reasoning_parser.py>.
 
-??? Code
+??? code
 
     ```python
     @dataclass

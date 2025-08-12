@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project Adapted from
-# https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, Optional, TypedDict, Union, cast
+from typing import Annotated, Literal, Optional, Union, cast
 
 import torch
 from torch import nn
@@ -29,6 +29,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
@@ -37,18 +38,28 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     merge_multimodal_embeddings)
 
 
-class AyaVisionImagePixelInputs(TypedDict):
+class AyaVisionImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - np: The total number of patches over each image over each prompt in
+              the batch
+        - c: Number of channels
+        - h: Height of each image patch
+        - w: Width of each image patch
+        - bn: Batch size * number of images
+    """
+
     type: Literal["pixel_values"]
-    pixel_values: torch.Tensor
-    """
-    Shape: `(num_patches_total, num_channels, height, width)`
 
-    `num_patches_total` is the total number of patches over each image over each
-    prompt in the batch.
-    """
+    pixel_values: Annotated[
+        torch.Tensor,
+        TensorShape("np", 3, "h", "w"),
+    ]
 
-    num_patches: torch.Tensor
-    """Shape: `(batch_size * num_images)`"""
+    num_patches: Annotated[
+        torch.Tensor,
+        TensorShape("bn"),
+    ]
 
 
 class AyaVisionMultiModalProjector(nn.Module):
@@ -112,16 +123,10 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(AyaVisionConfig)
 
     def get_hf_processor(self, **kwargs: object) -> AyaVisionProcessor:
-        processor = self.ctx.get_hf_processor(AyaVisionProcessor, **kwargs)
+        return self.ctx.get_hf_processor(AyaVisionProcessor, **kwargs)
 
-        # Temporary workaround since this processor has multiple image tokens
-        # See https://github.com/huggingface/transformers/issues/38350
-        processor._check_special_mm_tokens = lambda *args, **kwargs: None
-
-        return processor
-
-    def get_image_processor(self) -> GotOcr2ImageProcessor:
-        return self.get_hf_processor().image_processor
+    def get_image_processor(self, **kwargs: object) -> GotOcr2ImageProcessor:
+        return self.get_hf_processor(**kwargs).image_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -185,11 +190,13 @@ class AyaVisionMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,
             mm_kwargs,
+            tok_kwargs,
         )
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         image_processor = hf_processor.image_processor
@@ -302,6 +309,13 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             "lm_head.": "language_model.lm_head.",
         })
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: AyaVisionConfig = vllm_config.model_config.hf_config
@@ -374,21 +388,6 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             e.flatten(0, 2) for e in image_embeds.split(num_patches.tolist())
         ]
 
-    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        h = w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            if d.shape != expected_dims:
-                raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f"is {expected_dims}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[AyaVisionImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -396,22 +395,17 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_embeds = kwargs.pop("image_embeds", None)
         assert image_embeds is None, "Aya Vision does not support image_embeds."
 
-        if not isinstance(pixel_values, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
-        if num_patches is not None and not isinstance(num_patches,
-                                                      (torch.Tensor, list)):
-            raise ValueError("Incorrect type of num_patches. "
-                             f"Got type: {type(num_patches)}")
-
-        pixel_values = flatten_bn(pixel_values, concat=True)
-        num_patches = flatten_bn(num_patches, concat=True)
+        if pixel_values is None:
+            return None
 
         return AyaVisionImagePixelInputs(
             type="pixel_values",
-            pixel_values=self._validate_pixel_values(pixel_values),
-            num_patches=num_patches,
-        )
+            pixel_values=flatten_bn(pixel_values, concat=True),
+            num_patches=flatten_bn(num_patches, concat=True),
+            resolve_bindings={
+                "h": self.config.vision_config.image_size,
+                "w": self.config.vision_config.image_size,
+            })
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
@@ -12,8 +13,7 @@ from transformers import LlavaConfig as HfLlavaConfig
 from transformers import PretrainedConfig, SiglipVisionConfig
 from transformers.image_utils import ImageInput, get_image_size, to_numpy_array
 from transformers.models.llava import LlavaProcessor
-from transformers.processing_utils import (ProcessingKwargs, Unpack,
-                                           _validate_images_text_input_order)
+from transformers.processing_utils import ProcessingKwargs, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
 from vllm.config import VllmConfig
@@ -92,9 +92,6 @@ class TarsierProcessor(LlavaProcessor):
         if images is None and text is None:
             raise ValueError(
                 "You have to specify at least one of `images` or `text`.")
-
-        # check if images and text inputs are reversed for BC
-        images, text = _validate_images_text_input_order(images, text)
 
         output_kwargs = self._merge_kwargs(
             TarsierProcessorKwargs,
@@ -181,13 +178,11 @@ class TarsierProcessingInfo(BaseProcessingInfo):
         return get_vision_encoder_info(self.get_hf_config())
 
     def get_hf_processor(self, **kwargs: object) -> TarsierProcessor:
-        hf_processor = self.ctx.get_hf_processor(TarsierProcessor, **kwargs)
-        # Patch for patch_size if needed (copied from vLLM LLaVA)
-        if hasattr(hf_processor,
-                   'patch_size') and hf_processor.patch_size is None:
-            patch_size = self.get_vision_encoder_info().get_patch_size()
-            hf_processor.patch_size = patch_size
-        return hf_processor
+        vision_info = self.get_vision_encoder_info()
+
+        kwargs.setdefault("patch_size", vision_info.get_patch_size())
+
+        return self.ctx.get_hf_processor(TarsierProcessor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -392,6 +387,13 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal,
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]
     }
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

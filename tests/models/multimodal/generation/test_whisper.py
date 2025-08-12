@@ -106,7 +106,7 @@ def run_test(
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend=distributed_executor_backend,
     ) as vllm_model:
-        llm = vllm_model.model
+        llm = vllm_model.llm
 
         sampling_params = SamplingParams(
             temperature=0,

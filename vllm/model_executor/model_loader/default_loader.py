@@ -13,7 +13,7 @@ from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm import envs
-from vllm.config import LoadConfig, LoadFormat, ModelConfig
+from vllm.config import LoadConfig, ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
@@ -69,10 +69,10 @@ class DefaultModelLoader(BaseModelLoader):
             # pylint: disable=C.
             from modelscope.hub.snapshot_download import snapshot_download
 
-            if not os.path.exists(model):
-                # Use file lock to prevent multiple processes from
-                # downloading the same model weights at the same time.
-                with get_lock(model, self.load_config.download_dir):
+            # Use file lock to prevent multiple processes from
+            # downloading the same model weights at the same time.
+            with get_lock(model, self.load_config.download_dir):
+                if not os.path.exists(model):
                     model_path = snapshot_download(
                         model_id=model,
                         cache_dir=self.load_config.download_dir,
@@ -81,8 +81,8 @@ class DefaultModelLoader(BaseModelLoader):
                         revision=revision,
                         ignore_file_pattern=self.load_config.ignore_patterns,
                     )
-            else:
-                model_path = model
+                else:
+                    model_path = model
             return model_path
         return None
 
@@ -104,19 +104,19 @@ class DefaultModelLoader(BaseModelLoader):
         use_safetensors = False
         index_file = SAFE_WEIGHTS_INDEX_NAME
         # Some quantized models use .pt files for storing the weights.
-        if load_format == LoadFormat.AUTO:
+        if load_format == "auto":
             allow_patterns = ["*.safetensors", "*.bin"]
-        elif (load_format == LoadFormat.SAFETENSORS
-              or load_format == LoadFormat.FASTSAFETENSORS):
+        elif (load_format == "safetensors"
+              or load_format == "fastsafetensors"):
             use_safetensors = True
             allow_patterns = ["*.safetensors"]
-        elif load_format == LoadFormat.MISTRAL:
+        elif load_format == "mistral":
             use_safetensors = True
             allow_patterns = ["consolidated*.safetensors"]
             index_file = "consolidated.safetensors.index.json"
-        elif load_format == LoadFormat.PT:
+        elif load_format == "pt":
             allow_patterns = ["*.pt"]
-        elif load_format == LoadFormat.NPCACHE:
+        elif load_format == "npcache":
             allow_patterns = ["*.bin"]
         else:
             raise ValueError(f"Unknown load_format: {load_format}")
@@ -178,7 +178,7 @@ class DefaultModelLoader(BaseModelLoader):
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
             source.model_or_path, source.revision, source.fall_back_to_pt,
             source.allow_patterns_overrides)
-        if self.load_config.load_format == LoadFormat.NPCACHE:
+        if self.load_config.load_format == "npcache":
             # Currently np_cache only support *.bin checkpoints
             assert use_safetensors is False
             weights_iterator = np_cache_weights_iterator(
@@ -189,7 +189,7 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.use_tqdm_on_load,
             )
         elif use_safetensors:
-            if self.load_config.load_format == LoadFormat.FASTSAFETENSORS:
+            if self.load_config.load_format == "fastsafetensors":
                 weights_iterator = fastsafetensors_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
@@ -217,16 +217,6 @@ class DefaultModelLoader(BaseModelLoader):
                     xm.mark_step()
 
             weights_iterator = _xla_weights_iterator(weights_iterator)
-
-        elif current_platform.is_hpu():
-            import habana_frameworks.torch.core as htcore
-
-            def _hpu_weights_iterator(iterator: Generator):
-                for weights in iterator:
-                    yield weights
-                    htcore.mark_step()
-
-            weights_iterator = _hpu_weights_iterator(weights_iterator)
 
         if self.counter_before_loading_weights == 0.0:
             self.counter_before_loading_weights = time.perf_counter()

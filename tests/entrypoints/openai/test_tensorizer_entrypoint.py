@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
-import json
+import os
 import tempfile
 
 import openai
@@ -58,18 +58,20 @@ def tensorize_model_and_lora(tmp_dir, model_uri):
 
 @pytest.fixture(scope="module")
 def server(model_uri, tensorize_model_and_lora):
-    model_loader_extra_config = {
-        "tensorizer_uri": model_uri,
-    }
+    # In this case, model_uri is a directory with a model.tensors
+    # file and all necessary model artifacts, particularly a
+    # HF `config.json` file. In this case, Tensorizer can infer the
+    # `TensorizerConfig` so --model-loader-extra-config can be completely
+    # omitted.
 
     ## Start OpenAI API server
     args = [
-        "--load-format", "tensorizer", "--device", "cuda",
-        "--model-loader-extra-config",
-        json.dumps(model_loader_extra_config), "--enable-lora"
+        "--load-format", "tensorizer", "--served-model-name", MODEL_NAME,
+        "--enable-lora"
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    model_dir = os.path.dirname(model_uri)
+    with RemoteOpenAIServer(model_dir, args) as remote_server:
         yield remote_server
 
 

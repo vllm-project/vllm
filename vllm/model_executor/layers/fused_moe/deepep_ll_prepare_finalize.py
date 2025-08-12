@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional, Union
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any, Optional, Union
 
 import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+    moe_kernel_quantize_input, normalize_batched_scales_shape)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
+DEEPEP_QUANT_BLOCK_SHAPE = [DEEPEP_QUANT_BLOCK_SIZE, DEEPEP_QUANT_BLOCK_SIZE]
 
 
 def dequant_fp8(expert_x_fp8: torch.Tensor,
@@ -35,29 +40,30 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     # DeepEP low-latency kernels are compiled only for certain
     # specific hidden sizes.
-    SUPPORTED_HIDDEN_SIZES = [2560, 4096, 5120, 7168]
+    SUPPORTED_HIDDEN_SIZES = [2048, 2560, 4096, 5120, 6144, 7168]
 
     def __init__(self,
                  buffer: deep_ep.Buffer,
-                 world_size: int,
-                 dp_size: int,
                  max_tokens_per_rank: int,
-                 quant_dtype: Optional[torch.dtype] = None,
-                 block_shape: Optional[list[int]] = None,
+                 num_dispatchers: int,
                  use_fp8_dispatch: bool = False):
         super().__init__()
 
         self.buffer = buffer
-        self.world_size = world_size
-        self.dp_size = dp_size
-        self.quant_dtype = quant_dtype
-        self.block_shape = block_shape
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
         self.handle = None
+        self.num_dispatchers_ = num_dispatchers
+
+    def num_dispatchers(self) -> int:
+        return self.num_dispatchers_
+
+    @property
+    def activation_format(self) -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
 
     def max_num_tokens_per_rank(self) -> Optional[int]:
         return self.max_tokens_per_rank
@@ -66,12 +72,17 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return torch.int64
 
     def _do_quant(
-            self, x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
-            a1_scale: Optional[torch.Tensor], a2_scale: Optional[torch.Tensor],
-            a1_dtype: torch.dtype
+        self,
+        x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        a1_dtype: torch.dtype,
+        quant_dtype: Optional[torch.dtype],
+        per_act_token_quant: bool,
+        block_shape: Optional[list[int]],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
 
-        block_k = self.block_shape[1] if self.block_shape is not None else None
+        block_k = block_shape[1] if block_shape is not None else None
         if self.use_fp8_dispatch:
             if block_k == DEEPEP_QUANT_BLOCK_SIZE:
                 # DeepEP kernels did the quantization for us.
@@ -84,47 +95,31 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         assert isinstance(x, torch.Tensor)
 
-        # Check if there is a block_shape / or if we can infer the quantization
-        # schemes from the scales.
-        per_token_quant = None
-        if all([v is None for v in [self.block_shape, a1_scale, a2_scale]
-                ]) and self.quant_dtype is not None:
-            # Quantization required despite none of the inputs suggesting
-            # quantization. Fallback to per_token_dynamic quant.
-            per_token_quant = True
-        else:
-            per_token_quant = ((self.block_shape is not None) or
-                               (a1_scale is not None and a1_scale.numel() != 1)
-                               or (a2_scale is not None
-                                   and a2_scale.numel() != 1))
-
         num_experts, max_tokens, hidden_dim = x.size()
 
         # TODO (varun): Optimization - Use a batched version of quant
         x = x.view((-1, hidden_dim))
-        x, x_scales = moe_kernel_quantize_input(x, a1_scale, self.quant_dtype,
-                                                per_token_quant,
-                                                self.block_shape)
+        x, x_scales = moe_kernel_quantize_input(x, a1_scale, quant_dtype,
+                                                per_act_token_quant,
+                                                block_shape)
         x = x.view((num_experts, -1, hidden_dim))
 
-        if per_token_quant:
+        if quant_dtype is not None:
             assert x_scales is not None
-            x_scales = x_scales.view(num_experts, max_tokens, -1)
+            x_scales = normalize_batched_scales_shape(x_scales, num_experts)
 
         return x, x_scales
 
     def prepare(
-        self,
-        a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        rank_topk_weights: torch.Tensor,
-        rank_topk_ids: torch.Tensor,
-        num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+        self, a1: torch.Tensor, a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor], topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor, num_experts: int,
+        expert_map: Optional[torch.Tensor], apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
+        extra_prepare_args: Optional[dict[str, Any]]
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
 
         hidden_size = a1.size(1)
         assert hidden_size in self.SUPPORTED_HIDDEN_SIZES, \
@@ -142,31 +137,39 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             "low_latency kernels doesn't support dispatching per-token scales")
 
         if apply_router_weight_on_input:
-            topk = rank_topk_ids.size(1)
+            topk = topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1")
-            a1 = a1 * rank_topk_weights.to(a1.dtype)
+            a1 = a1 * topk_weights.to(a1.dtype)
 
         # Dispatch
         expert_x, expert_num_tokens, self.handle, event, hook = \
                 self.buffer.low_latency_dispatch(a1,
-                                                rank_topk_ids,
+                                                topk_ids,
                                                 self.max_tokens_per_rank,
                                                 num_experts,
                                                 use_fp8=self.use_fp8_dispatch,
                                                 async_finish=False,
                                                 return_recv_hook=False)
 
-        expert_x, expert_x_scale = self._do_quant(expert_x, a1_scale, a2_scale,
-                                                  a1.dtype)
+        expert_x, expert_x_scale = self._do_quant(
+            expert_x, a1_scale, a2_scale, a1.dtype, quant_config.quant_dtype,
+            quant_config.per_act_token_quant, quant_config.block_shape)
 
-        return (expert_x, expert_x_scale, expert_num_tokens, None, None)
+        expert_tokens_meta = mk.ExpertTokensMetadata(
+            expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None)
+
+        return (expert_x, expert_x_scale, expert_tokens_meta, None, None)
 
     def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
                  topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 apply_router_weight_on_input: bool) -> None:
-
+                 apply_router_weight_on_input: bool,
+                 weight_and_reduce_impl: mk.TopKWeightAndReduce,
+                 extra_finalize_args: Optional[dict[str, Any]]) -> None:
+        assert isinstance(
+            weight_and_reduce_impl, TopKWeightAndReduceDelegate
+        ), ("Weight application and reduction happens in the combine kernel.")
         assert self.handle is not None
 
         combine_topk_weights = topk_weights

@@ -6,10 +6,10 @@ from typing import Any, Callable, Optional
 import torch
 import torch.nn.functional as F
 
-import vllm.envs as envs
+from vllm import envs
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    OCP_MX_BLOCK_SIZE, per_token_group_quant_mxfp4)
+    OCP_MX_BLOCK_SIZE, dequant_mxfp4, quant_dequant_mxfp4)
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.platforms import current_platform
@@ -235,12 +235,11 @@ class QuarkW4A4MXFP4(QuarkScheme):
                       x_scales: torch.Tensor = None) -> torch.Tensor:
 
         if self.emulate:
-            if envs.VLLM_QUARK_EMU_MEM_OPT:
-                dq_w = self.weight_quantizer(layer.weight).to(self.out_dtype)
-            else:
-                dq_w = layer.weight
-            qdq_x, _ = per_token_group_quant_mxfp4(x, OCP_MX_BLOCK_SIZE)
-            return F.linear(qdq_x, dq_w, bias)
+            dq_w = dequant_mxfp4(layer.weight, layer.weight_scale, x.dtype)
+
+            x = quant_dequant_mxfp4(x)
+
+            return F.linear(x, dq_w, bias)
         else:
             return torch.ops.vllm.gemm_with_dynamic_quant(
                 x, layer.weight, layer.weight_scale, x_scales, self.out_dtype)

@@ -14,7 +14,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.platforms import current_platform
 
 if not current_platform.has_device_capability(100):
-    pytest.skip(reason="Nvfp4 Requires compute capability of 10 or above.",
+    pytest.skip("Nvfp4 Requires compute capability of 10 or above.",
                 allow_module_level=True)
 
 MNK_FACTORS = [
@@ -93,11 +93,11 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
             a1_gscale=a1_gs,
             w1_fp4=w1_q,
             w1_blockscale=w1_blockscale,
-            w1_alphas=(1 / w1_gs),
+            g1_alphas=(1 / w1_gs),
             a2_gscale=a2_gs,
             w2_fp4=w2_q,
             w2_blockscale=w2_blockscale,
-            w2_alphas=(1 / w2_gs),
+            g2_alphas=(1 / w2_gs),
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             m=m,

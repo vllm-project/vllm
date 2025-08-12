@@ -4,6 +4,7 @@
 import asyncio
 import copy
 import functools
+import importlib
 import os
 import signal
 import subprocess
@@ -818,14 +819,15 @@ def create_new_process_for_each_test(
 
     Args:
         method: The process creation method. Can be either "spawn" or "fork". 
-               If not specified,
-               it defaults to "spawn" on ROCm platforms and "fork" otherwise.
+               If not specified, it defaults to "spawn" on ROCm and XPU
+               platforms and "fork" otherwise.
 
     Returns:
         A decorator to run test functions in separate processes.
     """
     if method is None:
-        method = "spawn" if current_platform.is_rocm() else "fork"
+        use_spawn = current_platform.is_rocm() or current_platform.is_xpu()
+        method = "spawn" if use_spawn else "fork"
 
     assert method in ["spawn",
                       "fork"], "Method must be either 'spawn' or 'fork'"
@@ -973,3 +975,14 @@ def get_client_text_logprob_generations(
     return [(text_generations, text,
              (None if x.logprobs is None else x.logprobs.top_logprobs))
             for completion in completions for x in completion.choices]
+
+
+def has_module_attribute(module_name, attribute_name):
+    """
+    Helper function to check if a module has a specific attribute.
+    """
+    try:
+        module = importlib.import_module(module_name)
+        return hasattr(module, attribute_name)
+    except ImportError:
+        return False

@@ -1,7 +1,4 @@
----
-title: Quickstart
----
-[](){ #quickstart }
+# Quickstart
 
 This guide will help you quickly get started with vLLM to perform:
 
@@ -43,7 +40,7 @@ uv pip install vllm --torch-backend=auto
 ```
 
 !!! note
-    For more detail and non-CUDA platforms, please refer [here][installation-index] for specific instructions on how to install vLLM.
+    For more detail and non-CUDA platforms, please refer [here](installation/README.md) for specific instructions on how to install vLLM.
 
 [](){ #quickstart-offline }
 
@@ -77,7 +74,7 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 ```
 
-The [LLM][vllm.LLM] class initializes vLLM's engine and the [OPT-125M model](https://arxiv.org/abs/2205.01068) for offline inference. The list of supported models can be found [here][supported-models].
+The [LLM][vllm.LLM] class initializes vLLM's engine and the [OPT-125M model](https://arxiv.org/abs/2205.01068) for offline inference. The list of supported models can be found [here](../models/supported_models.md).
 
 ```python
 llm = LLM(model="facebook/opt-125m")
@@ -100,6 +97,43 @@ for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
+
+!!! note
+    The `llm.generate` method does not automatically apply the model's chat template to the input prompt. Therefore, if you are using an Instruct model or Chat model, you should manually apply the corresponding chat template to ensure the expected behavior. Alternatively, you can use the `llm.chat` method and pass a list of messages which have the same format as those passed to OpenAI's `client.chat.completions`:
+
+    ??? code
+    
+        ```python
+        # Using tokenizer to apply chat template
+        from transformers import AutoTokenizer
+    
+        tokenizer = AutoTokenizer.from_pretrained("/path/to/chat_model")
+        messages_list = [
+            [{"role": "user", "content": prompt}]
+            for prompt in prompts
+        ]
+        texts = tokenizer.apply_chat_template(
+            messages_list,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        
+        # Generate outputs
+        outputs = llm.generate(texts, sampling_params)
+        
+        # Print the outputs.
+        for output in outputs:
+            prompt = output.prompt
+            generated_text = output.outputs[0].text
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    
+        # Using chat interface.
+        outputs = llm.chat(messages_list, sampling_params)
+        for idx, output in enumerate(outputs):
+            prompt = prompts[idx]
+            generated_text = output.outputs[0].text
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        ```
 
 [](){ #quickstart-online }
 
@@ -129,6 +163,7 @@ curl http://localhost:8000/v1/models
 ```
 
 You can pass in the argument `--api-key` or environment variable `VLLM_API_KEY` to enable the server to check for API key in the header.
+You can pass multiple keys after `--api-key`, and the server will accept any of the keys passed, this can be useful for key rotation.
 
 ### OpenAI Completions API with vLLM
 
@@ -147,7 +182,7 @@ curl http://localhost:8000/v1/completions \
 
 Since this server is compatible with OpenAI API, you can use it as a drop-in replacement for any applications using OpenAI API. For example, another way to query the server is via the `openai` Python package:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -186,7 +221,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 Alternatively, you can use the `openai` Python package:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI

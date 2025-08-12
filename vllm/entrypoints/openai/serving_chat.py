@@ -34,6 +34,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolCall)
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
@@ -62,6 +63,7 @@ class OpenAIServingChat(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
+        exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: Optional[str] = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
@@ -110,6 +112,8 @@ class OpenAIServingChat(OpenAIServing):
                 raise TypeError("Error: --enable-auto-tool-choice requires "
                                 f"tool_parser:'{tool_parser}' which has not "
                                 "been registered") from e
+        self.exclude_tools_when_tool_choice_none = (
+            exclude_tools_when_tool_choice_none)
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -146,10 +150,8 @@ class OpenAIServingChat(OpenAIServing):
             raise self.engine_client.dead_error
 
         try:
-            (
-                lora_request,
-                prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+            lora_request = self._maybe_get_adapters(
+                request, supports_default_mm_loras=True)
 
             model_name = self._get_model_name(request.model, lora_request)
 
@@ -175,9 +177,12 @@ class OpenAIServingChat(OpenAIServing):
                     "--enable-auto-tool-choice and --tool-call-parser to be set"
                 )
 
-            tool_dicts = None if request.tools is None else [
-                tool.model_dump() for tool in request.tools
-            ]
+            if (request.tools is None
+                    or (request.tool_choice == "none"
+                        and self.exclude_tools_when_tool_choice_none)):
+                tool_dicts = None
+            else:
+                tool_dicts = [tool.model_dump() for tool in request.tools]
 
             (
                 conversation,
@@ -215,22 +220,28 @@ class OpenAIServingChat(OpenAIServing):
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
-                default_max_tokens = self.max_model_len - len(
-                    engine_prompt["prompt_token_ids"])
+
+                if self.default_sampling_params is None:
+                    self.default_sampling_params = {}
+
+                max_tokens = get_max_tokens(
+                    max_model_len=self.max_model_len,
+                    request=request,
+                    input_length=len(engine_prompt["prompt_token_ids"]),
+                    default_sampling_params=self.default_sampling_params)
+
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
-                        default_max_tokens, self.default_sampling_params)
+                        max_tokens, self.default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
-                        default_max_tokens,
-                        self.model_config.logits_processor_pattern,
+                        max_tokens, self.model_config.logits_processor_pattern,
                         self.default_sampling_params)
 
                 self._log_inputs(request_id,
                                  request_prompts[i],
                                  params=sampling_params,
-                                 lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
+                                 lora_request=lora_request)
 
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
@@ -249,7 +260,6 @@ class OpenAIServingChat(OpenAIServing):
                         request_id,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
-                        prompt_adapter_request=prompt_adapter_request,
                         priority=request.priority,
                     )
 
@@ -603,12 +613,17 @@ class OpenAIServingChat(OpenAIServing):
                         previous_text = previous_texts[i]
                         previous_token_ids = all_previous_token_ids[i]
                         current_text = previous_text + delta_text
-                        current_token_ids = previous_token_ids + list(
-                            output.token_ids)
+
+                        # avoid the None + list error.
+                        if previous_token_ids:
+                            current_token_ids = previous_token_ids + list(
+                                output.token_ids)
+                        else:
+                            current_token_ids = list(output.token_ids)
 
                     # handle streaming deltas for tools with named tool_choice
                     if tool_choice_function_name:
-                        if (self.reasoning_parser
+                        if (self.reasoning_parser and not reasoning_end_arr[i]
                                 and not reasoning_parser.is_reasoning_end(
                                     previous_token_ids)):
                             assert reasoning_parser is not None
@@ -622,11 +637,18 @@ class OpenAIServingChat(OpenAIServing):
                                     current_token_ids,
                                     output.token_ids,
                                 ))
-                            # When encountering think end id in delta_token_ids,
-                            # process the `content`. Only keep 'content',
-                            # remove 'reasoning_content'
+                            # When encountering think end id in delta_token_ids
+                            # or think end id in prompt_token_ids
+                            # i.e {"enable_thinking": False},
+                            # set reasoning status to end.
+                            # Only keep 'content', remove 'reasoning_content'.
                             if reasoning_parser.is_reasoning_end(
-                                    list(output.token_ids)):
+                                    list(output.token_ids)) or \
+                                    (res.prompt_token_ids and
+                                        reasoning_parser.is_reasoning_end(
+                                            list(res.prompt_token_ids)
+                                        )):
+                                reasoning_end_arr[i] = True
                                 if delta_message and delta_message.content:
                                     # This need to be added to next `delta_text`
                                     current_text = delta_message.content
@@ -1023,6 +1045,7 @@ class OpenAIServingChat(OpenAIServing):
                 message = ChatMessage(
                     role=role,
                     content="",
+                    reasoning_content=reasoning_content,
                     tool_calls=[
                         tool_call_class(function=FunctionCall(
                             name=tool_call.name,
@@ -1066,9 +1089,17 @@ class OpenAIServingChat(OpenAIServing):
                 else:
                     # FOR NOW make it a chat message; we will have to detect
                     # the type to make it later.
+                    ret_content = content
+
+                    # try to use content return from tool parser first,
+                    # tool parser may do some modify for the content.
+                    if (tool_call_info.content
+                            and len(tool_call_info.content) > 0):
+                        ret_content = tool_call_info.content
+
                     message = ChatMessage(role=role,
                                           reasoning_content=reasoning_content,
-                                          content=content)
+                                          content=ret_content)
 
             # undetermined case that is still important to handle
             else:

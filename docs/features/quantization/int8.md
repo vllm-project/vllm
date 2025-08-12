@@ -1,7 +1,4 @@
----
-title: INT8 W8A8
----
-[](){ #int8 }
+# INT8 W8A8
 
 vLLM supports quantizing weights and activations to INT8 for memory savings and inference acceleration.
 This quantization method is particularly useful for reducing model size while maintaining good performance.
@@ -54,7 +51,7 @@ When quantizing activations to INT8, you need sample data to estimate the activa
 It's best to use calibration data that closely matches your deployment data.
 For a general-purpose instruction-tuned model, you can use a dataset like `ultrachat`:
 
-??? Code
+??? code
 
     ```python
     from datasets import load_dataset
@@ -81,7 +78,7 @@ For a general-purpose instruction-tuned model, you can use a dataset like `ultra
 
 Now, apply the quantization algorithms:
 
-??? Code
+??? code
 
     ```python
     from llmcompressor.transformers import oneshot
@@ -117,7 +114,8 @@ After quantization, you can load and run the model in vLLM:
 
 ```python
 from vllm import LLM
-model = LLM("./Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token")
+
+llm = LLM("./Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token")
 ```
 
 To evaluate accuracy, you can use `lm_eval`:

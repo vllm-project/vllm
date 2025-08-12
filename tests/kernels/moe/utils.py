@@ -1,194 +1,247 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-DeepEP test utilities
-"""
-import dataclasses
-import importlib
-import os
-import traceback
-from typing import Callable, Optional
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Optional
 
 import torch
-from torch.distributed import ProcessGroup
-from torch.multiprocessing import (
-    spawn)  # pyright: ignore[reportPrivateImportUsage]
-from typing_extensions import Concatenate, ParamSpec
 
-from vllm.model_executor.layers.fused_moe.utils import find_free_port
-
-has_deep_ep = importlib.util.find_spec("deep_ep") is not None
-if has_deep_ep:
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
-        DeepEPHTPrepareAndFinalize)
-    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
-        DeepEPLLPrepareAndFinalize)
-
-## Parallel Processes Utils
-
-P = ParamSpec("P")
+import vllm._custom_ops as ops
+from tests.kernels.quant_utils import per_block_cast_to_int8
+from vllm.model_executor.layers.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+    BatchedPrepareAndFinalize, BatchedTritonExperts, NaiveBatchedExperts)
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEModularKernel)
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input)
+from vllm.utils import round_up
+from vllm.utils.deep_gemm import per_block_cast_to_fp8
 
 
-@dataclasses.dataclass
-class ProcessGroupInfo:
-    world_size: int
-    world_local_size: int
-    rank: int
-    node_rank: int
-    local_rank: int
-    device: torch.device
+def triton_moe(
+    a: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weight: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    quant_dtype: Optional[torch.dtype] = None,
+    per_act_token_quant=False,
+    block_shape: Optional[list[int]] = None,
+) -> torch.Tensor:
+    return fused_experts(a,
+                         w1,
+                         w2,
+                         topk_weight,
+                         topk_ids,
+                         w1_scale=w1_scale,
+                         w2_scale=w2_scale,
+                         a1_scale=a1_scale,
+                         a2_scale=a2_scale,
+                         per_channel_quant=per_act_token_quant,
+                         use_fp8_w8a8=quant_dtype == torch.float8_e4m3fn,
+                         block_shape=block_shape)
 
 
-def _worker_parallel_launch(
-    local_rank: int,
-    world_size: int,
-    world_local_size: int,
-    node_rank: int,
-    init_method: str,
-    worker: Callable[Concatenate[ProcessGroupInfo, P], None],
-    *args: P.args,
-    **kwargs: P.kwargs,
-) -> None:
-    rank = node_rank * world_local_size + local_rank
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
-    torch.distributed.init_process_group(
-        backend="cpu:gloo,cuda:nccl",
-        init_method=init_method,
-        rank=rank,
-        world_size=world_size,
-        device_id=device,
-    )
-    barrier = torch.tensor([rank], device=device)
-    torch.distributed.all_reduce(barrier)
+def batched_moe(
+    a: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weight: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    quant_dtype: Optional[torch.dtype] = None,
+    per_act_token_quant: bool = False,
+    block_shape: Optional[list[int]] = None,
+) -> torch.Tensor:
+    max_num_tokens = round_up(a.shape[0], 64)
 
-    try:
-        worker(
-            ProcessGroupInfo(
-                world_size=world_size,
-                world_local_size=world_local_size,
-                rank=rank,
-                node_rank=node_rank,
-                local_rank=local_rank,
-                device=device,
-            ),
-            *args,
-            **kwargs,
-        )
-    except Exception as ex:
-        print(ex)
-        traceback.print_exc()
-        raise
-    finally:
-        torch.distributed.destroy_process_group()
-
-
-def parallel_launch(
-    world_size: int,
-    worker: Callable[Concatenate[ProcessGroupInfo, P], None],
-    *args: P.args,
-    **kwargs: P.kwargs,
-) -> None:
-    assert not kwargs
-    spawn(
-        _worker_parallel_launch,
-        args=(
-            world_size,
-            world_size,
-            0,
-            f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{find_free_port()}",
-            worker,
-        ) + args,
-        nprocs=world_size,
-        join=True,
+    fused_experts = FusedMoEModularKernel(
+        BatchedPrepareAndFinalize(max_num_tokens,
+                                  num_dispatchers=1,
+                                  num_local_experts=w1.shape[0],
+                                  rank=0),
+        BatchedTritonExperts(
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=1,
+            use_fp8_w8a8=quant_dtype == torch.float8_e4m3fn,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape,
+        ),
     )
 
-
-## DeepEP specific utils
-
-
-@dataclasses.dataclass
-class DeepEPHTArgs:
-    num_local_experts: int
-
-
-@dataclasses.dataclass
-class DeepEPLLArgs:
-    max_tokens_per_rank: int
-    hidden_size: int
-    num_experts: int
-    use_fp8_dispatch: bool
+    return fused_experts(a,
+                         w1,
+                         w2,
+                         topk_weight,
+                         topk_ids,
+                         w1_scale=w1_scale,
+                         w2_scale=w2_scale,
+                         a1_scale=a1_scale,
+                         a2_scale=a2_scale)
 
 
-def make_deepep_ht_a2a(pg: ProcessGroup,
-                       pgi: ProcessGroupInfo,
-                       dp_size: int,
-                       ht_args: DeepEPHTArgs,
-                       q_dtype: Optional[torch.dtype] = None,
-                       block_shape: Optional[list[int]] = None):
+def naive_batched_moe(
+    a: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weight: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    quant_dtype: Optional[torch.dtype] = None,
+    per_act_token_quant: bool = False,
+    block_shape: Optional[list[int]] = None,
+) -> torch.Tensor:
+    max_num_tokens = round_up(a.shape[0], 64)
 
-    import deep_ep
-
-    # high throughput a2a
-    num_nvl_bytes = 1024 * 1024 * 1024  # 1GB
-    num_rdma_bytes, low_latency_mode, num_qps_per_rank = 0, False, 1
-    buffer = deep_ep.Buffer(group=pg,
-                            num_nvl_bytes=num_nvl_bytes,
-                            num_rdma_bytes=num_rdma_bytes,
-                            low_latency_mode=low_latency_mode,
-                            num_qps_per_rank=num_qps_per_rank)
-    return DeepEPHTPrepareAndFinalize(buffer=buffer,
-                                      world_size=pgi.world_size,
-                                      rank=pgi.rank,
-                                      dp_size=dp_size,
-                                      rank_expert_offset=pgi.rank *
-                                      ht_args.num_local_experts,
-                                      quant_dtype=q_dtype,
-                                      block_shape=block_shape)
-
-
-def make_deepep_ll_a2a(pg: ProcessGroup,
-                       pgi: ProcessGroupInfo,
-                       dp_size: int,
-                       deepep_ll_args: DeepEPLLArgs,
-                       q_dtype: Optional[torch.dtype] = None,
-                       block_shape: Optional[list[int]] = None):
-
-    import deep_ep
-
-    # low-latency a2a
-    num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-        deepep_ll_args.max_tokens_per_rank, deepep_ll_args.hidden_size,
-        pgi.world_size, deepep_ll_args.num_experts)
-
-    buffer = deep_ep.Buffer(group=pg,
-                            num_rdma_bytes=num_rdma_bytes,
-                            low_latency_mode=True,
-                            num_qps_per_rank=deepep_ll_args.num_experts //
-                            pgi.world_size)
-
-    return DeepEPLLPrepareAndFinalize(
-        buffer=buffer,
-        world_size=pgi.world_size,
-        dp_size=dp_size,
-        max_tokens_per_rank=deepep_ll_args.max_tokens_per_rank,
-        quant_dtype=q_dtype,
-        block_shape=block_shape,
-        use_fp8_dispatch=deepep_ll_args.use_fp8_dispatch,
+    fused_experts = FusedMoEModularKernel(
+        BatchedPrepareAndFinalize(max_num_tokens,
+                                  num_dispatchers=1,
+                                  num_local_experts=w1.shape[0],
+                                  rank=0),
+        NaiveBatchedExperts(
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=1,
+            use_fp8_w8a8=quant_dtype == torch.float8_e4m3fn,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape,
+        ),
     )
 
+    return fused_experts(a,
+                         w1,
+                         w2,
+                         topk_weight,
+                         topk_ids,
+                         w1_scale=w1_scale,
+                         w2_scale=w2_scale,
+                         a1_scale=a1_scale,
+                         a2_scale=a2_scale)
 
-def make_deepep_a2a(pg: ProcessGroup,
-                    pgi: ProcessGroupInfo,
-                    dp_size: int,
-                    deepep_ht_args: Optional[DeepEPHTArgs],
-                    deepep_ll_args: Optional[DeepEPLLArgs],
-                    q_dtype: Optional[torch.dtype] = None,
-                    block_shape: Optional[list[int]] = None):
-    if deepep_ht_args is not None:
-        assert deepep_ll_args is None
-        return make_deepep_ht_a2a(pg, pgi, dp_size, deepep_ht_args, q_dtype,
-                                  block_shape)
 
-    assert deepep_ll_args is not None
-    return make_deepep_ll_a2a(pg, pgi, dp_size, deepep_ll_args, q_dtype,
-                              block_shape)
+def chunk_scales(scales: Optional[torch.Tensor], start: int,
+                 end: int) -> Optional[torch.Tensor]:
+    if scales is not None:
+        if scales.numel() == 1:
+            return scales
+        else:
+            return scales[start:end]
+    return None
+
+
+def make_quantized_test_activations(
+    E: int,
+    m: int,
+    k: int,
+    in_dtype: torch.dtype,
+    quant_dtype: Optional[torch.dtype] = None,
+    block_shape: Optional[list[int]] = None,
+    per_act_token_quant: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    a = torch.randn((E, m, k), device="cuda", dtype=in_dtype) / 10
+    a_q = a
+    a_scale = None
+
+    if quant_dtype is not None:
+        assert (quant_dtype == torch.float8_e4m3fn
+                or quant_dtype == torch.int8), "only fp8/int8 supported"
+        a_q = torch.zeros_like(a, dtype=quant_dtype)
+        a_scale_l = [None] * E
+        for e in range(E):
+            a_q[e], a_scale_l[e] = moe_kernel_quantize_input(
+                a[e], None, quant_dtype, per_act_token_quant, block_shape)
+        a_scale = torch.stack(a_scale_l)
+
+        if not per_act_token_quant and block_shape is None:
+            a_scale = a_scale.view(E, 1, 1)
+
+    return a, a_q, a_scale
+
+
+def moe_quantize_weights(
+    w: torch.Tensor,
+    w_s: Optional[torch.Tensor],
+    quant_dtype: Optional[torch.dtype],
+    per_token_quant: bool,
+    block_shape: Optional[list[int]],
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    assert (quant_dtype == torch.float8_e4m3fn
+            or quant_dtype == torch.int8), "only fp8/int8 supported"
+
+    if block_shape is not None:
+        assert not per_token_quant
+        if quant_dtype == torch.int8:
+            w, w_s = per_block_cast_to_int8(w, block_shape)
+        else:
+            w, w_s = per_block_cast_to_fp8(w, block_shape)
+    else:
+        if quant_dtype == torch.int8:
+            w, w_s = ops.scaled_int8_quant(
+                w, w_s, use_per_token_if_dynamic=per_token_quant)
+        else:
+            w, w_s = ops.scaled_fp8_quant(
+                w, w_s, use_per_token_if_dynamic=per_token_quant)
+
+    return w, w_s
+
+
+def make_test_weight(
+    e: int,
+    rows: int,
+    cols: int,
+    in_dtype: torch.dtype = torch.bfloat16,
+    quant_dtype: Optional[torch.dtype] = None,
+    block_shape: Optional[list[int]] = None,
+    per_act_token_quant: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    w_16 = torch.randn((e, rows, cols), device="cuda", dtype=in_dtype) / 15
+
+    if quant_dtype is not None:
+        w_l = [None] * e
+        w_s_l = [None] * e
+        for idx in range(e):
+            w_l[idx], w_s_l[idx] = moe_quantize_weights(
+                w_16[idx], None, quant_dtype, per_act_token_quant, block_shape)
+
+        w = torch.stack(w_l)
+        w_s = torch.stack(w_s_l)
+        if w_s.ndim == 2:
+            assert w_s.shape[-1] == 1
+            w_s = w_s.view(-1, 1, 1)
+
+        if block_shape is not None:
+            block_n, block_k = block_shape
+            n_tiles = (rows + block_n - 1) // block_n
+            k_tiles = (cols + block_k - 1) // block_k
+            assert w_s.shape == (e, n_tiles, k_tiles)
+    else:
+        w = w_16
+        w_s = None
+
+    return w_16, w, w_s
+
+
+def make_test_weights(
+    e: int,
+    n: int,
+    k: int,
+    in_dtype: torch.dtype = torch.bfloat16,
+    quant_dtype: Optional[torch.dtype] = None,
+    block_shape: Optional[list[int]] = None,
+    per_act_token_quant: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor,
+           torch.Tensor, Optional[torch.Tensor]]:
+    return (
+        *make_test_weight(e, 2 * n, k, in_dtype, quant_dtype, block_shape,
+                          per_act_token_quant),
+        *make_test_weight(e, k, n, in_dtype, quant_dtype, block_shape,
+                          per_act_token_quant),
+    )

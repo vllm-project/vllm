@@ -149,14 +149,17 @@ class Gemma3Attention(nn.Module):
         # TODO(woosuk): Add reference to the original HF implementation.
         layer_idx = extract_layer_index(prefix)
         self.is_sliding = (getattr(
-            config, "interleaved_sliding_window", None) is not None and bool(
-                (layer_idx + 1) % config.sliding_window_pattern))
+            config, "interleaved_sliding_window", None) is not None and (bool(
+                (layer_idx + 1) % config.sliding_window_pattern))) or (
+                    getattr(config, "layer_types", None) is not None
+                    and config.layer_types[layer_idx] == "sliding_attention")
         # Initialize the rotary embedding.
         if self.is_sliding:
             # Local attention. Override the values in config.json.
             self.rope_theta = config.rope_local_base_freq
             self.rope_scaling = {"rope_type": "default"}
-            self.sliding_window = config.interleaved_sliding_window
+            self.sliding_window = (config.interleaved_sliding_window
+                                   or config.sliding_window)
         else:
             # Global attention. Use the values in config.json.
             self.rope_theta = config.rope_theta

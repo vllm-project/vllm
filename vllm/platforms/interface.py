@@ -4,6 +4,7 @@ import enum
 import os
 import platform
 import random
+import sys
 from datetime import timedelta
 from platform import uname
 from typing import TYPE_CHECKING, NamedTuple, Optional, Union
@@ -45,6 +46,7 @@ class _Backend(enum.Enum):
     ROCM_FLASH = enum.auto()
     ROCM_AITER_MLA = enum.auto()  # Supported by V1
     ROCM_AITER_MLA_VLLM_V1 = enum.auto()
+    ROCM_AITER_FA = enum.auto()  # used for ViT attn backend
     TORCH_SDPA = enum.auto()
     FLASHINFER = enum.auto()
     FLASHINFER_VLLM_V1 = enum.auto()
@@ -52,22 +54,21 @@ class _Backend(enum.Enum):
     TRITON_MLA_VLLM_V1 = enum.auto()
     FLASHMLA_VLLM_V1 = enum.auto()
     FLASHMLA = enum.auto()  # Supported by V1
-    CUTLASS_MLA_VLLM_V1 = enum.auto()
-    HPU_ATTN = enum.auto()
+    CUTLASS_MLA = enum.auto()
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
-    BLOCK_SPARSE_FLASH_ATTN = enum.auto()
     DUAL_CHUNK_FLASH_ATTN = enum.auto()
+    DIFFERENTIAL_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
     FLEX_ATTENTION = enum.auto()
+    TREE_ATTN = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
     CUDA = enum.auto()
     ROCM = enum.auto()
     TPU = enum.auto()
-    HPU = enum.auto()
     XPU = enum.auto()
     CPU = enum.auto()
     NEURON = enum.auto()
@@ -128,6 +129,9 @@ class Platform:
     # compilation strategy.
     simple_compile_backend: str = "inductor"
 
+    # The backend used for distributed communication.
+    dist_backend: str = ""
+
     supported_quantization: list[str] = []
 
     additional_env_vars: list[str] = []
@@ -149,9 +153,6 @@ class Platform:
     def is_tpu(self) -> bool:
         return self._enum == PlatformEnum.TPU
 
-    def is_hpu(self) -> bool:
-        return self._enum == PlatformEnum.HPU
-
     def is_xpu(self) -> bool:
         return self._enum == PlatformEnum.XPU
 
@@ -163,6 +164,9 @@ class Platform:
 
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
+
+    def get_max_output_tokens(self, prompt_len: int) -> int:
+        return sys.maxsize
 
     def is_cuda_alike(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
@@ -183,6 +187,10 @@ class Platform:
             return int(physical_device_id)
         else:
             return device_id
+
+    @classmethod
+    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
+        return _Backend.TORCH_SDPA
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
@@ -298,7 +306,7 @@ class Platform:
         """
         Set the device for the current platform.
         """
-        torch.cuda.set_device(device)
+        raise NotImplementedError
 
     @classmethod
     def pre_register_and_update(cls,
@@ -540,6 +548,13 @@ class Platform:
         Init platform-specific torch distributed process group.
         """
         raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+        """
+        Returns if the kv_cache_dtype is supported by the current platform.
+        """
+        return False
 
 
 class UnspecifiedPlatform(Platform):

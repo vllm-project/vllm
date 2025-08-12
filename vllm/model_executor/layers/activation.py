@@ -71,11 +71,13 @@ class SiluAndMul(CustomOp):
             import aiter.ops.triton.activation as ops
             self.op = lambda x, shuffle: \
                 ops.act_mul_and_mxfp4_quant(x, "silu", shuffle=shuffle)
-        elif current_platform.is_cuda_alike() or current_platform.is_cpu():
+        elif current_platform.is_cuda_alike():
             self.op = torch.ops._C.silu_and_mul
         elif current_platform.is_xpu():
             from vllm._ipex_ops import ipex_ops
             self.op = ipex_ops.silu_and_mul
+        elif current_platform.is_cpu():
+            self._forward_method = self.forward_native
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""

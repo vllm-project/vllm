@@ -26,6 +26,8 @@ See <gh-file:LICENSE>.
 
 ## Developing
 
+--8<-- "docs/getting_started/installation/python_env_setup.inc.md"
+
 Depending on the kind of development you'd like to do (e.g. Python, CUDA), you can choose to build vLLM with or without compilation.
 Check out the [building from source][build-from-source] documentation for details.
 
@@ -42,7 +44,7 @@ For an optimized workflow when iterating on C++/CUDA kernels, see the [Increment
 Install MkDocs along with the [plugins](https://github.com/vllm-project/vllm/blob/main/mkdocs.yaml) used in the vLLM documentation, as well as required dependencies:
 
 ```bash
-pip install -r requirements/docs.txt
+uv pip install -r requirements/docs.txt
 ```
 
 !!! note
@@ -95,16 +97,17 @@ For additional features and advanced configurations, refer to the official [MkDo
 
 ## Testing
 
-??? note "Commands"
+??? console "Commands"
 
     ```bash
-    pip install -r requirements/dev.txt
+    # These commands are only for Nvidia CUDA platforms.
+    uv pip install -r requirements/common.txt -r requirements/dev.txt --torch-backend=auto
 
     # Linting, formatting and static type checking
-    pre-commit install --hook-type pre-commit --hook-type commit-msg
+    pre-commit install
 
     # You can manually run pre-commit with
-    pre-commit run --all-files
+    pre-commit run --all-files --show-diff-on-failure
 
     # To manually run something from CI that does not run
     # locally by default, you can run:
@@ -121,6 +124,10 @@ For additional features and advanced configurations, refer to the official [MkDo
     Since the <gh-file:docker/Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.
 
     Therefore, we recommend developing with Python 3.12 to minimise the chance of your local environment clashing with our CI environment.
+
+!!! note "Install python3-dev if Python.h is missing"
+    If any of the above commands fails with `Python.h: No such file or directory`, install
+    `python3-dev` with `sudo apt install python3-dev`.
 
 !!! note
     Currently, the repository is not fully checked by `mypy`.
@@ -153,7 +160,7 @@ Using `-s` with `git commit` will automatically add this header.
 
 !!! tip
     You can enable automatic sign-off via your IDE:
-  
+
     - **PyCharm**: Click on the `Show Commit Options` icon to the right of the `Commit and Push...` button in the `Commit` window.
       It will bring up a `git` window where you can modify the `Author` and enable `Sign-off commit`.
     - **VSCode**: Open the [Settings editor](https://code.visualstudio.com/docs/configure/settings)
