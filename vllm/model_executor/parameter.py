@@ -373,6 +373,11 @@ class BlockQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
     pass
 
 
+# TODO: rename to PartitionedModelWeightParameter
+# use meta tensor for data
+# pass weight_loader_2 to this function
+# this new weight loader will call the load_*_weight functions
+# these functions will give more control to this param and be responsible for tp
 class ShardedModelWeightParameter(torch.nn.Parameter):
     """
     Unlike other sharding, this sharding allows for shared memory
@@ -390,7 +395,6 @@ class ShardedModelWeightParameter(torch.nn.Parameter):
 
         if isinstance(loaded_shard_id, str):
             loaded_shard_id = {"q": 0, "k": 1, "v": 2}.get(loaded_shard_id)
-
 
         loaded_shard_id = 0 if loaded_shard_id is None else loaded_shard_id
         self.shards[loaded_shard_id].weight_loader(self.shards[loaded_shard_id], loaded_weight)

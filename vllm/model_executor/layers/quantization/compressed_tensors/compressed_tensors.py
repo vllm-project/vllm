@@ -84,7 +84,6 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         self.transform_config = TransformConfig.model_validate(
             transform_config)
-        self.transform_factories: dict[int, TransformFactory] = {}
 
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
@@ -583,13 +582,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                                         ending) + shard_ending
                                     if is_match(thing, layer, args.targets,
                                                 args.ignore):
-                                        print(
-                                            f"matched {thing} {args.targets}")
                                         shard_ids.add(shard_id)
-                                    else:
-                                        print(
-                                            f"NO matched {thing} {args.targets}"
-                                        )
 
                         if len(shard_ids) == 0:
                             shard_ids.add(0)
@@ -610,7 +603,6 @@ class CompressedTensorsConfig(QuantizationConfig):
             layer.input_tfm.append(input_tfm)
         if output_tfm is not None:
             layer.output_tfm.append(output_tfm)
-        layer.layer_name = layer_name
 
         if self.supports_cutlass_24(weight_quant=weight_quant,
                                     input_quant=input_quant,
@@ -734,7 +726,7 @@ registry = {}
 class vllmTransformBase(torch.nn.Module):  # InternalModule
 
     def __init__(self, scheme: TransformScheme, args: TransformArgs, shard_ids,
-                 layer: torch.nn.Module, weight_loader: Callable, name: str,
+                 layer: torch.nn.Module, weight_loader: Callable,
                  input_size_per_partition, output_partition_sizes, asdf_args):
         super().__init__()
         self.scheme = scheme
@@ -747,40 +739,15 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
         else:
             raise ValueError(layer.__mro__)
 
-        # NOTE: weight size might not be what you think
-        # For example, fused up_gate is actually a different shape
-        # prob need to use output_partition_sizes, input_size_per_partition
-        # if input size, use (input_size_per_partition, input_size_per_partition)
-
-        # Maybe parameter with multiple data? It's one parameter, so the weight loader will choose it for loading
-        # but it has mutliple data, which can be shared tensors
-
-        # trying to create multiple parameters for a fused layer seems like a bad time
-        # and might require having to edit the weight loader of every model
-
-        # at runtime, we can detect if the multiple data are identical, if so save some computation
-        # otherwise, do some slicing and perform ops in linear.
-
-        # Since I think the weight loading is as optimal as it can get, we can consider optimizing the application later
-
-        # we could potentially replace this with a "fake" weight, whose weight loader
-        # is actually a bait and switch to load shards into real weights
-        # essentially bringing this logic out of the parameter. Nicer typing this way
         self.weight = ShardedModelWeightParameter()
 
         #for shard_id, output_shape in enumerate(output_partition_sizes):
-        print(shard_ids)
         for shard_id in shard_ids:
             output_shape = output_partition_sizes[shard_id]
-            # SHARD_ID is not correct. Need some way of mapping between shard_id used by mapping ("q", "k", "v")
-            # and the shard id of this layer. Doesn't seem like this layer has it, so I think I need to assume the ordering of q, k, v.
-            # At load time, just enforce an ordering of q = 0, k = 1, v = 2
 
             if isinstance(layer, LinearBase):
                 assert hasattr(layer, "weight")
                 if args.location == TransformLocation.INPUT:
-                    # there's an optimization to be done if the input tensors are exactly the same
-                    # also stacking
                     weight_shape = (input_size_per_partition,
                                     input_size_per_partition)
 
@@ -796,14 +763,12 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
             else:
                 raise ValueError()
 
-            # TODO: do not create if args are not targeting this shard
             key = (id(scheme), weight_shape, )
             if key not in registry:
-                registry[key] = torch.eye(  # TODO: change back to empty
-                    weight_shape[0],
+                registry[key] = torch.empty(
+                    weight_shape,
                     dtype=scheme.precision,
                     device=layer.weight.device,
-                    #dtype=asdf_args.get("params_dtype"),
                 )
 
             p = torch.nn.Parameter(
@@ -815,6 +780,25 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
             )
 
             # TODO: use set_weight_attrs
+            # TODO: this weight loader needs to account for tp sharding, maybe handled by using ModelWeightParameter
+            # but do not pass weight_loader, since that weight loader handles partition sharding which we do not want
+            # partitionining is handled by asdf
+
+            # normally, partitioning (fused ops) is handled by Linear.weight_loader via Linear.__init__ -> LinearMethod.create_weights -> Parameter.__init__
+            # and tp is handled by Linear.*_size_per_partition via Linear.__init__ -> LinearMethod.create_weights -> Parameter.__init__
+
+            # however, partitioning assumes that the parameter is one tensor
+            # this assumption can't be true for shared tensors
+            
+            # instead, we keep Linear.*_size_per_partition sizes to account for tp initialize
+            # if 
+
+            # weight loader 2 kicks responsibility for tp loading to the parameter. This is convenient for us
+
+            # we can create a meta tensor
+
+            # and tp is handled by Linear.__init__ passed to 
+            # however, the weight loader assumes that the parameter
             p.input_dim = 1
             p.output_dim = 0
             # p.weight_loader = lambda *args, **kwargs: None
@@ -866,7 +850,6 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
                 transform_name = f"{name}_{args.location}"
                 transform = vllmTransformBase(
                     scheme, args, shard_ids, layer, weight_loader,
-                    layer.layer_name + f".{name}_{args.location}",
                     input_size_per_partition, output_partition_sizes,
                     asdf_args)
 
@@ -888,15 +871,12 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
         weight_shards = layer.weight.split(self.output_partition_sizes, dim=0)
         # TODO: bias shards
 
-        #assert len(self.input_transforms) == 1
-        #assert len(self.output_transforms) == 1
         for i, weight_shard in enumerate(weight_shards):
             for transform in self.input_transforms:
                 if i not in transform.weight.shards:
                     continue
 
                 transform_shard = transform.weight.shards[i]
-                #xs[i] = dispatch_unquantized_gemm()(layer, xs[i].to(transform_shard.dtype), transform_shard, None).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
                 xs[i] = (xs[i].to(transform_shard.dtype) @ transform_shard).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
 
             assert bias is None
@@ -908,7 +888,6 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
 
                 transform_shard = transform.weight.shards[i]
                 # TODO: inverse is hard coded right now
-                #xs[i] = dispatch_unquantized_gemm()(layer, xs[i].to(transform_shard.dtype), transform_shard, None).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
                 xs[i] = (xs[i].to(transform_shard.dtype) @ transform_shard.T).to(xs[i].dtype) / math.sqrt(transform_shard.size(0))
 
         return torch.hstack(xs)
