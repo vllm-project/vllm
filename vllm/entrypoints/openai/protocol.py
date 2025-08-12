@@ -526,10 +526,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
     guided_decoding_backend: Optional[str] = Field(
         default=None,
-        description=(
-            "If specified, will override the default guided decoding backend "
-            "of the server for this specific request. If set, must be one of "
-            "'outlines', 'lm-format-enforcer', 'xgrammar', 'guidance'"),
+        deprecated="The guided decoding backend is now managed centrally by "
+        "the `StructuredOutputManager` within the `EngineCore`. Therefore, it "
+        "must be configured globally during engine initialization and can no "
+        "longer be overridden on a per-request basis. "
+        "This parameter will be removed in a future version.",
     )
     guided_whitespace_pattern: Optional[str] = Field(
         default=None,
@@ -1011,10 +1012,11 @@ class CompletionRequest(OpenAIBaseModel):
     )
     guided_decoding_backend: Optional[str] = Field(
         default=None,
-        description=(
-            "If specified, will override the default guided decoding backend "
-            "of the server for this specific request. If set, must be one of "
-            "'outlines', 'lm-format-enforcer', 'xgrammar', 'guidance'"),
+        deprecated="The guided decoding backend is now managed centrally by "
+        "the `StructuredOutputManager` within the `EngineCore`. Therefore, it "
+        "must be configured globally during engine initialization and can no "
+        "longer be overridden on a per-request basis. "
+        "This parameter will be removed in a future version.",
     )
     guided_whitespace_pattern: Optional[str] = Field(
         default=None,
