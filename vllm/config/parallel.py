@@ -15,8 +15,7 @@ import vllm.envs as envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import (cuda_device_count_stateless, get_open_port,
-                        get_open_ports_list)
+from vllm.utils import cuda_device_count_stateless, get_open_ports_list
 
 if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
