@@ -1597,7 +1597,7 @@ class FusedMoE(CustomOp):
                                                     router_logits)
         else:
             final_hidden_states = torch.ops.vllm.moe_forward(
-                hidden_states, router_logits, 
+                hidden_states, router_logits,
                 self.layer_name)[..., :og_hidden_states]
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             # Default set to False. (May have to add shared expert outputs.
