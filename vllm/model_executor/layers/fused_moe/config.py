@@ -58,6 +58,35 @@ def _get_config_quant_dtype(
     return None
 
 
+def _quant_flags_to_group_shape(
+    quant_dtype: Union[torch.dtype, str, None],
+    per_act_token_quant: bool,
+    per_out_ch_quant: bool,
+    block_shape: Optional[list[int]],
+) -> tuple[Optional[GroupShape], Optional[GroupShape]]:
+    if block_shape is not None:
+        assert not per_act_token_quant
+        assert not per_out_ch_quant
+        # This is not quite right since first dim should be 1.
+        a_shape = GroupShape(row=block_shape[0], col=block_shape[1])
+        w_shape = GroupShape(row=block_shape[0], col=block_shape[1])
+    else:
+        w_shape = None
+
+        if quant_dtype is not None:
+            a_shape = GroupShape.PER_TENSOR
+        else:
+            a_shape = None
+
+        if per_act_token_quant:
+            a_shape = GroupShape.PER_TOKEN
+
+        if per_out_ch_quant:
+            w_shape = GroupShape.PER_TOKEN
+
+    return a_shape, w_shape
+
+
 @dataclass
 class FusedMoEQuantDesc:
     # TODO (bnell): use scalar_type instead of Union.
@@ -123,7 +152,7 @@ class FusedMoEQuantConfig:
 
     @property
     def per_out_ch_quant(self) -> bool:
-        return self.a2.shape == GroupShape.PER_TOKEN
+        return self.w1.shape == GroupShape.PER_TOKEN
 
     @property
     def is_per_tensor(self) -> bool:
@@ -277,48 +306,20 @@ class FusedMoEQuantConfig:
         a1_gscale: Optional[torch.Tensor] = None,
         a2_gscale: Optional[torch.Tensor] = None,
     ) -> "FusedMoEQuantConfig":
-        a1_shape, a2_shape = _quant_flags_to_group_shape(quant_dtype, per_act_token_quant, per_out_ch_quant, block_shape)
-        return FusedMoEQuantConfig(
-            a1=FusedMoEQuantDesc(quant_dtype, a1_shape, a1_scale, a1_gscale),
-            a2=FusedMoEQuantDesc(quant_dtype, a2_shape, a2_scale, a1_gscale),
-            w1=FusedMoEQuantDesc(quant_dtype, None, w1_scale, g1_alphas),
-            w2=FusedMoEQuantDesc(quant_dtype, None, w2_scale, g2_alphas),
+        a_shape, w_shape = _quant_flags_to_group_shape(quant_dtype, per_act_token_quant, per_out_ch_quant, block_shape)
+        quant_config = FusedMoEQuantConfig(
+            a1=FusedMoEQuantDesc(quant_dtype, a_shape, a1_scale, a1_gscale),
+            a2=FusedMoEQuantDesc(quant_dtype, a_shape, a2_scale, a2_gscale),
+            w1=FusedMoEQuantDesc(quant_dtype, w_shape, w1_scale, g1_alphas),
+            w2=FusedMoEQuantDesc(quant_dtype, w_shape, w2_scale, g2_alphas),
         )
+        assert quant_config.per_act_token_quant == per_act_token_quant
+        assert quant_config.per_out_ch_quant == per_out_ch_quant
+        assert quant_config.block_shape == block_shape
+        return quant_config
 
-
-def _quant_flags_to_group_shape(
-    quant_dtype: Union[torch.dtype, str, None],
-    per_act_token_quant: bool,
-    per_out_ch_quant: bool,
-    block_shape: Optional[list[int]],
-) -> tuple[Optional[GroupShape], Optional[GroupShape]]:
-    if block_shape is not None:
-        assert not per_act_token_quant
-        assert not per_out_ch_quant
-        # This is not quite right since first dim should be 1.
-        a1_shape = GroupShape(row=block_shape[0], col=block_shape[1])
-        a2_shape = GroupShape(row=block_shape[0], col=block_shape[1])
-    else:
-        if quant_dtype is not None:
-            a1_shape = GroupShape.PER_TENSOR
-            a2_shape = GroupShape.PER_TENSOR
-        else:
-            a1_shape = None
-            a2_shape = None
-
-        if per_act_token_quant:
-            a1_shape = GroupShape.PER_TOKEN
-            a2_shape = GroupShape.PER_TOKEN
-
-        if per_out_ch_quant:
-            a2_shape = GroupShape.PER_TOKEN
-
-    #print(f"SHAPES({quant_dtype},{block_shape},{per_act_token_quant},{per_out_ch_quant}) = {a1_shape},{a2_shape}")
-
-    return a1_shape, a2_shape
 
 # TODO better doc
-# TODO: put block shapes in weights also?
 
 def fp8_w8a8_moe_quant_config(
     w1_scale: torch.Tensor,
@@ -329,16 +330,16 @@ def fp8_w8a8_moe_quant_config(
     per_out_ch_quant: bool = False,
     block_shape: Optional[list[int]] = None,
 ) -> FusedMoEQuantConfig:
-    a1_shape, a2_shape = _quant_flags_to_group_shape(
+    a_shape, w_shape = _quant_flags_to_group_shape(
         torch.float8_e4m3fn,
         per_act_token_quant,
         per_out_ch_quant,
         block_shape)
     return FusedMoEQuantConfig(
-        a1=FusedMoEQuantDesc(torch.float8_e4m3fn, a1_shape, a1_scale),
-        a2=FusedMoEQuantDesc(torch.float8_e4m3fn, a2_shape, a2_scale),
-        w1=FusedMoEQuantDesc(torch.float8_e4m3fn, None, w1_scale),
-        w2=FusedMoEQuantDesc(torch.float8_e4m3fn, None, w2_scale),
+        a1=FusedMoEQuantDesc(torch.float8_e4m3fn, a_shape, a1_scale),
+        a2=FusedMoEQuantDesc(torch.float8_e4m3fn, a_shape, a2_scale),
+        w1=FusedMoEQuantDesc(torch.float8_e4m3fn, w_shape, w1_scale),
+        w2=FusedMoEQuantDesc(torch.float8_e4m3fn, w_shape, w2_scale),
     )
 
 
@@ -349,15 +350,15 @@ def int8_w8a8_moe_quant_config(
     a2_scale: Optional[torch.Tensor],
     per_act_token_quant: bool = False,
 ) -> FusedMoEQuantConfig:
-    a1_shape, a2_shape = _quant_flags_to_group_shape(
+    a_shape, w_shape = _quant_flags_to_group_shape(
         torch.int8,
         per_act_token_quant,
         False, None)
     return FusedMoEQuantConfig(
-        a1=FusedMoEQuantDesc(torch.int8, a1_shape, a1_scale),
-        a2=FusedMoEQuantDesc(torch.int8, a2_shape, a2_scale),
-        w1=FusedMoEQuantDesc(torch.int8, None, w1_scale),
-        w2=FusedMoEQuantDesc(torch.int8, None, w2_scale),
+        a1=FusedMoEQuantDesc(torch.int8, a_shape, a1_scale),
+        a2=FusedMoEQuantDesc(torch.int8, a_shape, a2_scale),
+        w1=FusedMoEQuantDesc(torch.int8, w_shape, w1_scale),
+        w2=FusedMoEQuantDesc(torch.int8, w_shape, w2_scale),
     )
 
 
@@ -368,15 +369,15 @@ def mxfp4_w4a4_moe_quant_config(
     a2_scale: Optional[torch.Tensor],
     block_shape: Optional[list[int]] = None,
 ) -> FusedMoEQuantConfig:
-    a1_shape, a2_shape = _quant_flags_to_group_shape("mxfp4",
+    a_shape, w_shape = _quant_flags_to_group_shape("mxfp4",
         False,  #?
         False,  #?
         block_shape)
     return FusedMoEQuantConfig(
-        a1=FusedMoEQuantDesc("mxfp4", a1_shape, a1_scale),
-        a2=FusedMoEQuantDesc("mxfp4", a2_shape, a2_scale),
-        w1=FusedMoEQuantDesc("mxfp4", None, w1_scale),
-        w2=FusedMoEQuantDesc("mxfp4", None, w2_scale),
+        a1=FusedMoEQuantDesc("mxfp4", a_shape, a1_scale),
+        a2=FusedMoEQuantDesc("mxfp4", a_shape, a2_scale),
+        w1=FusedMoEQuantDesc("mxfp4", w_shape, w1_scale),
+        w2=FusedMoEQuantDesc("mxfp4", w_shape, w2_scale),
     )
 
 
@@ -388,12 +389,12 @@ def nvfp4_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
 ) -> FusedMoEQuantConfig:
-    a1_shape, a2_shape = _quant_flags_to_group_shape("nvfp4", False, False, None)
+    a_shape, w_shape = _quant_flags_to_group_shape("nvfp4", False, False, None)
     return FusedMoEQuantConfig(
-        a1=FusedMoEQuantDesc("nvfp4", a1_shape, None, a1_gscale),
-        a2=FusedMoEQuantDesc("nvfp4", a2_shape, None, a2_gscale),
-        w1=FusedMoEQuantDesc("nvfp4", None, w1_scale, g1_alphas),
-        w2=FusedMoEQuantDesc("nvfp4", None, w2_scale, g2_alphas),
+        a1=FusedMoEQuantDesc("nvfp4", a_shape, None, a1_gscale),
+        a2=FusedMoEQuantDesc("nvfp4", a_shape, None, a2_gscale),
+        w1=FusedMoEQuantDesc("nvfp4", w_shape, w1_scale, g1_alphas),
+        w2=FusedMoEQuantDesc("nvfp4", w_shape, w2_scale, g2_alphas),
     )
 
 
@@ -412,8 +413,8 @@ def int4_w4a16_moe_quant_config(
     return FusedMoEQuantConfig(
         a1=FusedMoEQuantDesc(shape=group_shape),
         a2=FusedMoEQuantDesc(shape=group_shape),
-        w1=FusedMoEQuantDesc("int4", None, w1_scale, None, w1_zp),
-        w2=FusedMoEQuantDesc("int4", None, w2_scale, None, w2_zp),
+        w1=FusedMoEQuantDesc("int4", group_shape, w1_scale, None, w1_zp),
+        w2=FusedMoEQuantDesc("int4", group_shape, w2_scale, None, w2_zp),
     )
 
 
@@ -432,8 +433,8 @@ def int8_w8a16_moe_quant_config(
     return FusedMoEQuantConfig(
         a1=FusedMoEQuantDesc(shape=group_shape),
         a2=FusedMoEQuantDesc(shape=group_shape),
-        w1=FusedMoEQuantDesc(torch.int8, None, w1_scale, None, w1_zp),
-        w2=FusedMoEQuantDesc(torch.int8, None, w2_scale, None, w2_zp),
+        w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, None, w1_zp),
+        w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, None, w2_zp),
     )
 
 
