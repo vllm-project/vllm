@@ -21,6 +21,7 @@ To serve these models efficiently, our KVCacheManager must:
 
 ## Definitions
 
+<!-- markdownlint-disable MD032 -->
 1. **kv hidden size**: The number of bytes to store one token's KV cache for a single layer.
 2. **block**: the memory reserved for kv cache are divided into multiple *blocks* with the same *page size* (defined below)
 3. **block size**: number of tokens inside a block
@@ -34,6 +35,7 @@ $$
 \text{block_size} \times \text{kv_hidden_size}
 $$
     - `num_layers` doesn't mean the total number of layers in the model. The exact number depends on the context in this doc.
+<!-- markdownlint-enable MD032 -->
 
 ## Allocation
 
@@ -68,8 +70,8 @@ When the model has more layers, e.g., 20 sliding window layers and 10 full atten
 
 The grouping is feasible because there is usually a beautiful ratio between the number of different types of layers. For example:
 
-* Gemma-2: 1 sw: 1 full
-* Llama 4: 3 local : 1 full
+- Gemma-2: 1 sw: 1 full
+- Llama 4: 3 local : 1 full
 
 Our example can be regarded as 2 sw: 1 full. We can allocate blocks as if there are 2 sw and 1 full in the model, and repeat the result by 10 times to generate the block\_ids for the 30 layers. The page size becomes
 
@@ -90,9 +92,9 @@ Here is the formal definition: the layers are divided into multiple *KV Cache Gr
 
 Our example model is divided into 3 KV cache groups:
 
-* Group 0: 10 full attention layers full.0 \- full.9
-* Group 1: 10 sliding window layers sw.0 \- sw.9
-* Group 2: 10 sliding window layers sw.10 \- sw.19
+- Group 0: 10 full attention layers full.0 \- full.9
+- Group 1: 10 sliding window layers sw.0 \- sw.9
+- Group 2: 10 sliding window layers sw.10 \- sw.19
 
 Obviously, it satisfies rule 1\. For rule 2, all 3 groups have
 $$
@@ -104,12 +106,12 @@ as their page size.
 
 Unfortunately, not all models have such a beautiful ratio, and approach in Case 2 will produce too many small groups. For example, Gemma-3-27b has 52 sliding window layers and 10 full attention layers. With the constraints in case 2, it would be 26 sliding window groups and 5 full attention groups, each contains 2 layers. The allocation is still inefficient. To reduce the number of kv cache groups, we group layers using the smallest layer count among all attention types. For example, min(52, 10)=10 layers per group in Gemma-3-27b. Then the grouping result is:
 
-* Group 0: full.0 \- full.9
-* Group 1: sw.0 \- sw.9
-* Group 2: sw.10 \- sw.19
-* ...
-* Group 6: sw.40 \- sw.49
-* Group 7: sw.50, sw.51, and 8 padding layers.
+- Group 0: full.0 \- full.9
+- Group 1: sw.0 \- sw.9
+- Group 2: sw.10 \- sw.19
+- ...
+- Group 6: sw.40 \- sw.49
+- Group 7: sw.50, sw.51, and 8 padding layers.
 
 We will update this algorithm if this heuristic leads to a bad result when a new model comes out (e.g., 20 full \+ 30 sw, the group size should be 10 instead of 20).
 
@@ -121,15 +123,17 @@ Some architectures (e.g., Bamba, Jamba, Minimax) interleave standard attention l
 
 The current algorithm is:
 <!-- markdownlint-disable MD049 -->
+<!-- markdownlint-disable MD032 -->
 1. Increase the block\_size of attention layers until
-   $$
-   \text{block_size} \times \text{kv_hidden_size}_{\text{att}} \ge \text{state_size}_{\text{mamba}}
-   $$
+    $$
+    \text{block_size} \times \text{kv_hidden_size}_{\text{att}} \ge \text{state_size}_{\text{mamba}}
+    $$
 2. Pad the mamba state per layer to
-$$
-\text{block_size} \times \text{kv_hidden_size}_{\text{att}}
-$$
+    $$
+    \text{block_size} \times \text{kv_hidden_size}_{\text{att}}
+    $$
 3. Apply the grouping strategy in case 3\.
+<!-- markdownlint-enable MD032 -->
 <!-- markdownlint-enable MD049 -->
 
 Note that this can lead to more than 400 block\_size for attention layers, which is too large. Another padding strategy is to increase block\_size until
@@ -174,9 +178,9 @@ Let's say sliding window size 4 and block size 1, and the request is a 15-token 
 
 There are 3 possible cache hit prefix
 
-* cache hit length 5, compute prefill with [2, 3, 4] → [5, 6, …, 14]
-* cache hit length 6, compute prefill with [3, 4, 5] → [6, 7, …, 14]
-* cache hit length 14, compute prefill with [11, 12, 13] → [14] (most efficient)
+- cache hit length 5, compute prefill with [2, 3, 4] → [5, 6, …, 14]
+- cache hit length 6, compute prefill with [3, 4, 5] → [6, 7, …, 14]
+- cache hit length 14, compute prefill with [11, 12, 13] → [14] (most efficient)
 
 We can check the cache hit from right to left, and early exit when we find a match.This is opposite from global attention, where we check from left to right and early exit when the match fails. One potential cons (compared to global attention) is that we end up iterating over the entire list of tokens when there's no match, which is often a common case. This could potentially cause non-negligible overheads, but fine with full \+ swa, as discussed below.
 
@@ -204,17 +208,17 @@ The prefix caching support of the mamba model is WIP. Once implemented, models w
 
 The KVCacheManager is organized into 3 layers:
 
-* **KVCacheManager**: The interface between the scheduler and kv cache management system.
-* **KVCacheCoordinator**: coordinate per-group SingleTypeKVCacheManagers to generate the allocation result of a request. Depending on the model's configuration, one of these coordinators is chosen:
-    * **KVCacheCoordinatorNoPrefixCache**: Used when prefix caching is disabled.
-    * **UnitaryKVCacheCoordinator**: If only one KV cache group. The prefix caching logic is simplified as no intersection is needed.
-    * **HybridKVCacheCoordinator**: Handles exactly two KV cache groups (must include one full‑attention group plus one other efficient‑attention group). Other cases are not implemented. You can disable prefix caching to use the KVCacheCoordinatorNoPrefixCache.
-* **SingleTypeKVCacheManager**: Each instance manages allocation and prefix caching for one KV cache group, implementing the attention‑type–specific logic (e.g., full attention, sliding window, Mamba).
+- **KVCacheManager**: The interface between the scheduler and kv cache management system.
+- **KVCacheCoordinator**: coordinate per-group SingleTypeKVCacheManagers to generate the allocation result of a request. Depending on the model's configuration, one of these coordinators is chosen:
+    - **KVCacheCoordinatorNoPrefixCache**: Used when prefix caching is disabled.
+    - **UnitaryKVCacheCoordinator**: If only one KV cache group. The prefix caching logic is simplified as no intersection is needed.
+    - **HybridKVCacheCoordinator**: Handles exactly two KV cache groups (must include one full‑attention group plus one other efficient‑attention group). Other cases are not implemented. You can disable prefix caching to use the KVCacheCoordinatorNoPrefixCache.
+- **SingleTypeKVCacheManager**: Each instance manages allocation and prefix caching for one KV cache group, implementing the attention‑type–specific logic (e.g., full attention, sliding window, Mamba).
 
 The blue box in the above figure shows the case with 10 full attention layers and 20 sliding window layers, thus
 
-* use HybridKVCacheCoordinator
-* use 1 FullAttentionManager and 2 SlidingWindowManager for the 3 KVCacheGroups.
+- use HybridKVCacheCoordinator
+- use 1 FullAttentionManager and 2 SlidingWindowManager for the 3 KVCacheGroups.
 
 ### Memory Layout
 
@@ -222,9 +226,9 @@ For a model with n KVCacheGroups, each with m layers, we allocate m buffers. Eac
 
 The following figure is for a model with 10 full attention layers (full.0 \- full.9) and 20 sliding window layers (sw.0-sw.19). It follows "case 2" in "Allocation" section and is divided into 3 groups:
 
-* group 0: full.0-full.9
-* group 1: sw.0-sw.9
-* group 2: sw.10-sw.19
+- group 0: full.0-full.9
+- group 1: sw.0-sw.9
+- group 2: sw.10-sw.19
 
 And for a request, we allocate 11 blocks with block\_id 0-6 to group 0, 7-8 to group 1, and 9-10 to group 2.
 
