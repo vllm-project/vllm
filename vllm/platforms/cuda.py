@@ -162,6 +162,9 @@ class CudaPlatformBase(Platform):
                 if cls.is_device_capability(100):
                     # Blackwell => Force CutlassMLA.
                     use_cutlass_mla = True
+                    # TODO: This does not work, because the
+                    # global_force_attn_backend_context_manager is not set.
+                    # See vllm/attention/selector.py:_cached_get_attn_backend
                     envs.VLLM_ATTENTION_BACKEND = "CUTLASS_MLA"
                 else:
                     # Not Blackwell
@@ -227,7 +230,9 @@ class CudaPlatformBase(Platform):
         if use_mla:
             # TODO(lucas): refactor to be more concise
             #  we should probably consider factoring out V1 here
-            if selected_backend == _Backend.CUTLASS_MLA:
+            if selected_backend == _Backend.CUTLASS_MLA or (
+                    cls.is_device_capability(100) and selected_backend is None
+                    and block_size == 128):
                 if use_v1:
                     logger.info_once("Using Cutlass MLA backend on V1 engine.")
                     return ("vllm.v1.attention.backends.mla."
