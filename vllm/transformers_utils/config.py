@@ -30,13 +30,13 @@ from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
-                                            KimiVLConfig, MedusaConfig,
-                                            MLPSpeculatorConfig,
-                                            Nemotron_Nano_VL_Config,
-                                            NemotronConfig, OvisConfig,
-                                            RWConfig, SpeculatorsConfig,
-                                            Step3TextConfig, Step3VLConfig,
-                                            UltravoxConfig)
+                                             KimiVLConfig, MedusaConfig,
+                                             MLPSpeculatorConfig,
+                                             Nemotron_Nano_VL_Config,
+                                             NemotronConfig, OvisConfig,
+                                             RWConfig, SpeculatorsConfig,
+                                             Step3TextConfig, Step3VLConfig,
+                                             UltravoxConfig)
 
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
@@ -929,15 +929,15 @@ def get_hf_file_bytes(file_name: str,
                       model: Union[str, Path],
                       revision: Optional[str] = 'main') -> Optional[bytes]:
     file_path = try_get_local_file(model=model,
-                                   file_name=file_name,
-                                   revision=revision)
+                                    file_name=file_name,
+                                    revision=revision)
     
     if file_path is None:
         try:
             hf_hub_file = hf_hub_download(model,
-                                        file_name,
-                                        revision=revision,
-                                        token=_get_hf_token())
+                                          file_name,
+                                          revision=revision,
+                                          token=_get_hf_token())
             file_path = Path(hf_hub_file)
         except Exception:
             return None
