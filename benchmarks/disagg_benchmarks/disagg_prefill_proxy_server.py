@@ -13,7 +13,6 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Global configuration parameters
 # Timeout for backend service requests (seconds)
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=300)
 # Maximum concurrent requests to backend services
@@ -85,11 +84,10 @@ class RequestQueue:
         """Process queued requests using semaphore for concurrency control"""
         while True:
             if self.queue:
-                async with self.semaphore:
-                    async with self.lock:
-                        task = self.queue.popleft()
-                        self.queue_size -= 1
-                        await task
+                async with self.semaphore, self.lock:
+                    task = self.queue.popleft()
+                    self.queue_size -= 1
+                    await task
             await asyncio.sleep(0.01)  # Yield control to event loop
 
 
@@ -126,11 +124,11 @@ async def forward_request(url, data):
                     yield b'{"error": "Backend service error"}'
         except aiohttp.ClientError as e:
             # Handle connection errors
-            logger.error(f"Connection error to {url}: {str(e)}")
+            logger.error("Connection error to %s: %s", url, str(e))
             yield b'{"error": "Service unavailable"}'
         except asyncio.TimeoutError:
             # Handle timeout errors
-            logger.error(f"Timeout connecting to {url}")
+            logger.error("Timeout connecting to %s", url)
             yield b'{"error": "Service timeout"}'
 
 
@@ -156,7 +154,7 @@ async def process_request():
     except Exception as e:
         # Handle internal server errors
         import traceback
-        logger.error(f"Error processing request: {str(e)}")
+        logger.error("Error processing request: %s", str(e))
         logger.error(traceback.format_exc())
         return Response(
             response=b'{"error": "Internal server error"}',
