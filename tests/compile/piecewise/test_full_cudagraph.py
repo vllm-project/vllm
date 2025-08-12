@@ -71,7 +71,8 @@ def llm_pair(request):
     [
         # Model names for the llm_pair fixture
         "deepseek-ai/DeepSeek-V2-Lite",
-        "Qwen/Qwen2-1.5B-Instruct"
+        "Qwen/Qwen2-1.5B-Instruct",
+        "google/gemma-3-1b-it",
     ],
     indirect=True)
 @pytest.mark.skipif(current_platform.get_device_capability() != (9, 0),
@@ -126,6 +127,8 @@ class TestFullCUDAGraph:
         ("Qwen/Qwen2-1.5B-Instruct", True),
         # MLA does not support capturing CUDA Graphs with size > max_num_seqs
         ("deepseek-ai/DeepSeek-V2-Lite", False),
+        # Full CUDA graph supports mixed full and sliding window attention.
+        ("google/gemma-3-1b-it", True),
     ])
 @pytest.mark.skipif(current_platform.get_device_capability() != (9, 0),
                     reason="Only Hopper GPUs support FA3 and FlashMLA")
