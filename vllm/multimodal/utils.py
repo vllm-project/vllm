@@ -36,7 +36,8 @@ else:
     MultiModalKwargs = Any
     MultiModalPlaceholderDict = Any
 
-global_thread_pool = ThreadPoolExecutor()
+global_thread_pool = ThreadPoolExecutor(
+    max_workers=envs.VLLM_MEDIA_LOADING_THREAD_COUNT)
 atexit.register(global_thread_pool.shutdown)
 
 
