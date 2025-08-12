@@ -25,6 +25,7 @@ a:not(:has(svg)):not(.md-icon):not(.autorefs-external) {
 
 a[href*="localhost"]::after,
 a[href*="127.0.0.1"]::after,
+a[href*="org.readthedocs.build"]::after,
 a[href*="docs.vllm.ai"]::after {
     display: none !important;
 }
