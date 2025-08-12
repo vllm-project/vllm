@@ -59,12 +59,12 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 
 ### Hardware
 
-| Hardware   | Status                             |
-|------------|------------------------------------|
-| **NVIDIA** | <nobr>🚀</nobr>                   |
-| **AMD**    | <nobr>🟢</nobr>                   |
-| **TPU**    | <nobr>🟢</nobr>                   |
-| **CPU**    | <nobr>🟢 (x86) 🟡 (MacOS) </nobr> |
+| Hardware   | Status                                        |
+|------------|-----------------------------------------------|
+| **NVIDIA** | <nobr>🚀</nobr>                               |
+| **AMD**    | <nobr>🟢</nobr>                               |
+| **TPU**    | <nobr>🟢</nobr>                               |
+| **CPU**    | <nobr>🟢 (x86\_64/aarch64) 🟡 (MacOS) </nobr> |
 
 !!! note
 
@@ -110,6 +110,10 @@ Models that use Mamba-2 and Mamba-1 layers (e.g., `Mamba2ForCausalLM`, `MambaFor
 Models that combine Mamba-2 and Mamba-1 layers with standard attention layers are also supported (e.g., `BambaForCausalLM`,
 `Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`, `JambaForCausalLM`). Please note that
 these models currently require disabling prefix caching and using the FlashInfer attention backend in V1.
+
+Hybrid models with mechanisms different to Mamba are also supported (e.g, `MiniMaxText01ForCausalLM`, `MiniMaxM1ForCausalLM`).
+Please note that these models currently require disabling prefix caching, enforcing eager mode, and using the FlashInfer
+attention backend in V1.
 
 #### Encoder-Decoder Models
 
