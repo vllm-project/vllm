@@ -252,14 +252,17 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
 
 @functools.lru_cache
 def get_kv_cache_layout():
+    # Format specified by the code.
     global _KV_CACHE_LAYOUT_OVERRIDE
-    # Override with format specified by the user.
-    cache_layout = envs.VLLM_KV_CACHE_LAYOUT
+
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
         cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
         logger.info_once("`_KV_CACHE_LAYOUT_OVERRIDE` variable detected. " \
                          "Setting KV cache layout to %s.", cache_layout)
+        return cache_layout
 
+    # Format specified by the user.
+    cache_layout = envs.VLLM_KV_CACHE_LAYOUT
     # When neither the user nor the override specified a layout, get default
     if cache_layout is None:
         cache_layout = get_kv_connector_cache_layout()
