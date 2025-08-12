@@ -19,8 +19,6 @@ from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 logger = init_logger(__name__)
 
 StatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
-DpSharedStatLoggerFactory = Callable[[VllmConfig, Optional[list[int]]],
-                                     "PrometheusStatLogger"]
 
 
 class StatLoggerBase(ABC):
@@ -636,67 +634,37 @@ class StatLoggerManager:
         self,
         vllm_config: VllmConfig,
         engine_idxs: Optional[list[int]] = None,
-        custom_stat_loggers: Optional[list[Union[
-            StatLoggerFactory, DpSharedStatLoggerFactory]]] = None,
+        custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
     ):
-        """
-        Initializes the StatLoggerManager.
-
-        Args:
-            vllm_config (VllmConfig): The configuration object for vLLM.
-            engine_idxs (Optional[list[int]]): List of engine indices. If None,
-                defaults to [0].
-            custom_stat_loggers (Optional[list[Union[
-                StatLoggerFactory, DpSharedStatLoggerFactory
-            ]]]): 
-                Optional list of custom stat logger factories to use. If None, 
-                default loggers are used.
-        """
         self.engine_idxs = engine_idxs if engine_idxs else [0]
-        self.vllm_config = vllm_config
 
-        factories: list[StatLoggerFactory] = []
-        shared_logger_factories: list[DpSharedStatLoggerFactory] = []
+        factories: list[StatLoggerFactory]
         if custom_stat_loggers is not None:
-            for factory in custom_stat_loggers:
-                if isinstance(factory, type) and issubclass(
-                        factory, PrometheusStatLogger):
-                    shared_logger_factories.append(factory)  # type: ignore
-                else:
-                    factories.append(factory)  # type: ignore
+            factories = custom_stat_loggers
         else:
+            factories = []
             if logger.isEnabledFor(logging.INFO):
                 factories.append(LoggingStatLogger)
 
-            shared_logger_factories.append(PrometheusStatLogger)
-
-        self.shared_loggers = []
-        if len(shared_logger_factories) > 0:
-            for factory in shared_logger_factories:
-                self.shared_loggers.append(factory(vllm_config, engine_idxs))
-
         # engine_idx: StatLogger
         self.per_engine_logger_dict: dict[int, list[StatLoggerBase]] = {}
+        prometheus_factory = PrometheusStatLogger
         for engine_idx in self.engine_idxs:
             loggers: list[StatLoggerBase] = []
             for logger_factory in factories:
+                # If we get a custom prometheus logger, use that
+                # instead. This is typically used for the ray case.
+                if (isinstance(logger_factory, type)
+                        and issubclass(logger_factory, PrometheusStatLogger)):
+                    prometheus_factory = logger_factory
+                    continue
                 loggers.append(logger_factory(vllm_config,
                                               engine_idx))  # type: ignore
             self.per_engine_logger_dict[engine_idx] = loggers
 
-    def add_logger(
-        self, logger_factory: Union[StatLoggerFactory,
-                                    DpSharedStatLoggerFactory]
-    ) -> None:
-        if (isinstance(logger_factory, type)
-                and issubclass(logger_factory, PrometheusStatLogger)):
-            self.shared_loggers.append(
-                logger_factory(self.vllm_config,
-                               self.engine_idxs))  # type: ignore
-        else:
-            for engine_idx, logger_list in self.per_engine_logger_dict.items():
-                logger_list.append(logger_factory(self.vllm_config,
-                                                  engine_idx))  # type: ignore
+        # For Prometheus, need to share the metrics between EngineCores.
+        # Each EngineCore's metrics are expressed as a unique label.
+        self.prometheus_logger = prometheus_factory(vllm_config, engine_idxs)
 
     def record(
         self,
@@ -711,8 +679,8 @@ class StatLoggerManager:
         for logger in per_engine_loggers:
             logger.record(scheduler_stats, iteration_stats, engine_idx)
 
-        for logger in self.shared_loggers:
-            logger.record(scheduler_stats, iteration_stats, engine_idx)
+        self.prometheus_logger.record(scheduler_stats, iteration_stats,
+                                      engine_idx)
 
     def log(self):
         for per_engine_loggers in self.per_engine_logger_dict.values():
@@ -720,9 +688,8 @@ class StatLoggerManager:
                 logger.log()
 
     def log_engine_initialized(self):
-        for shared_logger in self.shared_loggers:
-            shared_logger.log_engine_initialized()
+        self.prometheus_logger.log_engine_initialized()
 
         for per_engine_loggers in self.per_engine_logger_dict.values():
-            for per_engine_logger in per_engine_loggers:
-                per_engine_logger.log_engine_initialized()
+            for logger in per_engine_loggers:
+                logger.log_engine_initialized()

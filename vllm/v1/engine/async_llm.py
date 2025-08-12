@@ -27,7 +27,7 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device, cancel_task_threadsafe, cdiv, deprecate_kwargs
+from vllm.utils import Device, cdiv, deprecate_kwargs
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -36,8 +36,7 @@ from vllm.v1.engine.output_processor import (OutputProcessor,
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import (DpSharedStatLoggerFactory,
-                                     StatLoggerFactory, StatLoggerManager)
+from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
 
@@ -56,8 +55,7 @@ class AsyncLLM(EngineClient):
         use_cached_outputs: bool = False,
         log_requests: bool = True,
         start_engine_loop: bool = True,
-        stat_loggers: Optional[list[Union[StatLoggerFactory,
-                                          DpSharedStatLoggerFactory]]] = None,
+        stat_loggers: Optional[list[StatLoggerFactory]] = None,
         client_addresses: Optional[dict[str, str]] = None,
         client_count: int = 1,
         client_index: int = 0,
@@ -191,8 +189,7 @@ class AsyncLLM(EngineClient):
         engine_args: AsyncEngineArgs,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[list[Union[StatLoggerFactory,
-                                          DpSharedStatLoggerFactory]]] = None,
+        stat_loggers: Optional[list[StatLoggerFactory]] = None,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
@@ -222,7 +219,8 @@ class AsyncLLM(EngineClient):
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
 
-        cancel_task_threadsafe(getattr(self, "output_handler", None))
+        if handler := getattr(self, "output_handler", None):
+            handler.cancel()
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return await self.engine_core.get_supported_tasks_async()
@@ -568,7 +566,7 @@ class AsyncLLM(EngineClient):
         await self.engine_core.profile_async(False)
 
     async def reset_mm_cache(self) -> None:
-        self.processor.mm_registry.reset_processor_cache(self.model_config)
+        self.processor.mm_registry.reset_processor_cache()
         self.processor.mm_input_cache_client.reset()
         await self.engine_core.reset_mm_cache_async()
 
@@ -613,17 +611,6 @@ class AsyncLLM(EngineClient):
         """
         return await self.engine_core.collective_rpc_async(
             method, timeout, args, kwargs)
-
-    async def add_logger(
-        self, logger_factory: Union[StatLoggerFactory,
-                                    DpSharedStatLoggerFactory]
-    ) -> None:
-        if self.logger_manager is None:
-            raise RuntimeError(
-                "Stat logging is disabled. Set `disable_log_stats=False` "
-                "engine argument to enable.")
-
-        self.logger_manager.add_logger(logger_factory)
 
     async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
         """Wait for all requests to be drained."""
