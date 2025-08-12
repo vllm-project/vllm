@@ -21,8 +21,8 @@ logger = init_logger(__name__)
 
 class CutlassMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     # enable full CUDA Graph support for decode-only capture
-    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.PURE_DECODE_ONLY
+    attn_cudagraph_support: ClassVar[
+        AttentionCGSupport] = AttentionCGSupport.PURE_DECODE_ONLY
 
 
 class CutlassMLABackend(MLACommonBackend):
