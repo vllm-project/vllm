@@ -74,14 +74,14 @@ class HarmonyPythonTool(Tool):
 
         # NOTE (Chen): as of gpt-oss 0.0.2, there is a bug in _make_response
         # and we do the following monkey patch to fix it.
-        class PatchedGptOssPythonToolPatch(PythonTool):
+        class PatchedGptOssPythonTool(PythonTool):
 
             def _make_response(self,
                                output: str,
                                channel: Optional[str] = None) -> Message:
                 return super()._make_response(output)
 
-        self.python_tool = PatchedGptOssPythonToolPatch()
+        self.python_tool = PatchedGptOssPythonTool()
         logger.info_once("Code interpreter tool initialized")
 
     async def get_result(self, context: "ConversationContext") -> Any:
