@@ -221,7 +221,7 @@ class AiterFlashAttentionMetadata:
     seq_lens: torch.Tensor
     slot_mapping: torch.Tensor
     block_table: torch.Tensor
-    cu_seq_lens: torch.Tensor
+    cu_seq_lens: Optional[torch.Tensor]
 
     # For cascade attention.
     use_cascade: bool
