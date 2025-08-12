@@ -411,9 +411,10 @@ class SamplingParams(
             raise ValueError(f"prompt_logprobs must be non-negative, got "
                              f"{self.prompt_logprobs}.")
         if (self.truncate_prompt_tokens is not None
-                and self.truncate_prompt_tokens < -1):
-            raise ValueError(f"truncate_prompt_tokens must be >= -1, "
-                             f"got {self.truncate_prompt_tokens}")
+                and (self.truncate_prompt_tokens == 0 or self.truncate_prompt_tokens < -1)):
+            raise ValueError(
+                f"truncate_prompt_tokens must be an integer >= 1 or -1, "
+                f"got {self.truncate_prompt_tokens}")
         assert isinstance(self.stop_token_ids, list)
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
             raise ValueError(f"stop_token_ids must contain only integers, "
