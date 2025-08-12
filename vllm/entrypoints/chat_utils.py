@@ -15,6 +15,8 @@ import jinja2.nodes
 import transformers.utils.chat_template_utils as hf_chat_utils
 # yapf conflicts with isort for this block
 # yapf: disable
+from openai.types.chat.chat_completion_message_tool_call_param import (
+    Function as FunctionCallTool)
 from openai.types.chat import (ChatCompletionAssistantMessageParam,
                                ChatCompletionContentPartImageParam,
                                ChatCompletionContentPartInputAudioParam)
@@ -1533,3 +1535,29 @@ def make_tool_call_id(id_type: str = "random", func_name=None, idx=None):
     else:
         # by default return random
         return f"chatcmpl-tool-{random_uuid()}"
+
+
+def parse_chat_tool_call(item: dict[str, Any]) -> ChatCompletionMessageParam:
+    if item.get("type") == "function_call":
+        # Append the function call as a tool call.
+        return ChatCompletionAssistantMessageParam(
+                role="assistant",
+                tool_calls=[
+                    ChatCompletionMessageToolCallParam(
+                        id=item.get("call_id"),
+                        function=FunctionCallTool(
+                            name=item.get("name"),
+                            arguments=item.get("arguments", "{}"),
+                        ),
+                        type="function",
+                    )
+                ],
+            )
+    elif item.get("type") == "function_call_output":
+        # Append the function call output as a tool message.
+        return ChatCompletionToolMessageParam(
+                role="tool",
+                content=item.get("output", ""),
+                tool_call_id=item.get("call_id"),
+            )
+    return item  # type: ignore

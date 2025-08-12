@@ -61,7 +61,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TranscriptionResponse,
                                               TranslationRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.tool_parsers import ToolParser
+from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer
 # yapf: enable
 from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
@@ -75,6 +75,7 @@ from vllm.multimodal import (  # noqa: F401 - Required to resolve Pydantic error
     MultiModalDataDict, MultiModalUUIDDict)
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
+from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
@@ -972,8 +973,11 @@ class OpenAIServing:
             request, "tool_choice") and request.tool_choice != "none")
 
         if should_parse_tools:
-            if not isinstance(request, ChatCompletionRequest):
-                msg = "Tool usage is only supported for Chat Completions API"
+            if not isinstance(request,
+                              ChatCompletionRequest) and not isinstance(
+                                  request, ResponsesRequest):
+                msg = "Tool usage is only supported for Chat Completions API " \
+                      "and Responses API requests."
                 raise NotImplementedError(msg)
 
             request = tool_parser(tokenizer).adjust_request(  # type: ignore
@@ -1189,6 +1193,51 @@ class OpenAIServing:
         if not model_name:
             return self.models.base_model_paths[0].name
         return model_name
+
+    def _get_tool_parser(
+        self,
+        tool_parser_name: Optional[str] = None,
+        enable_auto_tools: bool = False
+    ) -> Optional[Callable[[AnyTokenizer], ToolParser]]:
+        """Get the tool parser based on the name."""
+        parser = None
+        if not enable_auto_tools or tool_parser_name is None:
+            return parser
+        logger.info(
+            "\"auto\" tool choice has been enabled please note that while"
+            " the parallel_tool_calls client option is preset for "
+            "compatibility reasons, it will be ignored.")
+        """Get the tool parser based on the name."""
+        try:
+            if (tool_parser_name == "pythonic"
+                    and self.model_config.model.startswith(
+                        "meta-llama/Llama-3.2")):
+                logger.warning(
+                    "Llama3.2 models may struggle to emit valid pythonic"
+                    " tool calls")
+            parser = ToolParserManager.get_tool_parser(tool_parser_name)
+        except Exception as e:
+            raise TypeError("Error: --enable-auto-tool-choice requires "
+                            f"tool_parser:'{tool_parser_name}' which has not "
+                            "been registered") from e
+        return parser
+
+    def _get_reasoning_parser(
+        self,
+        reasoning_parser_name: str,
+    ) -> Optional[Callable[[AnyTokenizer], ReasoningParser]]:
+        """Get the reasoning parser based on the name."""
+        parser = None
+        if not reasoning_parser_name:
+            return None
+        try:
+            parser = (ReasoningParserManager.get_reasoning_parser(
+                reasoning_parser_name))
+            assert parser is not None
+        except Exception as e:
+            raise TypeError(
+                f"{reasoning_parser_name=} has not been registered") from e
+        return parser
 
 
 def clamp_prompt_logprobs(
