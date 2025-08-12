@@ -751,7 +751,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
              ("true", "1")),
 
     # Whether to use aiter triton fp8 bmm kernel
-    # By default it enabled.
+    # By default is enabled.
     "VLLM_ROCM_USE_AITER_FP8BMM":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "True").lower() in
              ("true", "1")),

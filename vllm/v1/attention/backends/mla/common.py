@@ -243,20 +243,7 @@ def is_rocm_aiter_fp8bmm_enabled() -> bool:
 
 if is_rocm_aiter_fp8bmm_enabled():
     from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501
-        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_fp8_bmm)
-
-    def aiter_triton_fp8_bmm_wrapper(x,
-                                     w,
-                                     w_s,
-                                     group_size=128,
-                                     y=None,
-                                     transpose_bm=False):
-        return aiter_fp8_bmm(x,
-                             w,
-                             w_s,
-                             group_size=group_size,
-                             YQ=y,
-                             transpose_bm=transpose_bm)
+        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_triton_fp8_bmm)
 
     def dynamic_per_batched_tensor_quant(
             x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn):
@@ -988,11 +975,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
         if is_rocm_aiter_fp8bmm_enabled():
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
-            x = aiter_triton_fp8_bmm_wrapper(x,
-                                             self.W_V,
-                                             self.W_V_scale,
-                                             group_size=128,
-                                             transpose_bm=True)
+            x = aiter_triton_fp8_bmm(x,
+                                     self.W_V,
+                                     self.W_V_scale,
+                                     group_size=128,
+                                     transpose_bm=True)
             # Convert from (B, N, V) to (B, N * V)
             x = x.reshape(-1, self.num_heads * self.v_head_dim)
         else:
@@ -1031,7 +1018,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         # `W_UV` and `W_UK_T`, we we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
         kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
-
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)), (
@@ -1064,20 +1050,20 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 x = torch.empty((self.W_K.shape[0], m, self.W_K.shape[2]),
                                 dtype=torch.bfloat16,
                                 device=self.W_K.device)
-                aiter_triton_fp8_bmm_wrapper(x,
-                                             self.W_K,
-                                             self.W_K_scale,
-                                             group_size=128,
-                                             transpose_bm=True)
+                aiter_triton_fp8_bmm(x,
+                                     self.W_K,
+                                     self.W_K_scale,
+                                     group_size=128,
+                                     transpose_bm=True)
 
                 x = torch.empty((self.W_V.shape[0], m, self.W_V.shape[2]),
                                 dtype=torch.bfloat16,
                                 device=self.W_V.device)
-                aiter_triton_fp8_bmm_wrapper(x,
-                                             self.W_V,
-                                             self.W_V_scale,
-                                             group_size=128,
-                                             transpose_bm=True)
+                aiter_triton_fp8_bmm(x,
+                                     self.W_V,
+                                     self.W_V_scale,
+                                     group_size=128,
+                                     transpose_bm=True)
 
         else:
             # Convert from (L, N, V) to (N, L, V)
@@ -1279,12 +1265,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
             if is_rocm_aiter_fp8bmm_enabled():
                 # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
-                decode_ql_nope = aiter_triton_fp8_bmm_wrapper(
-                    decode_q_nope,
-                    self.W_K,
-                    self.W_K_scale,
-                    group_size=128,
-                    transpose_bm=True)
+                decode_ql_nope = aiter_triton_fp8_bmm(decode_q_nope,
+                                                      self.W_K,
+                                                      self.W_K_scale,
+                                                      group_size=128,
+                                                      transpose_bm=True)
             else:
                 # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
                 decode_ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
