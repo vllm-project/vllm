@@ -120,6 +120,36 @@ class SupportsMultiModal(Protocol):
         ...
 
 
+@runtime_checkable
+class SupportsInputEmbeddingsAndPositions(Protocol):
+    """The interface required for models that support returning both input embeddings and positions."""
+
+    supports_input_embeddings_and_positions: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports returning both input embeddings and positions.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+    def get_input_embeddings_and_positions(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        # Only necessary so that the v0 overload is valid
+        # TODO: Remove attn_metadata once v0 is deprecated
+        attn_metadata: Optional["AttentionMetadata"] = None,
+    ) -> tuple[Tensor, Tensor]:
+        """
+        Returns a tuple of (input_embeddings, positions) where:
+        - input_embeddings: The input embeddings merged from the text embeddings from 
+          input_ids and the multimodal embeddings generated from multimodal kwargs.
+        - positions: The positions tensor for the input embeddings.
+        """
+        ...
+
+
 @overload
 def supports_multimodal(
         model: type[object]) -> TypeIs[type[SupportsMultiModal]]:
@@ -169,6 +199,25 @@ def supports_multimodal_raw_input(
 ) -> Union[TypeIs[type[SupportsMultiModalWithRawInput]],
            TypeIs[SupportsMultiModalWithRawInput]]:
     return getattr(model, "supports_multimodal_raw_input", False)
+
+
+@overload
+def supports_input_embeddings_and_positions(
+        model: type[object]) -> TypeIs[type[SupportsInputEmbeddingsAndPositions]]:
+    ...
+
+
+@overload
+def supports_input_embeddings_and_positions(
+        model: object) -> TypeIs[SupportsInputEmbeddingsAndPositions]:
+    ...
+
+
+def supports_input_embeddings_and_positions(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsInputEmbeddingsAndPositions]],
+           TypeIs[SupportsInputEmbeddingsAndPositions]]:
+    return getattr(model, "supports_input_embeddings_and_positions", False)
 
 
 @runtime_checkable

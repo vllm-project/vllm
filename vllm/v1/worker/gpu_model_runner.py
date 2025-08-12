@@ -35,6 +35,7 @@ from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
+                                                   supports_input_embeddings_and_positions,
                                                    supports_transcription)
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
@@ -1490,10 +1491,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            inputs_embeds_scheduled = self.model.get_input_embeddings(
-                input_ids=self.input_ids[:num_scheduled_tokens],
-                multimodal_embeddings=mm_embeds or None,
-            )
+            
+            # Check if the model supports the new mixin for getting both embeddings and positions
+            if supports_input_embeddings_and_positions(self.model):
+                inputs_embeds_scheduled, positions_scheduled = self.model.get_input_embeddings_and_positions(
+                    input_ids=self.input_ids[:num_scheduled_tokens],
+                    multimodal_embeddings=mm_embeds or None,
+                )
+                
+                # Update mrope positions if using MRoPE
+                if self.uses_mrope:
+                    self.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
+                else:
+                    self.positions[:num_scheduled_tokens].copy(positions_scheduled)
+            else:
+                inputs_embeds_scheduled = self.model.get_input_embeddings(
+                    input_ids=self.input_ids[:num_scheduled_tokens],
+                    multimodal_embeddings=mm_embeds or None,
+                )
 
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds[:num_scheduled_tokens].copy_(
