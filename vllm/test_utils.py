@@ -6,7 +6,8 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.sampling_params import SamplingParams
-from vllm.v1.sample.logits_processor import (BatchUpdate, LogitsProcessor,
+from vllm.v1.sample.logits_processor import (LOGITSPROCS_GROUP, BatchUpdate,
+                                             LogitsProcessor,
                                              MoveDirectionality)
 
 MODELS_ON_S3 = [
@@ -214,4 +215,5 @@ class EntryPoint:
         return DummyLogitsProcessor
 
 
-entry_points = lambda group: [EntryPoint()]
+entry_points = lambda group: [EntryPoint()
+                              ] if group == LOGITSPROCS_GROUP else []

@@ -14,6 +14,13 @@ from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
                                                      TEMP_GREEDY, prompts)
 from vllm.test_utils import DUMMY_LOGITPROC_FQCN
 
+# Inject this code into python interpreter -c flag to launch vllm server with
+# patched entrypoint
+CMD_STR = ("import importlib.metadata; from vllm.test_utils import "
+           "entry_points as fake_entry_points; importlib.metadata."
+           "entry_points = fake_entry_points; from vllm.entrypoints.cli "
+           "import main; main.main()")
+
 
 @pytest.fixture(scope="module")
 def default_server_args():
@@ -42,12 +49,18 @@ def server(default_server_args, request, monkeypatch):
     if request.param:
         # Append FQCN argument
         default_server_args = default_server_args + request.param
+        with RemoteOpenAIServer(MODEL_NAME,
+                                default_server_args) as remote_server:
+            yield remote_server
     else:
-        # Monkeypatch dummy logit processor entrypoint
-        monkeypatch.setenv("VLLM_MOCK_LP_ENTRYPOINT", "1")
-
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
-        yield remote_server
+        # Patch in dummy logit processor entrypoint
+        with RemoteOpenAIServer(
+                MODEL_NAME,
+                default_server_args,
+                multiproc_method="fork",
+                cmd_str=CMD_STR,
+        ) as remote_server:
+            yield remote_server
 
 
 @pytest_asyncio.fixture

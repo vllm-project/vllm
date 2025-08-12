@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.sample.logits_processor.builtin import (LogitBiasLogitsProcessor,
                                                      MinPLogitsProcessor,
@@ -176,14 +175,8 @@ def build_logitsprocs(
 
 
 __all__ = [
-    "LogitsProcessor",
-    "LogitBiasLogitsProcessor",
-    "MinPLogitsProcessor",
-    "MinTokensLogitsProcessor",
-    "BatchUpdate",
-    "BatchUpdateBuilder",
-    "MoveDirectionality",
-    "LogitsProcessors",
-    "build_logitsprocs",
-    "STR_POOLING_REJECTS_LOGITSPROCS",
+    "LogitsProcessor", "LogitBiasLogitsProcessor", "MinPLogitsProcessor",
+    "MinTokensLogitsProcessor", "BatchUpdate", "BatchUpdateBuilder",
+    "MoveDirectionality", "LogitsProcessors", "build_logitsprocs",
+    "STR_POOLING_REJECTS_LOGITSPROCS", "LOGITSPROCS_GROUP"
 ]
