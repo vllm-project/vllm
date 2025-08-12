@@ -924,13 +924,11 @@ class NixlConnectorWorker:
         is_kv_replicated = self._tp_size[engine_id] // total_num_kv_heads >= 1
 
         if self.use_mla or is_kv_replicated:
-            print("HELLO")
             # With MLA the only difference is in the number of blocks.
             remote_block_size = nixl_agent_meta.block_len // (
                 self.slot_size_bytes)
             assert self.block_len == nixl_agent_meta.block_len
         else:
-            print("HEREEE", tp_ratio, self._tp_size)
             remote_block_size = nixl_agent_meta.block_len // (
                 self.slot_size_bytes * tp_ratio)
             if self._use_flashinfer:
