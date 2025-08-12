@@ -84,7 +84,7 @@ class RemoteOpenAIServer:
                  seed: Optional[int] = 0,
                  auto_port: bool = True,
                  max_wait_seconds: Optional[float] = None,
-                 fork=True,
+                 fork_at_launch=True,
                  worker_multiproc_method: str = "spawn") -> None:
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
