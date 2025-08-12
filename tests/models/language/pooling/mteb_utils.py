@@ -177,9 +177,12 @@ def mteb_test_embed_models(hf_runner,
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:
 
+        model_config = vllm_model.llm.llm_engine.model_config
+
         if model_info.architecture:
-            assert (model_info.architecture
-                    in vllm_model.llm.llm_engine.model_config.architectures)
+            assert model_info.architecture in model_config.architectures
+        assert (model_config._model_info.default_pooling_type ==
+                model_info.default_pooling_type)
 
         vllm_main_score = run_mteb_embed_task(VllmMtebEncoder(vllm_model),
                                               MTEB_EMBED_TASKS)
@@ -286,7 +289,12 @@ def mteb_test_rerank_models(hf_runner,
                      **vllm_extra_kwargs) as vllm_model:
 
         model_config = vllm_model.llm.llm_engine.model_config
+
+        if model_info.architecture:
+            assert (model_info.architecture in model_config.architectures)
         assert model_config.hf_config.num_labels == 1
+        assert (model_config._model_info.default_pooling_type ==
+                model_info.default_pooling_type)
 
         vllm_main_score = run_mteb_rerank(vllm_mteb_encoder(vllm_model),
                                           tasks=MTEB_RERANK_TASKS,
