@@ -698,10 +698,15 @@ __global__ void Marlin(
   int4* sh_b = sh;
   int4* sh_red = sh;
 
-  constexpr int sh_size_b_red_min = (sh_red_size < sh_b_size ? sh_red_size : sh_b_size);
-  constexpr int sh_size_b_red_max = (sh_red_size > sh_b_size ? sh_red_size : sh_b_size);
+  constexpr int sh_size_b_red_min =
+      (sh_red_size < sh_b_size ? sh_red_size : sh_b_size);
+  constexpr int sh_size_b_red_max =
+      (sh_red_size > sh_b_size ? sh_red_size : sh_b_size);
   constexpr int sh_bias_size = (thread_n_blocks * 16 / 8);
-  constexpr int sh_b_red_bias_size = sh_size_b_red_max > (sh_size_b_red_min + sh_bias_size) ? sh_size_b_red_max : (sh_size_b_red_min + sh_bias_size);
+  constexpr int sh_b_red_bias_size =
+      sh_size_b_red_max > (sh_size_b_red_min + sh_bias_size)
+          ? sh_size_b_red_max
+          : (sh_size_b_red_min + sh_bias_size);
 
   int4* sh_bias = sh + sh_size_b_red_min;
   int4* sh_g_idx = sh + sh_b_red_bias_size;

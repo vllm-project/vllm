@@ -46,7 +46,7 @@ __global__ void permute_cols_kernel(
     const int32_t* __restrict__ sorted_token_ids_ptr,
     const int32_t* __restrict__ expert_ids_ptr,
     const int32_t* __restrict__ num_tokens_past_padded_ptr, int size_m,
-    int size_k, int top_k) {};
+    int size_k, int top_k){};
 
 }  // namespace marlin
 
@@ -222,7 +222,8 @@ int get_kernel_cache_size(thread_config_t const& th_config, bool m_block_size_8,
   int sh_b_size = pipe_stages * (tb_k * tb_n / pack_factor) * 4;
   int sh_red_size = tb_m * (tb_n + 8) * 2;
   int sh_bias_size = tb_n * 2;
-  int tmp_size = (sh_b_size > sh_red_size ? sh_red_size : sh_b_size) + sh_bias_size;
+  int tmp_size =
+      (sh_b_size > sh_red_size ? sh_red_size : sh_b_size) + sh_bias_size;
   tmp_size = max(max(sh_b_size, sh_red_size), tmp_size);
 
   int sh_s_size =
@@ -239,9 +240,8 @@ int get_kernel_cache_size(thread_config_t const& th_config, bool m_block_size_8,
       sh_zp_size = sh_s_size / 2;
   }
 
-  int total_size = tmp_size + sh_a_size + sh_s_size +
-                   sh_zp_size + sh_g_idx_size +
-                   sh_block_meta_size;
+  int total_size = tmp_size + sh_a_size + sh_s_size + sh_zp_size +
+                   sh_g_idx_size + sh_block_meta_size;
 
   return total_size;
 }
@@ -251,7 +251,6 @@ bool is_valid_config(thread_config_t const& th_config, bool m_block_size_8,
                      int num_bits, int group_size, bool has_act_order,
                      bool is_k_full, int has_zp, int is_zp_float,
                      int max_shared_mem) {
-
   // Sanity
   if (th_config.thread_k == -1 || th_config.thread_n == -1 ||
       th_config.num_threads == -1) {

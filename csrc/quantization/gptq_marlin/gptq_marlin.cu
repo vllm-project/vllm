@@ -190,7 +190,8 @@ int get_kernel_cache_size(thread_config_t const& th_config, int thread_m_blocks,
   int sh_b_size = pipe_stages * (tb_k * tb_n / pack_factor) * 4;
   int sh_red_size = tb_m * (tb_n + 8) * 2;
   int sh_bias_size = tb_n * 2;
-  int tmp_size = (sh_b_size > sh_red_size ? sh_red_size : sh_b_size) + sh_bias_size;
+  int tmp_size =
+      (sh_b_size > sh_red_size ? sh_red_size : sh_b_size) + sh_bias_size;
   tmp_size = max(max(sh_b_size, sh_red_size), tmp_size);
 
   int sh_s_size =
