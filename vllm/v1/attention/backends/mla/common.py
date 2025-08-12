@@ -1039,9 +1039,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             W_K = W_UK.transpose(0, 1)  # 16 512 128
             W_V = W_UV.permute(1, 2, 0)  # 16 128 512
             self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
-                W_K, dtype=torch.float8_e4m3fnuz)
+                W_K, dtype=current_platform.fp8_dtype())
             self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(
-                W_V, dtype=torch.float8_e4m3fnuz)
+                W_V, dtype=current_platform.fp8_dtype())
             logger.info_once(
                 "[Aiter Triton] compiling fp8 BMM for batch sizes 1 to 128 "
                 f"W_K shape = {list(self.W_K.shape)} and "
