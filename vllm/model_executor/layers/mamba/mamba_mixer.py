@@ -8,6 +8,8 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 from vllm import envs
+from vllm.attention.backends.placeholder_attn import (
+    PlaceholderAttentionMetadata)
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
@@ -155,8 +157,8 @@ class MambaMixer(MambaBase, CustomOp):
         self.prefix = prefix
 
     def _ssm_transform(
-        self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.is_lora_enabled:
             ssm_params = self.x_proj(x.contiguous())[0]
         else:
@@ -166,9 +168,12 @@ class MambaMixer(MambaBase, CustomOp):
             [self.time_step_rank, self.ssm_state_size, self.ssm_state_size],
             dim=-1)
         if self.use_rms_norm:
-            time_step = self.dt_layernorm(time_step.contiguous())
-            B = self.b_layernorm(B.contiguous())
-            C = self.c_layernorm(C.contiguous())
+            if self.dt_layernorm is not None:
+                time_step = self.dt_layernorm(time_step.contiguous())
+            if self.b_layernorm is not None:
+                B = self.b_layernorm(B.contiguous())
+            if self.c_layernorm is not None:
+                C = self.c_layernorm(C.contiguous())
         discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
         return discrete_time_step, B, C
 
@@ -218,6 +223,7 @@ class MambaMixer(MambaBase, CustomOp):
                 ssm_state = self_kv_cache[1]
                 has_initial_states_p = mamba1_metadata.has_initial_states
         else:
+            assert isinstance(attn_metadata, PlaceholderAttentionMetadata)
             assert mamba_cache_params is not None
             conv_state = mamba_cache_params.conv_state
             ssm_state = mamba_cache_params.ssm_state
@@ -240,10 +246,10 @@ class MambaMixer(MambaBase, CustomOp):
             hidden_states_BC = hidden_states_BC.contiguous()
             return self.out_proj(hidden_states_BC.transpose(-2, -1))[0]
 
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        num_prefill_tokens = attn_metadata.num_prefill_tokens  # token count
         num_decode_tokens = attn_metadata.num_decode_tokens
-        num_prefills = attn_metadata.num_prefills
-        num_decodes = attn_metadata.num_decode_tokens
+        num_prefills = attn_metadata.num_prefills  # request count
+        num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
         has_prefill = num_prefill_tokens > 0
         has_decode = num_decode_tokens > 0
 
@@ -380,8 +386,8 @@ class PrefillDecodeSplit(NamedTuple):
     gate_d: torch.Tensor
     state_indices_tensor_p: torch.Tensor
     state_indices_tensor_d: torch.Tensor
-    query_start_loc_p: torch.Tensor
-    initial_states: torch.Tensor
+    query_start_loc_p: Optional[torch.Tensor]
+    initial_states: Optional[torch.Tensor]
 
 
 def split_batch_to_prefill_and_decode(
