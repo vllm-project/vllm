@@ -6,7 +6,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import DbrxConfig
 
 from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
@@ -39,7 +39,7 @@ class DbrxRouter(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: DbrxConfig,
         params_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
@@ -63,7 +63,7 @@ class DbrxExperts(FusedMoE):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: DbrxConfig,
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: Optional[torch.dtype] = None,
         prefix: str = "",
@@ -138,7 +138,7 @@ class DbrxMoE(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: DbrxConfig,
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: Optional[torch.dtype] = None,
         prefix: str = "",
@@ -169,7 +169,7 @@ class DbrxAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -249,7 +249,7 @@ class DbrxFusedNormAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -284,7 +284,7 @@ class DbrxBlock(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",

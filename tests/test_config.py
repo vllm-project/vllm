@@ -200,28 +200,6 @@ def test_disable_sliding_window(model_id_expected):
     assert model_config.max_model_len == expected
 
 
-def test_get_sliding_window():
-    TEST_SLIDING_WINDOW = 4096
-    # Test that the sliding window is correctly computed.
-    # For Qwen1.5/Qwen2, get_sliding_window() should be None
-    # when use_sliding_window is False.
-    qwen2_model_config = ModelConfig("Qwen/Qwen1.5-7B")
-
-    qwen2_model_config.hf_config.use_sliding_window = False
-    qwen2_model_config.hf_config.sliding_window = TEST_SLIDING_WINDOW
-    assert qwen2_model_config.get_sliding_window() is None
-
-    qwen2_model_config.hf_config.use_sliding_window = True
-    assert qwen2_model_config.get_sliding_window() == TEST_SLIDING_WINDOW
-
-    mistral_model_config = ModelConfig("mistralai/Mistral-7B-v0.1")
-    mistral_model_config.hf_config.sliding_window = None
-    assert mistral_model_config.get_sliding_window() is None
-
-    mistral_model_config.hf_config.sliding_window = TEST_SLIDING_WINDOW
-    assert mistral_model_config.get_sliding_window() == TEST_SLIDING_WINDOW
-
-
 @pytest.mark.skipif(current_platform.is_rocm(),
                     reason="Xformers backend is not supported on ROCm.")
 def test_get_pooling_config():
@@ -247,6 +225,20 @@ def test_get_pooling_config_from_args():
     pooling_config = model_config._init_pooler_config()
     assert pooling_config is not None
     assert asdict(pooling_config) == asdict(override_pooler_config)
+
+
+@pytest.mark.parametrize(
+    ("model_id", "default_pooling_type", "pooling_type"),
+    [
+        ("tomaarsen/Qwen3-Reranker-0.6B-seq-cls", "LAST", "LAST"),  # LLM
+        ("intfloat/e5-small", "CLS", "MEAN"),  # BertModel
+        ("Qwen/Qwen2.5-Math-RM-72B", "ALL", "ALL"),  # reward
+        ("Qwen/Qwen2.5-Math-PRM-7B", "STEP", "STEP")  # step reward
+    ])
+def test_default_pooling_type(model_id, default_pooling_type, pooling_type):
+    model_config = ModelConfig(model_id)
+    assert model_config._model_info.default_pooling_type == default_pooling_type
+    assert model_config.pooler_config.pooling_type == pooling_type
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),

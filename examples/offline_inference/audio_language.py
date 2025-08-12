@@ -96,6 +96,25 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# Gemma3N
+def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "google/gemma-3n-E2B-it"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=2048,
+        max_num_batched_tokens=2048,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+        enforce_eager=True,
+    )
+    prompt = f"<start_of_turn>user\n<audio_soft_token>{question}"
+    "<end_of_turn>\n<start_of_turn>model\n"
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # Granite Speech
 def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
     # NOTE - the setting in this example are somehat different than what is
@@ -331,6 +350,7 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 
 model_example_map = {
     "voxtral": run_voxtral,
+    "gemma3n": run_gemma3n,
     "granite_speech": run_granite_speech,
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,

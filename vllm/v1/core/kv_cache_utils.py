@@ -429,8 +429,8 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     if mm_positions and len(mm_positions) != len(mm_hashes):
         raise ValueError(
             "The number of multi-modal positions and hashes must match. This "
-            "is likely because you do not enable MM preprocessor hashing. "
-            "Please set disable_mm_preprocessor_cache=False.")
+            "is likely because you did not enable MM hashing. "
+            "Please set `mm_processor_cache_gb > 0`.")
 
     # Note that we assume mm_positions is sorted by offset.
     # We do not need to check all mm inputs if the start token index is out of

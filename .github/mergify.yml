@@ -118,6 +118,20 @@ pull_request_rules:
       add:
         - qwen
 
+- name: label-gpt-oss
+  description: Automatically apply gpt-oss label
+  conditions:
+    - or:
+      - files~=^examples/.*gpt[-_]?oss.*\.py
+      - files~=^tests/.*gpt[-_]?oss.*\.py
+      - files~=^vllm/model_executor/models/.*gpt[-_]?oss.*\.py
+      - files~=^vllm/model_executor/layers/.*gpt[-_]?oss.*\.py
+      - title~=(?i)gpt[-_]?oss
+  actions:
+    label:
+      add:
+        - gpt-oss
+
 - name: label-rocm
   description: Automatically apply rocm label
   conditions:

@@ -8,12 +8,12 @@ import torch
 
 from tests.conftest import HfRunner
 
-from .mteb_utils import (RerankModelInfo, VllmMtebEncoder,
-                         mteb_test_rerank_models)
+from ...utils import LASTPoolingRerankModelInfo, RerankModelInfo
+from .mteb_utils import VllmMtebEncoder, mteb_test_rerank_models
 
 RERANK_MODELS = [
-    RerankModelInfo("BAAI/bge-reranker-v2-gemma",
-                    architecture="GemmaForSequenceClassification"),
+    LASTPoolingRerankModelInfo("BAAI/bge-reranker-v2-gemma",
+                               architecture="GemmaForSequenceClassification"),
 ]
 
 PROMPT = "Given a query A and a passage B, determine whether the passage contains an answer to the query by providing a prediction of either 'Yes' or 'No'."  # noqa: E501

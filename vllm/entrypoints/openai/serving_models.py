@@ -9,7 +9,7 @@ from typing import Optional, Union
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.protocol import (ErrorResponse,
+from vllm.entrypoints.openai.protocol import (ErrorInfo, ErrorResponse,
                                               LoadLoRAAdapterRequest,
                                               ModelCard, ModelList,
                                               ModelPermission,
@@ -82,7 +82,7 @@ class OpenAIServingModels:
             load_result = await self.load_lora_adapter(
                 request=load_request, base_model_name=lora.base_model_name)
             if isinstance(load_result, ErrorResponse):
-                raise ValueError(load_result.message)
+                raise ValueError(load_result.error.message)
 
     def is_base_model(self, model_name) -> bool:
         return any(model.name == model_name for model in self.base_model_paths)
@@ -284,6 +284,5 @@ def create_error_response(
         message: str,
         err_type: str = "BadRequestError",
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
-    return ErrorResponse(message=message,
-                         type=err_type,
-                         code=status_code.value)
+    return ErrorResponse(error=ErrorInfo(
+        message=message, type=err_type, code=status_code.value))

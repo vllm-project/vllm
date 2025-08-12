@@ -13,8 +13,8 @@ from typing import (TYPE_CHECKING, Any, Literal, Optional, TypedDict, TypeVar,
 import numpy as np
 from typing_extensions import NotRequired, TypeAlias
 
-from vllm.jsontree import JSONTree, json_map_leaves
 from vllm.utils import LazyLoader, full_groupby, is_list_of
+from vllm.utils.jsontree import JSONTree, json_map_leaves
 
 if TYPE_CHECKING:
     import torch

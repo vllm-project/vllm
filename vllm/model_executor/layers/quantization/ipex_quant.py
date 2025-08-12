@@ -4,6 +4,7 @@
 from typing import Any, Optional
 
 import torch
+from packaging import version
 
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
@@ -135,7 +136,8 @@ class IPEXGPTQLinearMethod(GPTQLinearMethod):
 
         try:
             import intel_extension_for_pytorch as ipex
-            if ipex.__version__ < MIN_IPEX_VERSION:
+            if version.parse(
+                    ipex.__version__) < version.parse(MIN_IPEX_VERSION):
                 raise ImportError(
                     "intel_extension_for_pytorch version is "
                     "wrong. Please install "
@@ -199,7 +201,8 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
 
         try:
             import intel_extension_for_pytorch as ipex
-            if ipex.__version__ < MIN_IPEX_VERSION:
+            if version.parse(
+                    ipex.__version__) < version.parse(MIN_IPEX_VERSION):
                 raise ImportError(
                     "intel_extension_for_pytorch version is "
                     "wrong. Please install "

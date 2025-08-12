@@ -34,11 +34,13 @@ theme:
     - content.action.edit
     - content.code.copy
     - content.tabs.link
+    - navigation.instant
+    - navigation.instant.progress
     - navigation.tracking
     - navigation.tabs
     - navigation.tabs.sticky
     - navigation.sections
-    - navigation.prune
+    - navigation.indexes
     - navigation.top
     - search.highlight
     - search.share
@@ -50,11 +52,6 @@ hooks:
   - docs/mkdocs/hooks/generate_examples.py
   - docs/mkdocs/hooks/generate_argparse.py
   - docs/mkdocs/hooks/url_schemes.py
-
-# Required to stop api-autonav from raising an error
-# https://github.com/tlambert03/mkdocs-api-autonav/issues/16
-nav:
-  - api
 
 plugins:
   - meta
