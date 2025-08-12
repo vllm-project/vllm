@@ -151,7 +151,6 @@ class KVOutputAggregator:
             update_finished_set(output.finished_recving,
                                 self._recv_remaining_count, finished_recving)
 
-
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
 
