@@ -45,7 +45,7 @@ class CPUWorker(Worker):
         if omp_cpuids == "auto" and platform.system() == "Linux":
             cpu_arch = current_platform.get_cpu_architecture()
             if cpu_arch in (CpuArchEnum.POWERPC, CpuArchEnum.S390X):
-                # For POWERPC SMT-8/4/2
+                # For s390x and POWERPC SMT-8/4/2
                 self.local_omp_cpuid = self._get_autobind_cpu_ids(
                     lambda cpus: [cpu for cpu in cpus if cpu.id % 8 < 4])
             elif current_platform.get_cpu_architecture() == CpuArchEnum.X86:

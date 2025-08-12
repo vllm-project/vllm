@@ -231,12 +231,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=numba-builder,source=/tmp/llvmlite/dist,target=/tmp/llvmlite-wheels/ \
     --mount=type=bind,from=numba-builder,source=/tmp/numba/dist,target=/tmp/numba-wheels/ \
      sed -i '/^torch/d' requirements/build.txt && \
-     ARROW_WHL_FILE=$(ls /tmp/arrow-wheels/pyarrow-*.whl | head -n 1) && \
-     VISION_WHL_FILE=$(ls /tmp/vision-wheels/*.whl | head -n 1) && \
-     HF_XET_WHL_FILE=$(ls /tmp/hf-xet-wheels/*.whl | head -n 1) && \
-     TORCH_WHL_FILE=$(ls /tmp/torch-wheels/*.whl | head -n 1) && \
-     LLVM_WHL_FILE=$(ls /tmp/llvmlite-wheels/*.whl | head -n 1) && \
-     NUMBA_WHL_FILE=$(ls /tmp/numba-wheels/*.whl | head -n 1) && \
+     ARROW_WHL_FILE=$(ls /tmp/arrow-wheels/pyarrow-*.whl) && \
+     VISION_WHL_FILE=$(ls /tmp/vision-wheels/*.whl) && \
+     HF_XET_WHL_FILE=$(ls /tmp/hf-xet-wheels/*.whl) && \
+     TORCH_WHL_FILE=$(ls /tmp/torch-wheels/*.whl) && \
+     LLVM_WHL_FILE=$(ls /tmp/llvmlite-wheels/*.whl) && \
+     NUMBA_WHL_FILE=$(ls /tmp/numba-wheels/*.whl) && \
     uv pip install -v \    
         $ARROW_WHL_FILE  \
         $VISION_WHL_FILE \
