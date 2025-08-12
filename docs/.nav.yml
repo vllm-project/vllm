@@ -18,8 +18,15 @@ nav:
       - Releases: https://github.com/vllm-project/vllm/releases
   - User Guide:
     - Summary: usage/README.md
-    - usage/v1_guide.md
+    - Getting Started:
+      - getting_started/quickstart.md
+      - getting_started/installation
+    - Examples:
+      - Offline Inference: examples/offline_inference
+      - Online Serving: examples/online_serving
+      - Others: examples/others
     - General:
+      - usage/v1_guide.md
       - usage/*
     - Inference and Serving:
       - serving/offline_inference.md
