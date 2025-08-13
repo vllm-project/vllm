@@ -135,6 +135,12 @@ def register_moe_scaling_factors(layer: torch.nn.Module) -> None:
             layer.w13_input_scale, layer.w13_weight_scale,
             layer.w2_input_scale, layer.w2_weight_scale
         )
-    layer.register_parameter('output1_scales_scalar', output1_scales)
-    layer.register_parameter('output1_scales_gate_scalar', output1_gate_scales)
-    layer.register_parameter('output2_scales_scalar', output2_scales)
+    layer.register_parameter(
+        'output1_scales_scalar',
+        torch.nn.Parameter(output1_scales, requires_grad=False))
+    layer.register_parameter(
+        'output1_scales_gate_scalar',
+        torch.nn.Parameter(output1_gate_scales, requires_grad=False))
+    layer.register_parameter(
+        'output2_scales_scalar',
+        torch.nn.Parameter(output2_scales, requires_grad=False))
