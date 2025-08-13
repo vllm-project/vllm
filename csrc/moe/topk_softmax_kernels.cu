@@ -423,11 +423,11 @@ void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, f
         input, finished, output, num_rows, indices, source_row, k, start_expert, end_expert);
 }
 
-#define LAUNCH_SOFTMAX(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)                          \
-    static_assert(WARP_SIZE == 32 || WARP_SIZE == 64,                                 \
-                  "Unsupported warp size. Only 32 and 64 are supported.");            \
-    topkGatingSoftmaxLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, WARP_SIZE, MAX_BYTES>( \
-        gating_output, nullptr, topk_weights, topk_indices,                           \
+#define LAUNCH_SOFTMAX(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)                                \
+    static_assert(WARP_SIZE_CONST == 32 || WARP_SIZE_CONST == 64,                           \
+                  "Unsupported warp size. Only 32 and 64 are supported.");                  \
+    topkGatingSoftmaxLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, WARP_SIZE_CONST, MAX_BYTES>( \
+        gating_output, nullptr, topk_weights, topk_indices,                                 \
         token_expert_indices, num_tokens, topk, 0, num_experts, stream);
 
 template <typename IndType>
@@ -443,7 +443,9 @@ void topkGatingSoftmaxKernelLauncher(
     cudaStream_t stream) {
     static constexpr int WARPS_PER_TB = 4;
     static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
+#ifndef USE_ROCM
     static constexpr int BYTES_PER_LDG_MULTIPLE_64 = 8;
+#endif
     switch (num_experts) {
         case 1:
             LAUNCH_SOFTMAX(1, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
