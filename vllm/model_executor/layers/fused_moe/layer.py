@@ -475,12 +475,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         else:
-            return self.fused_experts(
+            # add w1_bias/w2_bias to kwargs if they exist
+            kwargs = dict(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
-                w1_bias=layer.w13_bias if self.has_bias else None,
-                w2_bias=layer.w2_bias if self.has_bias else None,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
@@ -489,6 +488,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
             )
+            if isinstance(self.fused_experts,
+                          FusedMoEModularKernel) and self.has_bias:
+                raise ValueError(
+                    "FusedMoEModularKernel does not support bias.")
+            if self.has_bias:
+                kwargs.update({
+                    "w1_bias": getattr(layer, "w13_bias", None),
+                    "w2_bias": getattr(layer, "w2_bias", None),
+                })
+
+            return self.fused_experts(**kwargs)
 
     def forward_cpu(
         self,
@@ -741,12 +751,14 @@ class FusedMoE(torch.nn.Module):
 
         # we padding globally so EP buffer allocation works
         if quant_config and quant_config.get_name() == "mxfp4":
-            if not is_torch_equal_or_newer("2.8.0"):
-                raise RuntimeError("Mxfp4 on hopper requires torch >= 2.8.0")
-            if current_platform.is_device_capability(
-                    90) and not has_triton_kernels():
-                raise NotImplementedError(
-                    "Triton kernels must be installed for mxfp4 on hopper")
+            if not current_platform.is_device_capability(100):
+                if not is_torch_equal_or_newer("2.8.0"):
+                    raise RuntimeError(
+                        "Mxfp4 on non-blackwell requires torch >= 2.8.0")
+                if not has_triton_kernels():
+                    raise NotImplementedError(
+                        "triton_kernels must be installed for "
+                        "mxfp4 on non-blackwell")
             if (current_platform.is_rocm()
                     or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
                     or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
