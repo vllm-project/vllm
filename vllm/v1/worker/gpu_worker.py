@@ -313,8 +313,8 @@ class Worker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
-        # if not self.model_config.enforce_eager:
-        #     self.model_runner.capture_model()
+        if not self.model_config.enforce_eager and not self.model_config.delayed_cudagraphs:
+            self.model_runner.capture_model()
 
         # Warm up sampler and preallocate memory buffer for logits and other
         # sampling related tensors of max possible shape to avoid memory
@@ -355,28 +355,16 @@ class Worker(WorkerBase):
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
-
-    @torch.inference_mode()
-    def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> Optional[ModelRunnerOutput]:
-        intermediate_tensors = None
-        if not get_pp_group().is_first_rank:
-            intermediate_tensors = IntermediateTensors(
-                get_pp_group().recv_tensor_dict(
-                    all_gather_group=get_tp_group()))
-
-
-        # Initialize next_comp variable to None
+    
+    def _delayed_cudagraph_capture(self, total_num_scheduled_tokens: int) -> None:
+        # Initialize next_capture variable to None
         next_capture = None
 
         # Check if the scheduled token count is in our compiled CUDAgraphs list
-        if scheduler_output.total_num_scheduled_tokens in self._token_compiled_cudagraphs:
+        if total_num_scheduled_tokens in self._token_compiled_cudagraphs:
             # If it is, update next_comp and remove the entry from _token_compiled_cudagraphs
-            next_capture = scheduler_output.total_num_scheduled_tokens
-            self._token_compiled_cudagraphs.discard(
-                scheduler_output.total_num_scheduled_tokens)
+            next_capture = total_num_scheduled_tokens
+            self._token_compiled_cudagraphs.discard(total_num_scheduled_tokens)
             logger.info(
                 "LAZY DIEGO: CUDAgraph in execution time for %d input tokens",
                 next_capture)
@@ -392,6 +380,21 @@ class Worker(WorkerBase):
         # If we have a value for next_comp, call the model_runner to capture the model
         if next_capture:
             self.model_runner.capture_model(next_capture)
+   
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> Optional[ModelRunnerOutput]:
+        intermediate_tensors = None
+        if not get_pp_group().is_first_rank:
+            intermediate_tensors = IntermediateTensors(
+                get_pp_group().recv_tensor_dict(
+                    all_gather_group=get_tp_group()))
+
+
+        if self.model_config.delayed_cudagraphs and not self.model_config.enforce_eager:
+            self._delayed_cudagraph_capture(scheduler_output.total_num_scheduled_tokens)
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
