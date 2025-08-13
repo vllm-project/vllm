@@ -29,13 +29,11 @@ def main(args):
         proposer = NgramProposer(
             vllm_config=VllmConfig(
                 model_config=model_config,
-                speculative_config=SpeculativeConfig.from_dict(
-                    {
-                        "prompt_lookup_min": args.min_ngram,
-                        "prompt_lookup_max": max_ngram,
-                        "num_speculative_tokens": args.num_spec_token,
-                        "method": "ngram",
-                    }
+                speculative_config=SpeculativeConfig(
+                    prompt_lookup_min=args.min_ngram,
+                    prompt_lookup_max=max_ngram,
+                    num_speculative_tokens=args.num_spec_token,
+                    method="ngram",
                 ),
             )
         )
