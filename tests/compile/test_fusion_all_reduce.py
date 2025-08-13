@@ -8,9 +8,11 @@ import torch
 import vllm.envs as envs
 from vllm.compilation.collective_fusion import AllReduceFusionPass
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
+from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import (CompilationConfig, CompilationLevel, DeviceConfig,
-                         ModelConfig, PassConfig, VllmConfig)
+                         ModelConfig, PassConfig, VllmConfig,
+                         set_current_vllm_config)
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (init_distributed_environment,
                                              initialize_model_parallel)
@@ -76,17 +78,15 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP8Model(torch.nn.Module):
         self.quant_fp8 = QuantFP8(static=True,
                                   group_shape=GroupShape.PER_TENSOR)
         self.scale = torch.rand(1, dtype=torch.float32)
-        self.output = torch.empty((token_num, hidden_size),
-                                  dtype=torch.float32)
+        # self.output = torch.empty((token_num, hidden_size),
+        #                           dtype=torch.float32)
 
     def forward(self, hidden_states, residual):
         view = hidden_states.reshape(-1, self.hidden_size)
         all_reduce = tensor_model_parallel_all_reduce(view)
         norm_output, residual_output = self.norm(all_reduce, residual)
-        torch.ops._C.static_scaled_fp8_quant(self.output,
-                                             norm_output.contiguous(),
-                                             self.scale)
-        return self.output, residual_output
+        quant_out, _ = self.quant_fp8(norm_output, scale=self.scale)
+        return quant_out, residual_output
 
     def ops_in_model_after(self):
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
@@ -94,7 +94,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP8Model(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             torch.ops.vllm.all_reduce.default,
-            torch.ops._C.static_scaled_fp8_quant.default
+            # torch.ops._C.static_scaled_fp8_quant.default
         ]
 
 
@@ -198,8 +198,7 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
     initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
-        level=CompilationLevel.PIECEWISE,
-        custom_ops=["+rms_norm", "+quant_fp8"]))
+        level=CompilationLevel.PIECEWISE, custom_ops=["+rms_norm"]))
     vllm_config.compilation_config.pass_config = PassConfig(
         enable_fi_allreduce_fusion=True, enable_noop=True)
     vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
@@ -211,22 +210,32 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
                                            trust_remote_code=True,
                                            dtype=dtype,
                                            seed=42)
+    with set_current_vllm_config(vllm_config):
+        all_reduce_fusion_pass = AllReduceFusionPass(vllm_config)
+        noop_pass = NoOpEliminationPass(vllm_config)
+        func_pass = FixFunctionalizationPass(vllm_config)
 
-    all_reduce_fusion_pass = AllReduceFusionPass(vllm_config)
-    noop_pass = NoOpEliminationPass(vllm_config)
-    func_pass = FixFunctionalizationPass(vllm_config)
+        backend = TestBackend(all_reduce_fusion_pass, noop_pass, func_pass)
 
-    backend = TestBackend(all_reduce_fusion_pass, noop_pass, func_pass)
+        token_num = batch_size * seq_len
+        model = test_model_cls(hidden_size, token_num)
 
-    token_num = batch_size * seq_len
-    model = test_model_cls(hidden_size, token_num)
+        hidden_states = torch.randn((token_num, hidden_size),
+                                    requires_grad=False)
+        residual = torch.randn((token_num, hidden_size), requires_grad=False)
 
-    hidden_states = torch.randn((token_num, hidden_size), requires_grad=False)
-    residual = torch.randn((token_num, hidden_size), requires_grad=False)
+        compiled_model = torch.compile(model, backend=backend)
+        compiled_model(hidden_states, residual)
 
-    compiled_model = torch.compile(model, backend=backend)
-    compiled_model(hidden_states, residual)
+        backend.check_before_ops(model.ops_in_model_before(),
+                                 fully_replaced=False)
+        backend.check_after_ops(model.ops_in_model_after())
+        print(backend.graph_pre_pass)
+        print(backend.graph_post_pass)
+        for node in find_op_nodes(
+                torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default,
+                backend.graph_post_pass):
+            print(f"{node.args=}")
+            print(f"{node.kwargs=}")
 
-    backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
-    backend.check_after_ops(model.ops_in_model_after())
-    del all_reduce_fusion_pass
+        del all_reduce_fusion_pass
