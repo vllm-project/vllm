@@ -234,6 +234,10 @@ class Worker(LocalOrDistributedWorkerBase):
     def determine_available_kv_cache_memory(self,
                                             total_gpu_memory: int) -> float:
         if kv_cache_memory := self.cache_config.kv_cache_memory:
+            # still need a profile run which compiles the model for
+            # max_num_batched_tokens
+            self.model_runner.profile_run()
+
             msg = (f"(Reserved {(kv_cache_memory/GiB_bytes):.2f}GiB memory "
                    f"for KV Cache as specified by kv_cache_memory config "
                    f"and skipped memory profiling. This does does not "

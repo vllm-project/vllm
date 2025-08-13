@@ -232,11 +232,12 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
         GiB = lambda b: b / GiB_bytes
-
         if kv_cache_memory := self.cache_config.kv_cache_memory:
+            # still need a profile run which compiles the model for
+            # max_num_batched_tokens
+            self.model_runner.profile_run()
+
             msg = (
                 f"(Reserved {GiB(kv_cache_memory):.2f}GiB memory for KV Cache "
                 "as specified by kv_cache_memory config and skipped "
@@ -246,6 +247,9 @@ class Worker(WorkerBase):
                 "size.")
             logger.debug(msg)
             return kv_cache_memory
+
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
