@@ -426,8 +426,8 @@ def main():
         print(f"  Token throughput: {avg_total_tokens/avg_total_time:.2f} tokens/sec")
         
         # Write results to CSV
-        write_results_to_csv(all_results, args.output_file)
-        print(f"\nDetailed results saved to: {args.output_file}")
+        # write_results_to_csv(all_results, args.output_file)
+        # print(f"\nDetailed results saved to: {args.output_file}")
         print("=" * 80)
 
 
