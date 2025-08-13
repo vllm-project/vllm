@@ -13,7 +13,7 @@ from vllm.entrypoints.openai.api_server import create_server_socket
 
 
 def test_create_server_socket_empty_host():
-    """Test that create_server_socket returns multiple sockets when host is empty."""
+    """Test create_server_socket returns multiple sockets when host is empty."""
     # Test with empty host (should bind to all addresses)
     sockets = create_server_socket(("", 8000))
 
@@ -24,16 +24,15 @@ def test_create_server_socket_empty_host():
     families = [sock.family for sock in sockets]
 
     # Should have at least one IPv4 or IPv6 socket
-    assert (socket.AF_INET in families or socket.AF_INET6 in families), \
-        (f"Expected at least one IPv4 or IPv6 socket, got families: "
-         f"{families}")
+    assert (socket.AF_INET in families or socket.AF_INET6 in families), (
+        f"Expected at least one IPv4 or IPv6 socket, got families: {families}")
 
     for sock in sockets:
         sock.close()
 
 
 def test_create_server_socket_specific_host():
-    """Test that create_server_socket returns single socket when host is specified."""
+    """Test create_server_socket returns single socket when host specified."""
     # Test with specific IPv4 host
     sockets = create_server_socket(("127.0.0.1", 8001))
 
@@ -41,8 +40,8 @@ def test_create_server_socket_specific_host():
     assert len(sockets) == 1, f"Expected 1 socket, got {len(sockets)}"
 
     # Should be IPv4
-    assert sockets[0].family == socket.AF_INET, \
-        f"Expected IPv4 socket, got family: {sockets[0].family}"
+    assert sockets[0].family == socket.AF_INET, (
+        f"Expected IPv4 socket, got family: {sockets[0].family}")
 
     for sock in sockets:
         sock.close()
@@ -57,15 +56,15 @@ def test_create_server_socket_ipv6_host():
     assert len(sockets) == 1, f"Expected 1 socket, got {len(sockets)}"
 
     # Should be IPv6
-    assert sockets[0].family == socket.AF_INET6, \
-        f"Expected IPv6 socket, got family: {sockets[0].family}"
+    assert sockets[0].family == socket.AF_INET6, (
+        f"Expected IPv6 socket, got family: {sockets[0].family}")
 
     for sock in sockets:
         sock.close()
 
 
 def test_create_server_socket_dual_stack_behavior():
-    """Test that empty host creates sockets for both IPv4 and IPv6 when available."""
+    """Test empty host creates sockets for both IPv4 and IPv6 when available."""
     sockets = create_server_socket(("", 8003))
 
     # In a dual-stack environment, we should get both IPv4 and IPv6 sockets
