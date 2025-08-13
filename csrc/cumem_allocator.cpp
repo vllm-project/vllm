@@ -33,6 +33,11 @@ CUresult error_code = no_error;  // store error code
 static PyObject* g_python_malloc_callback = nullptr;
 static PyObject* g_python_free_callback = nullptr;
 
+struct PyGilGuard {
+  PyGILState_STATE s;
+  PyGilGuard() : s(PyGILState_Ensure()) {}
+  ~PyGilGuard() { PyGILState_Release(s); }
+};
 // ---------------------------------------------------------------------------
 // Helper functions:
 
@@ -153,98 +158,101 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   CUmemGenericAllocationHandle* p_memHandle =
       (CUmemGenericAllocationHandle*)malloc(
           sizeof(CUmemGenericAllocationHandle));
-
-  // Acquire GIL (not in stable ABI officially, but often works)
-  PyGILState_STATE gstate = PyGILState_Ensure();
-  PyObject* cb = g_python_malloc_callback;
-
-  if (!cb) {
-    std::cerr << "ERROR: g_python_malloc_callback not set.\n";
-    PyGILState_Release(gstate);
-    return nullptr;
-  }
-
-  PyObject* arg_tuple = create_tuple_from_c_integers(
-      (unsigned long long)device, (unsigned long long)alignedSize,
-      (unsigned long long)d_mem, (unsigned long long)p_memHandle);
-
-  if (!arg_tuple) {
-    PyGILState_Release(gstate);
+  if (!p_memHandle) {
     cuMemAddressFree(d_mem, alignedSize);
-    free(p_memHandle);
     return nullptr;
   }
 
-  // Call g_python_malloc_callback
-  PyObject* py_result = PyObject_CallFunctionObjArgs(cb, arg_tuple, NULL);
-  Py_DECREF(arg_tuple);
+  {
+    PyGilGuard gil;
+    PyObject* cb = g_python_malloc_callback;
 
-  if (!py_result) {
-    PyErr_Print();
-    PyGILState_Release(gstate);
-    cuMemAddressFree(d_mem, alignedSize);
-    free(p_memHandle);
-    return nullptr;
+    if (!cb) {
+      std::cerr << "ERROR: g_python_malloc_callback not set.\n";
+      cuMemAddressFree(d_mem, alignedSize);
+      free(p_memHandle);
+      return nullptr;
+    }
+
+    PyObject* arg_tuple = create_tuple_from_c_integers(
+        (unsigned long long)device, (unsigned long long)alignedSize,
+        (unsigned long long)d_mem, (unsigned long long)p_memHandle);
+
+    if (!arg_tuple) {
+      cuMemAddressFree(d_mem, alignedSize);
+      free(p_memHandle);
+      return nullptr;
+    }
+
+    // Call g_python_malloc_callback
+    PyObject* py_result = PyObject_CallFunctionObjArgs(cb, arg_tuple, NULL);
+    Py_DECREF(arg_tuple);
+
+    if (!py_result) {
+      PyErr_Print();
+      cuMemAddressFree(d_mem, alignedSize);
+      free(p_memHandle);
+      return nullptr;
+    }
+    Py_DECREF(py_result);
   }
-  Py_DECREF(py_result);
-
-  PyGILState_Release(gstate);
 
   // do the final mapping
   create_and_map(device, alignedSize, d_mem, p_memHandle);
+  if (error_code != 0) {
+    error_code = no_error;
+    cuMemAddressFree(d_mem, alignedSize);
+    free(p_memHandle);
+    return nullptr;
+  }
 
   return (void*)d_mem;
 }
 
 // use CUstream instead of cudaStream_t, to avoid including cuda_runtime_api.h
 void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
-  // Acquire GIL (not in stable ABI officially, but often works)
-  PyGILState_STATE gstate = PyGILState_Ensure();
-  PyObject* cb = g_python_free_callback;
-
-  // get memory handle from the pointer
-  if (!cb) {
-    std::cerr << "ERROR: g_python_free_callback not set.\n";
-    PyGILState_Release(gstate);
-    return;
-  }
-
-  PyObject* py_ptr =
-      PyLong_FromUnsignedLongLong(reinterpret_cast<unsigned long long>(ptr));
-
-  if (!py_ptr) {
-    PyGILState_Release(gstate);
-    return;
-  }
-
-  PyObject* py_result = PyObject_CallFunctionObjArgs(cb, py_ptr, NULL);
-  Py_DECREF(py_ptr);
-  if (!py_result) {
-    PyErr_Print();
-    PyGILState_Release(gstate);
-    return;
-  }
-
-  if (!PyTuple_Check(py_result) || PyTuple_Size(py_result) != 4) {
-    Py_DECREF(py_result);
-    PyGILState_Release(gstate);
-    PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");
-    return;
-  }
-
   unsigned long long recv_device, recv_size;
   unsigned long long recv_d_mem, recv_p_memHandle;
-  // Unpack the tuple into four C integers
-  if (!PyArg_ParseTuple(py_result, "KKKK", &recv_device, &recv_size,
-                        &recv_d_mem, &recv_p_memHandle)) {
-    // PyArg_ParseTuple sets an error if it fails
-    Py_DECREF(py_result);
-    PyGILState_Release(gstate);
-    return;
-  }
-  Py_DECREF(py_result);
-  PyGILState_Release(gstate);
 
+  {
+    PyGilGuard gil;
+    PyObject* cb = g_python_free_callback;
+
+    // get memory handle from the pointer
+    if (!cb) {
+      std::cerr << "ERROR: g_python_free_callback not set.\n";
+      return;
+    }
+
+    PyObject* py_ptr =
+        PyLong_FromUnsignedLongLong(reinterpret_cast<unsigned long long>(ptr));
+
+    if (!py_ptr) {
+      return;
+    }
+
+    PyObject* py_result = PyObject_CallFunctionObjArgs(cb, py_ptr, NULL);
+    Py_DECREF(py_ptr);
+    if (!py_result) {
+      PyErr_Print();
+      return;
+    }
+
+    if (!PyTuple_Check(py_result) || PyTuple_Size(py_result) != 4) {
+      Py_DECREF(py_result);
+      PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");
+      return;
+    }
+
+    // Unpack the tuple into four C integers
+    if (!PyArg_ParseTuple(py_result, "KKKK", &recv_device, &recv_size,
+                          &recv_d_mem, &recv_p_memHandle)) {
+      // PyArg_ParseTuple sets an error if it fails
+      Py_DECREF(py_result);
+      return;
+    }
+    Py_DECREF(py_result);
+  }
   // recv_size == size
   // recv_device == device
 
