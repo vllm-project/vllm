@@ -52,7 +52,7 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
-    make_kv_sharing_fast_prefill_attention_metadata,
+    UbatchSlice, make_kv_sharing_fast_prefill_attention_metadata,
     make_local_attention_virtual_batches, split_attn_metadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec,
@@ -100,7 +100,6 @@ AttnMetadataDict: TypeAlias = dict[str, FlashAttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = Union[list[AttnMetadataDict],
                                         AttnMetadataDict]
 
-UbatchSlice: TypeAlias = tuple[slice, slice]
 UBatchSlices: TypeAlias = list[UbatchSlice]
 
 
@@ -656,10 +655,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert b0_reqs_end < num_reqs and \
             b0_tokens_end < total_num_scheduled_tokens
         ubatch_slices = [
-            (slice(0, b0_reqs_end), slice(0, b0_tokens_end)),
-            (slice(b0_reqs_end,
-                   num_reqs), slice(b0_tokens_end,
-                                    total_num_scheduled_tokens)),
+            UbatchSlice(slice(0, b0_reqs_end), slice(0, b0_tokens_end)),
+            UbatchSlice(slice(b0_reqs_end, num_reqs),
+                        slice(b0_tokens_end, total_num_scheduled_tokens)),
         ]
 
         # Compute ubatch padding. This currently only accounts for DP padding
@@ -1595,10 +1593,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         first_ubatch_slice = ubatch_slices[0]
         second_ubatch_slice = ubatch_slices[1]
 
-        first_ubatch_num_tokens = first_ubatch_slice[
-            1].stop - first_ubatch_slice[1].start
-        second_ubatch_num_tokens = second_ubatch_slice[
-            1].stop - second_ubatch_slice[1].start
+        first_ubatch_num_tokens = first_ubatch_slice.token_slice.stop - \
+             first_ubatch_slice.token_slice.start
+        second_ubatch_num_tokens = second_ubatch_slice.token_slice.stop - \
+            second_ubatch_slice.token_slice.start
         # We don't support prefills yet so the two ubatches should only differ
         # by at most one token
         assert abs(first_ubatch_num_tokens - second_ubatch_num_tokens) <= 1
@@ -1635,7 +1633,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     # slicing but before attention meta data creation
     def pad_out_ubatch_first_stage(self, ubatch_slices: UBatchSlices,
                                    num_pad_tokens: int):
-        original_num_tokens = ubatch_slices[1][1].stop
+        original_num_tokens = ubatch_slices[1].token_slice.stop
         assert num_pad_tokens < original_num_tokens
         total_num_tokens_per_ubatch = (original_num_tokens +
                                        num_pad_tokens) // 2
@@ -1643,10 +1641,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         padded_second_ubatch_slice = slice(total_num_tokens_per_ubatch,
                                            original_num_tokens)
 
-        ubatch_slices[0] = (padded_first_ubatch_slice,
-                            padded_first_ubatch_slice)
-        ubatch_slices[1] = (padded_second_ubatch_slice,
-                            padded_second_ubatch_slice)
+        ubatch_slices[0] = UbatchSlice(padded_first_ubatch_slice,
+                                       padded_first_ubatch_slice)
+        ubatch_slices[1] = UbatchSlice(padded_second_ubatch_slice,
+                                       padded_second_ubatch_slice)
 
     # This is where the second ubatch is adjusted to account for the padding.
     # Should be called after attention metadata creation. This just pads
@@ -1655,10 +1653,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def pad_out_ubatch_second_stage(self, ubatch_slices: UBatchSlices,
                                     num_total_tokens: int):
         # TODO Add asserts to make sure stage one ran
-        padded_second_ubatch_slice = slice(ubatch_slices[1][1].start,
+        padded_second_ubatch_slice = slice(ubatch_slices[1].token_slice.start,
                                            num_total_tokens)
-        ubatch_slices[1] = (padded_second_ubatch_slice,
-                            padded_second_ubatch_slice)
+        ubatch_slices[1] = UbatchSlice(padded_second_ubatch_slice,
+                                       padded_second_ubatch_slice)
 
     def should_ubatch(self, should_ubatch: bool) -> bool:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
@@ -1753,8 +1751,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Create one forward context per ubatch
         forward_contexts = []
-        for i, (_, tokens_slice) in enumerate(ubatch_slices):
-            num_tokens = (tokens_slice.stop - tokens_slice.start)
+        for i, ubatch_slice in enumerate(ubatch_slices):
+            num_tokens = (ubatch_slice.token_slice.stop -
+                          ubatch_slice.token_slice.start)
             forward_contexts.append(
                 create_forward_context(
                     attn_metadata[i] if attn_metadata is not None else None,
@@ -1772,17 +1771,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             enable_async_comms=self.parallel_config.enable_async_comms)
 
         ubatch_metadata: list[UbatchMetadata] = []
-        for i, (_, tokens_slice) in enumerate(ubatch_slices):
+        for i, ubatch_slice in enumerate(ubatch_slices):
             input_ids, positions, inputs_embeds, intermediate_tensors = \
-                self.model_inputs(tokens_slice, scheduler_output, is_dummy_run)
+                self.model_inputs(
+                    ubatch_slice.token_slice, scheduler_output, is_dummy_run)
             ubatch_metadata.append(
                 UbatchMetadata(context=ubatch_ctxs[i],
                                input_ids=input_ids,
                                positions=positions,
                                inputs_embeds=inputs_embeds,
                                intermediate_tensors=intermediate_tensors,
-                               num_tokens=tokens_slice.stop -
-                               tokens_slice.start))
+                               num_tokens=ubatch_slice.token_slice.stop -
+                               ubatch_slice.token_slice.start))
 
         return ubatch_metadata
 
@@ -1808,8 +1808,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         results: list[tuple[int, torch.Tensor]] = []
         compute_stream = ubatch_metadata[0].context.compute_stream
-        num_tokens = ubatch_metadata[0].num_tokens + ubatch_metadata[
-            1].num_tokens
+        num_tokens = ubatch_metadata[0].num_tokens + \
+            ubatch_metadata[1].num_tokens
 
         # Ubatches will manually manage the forward context, so we override
         # it to None here so we can have it restored correctly later
@@ -2704,10 +2704,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                 dp_size,
                                                 device="cpu",
                                                 dtype=torch.int32)
-            ubatch_slices = [(slice(0,
-                                    num_reqs // 2), slice(0, num_tokens // 2)),
-                             (slice(num_reqs // 2, num_reqs),
-                              slice(num_tokens // 2, num_tokens))]
+            ubatch_slices = [
+                UbatchSlice(slice(0, num_reqs // 2), slice(0,
+                                                           num_tokens // 2)),
+                UbatchSlice(slice(num_reqs // 2, num_reqs),
+                            slice(num_tokens // 2, num_tokens))
+            ]
 
         # attn_metadata: Optional[dict[str, Any]] = None
         attn_metadata: Optional[PerLayerAttnMetadata] = None

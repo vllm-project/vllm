@@ -76,6 +76,7 @@ def slice_query_start_locs(
     """
     Creates a new query_start_loc that corresponds to the requests in 
     request_slice.
+
     Note: This function creates a new tensor to hold the new query_start_locs.
     This will break cudagraph compatibility.
     """
@@ -129,19 +130,19 @@ def _make_metadata_with_slice(
 
 
 def split_attn_metadata(
-    ubatch_slices: list[tuple[slice, slice]],
+    ubatch_slices: list[UbatchSlice],
     common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
     """
     Creates a new CommonAttentionMetadata instance that corresponds to the 
     requests for each UbatchSlice in ubatch_slices.
+
     Note: This function does not modify common_attn_metadata
     """
     results = []
     for ubatch_slice in ubatch_slices:
-        s = UbatchSlice(request_slice=ubatch_slice[0],
-                        token_slice=ubatch_slice[1])
-        results.append(_make_metadata_with_slice(s, common_attn_metadata))
+        results.append(
+            _make_metadata_with_slice(ubatch_slice, common_attn_metadata))
     return results
 
 
