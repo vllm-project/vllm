@@ -22,7 +22,6 @@ jobs:
                 keywords: [
                   // Core ROCm/AMD terms
                   "rocm",
-                  "roc",
                   "amd",
                   "hip",
                   // GPU Models - Instinct Series
