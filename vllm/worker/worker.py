@@ -269,8 +269,8 @@ class Worker(LocalOrDistributedWorkerBase):
         self.requested_memory = total_gpu_memory * \
             self.cache_config.gpu_memory_utilization
 
-        available_kv_cache_memory = (self.requested_memory -
-                                     result.non_kv_cache_memory)
+        self.available_kv_cache_memory = (self.requested_memory -
+                                          result.non_kv_cache_memory)
 
         msg = (f"Memory profiling takes {result.profile_time:.2f} seconds\n"
                "the current vLLM instance can use "
@@ -286,10 +286,10 @@ class Worker(LocalOrDistributedWorkerBase):
                " PyTorch activation peak memory takes "
                f"{(result.torch_peak_increase / GiB_bytes):.2f}GiB;"
                " the rest of the memory reserved for KV Cache is "
-               f"{(available_kv_cache_memory / GiB_bytes):.2f}GiB.")
+               f"{(self.available_kv_cache_memory / GiB_bytes):.2f}GiB.")
 
         logger.info(msg)
-        return available_kv_cache_memory
+        return self.available_kv_cache_memory
 
     @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -461,7 +461,8 @@ class Worker(LocalOrDistributedWorkerBase):
                 f"{kv_cache_memory_bytes_to_requested_limit}` to fit into "
                 f"requested memory, or `--kv-cache-memory="
                 f"{kv_cache_memory_bytes_to_gpu_limit}` to fully "
-                f"utilize gpu memory.")
+                f"utilize gpu memory. Current kv cache memory in use is "
+                f"{int(self.available_kv_cache_memory)} bytes.")
             logger.info(msg)
 
         # Reset the seed to ensure that the random state is not affected by

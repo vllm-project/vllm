@@ -277,7 +277,7 @@ class Worker(WorkerBase):
             "release GPU memory while vLLM is profiling during initialization. "
             "To fix this, ensure consistent GPU memory allocation or "
             "isolate vLLM in its own container.")
-        available_kv_cache_memory = self.requested_memory \
+        self.available_kv_cache_memory = self.requested_memory \
             - profile_result.non_kv_cache_memory
 
         unrequested_memory = self.init_snapshot.free_memory \
@@ -297,10 +297,10 @@ class Worker(WorkerBase):
         )
         logger.debug(profile_result)
         logger.info("Available KV cache memory: %.2f GiB",
-                    GiB(available_kv_cache_memory))
+                    GiB(self.available_kv_cache_memory))
         gc.collect()
 
-        return int(available_kv_cache_memory)
+        return int(self.available_kv_cache_memory)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
@@ -377,7 +377,9 @@ class Worker(WorkerBase):
                 f"{kv_cache_memory_bytes_to_requested_limit}` to fit into "
                 f"requested memory, or `--kv-cache-memory="
                 f"{kv_cache_memory_bytes_to_gpu_limit}` to fully "
-                f"utilize gpu memory.")
+                f"utilize gpu memory. Current kv cache memory in use is "
+                f"{int(self.available_kv_cache_memory)} bytes.")
+
             logger.info(msg)
 
         # Warm up sampler and preallocate memory buffer for logits and other
