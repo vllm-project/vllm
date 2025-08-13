@@ -34,13 +34,6 @@ if QUARK_MXFP4_AVAILABLE:
     from quark.torch.kernel import mx as mx_kernel
     from quark.torch.quantization.config.config import FP4PerGroupSpec
 
-try:
-    huggingface_hub.list_repo_refs(
-        "amd/Llama-3.3-70B-Instruct-WMXFP4-AMXFP4-KVFP8-Scale-UINT8-SQ")
-    HF_HUB_AMD_ORG_ACCESS = True
-except huggingface_hub.errors.RepositoryNotFoundError:
-    HF_HUB_AMD_ORG_ACCESS = False
-
 
 @pytest.fixture(scope="function", autouse=True)
 def use_v0_only(monkeypatch):
@@ -142,7 +135,7 @@ class GSM8KAccuracyTestConfig:
 ACCURACY_CONFIGS = [
     # Private model.
     GSM8KAccuracyTestConfig(
-        model_name="amd/DeepSeek-R1-WMXFP4-AMXFP4-Scale-UINT8-MoE-Quant",
+        model_name="/data/amd/DeepSeek-R1-MXFP4-Preview",
         excepted_value=0.96),
 ]
 
@@ -150,9 +143,6 @@ ACCURACY_CONFIGS = [
 @pytest.mark.parametrize("config", ACCURACY_CONFIGS)
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE,
                     reason="amd-quark>=0.9 is not available")
-@pytest.mark.skipif(
-    not HF_HUB_AMD_ORG_ACCESS,
-    reason="Read access to huggingface.co/amd is required for this test.")
 def test_mxfp4_gsm8k_correctness(config: GSM8KAccuracyTestConfig):
     if torch.cuda.device_count() < 8:
         pytest.skip(
