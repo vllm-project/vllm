@@ -585,7 +585,10 @@ def main(args: argparse.Namespace):
         "DeepseekV3ForCausalLM",
         "DeepseekV2ForCausalLM",
         "Glm4MoeForCausalLM",
+        "Glm4vMoeForConditionalGeneration",
     ):
+        if config.architectures[0] == "Glm4vMoeForConditionalGeneration":
+            config = config.text_config
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
