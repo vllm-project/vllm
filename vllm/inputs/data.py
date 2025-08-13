@@ -77,6 +77,26 @@ class EmbedsPrompt(TypedDict):
     """
 
 
+class ImagePrompt(TypedDict):
+
+    type: Literal["url", "path", "object"]
+    """
+    This is the data type for the input image
+    """
+
+    format: str
+    """
+    This is the image format (e.g., jpeg, png, etc.)
+    """
+
+    data: Any
+    """
+    Input image data 
+    """
+
+
+MultiModalPromptType = Union[ImagePrompt]
+
 SingletonPrompt = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
 """
 Set of possible schemas for a single prompt:

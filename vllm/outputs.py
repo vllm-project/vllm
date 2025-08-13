@@ -5,7 +5,7 @@ import time
 from collections.abc import MutableSequence
 from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass
-from typing import Any, Generic, Optional, Union
+from typing import Any, Generic, Literal, Optional, Union
 
 import torch
 from typing_extensions import TypeVar
@@ -514,3 +514,37 @@ class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
             prompt_token_ids=request_output.prompt_token_ids,
             finished=request_output.finished,
         )
+
+
+class MultiModalRequestOutput(Generic[_O]):
+    """
+    The output data of a multimodal request to vLLM. 
+    A request generating anything but text
+
+    Args:
+        data (Any): The resulting data
+    """
+
+    def __init__(self, data: Any):
+        self.data = data
+
+
+class ImageRequestOutput(MultiModalRequestOutput):
+    """
+    The output data of an image request to vLLM. 
+
+    Args:
+        type (str): The data content type [path, object]
+        format (str): The image format (e.g., jpeg, png, etc.)
+        data (Any): The resulting data.
+    """
+
+    def __init__(self, type: str, format: str, data: Any):
+        super().__init__(data)
+        self.type: Literal["path", "object"] = type
+        self.format = format
+
+    def __repr__(self) -> str:
+        return (f"ImageRequestOutput,"
+                f"type={self.type},"
+                f"format={self.format}")
