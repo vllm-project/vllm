@@ -132,9 +132,9 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
 # Note: W1 has shape (E, 2N, K), so N = 512
 # can trigger the deepgemm path.
 MNKs = [
-    (1024, 512, 128),
-    (1024, 512, 512),
-    (2048, 512, 512),
+    (1024, 768, 128),
+    (1024, 768, 512),
+    (2048, 768, 512),
     (512, 1024, 1024),
     (512, 2048, 2048),
     (4096, 4096, 1024),

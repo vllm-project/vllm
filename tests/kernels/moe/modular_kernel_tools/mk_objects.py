@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_fp8_supported)
 from vllm.platforms import current_platform
 from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
 
@@ -237,8 +238,7 @@ if (has_flashinfer_cutlass_fused_moe()
 else:
     FlashInferCutlassMoEPrepareAndFinalize = None
 
-# Disable on blackwell for now
-if has_deep_gemm() and not current_platform.has_device_capability(100):
+if has_deep_gemm() and is_deep_gemm_supported():
     register_experts(
         BatchedDeepGemmExperts,
         batched_format,
