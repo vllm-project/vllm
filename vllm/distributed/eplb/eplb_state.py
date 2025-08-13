@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Expert parallelism load balancer (EPLB) metrics and states.
 
@@ -122,11 +123,23 @@ class EplbState:
     Shape: (window_size, num_moe_layers, num_local_physical_experts)
     """
     new_physical_to_logical_map: Optional[torch.Tensor] = None
+    """
+    intermediate variable between `move_to_buffer` and `move_to_workspace`.
 
+    the size is same as physical_to_logical_map
+    """
     new_logical_to_physical_map: Optional[torch.Tensor] = None
+    """
+    intermediate variable between `move_to_buffer` and `move_to_workspace`.
 
+    the size is same as logical_to_physical_map
+    """
     new_logical_replica_count: Optional[torch.Tensor] = None
+    """
+    intermediate variable between `move_to_buffer` and `move_to_workspace`.
 
+    the size is same as logical_replica_count
+    """
     expert_load_window_step: int = 0
     """
     Current step in the sliding window.
@@ -154,23 +167,45 @@ class EplbState:
     Interval for expert rearrangement steps.
     This is a constant and is taken from the config.
     """ 
-    layer: int = 0
-
+    layer_to_transfer: int = 0
+    """
+    The layer index to transfer in async mode.
+    """
     ep_buffer_ready: bool = False
-
+    """
+    The flag indicates whether the expert buffer is ready for transfer.
+    """
     buffer_lock: threading.Lock = field(default_factory=threading.Lock())
-
+    """
+    The lock to protect the expert buffer.
+    """
     expert_buffer:list[torch.Tensor] = field(default_factory=list)
-
+    """
+    The buffer to store the expert weights during transfer.
+    """
     rebalanced: bool = False  
-
+    """
+    The flag indicates whether the experts rebalance have been computed.
+    """
     is_unchanged: list[bool] = field(default_factory=list)
-
+    """
+    intermediate variable between `move_to_buffer` and `move_to_workspace`.
+    The size is same as the num of physical experts in the current layer.
+    """
     is_received_locally: list[bool] = field(default_factory=list)
-
+    """
+    intermediate variable between `move_to_buffer` and `move_to_workspace`.
+    The size is same as the num of physical experts in the current layer.
+    """
     experts_recv_loc: dict[int, int] = field(default_factory=dict)
-
+    """
+    intermediate variable between `move_to_buffer` and `move_to_workspace`.
+    The size is same as the num of physical experts in the current layer.
+    """
     is_async: bool = False
+    """
+    The flag indicates whether the EPLB is running in async mode.
+    """
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -216,6 +251,9 @@ class EplbState:
             physical_to_logical_map_list,
             device=device,
         )
+        # Assuming 8 GPUs per node, this supports up to
+        # (1023 + 1) / 8 = 128 nodes for now.
+        # TODO(rui): make this configurable
         MAX_EXPERT_REDUNDANCY = 1023
         assert model.num_redundant_experts <= MAX_EXPERT_REDUNDANCY, (
             f"num_redundant_experts {model.num_redundant_experts} "
@@ -364,10 +402,13 @@ class EplbState:
         """
         if self.is_async:
             is_profile = False
-        #Non-Blocking EPLB don't support profile now
+        """
+        Non-Blocking EPLB don't support profile now,
+        because it need build a new thread.
+        """
         ep_group = get_ep_group().device_group
         if is_profile:
-            self.rearrange_calculate(model, is_profile=True)
+            self.rearrange(model, is_profile=True)
             return
 
         if is_dummy:
@@ -424,9 +465,9 @@ class EplbState:
         if (self.expert_rearrangement_step
                 >= self.expert_rearrangement_step_interval):
             self.expert_rearrangement_step = 0
-            self.rearrange_calculate(model, is_profile)
-            
-    def rearrange_calculate(
+            self.rearrange(model, is_profile)
+          
+    def rearrange(
             self,
             model: MixtureOfExperts,
             is_profile: bool = False,
@@ -578,11 +619,9 @@ class EplbState:
                                                    rank_mapping=rank_mapping))
             except Exception as e:
                 logger.exception("async loop error (Rank %d): %s", rank, 
-                                  str(e)
-            )
+                                  str(e))
             finally:
                 loop.close()
-
         thread = threading.Thread(target=thread_target, daemon=True)
         thread.start()
         return thread
@@ -594,14 +633,14 @@ class EplbState:
             is_profile: bool = False,
             rank_mapping: Optional[dict[int, int]] = None):
         experts_stream = torch.cuda.Stream()
-        while self.layer < model.num_moe_layers:
+        while self.layer_to_transfer < model.num_moe_layers:
             if not self.ep_buffer_ready and self.rebalanced:
                 # get lock
                 await asyncio.to_thread(self.buffer_lock.acquire)
                 try:
                     self.expert_buffer = [
                         torch.empty_like(w) for w in model.expert_weights[0]
-                        ]
+                        ]                   
                     await transfer_layer(
                         old_global_expert_indices=self.physical_to_logical_map,
                         new_global_expert_indices=self.
@@ -610,20 +649,19 @@ class EplbState:
                         expert_weights_buffer=self.expert_buffer,
                         ep_group=ep_group,
                         is_profile=is_profile,
-                        layer=self.layer,
+                        layer=self.layer_to_transfer,
                         cuda_stream=experts_stream,
                         rank_mapping=rank_mapping,
                     )
                     self.ep_buffer_ready = True
-                    if experts_stream is not None:
-                        experts_stream.synchronize()  
+
                 finally:
                     # release lock
                     self.buffer_lock.release()
             else:
                 await asyncio.sleep(0.5) 
         self.rebalanced = False
-        self.layer = 0
+        self.layer_to_transfer = 0
         self.post_eplb(model, is_profile)
 
 
@@ -633,18 +671,18 @@ class EplbState:
                           is_profile: bool = False):
         if not self.buffer_lock.acquire(blocking=False):
             return 
-        try:
+        try:            
             move_from_buffer(
-                expert_weights=model.expert_weights[self.layer],
+                expert_weights=model.expert_weights[self.layer_to_transfer],
                 expert_weights_buffer=self.expert_buffer,
                 is_unchanged=self.is_unchanged,
                 is_received_locally=self.is_received_locally, 
                 experts_recv_loc=self.experts_recv_loc, 
                 new_indices=self.new_physical_to_logical_map[
-                    self.layer].tolist(),
+                    self.layer_to_transfer].tolist(),
                 ep_group=ep_group
             )
-            self.layer += 1
+            self.layer_to_transfer += 1
             self.ep_buffer_ready = False
         finally:
             self.buffer_lock.release()

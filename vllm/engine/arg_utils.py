@@ -1185,7 +1185,7 @@ class EngineArgs:
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
-            eplb_async=self.eplb_async
+            eplb_async=self.eplb_async,
             num_redundant_experts=self.num_redundant_experts,
             eplb_window_size=self.eplb_window_size,
             eplb_step_interval=self.eplb_step_interval,

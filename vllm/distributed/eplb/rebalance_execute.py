@@ -137,7 +137,8 @@ def move_to_buffer(
                 is_received_locally[dst] = True
                 for weight, buffer in zip(expert_weights,
                                           expert_weights_buffer):
-                    buffer[dst].copy_(weight[src])
+                    with torch.cuda.stream(cuda_stream):                      
+                        buffer[dst].copy_(weight[src], non_blocking=True)
 
     p2p_ops: list[P2POp] = []
 
@@ -180,6 +181,7 @@ def move_to_buffer(
                     torch.distributed.isend,
                     weight[src],
                     dst_global,
+                    stream=cuda_stream if cuda_stream is not None else torch.cuda.default_stream()
                 ) for weight in expert_weights
             ]
 
@@ -219,6 +221,7 @@ def move_to_buffer(
                 torch.distributed.irecv,
                 weight[dst],
                 src_global,
+                stream=cuda_stream if cuda_stream is not None else torch.cuda.default_stream()
             ) for weight in expert_weights_buffer
         ]
 
@@ -227,14 +230,12 @@ def move_to_buffer(
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
             with torch.cuda.stream(cuda_stream):
-                req.wait()
-            cuda_stream.synchronize()    
+                req.wait()  
     elif p2p_ops:
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
             req.wait()
     # wait for the communication to finish   
-    barrier(group=ep_group)
     return is_unchanged, is_received_locally, experts_recv_loc
 
 def move_from_buffer(
@@ -258,12 +259,12 @@ def move_from_buffer(
             continue
         if is_received_locally[dst]:
             for weight, buffer in zip(expert_weights, expert_weights_buffer):
-                weight[dst].copy_(buffer[dst])
+                weight[dst].copy_(buffer[dst], non_blocking=True)
         else:
             expert = new_indices[local2global(dst)]
             src = experts_recv_loc[expert]
             for weight, buffer in zip(expert_weights, expert_weights_buffer):
-                weight[dst].copy_(buffer[src])
+                weight[dst].copy_(buffer[src], non_blocking=True)
     
 
 async def transfer_layer(old_global_expert_indices: torch.Tensor,
@@ -322,21 +323,7 @@ async def transfer_layer(old_global_expert_indices: torch.Tensor,
     # A buffer to hold the expert weights in one layer during the exchange.
     # NOTE: Currently we assume the same weights across different layers
     # have the same shape.
-    if is_profile:
-        # Maximum send size is to send all local experts to all ranks,
-        # So we use a dummy `all_gather` to reserve enough communication buffer
-        for weight, buffer in zip(expert_weights[0], expert_weights_buffer):
-            # A `/dev/null`-like buffer to avoid real memory allocation
-            dummy_recv_buffer = [buffer for _ in range(ep_size)]
-            # NOTE(bowen): Needed this barrier to avoid OOM during actual
-            # execution. I'm not very sure why this is needed
-            torch.distributed.barrier()
-            torch.distributed.all_gather.all_gather(
-                dummy_recv_buffer,
-                weight,
-                group=ep_group,
-            )
-        return
+    
 
     is_unchanged, is_received_locally, experts_recv_loc = move_to_buffer(
         num_local_experts=num_local_physical_experts,
