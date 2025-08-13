@@ -25,7 +25,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_kernel,
     flashinfer_fp4_cutlass_moe_forward, reorder_w1w3_to_w3w1)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_flashinfer_per_tensor_scale_fp8, get_moe_scaling_factors,
+    apply_flashinfer_per_tensor_scale_fp8, register_moe_scaling_factors,
     rotate_flashinfer_fp8_moe_weights, swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear, is_fp4_marlin_supported,
@@ -283,10 +283,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 "Using FlashInfer MoE FP8 kernels for ModelOptFp8MoEMethod.")
             self.flashinfer_moe_enabled = True
 
-        self._output1_scales_scalar: Optional[torch.Tensor] = None
-        self._output1_scales_gate_scalar: Optional[torch.Tensor] = None
-        self._output2_scales_scalar: Optional[torch.Tensor] = None
-
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -433,11 +429,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
             rotate_flashinfer_fp8_moe_weights(layer.w13_weight,
                                               layer.w2_weight)
-            self._output1_scales_scalar, self._output1_scales_gate_scalar, \
-                self._output2_scales_scalar = get_moe_scaling_factors(
-                    layer.w13_input_scale, layer.w13_weight_scale,
-                    layer.w2_input_scale, layer.w2_weight_scale
-                )
+            register_moe_scaling_factors(layer)
 
     def apply(
         self,
@@ -468,17 +460,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         if self.flashinfer_moe_enabled:
             assert activation == 'silu'
             assert not renormalize
-            assert self._output1_scales_scalar is not None
-            assert self._output1_scales_gate_scalar is not None
-            assert self._output2_scales_scalar is not None
             return apply_flashinfer_per_tensor_scale_fp8(
                 layer=layer,
                 hidden_states=x,
                 router_logits=router_logits,
                 routing_bias=e_score_correction_bias,
-                output1_scales_scalar=self._output1_scales_scalar,
-                output1_scales_gate_scalar=self._output1_scales_gate_scalar,
-                output2_scales_scalar=self._output2_scales_scalar,
                 global_num_experts=global_num_experts,
                 top_k=top_k,
                 num_expert_group=num_expert_group,

@@ -75,9 +75,6 @@ def apply_flashinfer_per_tensor_scale_fp8(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     routing_bias: Optional[torch.Tensor],
-    output1_scales_scalar: torch.Tensor,
-    output1_scales_gate_scalar: torch.Tensor,
-    output2_scales_scalar: torch.Tensor,
     top_k: int,
     num_expert_group: Optional[int],
     topk_group: Optional[int],
@@ -85,6 +82,12 @@ def apply_flashinfer_per_tensor_scale_fp8(
     apply_router_weight_on_input: bool,
 ) -> torch.Tensor:
     from flashinfer.fused_moe import RoutingMethodType
+    assert layer.output1_scales_scalar is not None, (
+        "Expected output1_scales_scalar to be initialized")
+    assert layer.output1_scales_scalar is not None, (
+        "Expected output1_scales_gate_scalar to be initialized")
+    assert layer.output1_scales_scalar is not None, (
+        "Expected output2_scales_scalar to be initialized")
 
     from vllm.model_executor.models.llama4 import Llama4MoE
     assert layer.custom_routing_function == Llama4MoE.custom_routing_function, \
@@ -96,9 +99,9 @@ def apply_flashinfer_per_tensor_scale_fp8(
         input_scale=layer.w13_input_scale,
         gemm1_weights=layer.w13_weight,
         gemm2_weights=layer.w2_weight,
-        output1_scales_scalar=output1_scales_scalar,
-        output1_scales_gate_scalar=output1_scales_gate_scalar,
-        output2_scales_scalar=output2_scales_scalar,
+        output1_scales_scalar=layer.output1_scales_scalar,
+        output1_scales_gate_scalar=layer.output1_scales_gate_scalar,
+        output2_scales_scalar=layer.output2_scales_scalar,
         num_experts=global_num_experts,
         top_k=top_k,
         num_expert_group=num_expert_group,
@@ -124,3 +127,14 @@ def get_moe_scaling_factors(
 
     return output1_scales_scalar, output1_scales_gate_scalar, \
         output2_scales_scalar
+
+
+def register_moe_scaling_factors(layer: torch.nn.Module) -> None:
+    output1_scales, output1_gate_scales, output2_scales = \
+        get_moe_scaling_factors(
+            layer.w13_input_scale, layer.w13_weight_scale,
+            layer.w2_input_scale, layer.w2_weight_scale
+        )
+    layer.register_parameter('output1_scales_scalar', output1_scales)
+    layer.register_parameter('output1_scales_gate_scalar', output1_gate_scales)
+    layer.register_parameter('output2_scales_scalar', output2_scales)
