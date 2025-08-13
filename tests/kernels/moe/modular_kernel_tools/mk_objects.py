@@ -208,7 +208,8 @@ if has_pplx():
         backend="pplx",
     )
 
-if has_flashinfer_cutlass_fused_moe():
+if (has_flashinfer_cutlass_fused_moe()
+        and current_platform.has_device_capability(100)):
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
         FlashInferExperts)
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
