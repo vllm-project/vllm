@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Optional
 
 from vllm.config import VllmConfig
@@ -19,13 +20,13 @@ class MultimodalDataProcessor(ABC):
         self,
         prompt: MultiModalPromptType,
         request_id: Optional[str] = None,
-    ) -> list[PromptType]:
+    ) -> Sequence[PromptType]:
         ...
 
     @abstractmethod
     def post_process(
         self,
-        model_out: list[Optional[PoolingRequestOutput]],
+        model_out: Sequence[PoolingRequestOutput],
         request_id: Optional[str] = None,
     ) -> MultiModalRequestOutput:
         ...

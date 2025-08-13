@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
-from typing import Optional
 
 from vllm.config import VllmConfig
 from vllm.plugins import load_plugins_by_group
@@ -14,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_multimodal_data_processor(
-        vllm_config: VllmConfig) -> Optional[MultimodalDataProcessor]:
+        vllm_config: VllmConfig) -> MultimodalDataProcessor:
     # Multimodal processors are loaded as plugins under the
     # 'vllm.multimodal_data_processor_plugins' group. Similar to platform
     # plugins, these plugins register a function that returns the class
