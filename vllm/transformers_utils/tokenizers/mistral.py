@@ -12,6 +12,7 @@ from huggingface_hub import HfApi, hf_hub_download
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_base import TokenizerBase
+from transformers.tokenization_utils_base import BatchEncoding
 from vllm.utils import is_list_of
 
 if TYPE_CHECKING:
@@ -26,10 +27,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
-@dataclass
-class Encoding:
-    input_ids: Union[list[int], list[list[int]]]
 
 
 def maybe_serialize_tool_calls(request: "ChatCompletionRequest"):
@@ -359,7 +356,7 @@ class MistralTokenizer(TokenizerBase):
         # For str, single prompt text
         else:
             input_ids = self.encode_one(text, truncation, max_length)
-        return Encoding(input_ids=input_ids)
+        return BatchEncoding({"input_ids": input_ids})
 
     def get_vocab(self) -> dict[str, int]:
         # NB: the dictionary form of the vocabulary collapses token ids that map
