@@ -85,35 +85,19 @@ class MiniCPMVImagePixelInputs(TensorSchema):
         - w: Width
     """
     def _validate_nested_tensors(
-            self, value: Union[list[torch.Tensor, ...],
-                               tuple[torch.Tensor, ...]], field_name: str,
-            expected_shape: tuple[Union[int, str], ...],
-            dynamic_dims: set[str, ...]) -> tuple[int, ...]:
-        """Validate a list/tuple of tensors and return the actual shape."""
-              
-        # value[0] is the scaled image, and value[1:] is a collection of image slices.
-        # It is ensured that all slices in the collection have the same shape.
-        if len(value) <= 1:
-            return (len(value),) + value[0].shape if value else (0,)
+        self, value: Union[list[torch.Tensor, ...],
+                           tuple[torch.Tensor, ...]], field_name: str,
+        expected_shape: tuple[Union[int, str], ...],
+        dynamic_dims: set[str, ...]) -> tuple[int, ...]:
+    """Validate a list/tuple of tensors and return the actual shape."""
           
-        first = value[1]
-        for i, v in enumerate(value[1:]):
-            if not isinstance(v, torch.Tensor):
-                raise ValueError(f"{field_name}[{i}] is not a "
-                                 f"torch.Tensor")
-            if not self._match_shape_with_dynamic(
-                    v.shape,
-                    first.shape,
-                    expected_shape,
-                    dynamic_dims,
-            ):
-                raise ValueError(f"{field_name} contains inconsistent "
-                                 f"shapes: {first.shape} vs {v.shape} "
-                                 f"at index {i}")
-
-        # Treat the list as a stacked tensor:
-        # shape = (len(list), *tensor.shape)
-        return (len(value), ) + first.shape
+    # value[0] is the scaled image,
+    # and value[1:] is a collection of image slices.
+    # It is ensured that all slices in the collection
+    # have the same shape.
+    if field_name == "pixel_values":
+        value = value[1:] if len(value) > 1 else value
+    return super()._validate_nested_tensors(value, field_name, expected_shape, dynamic_dims)
     
     type: Literal["pixel_values"] = "pixel_values"
 
