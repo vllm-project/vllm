@@ -229,6 +229,9 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                 num_blocks=1,
                 block_len=self.block_len,
                 attn_backend_name=self.backend_name,
+                # `self.kv_cache_layout` is only forced to HND when vllm engine
+                # is started. We mock HND here.
+                kv_cache_layout="HND",
             ),
             remote_tp_size=remote_tp_size)
         return {0: remote_agent_name}
