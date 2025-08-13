@@ -375,7 +375,6 @@ class FlashAttentionMetadataBuilder(
             max_num_splits=max_num_splits,
             causal=causal,
             # Encoder/cross-attention fields
-            encoder_seq_start_loc=common_attn_metadata.encoder_seq_start_loc,
             max_encoder_seq_len=common_attn_metadata.max_encoder_seq_len,
             cross_slot_mapping=common_attn_metadata.cross_slot_mapping,
         )

@@ -861,12 +861,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             attention_layers = get_layers_from_vllm_config(
                 self.vllm_config, Attention)
             for layer_name, attn_module in attention_layers.items():
-                if self.is_encoder_only_model and attn_module.attn_type == AttentionType.ENCODER_ONLY:
+                if self.is_encoder_only_model and \
+                    attn_module.attn_type == AttentionType.ENCODER_ONLY:
                     common_attn_metadata, encoder_attn_metadata =\
                         per_layer_metadata[layer_name]
                     attn_metadata[layer_name] = encoder_attn_metadata
                 elif attn_module.attn_type in (AttentionType.ENCODER_ONLY,
-                                             AttentionType.ENCODER):
+                                               AttentionType.ENCODER):
                     attn_metadata[layer_name] = encoder_attn_metadata
 
         # Prepare the attention metadata for each KV cache group and make layers
@@ -3445,8 +3446,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return group_metadata
 
     def _build_enc_dec_attn_metadata(
-            self, scheduler_output: "SchedulerOutput",
-            common_attn_metadata: Optional[CommonAttentionMetadata] = None
+        self,
+        scheduler_output: "SchedulerOutput",
+        common_attn_metadata: Optional[CommonAttentionMetadata] = None
     ) -> tuple[CommonAttentionMetadata, dict[str, Any]]:
         """Prepare encoder attention metadata for encoder-decoder models.
 
@@ -3497,7 +3499,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             common_attn_metadata, is_cross_attention)
 
         # Set encoder fields
-        common_metadata.encoder_seq_start_loc = encoder_seq_start_loc_tensor
         common_metadata.max_encoder_seq_len = self.max_encoder_len
 
         # Add cross slot mapping for cross-attention
