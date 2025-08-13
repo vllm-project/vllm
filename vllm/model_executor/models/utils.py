@@ -265,8 +265,8 @@ class AutoWeightsLoader:
                                 shard_id=shard_id,
                                 expert_id=expert_id,
                             )
-                            logger.debug("Loaded expert %d into %s", shard_id,
-                                         prefix)
+                            logger.debug("Loaded %s for expert %d into %s",
+                                         param_name, expert_id, prefix)
                             yield weight_name
 
                 yield from self._load_module(prefix,
