@@ -68,8 +68,9 @@ class HarmonyContext(ConversationContext):
         self.parser = get_streamable_parser_for_assistant()
         self.num_init_messages = len(messages)
         self.num_prompt_tokens = 0
-        self.num_cached_tokens = 0
         self.num_output_tokens = 0
+        # TODO(woosuk): Implement the following fields.
+        self.num_cached_tokens = 0
         self.num_reasoning_tokens = 0
 
     def _update_prompt_tokens(self, output: RequestOutput):
