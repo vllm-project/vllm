@@ -15,6 +15,7 @@ from vllm.model_executor.parameter import (GroupQuantScaleParameter,
 from vllm.platforms import current_platform
 
 try:
+    from aiter.ops.shuffle import shuffle_weight
     from aiter.ops.triton.gemm_afp4wfp4 import (
         gemm_afp4wfp4, gemm_afp4wfp4_preshuffled_scales)
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
@@ -33,7 +34,7 @@ try:
         out_dtype: Optional[torch.dtype] = torch.bfloat16,
     ) -> torch.Tensor:
         M = x.shape[0]
-        if envs.VLLM_TRITON_FP4_GEMM_USE_ASM and M > 128:
+        if envs.VLLM_TRITON_FP4_GEMM_USE_ASM:
             if x_scales is None:
                 x_q, x_s = dynamic_mxfp4_quant_asm(x, shuffle=True)
             else:
@@ -44,49 +45,27 @@ try:
                             weight.shape[0],
                             device=x_q.device,
                             dtype=out_dtype)
-            #asm_bias = torch.empty_like(y)
+
             gemm_a4w4(x_q,
                       weight,
                       x_s,
                       weight_scale.view(x_s.dtype),
                       y,
-                      y,
-                      bpreshuffle=False)
-
+                      bpreshuffle=True)
             return y[:M]
-        elif envs.VLLM_TRITON_FP4_GEMM_USE_ASM:
+        else:
             if x_scales is None:
-                x_q, x_s = dynamic_mxfp4_quant_asm(x, shuffle=(M >= 32))
-                x_s = x_s.view(torch.uint8)
+                x_q, x_s = dynamic_mxfp4_quant(x)
             else:
                 x_q = x
                 x_s = x_scales
-            if M >= 32:
-                sm, sn = x_s.shape
-                x_s = x_s.view(sm // 32, sn * 32)
             y = torch.empty(x_q.shape[0],
                             weight.shape[0],
                             device=x_q.device,
                             dtype=out_dtype)
 
-            smw, snw = weight_scale.shape
-            gemm_afp4wfp4_preshuffled_scales(
-                x_q, weight, x_s, weight_scale.view(smw // 32, snw * 32),
-                out_dtype, y)
+            gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y)
             return y
-        if x_scales is None:
-            x_q, x_s = dynamic_mxfp4_quant(x)
-        else:
-            x_q = x
-            x_s = x_scales
-        y = torch.empty(x_q.shape[0],
-                        weight.shape[0],
-                        device=x_q.device,
-                        dtype=out_dtype)
-
-        gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y)
-
-        return y
 
     def gemm_with_dynamic_quant_fake(
         x: torch.Tensor,
@@ -178,6 +157,7 @@ class QuarkW4A4MXFP4(QuarkScheme):
             torch.cuda.empty_cache()
         else:
             if envs.VLLM_TRITON_FP4_GEMM_USE_ASM:
+                # shuffle weight scale
                 weight_scale_shuffle = layer.weight_scale.data
                 sm, sn = weight_scale_shuffle.shape
                 weight_scale_shuffle = weight_scale_shuffle.view(
@@ -187,6 +167,13 @@ class QuarkW4A4MXFP4(QuarkScheme):
                 weight_scale_shuffle = weight_scale_shuffle.view(sm, sn)
                 layer.weight_scale = torch.nn.Parameter(weight_scale_shuffle,
                                                         requires_grad=False)
+
+                # shuffle weight
+                weight_shuffle = layer.weight.data
+                weight_shuffle = shuffle_weight(weight_shuffle,
+                                                layout=(16, 16))
+                layer.weight = torch.nn.Parameter(weight_shuffle,
+                                                  requires_grad=False)
             else:
                 layer.weight_scale = torch.nn.Parameter(
                     layer.weight_scale.data.T.contiguous(),
