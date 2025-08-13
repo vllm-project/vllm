@@ -203,7 +203,7 @@ def _construct_cached_request_state(req_id_suffix: int):
         prompt_token_ids=prompt_token_ids,
         sampling_params=_create_sampling_params(),
         pooling_params=None,
-        mm_inputs=[],
+        mm_kwargs=[],
         mm_positions=[],
         block_ids=([], ),
         generator=None,

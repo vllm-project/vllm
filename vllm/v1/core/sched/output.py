@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorMetadata)
     from vllm.lora.request import LoRARequest
-    from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+    from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
@@ -24,7 +24,7 @@ class NewRequestData:
 
     req_id: str
     prompt_token_ids: list[int]
-    mm_inputs: list[MultiModalKwargs]
+    mm_kwargs: list[MultiModalKwargsItem]
     mm_hashes: list[str]
     mm_positions: list[PlaceholderRange]
     sampling_params: Optional[SamplingParams]
@@ -42,7 +42,7 @@ class NewRequestData:
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
-            mm_inputs=request.mm_inputs,
+            mm_kwargs=request.mm_kwargs,
             mm_hashes=request.mm_hashes,
             mm_positions=request.mm_positions,
             sampling_params=request.sampling_params,
@@ -56,7 +56,7 @@ class NewRequestData:
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids={self.prompt_token_ids},"
-                f"mm_inputs={self.mm_inputs},"
+                f"mm_kwargs={self.mm_kwargs},"
                 f"mm_hashes={self.mm_hashes},"
                 f"mm_positions={self.mm_positions},"
                 f"sampling_params={self.sampling_params},"
@@ -70,7 +70,7 @@ class NewRequestData:
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids_len={len(self.prompt_token_ids)},"
-                f"mm_inputs={self.mm_inputs},"
+                f"mm_kwargs={self.mm_kwargs},"
                 f"mm_hashes={self.mm_hashes},"
                 f"mm_positions={self.mm_positions},"
                 f"sampling_params={self.sampling_params},"

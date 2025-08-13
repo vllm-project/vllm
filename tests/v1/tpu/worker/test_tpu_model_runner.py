@@ -64,7 +64,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
-                mm_inputs=[],
+                mm_kwargs=[],
                 mm_hashes=[],
                 mm_positions=[],
                 sampling_params=SamplingParams(),
