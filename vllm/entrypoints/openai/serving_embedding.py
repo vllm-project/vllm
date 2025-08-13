@@ -158,13 +158,7 @@ class EmbeddingMixin(OpenAIServing):
 
     def _should_use_chunked_processing(self, request) -> bool:
         """Check if chunked processing should be used for this request."""
-        if not isinstance(request,
-                          (EmbeddingChatRequest, EmbeddingCompletionRequest)):
-            return False
-
-        # For chunked processing, we always use MEAN aggregation
-        # for cross-chunk aggregation (native pooling is used within each chunk)
-        return self.supports_chunked_processing
+        return isinstance(request, EmbeddingRequest) and self.supports_chunked_processing
 
     async def _process_chunked_request(
         self,
