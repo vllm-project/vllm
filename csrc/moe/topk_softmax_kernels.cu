@@ -453,7 +453,7 @@ void topkGatingSoftmaxKernelLauncher(
     static constexpr int WARPS_PER_TB = 4;
     auto warpSize = WARP_SIZE;
     static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
-    static constexpr int BYTES_PER_LDG_MULTIPLE_64 = 8;
+    [[maybe_unused]] static constexpr int BYTES_PER_LDG_MULTIPLE_64 = 8;
     switch (num_experts) {
         case 1:
             LAUNCH_SOFTMAX(1, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
