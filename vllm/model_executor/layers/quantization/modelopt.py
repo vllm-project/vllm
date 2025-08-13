@@ -462,7 +462,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 "EPLB not supported for `ModelOptFp8MoEMethod` yet.")
 
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
-            assert activation == 'silu'
+            assert activation == 'silu', (
+                f"Expected 'silu' activation but got {activation}")
             assert not renormalize
             return apply_flashinfer_per_tensor_scale_fp8(
                 layer=layer,
@@ -490,9 +491,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         )
 
         if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert self.fused_experts is not None
+            assert self.fused_experts is not None, (
+                "Expected self.fused_experts to be initialized")
             assert not renormalize
-            assert activation == 'silu'
+            assert activation == 'silu', (
+                f"Expected 'silu' activation but got {activation}")
             return flashinfer_fp8_cutlass_moe_forward(
                 self.fused_experts,
                 layer,
