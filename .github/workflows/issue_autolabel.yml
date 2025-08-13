@@ -79,11 +79,13 @@ jobs:
                 ],
                 exclusions: [
                   "rocm used to build pytorch: none",
-                  "rocm used to build pytorch: 0\\.0\\.0",
+                  "rocm used to build pytorch: 0.0.0",
                   "rocm used to build pytorch: not available",
                   "ROCM Version: Could not collect",
                   "ROCM used to build PyTorch: N/A",
                   "ROCM used to build PyTorch : N/A",
+                  "ROCm: Disabled",
+                  "rocm: disabled",
                 ],
               },
             };
