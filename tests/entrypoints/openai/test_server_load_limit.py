@@ -196,5 +196,5 @@ class TestServerLoadLimit:
 
         # Should be Optional[int]
         import typing
-        expected_type = typing.Union[int, type(None)]  # Optional[int]
+        expected_type = typing.Optional[int]
         assert annotations['max_server_load'] == expected_type
