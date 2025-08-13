@@ -1527,6 +1527,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                     if self.uses_mrope:
                         self.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
+                        self.mrope_positions_cpu[:, :num_scheduled_tokens].copy_(positions_scheduled.cpu())
+                        self.mrope_positions_np[:, :num_scheduled_tokens].copy_(self.mrope_positions_cpu.numpy())
 
                         # ekhvedchenia: What request we should update?
                         for i, req_id in enumerate(self.input_batch.req_ids):
