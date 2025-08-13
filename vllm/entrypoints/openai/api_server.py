@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import Annotated, Any, Callable, Optional
+from typing import Annotated, Any, Callable, Optional, List
 
 import prometheus_client
 import pydantic
@@ -1764,17 +1764,57 @@ async def init_app_state(
     state.server_load_metrics = 0
 
 
-def create_server_socket(addr: tuple[str, int]) -> socket.socket:
-    family = socket.AF_INET
-    if is_valid_ipv6_address(addr[0]):
-        family = socket.AF_INET6
+def create_server_socket(addr: tuple[str, int]) -> List[socket.socket]:
+    """Create server socket(s) for the given address.
+    
+    When addr[0] is empty (""), creates sockets for all available addresses
+    (both IPv4 and IPv6) to support dual-stack environments.
+    Otherwise, creates a single socket for the specified address.
+    """
+    host, port = addr
+    
+    # If host is empty, bind to all available addresses
+    if not host:
+        sockets = []
+        
+        # Try to bind to IPv4 addresses
+        try:
+            sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            sock.bind(("", port))
+            sockets.append(sock)
+        except OSError as e:
+            logger.debug("Failed to bind IPv4 socket: %s", e)
+        
+        # Try to bind to IPv6 addresses
+        try:
+            sock = socket.socket(family=socket.AF_INET6, type=socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            # Enable dual-stack mode for IPv6 socket
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            sock.bind(("", port))
+            sockets.append(sock)
+        except OSError as e:
+            logger.debug("Failed to bind IPv6 socket: %s", e)
+        
+        if not sockets:
+            raise OSError("Failed to bind to any address family")
+        
+        return sockets
+    else:
+        # Bind to specific address
+        family = socket.AF_INET
+        if is_valid_ipv6_address(host):
+            family = socket.AF_INET6
 
-    sock = socket.socket(family=family, type=socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    sock.bind(addr)
+        sock = socket.socket(family=family, type=socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        sock.bind(addr)
 
-    return sock
+        return [sock]
 
 
 def create_server_unix_socket(path: str) -> socket.socket:
@@ -1815,9 +1855,10 @@ def setup_server(args):
     # see https://github.com/vllm-project/vllm/issues/8204
     if args.uds:
         sock = create_server_unix_socket(args.uds)
+        sockets = [sock]
     else:
         sock_addr = (args.host or "", args.port)
-        sock = create_server_socket(sock_addr)
+        sockets = create_server_socket(sock_addr)
 
     # workaround to avoid footguns where uvicorn drops requests with too
     # many concurrent requests active
@@ -1834,10 +1875,14 @@ def setup_server(args):
     else:
         addr, port = sock_addr
         is_ssl = args.ssl_keyfile and args.ssl_certfile
-        host_part = f"[{addr}]" if is_valid_ipv6_address(
-            addr) else addr or "0.0.0.0"
+        # When binding to all addresses (empty host), use "*" to represent all interfaces
+        if not addr:
+            host_part = "*"
+        else:
+            host_part = f"[{addr}]" if is_valid_ipv6_address(
+                addr) else addr
         listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
-    return listen_address, sock
+    return listen_address, sockets
 
 
 async def run_server(args, **uvicorn_kwargs) -> None:
@@ -1851,7 +1896,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
 
 async def run_server_worker(listen_address,
-                            sock,
+                            sockets,
                             args,
                             client_config=None,
                             **uvicorn_kwargs) -> None:
@@ -1881,7 +1926,7 @@ async def run_server_worker(listen_address,
                     listen_address)
         shutdown_task = await serve_http(
             app,
-            sock=sock,
+            sock=sockets,
             enable_ssl_refresh=args.enable_ssl_refresh,
             host=args.host,
             port=args.port,
@@ -1901,7 +1946,8 @@ async def run_server_worker(listen_address,
     try:
         await shutdown_task
     finally:
-        sock.close()
+        for sock in sockets:
+            sock.close()
 
 
 if __name__ == "__main__":
