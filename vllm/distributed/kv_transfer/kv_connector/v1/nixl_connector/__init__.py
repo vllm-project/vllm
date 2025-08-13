@@ -11,7 +11,6 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
-import msgspec
 import numpy as np
 import torch
 
@@ -20,6 +19,9 @@ from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+# centralized lazy import
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector._nixl_import import (  # noqa: E501
+    NixlWrapper)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.handshake import (  # noqa: E501
     HandshakeStrategy, HttpHandshakeStrategy, NixlAgentMetadata,
     ZmqHandshakeStrategy)
@@ -44,14 +46,6 @@ EngineId = str
 ReqId = str
 
 logger = init_logger(__name__)
-
-# Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
-try:
-    from nixl._api import nixl_agent as NixlWrapper
-    logger.info("NIXL is available")
-except ImportError:
-    logger.warning("NIXL is not available")
-    NixlWrapper = None
 
 # Supported platforms and types of kv transfer buffer.
 # {device: tuple of supported kv buffer types}
@@ -180,8 +174,7 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
         # Set handshake metadata directly
-        if hasattr(self.connector_worker, 'xfer_metadata'):
-            self._handshake_metadata = self.connector_worker.xfer_metadata
+        self._handshake_metadata = self.connector_worker.xfer_metadata
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         assert self.connector_worker is not None
@@ -543,7 +536,7 @@ class NixlConnectorWorker:
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
 
         # Initialize handshake strategy
-        handshake_method = envs.VLLM_NIXL_HANDSHAKE_METHOD.lower()
+        handshake_method = envs.VLLM_NIXL_HANDSHAKE_METHOD
         if handshake_method == "zmq":
             self._handshake_strategy: HandshakeStrategy = ZmqHandshakeStrategy(
                 self.nixl_wrapper, self.tp_rank, self.world_size,
@@ -559,8 +552,7 @@ class NixlConnectorWorker:
     def __del__(self):
         """Cleanup background threads on destruction."""
         self._handshake_initiation_executor.shutdown(wait=False)
-        if hasattr(self, '_handshake_strategy'):
-            self._handshake_strategy.cleanup()
+        self._handshake_strategy.cleanup()
 
     def _nixl_handshake(
         self,
@@ -1232,23 +1224,3 @@ class NixlConnectorWorker:
         else:
             block_len = self.block_len
         return block_len
-
-
-@contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
-    """Context manager for a ZMQ socket"""
-
-    if socket_type not in (zmq.ROUTER, zmq.REQ):
-        raise ValueError(f"Unexpected socket type: {socket_type}")
-
-    ctx: Optional[zmq.Context] = None
-    try:
-        ctx = zmq.Context()  # type: ignore[attr-defined]
-        yield make_zmq_socket(ctx=ctx,
-                              path=addr,
-                              socket_type=socket_type,
-                              bind=socket_type == zmq.ROUTER)
-    finally:
-        if ctx is not None:
-            ctx.destroy(linger=0)
-

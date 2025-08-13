@@ -35,18 +35,16 @@ class NixlSideChannelServer:
 
             if kv_meta is None:
                 return {}
+            if dp_rank is not None and not (dp_data := kv_meta.get(dp_rank)):
+                return {}
+            if tp_rank is not None and not (tp_data := dp_data.get(tp_rank)):
+                return {}
 
             if dp_rank is None:
                 return kv_meta
 
-            if not (dp_data := kv_meta.get(dp_rank)):
-                return {}
-
             if tp_rank is None:
                 return {dp_rank: dp_data}
-
-            if not (tp_data := dp_data.get(tp_rank)):
-                return {}
 
             return {dp_rank: {tp_rank: tp_data}}
 
