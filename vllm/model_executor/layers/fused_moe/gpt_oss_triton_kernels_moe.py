@@ -125,7 +125,6 @@ class BatchedOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
-        quant_config,
         max_num_tokens: int,
         num_dispatchers: int,
         quant_config: FusedMoEQuantConfig,

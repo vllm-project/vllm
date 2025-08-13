@@ -153,7 +153,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                 async_finish=False,
                                                 return_recv_hook=False)
 
-        expert_x, expert_x_scale = self._do_quant(expert_x, a1.dtype)
+        expert_x, expert_x_scale = self._do_quant(expert_x, a1.dtype, quant_config)
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None)

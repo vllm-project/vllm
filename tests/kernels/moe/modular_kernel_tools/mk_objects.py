@@ -33,6 +33,14 @@ from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
 
 @dataclass
+class TestMoEQuantConfig:
+    quant_dtype: Union[torch.dtype, str, None] = None
+    per_act_token_quant: bool = False
+    per_out_ch_quant: bool = False
+    block_shape: Optional[list[int]] = None
+
+
+@dataclass
 class PrepareFinalizeInfo:
     activation_format: mk.FusedMoEActivationFormat
     supported_dtypes: list[Union[torch.dtype, str]]
@@ -312,33 +320,33 @@ if cutlass_fp4_supported():
         supports_expert_map=False,
     )
 
-MK_QUANT_CONFIGS = [
+MK_QUANT_CONFIGS: list[Optional[TestMoEQuantConfig]] = [
     None,
     # per-channel / per-column weights and per-tensor activations
-    FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
-                        per_out_ch_quant=True,
-                        per_act_token_quant=False,
-                        block_shape=None),
+    TestMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                       per_act_token_quant=False,
+                       per_out_ch_quant=True,
+                       block_shape=None),
     # per-channel / per-column weights and per-token activations
-    FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
-                        per_out_ch_quant=True,
-                        per_act_token_quant=True,
-                        block_shape=None),
+    TestMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                       per_act_token_quant=True,
+                       per_out_ch_quant=True,
+                       block_shape=None),
     # per-tensor weights and per-tensor activations
-    FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
-                        per_out_ch_quant=False,
-                        per_act_token_quant=False,
-                        block_shape=None),
+    TestMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                       per_act_token_quant=False,
+                       per_out_ch_quant=False,
+                       block_shape=None),
     # per-tensor weights and per-token activations
-    FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
-                        per_out_ch_quant=False,
-                        per_act_token_quant=True,
-                        block_shape=None),
+    TestMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                       per_act_token_quant=True,
+                       per_out_ch_quant=False,
+                       block_shape=None),
     # block-quantized weights and 128 block per-token activations
-    FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
-                        per_out_ch_quant=False,
-                        per_act_token_quant=False,
-                        block_shape=[128, 128]),
+    TestMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                       per_act_token_quant=False,
+                       per_out_ch_quant=False,
+                       block_shape=[128, 128]),
     # TODO (varun) : Should we test the following combinations ?
     # block-quantized weights and per-token activations
     # block-quantized weights and per-tensor activations
@@ -346,33 +354,26 @@ MK_QUANT_CONFIGS = [
 
 if cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe():
     MK_QUANT_CONFIGS += [
-        FusedMoEQuantConfig(quant_dtype="nvfp4",
-                            per_out_ch_quant=False,
-                            per_act_token_quant=False,
-                            block_shape=None),
+        TestMoEQuantConfig(quant_dtype="nvfp4",
+                           per_act_token_quant=False,
+                           per_out_ch_quant=False,
+                           block_shape=None),
     ]
-
-
-def _make_gscale(num_experts: int) -> torch.Tensor:
-    return torch.ones((num_experts, ),
-                      device=torch.cuda.current_device(),
-                      dtype=torch.float32)
 
 
 def make_prepare_finalize(
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
     backend: Optional[str],
     moe: FusedMoEConfig,
+    quant_config: FusedMoEQuantConfig,
 ) -> mk.FusedMoEPrepareAndFinalize:
     if backend != "naive" and backend is not None:
-        prepare_finalize = FusedMoEMethodBase._maybe_make_prepare_finalize(moe)
+        prepare_finalize = FusedMoEMethodBase._maybe_make_prepare_finalize(moe, quant_config)
         assert prepare_finalize is not None
         return prepare_finalize
     elif prepare_finalize_type == FlashInferCutlassMoEPrepareAndFinalize:
         return FlashInferCutlassMoEPrepareAndFinalize(
-            use_dp=moe.moe_parallel_config.dp_size > 1,
-            a1_gscale=_make_gscale(moe.num_local_experts),
-        )
+            use_dp=moe.moe_parallel_config.dp_size > 1)
     else:
         return MoEPrepareAndFinalizeNoEP()
 
@@ -386,31 +387,21 @@ def _slice(rank: int, num_local_experts: int, t: torch.Tensor) -> torch.Tensor:
 def make_fused_experts(
     fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
     moe: FusedMoEConfig,
+    quant_config: FusedMoEQuantConfig,
     num_dispatchers: int,
-    w1_gs: Optional[torch.Tensor],
-    w2_gs: Optional[torch.Tensor],
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
 
-    use_fp8 = moe.quant_dtype == torch.float8_e4m3fn
     batch_kwargs = {
         "max_num_tokens": moe.max_num_tokens,
         "num_dispatchers": num_dispatchers,
     }
     quant_kwargs = {
-        "use_fp8_w8a8": use_fp8,
-        "use_int8_w8a8": False,
-        "use_int8_w8a16": False,
-        "use_int4_w4a16": False,
-        "block_shape": moe.block_shape,
-        "per_act_token_quant": moe.per_act_token_quant,
+        "quant_config": quant_config,
     }
     deepgemm_kwargs = {"allow_deep_gemm": has_deep_gemm()}
 
     if fused_experts_type == BatchedDeepGemmExperts:
-        kwargs = batch_kwargs | {
-            "block_shape": moe.block_shape,
-            "per_act_token_quant": moe.per_act_token_quant,
-        }
+        kwargs = batch_kwargs | quant_kwargs
         print(f"Making BatchedDeepGemmExperts {kwargs} ...")
         experts = BatchedDeepGemmExperts(**kwargs)
     elif fused_experts_type == BatchedTritonExperts:
@@ -423,7 +414,7 @@ def make_fused_experts(
         experts = BatchedTritonOrDeepGemmExperts(**kwargs)
     elif fused_experts_type == DeepGemmExperts:
         print("Making DeepGemmExperts () ...")
-        experts = DeepGemmExperts()
+        experts = DeepGemmExperts(quant_config)
     elif fused_experts_type == TritonExperts:
         kwargs = quant_kwargs
         print(f"Making TritonExperts {kwargs} ...")
@@ -439,9 +430,7 @@ def make_fused_experts(
     elif fused_experts_type == CutlassExpertsFp8:
         kwargs = {
             "out_dtype": moe.in_dtype,
-            "per_act_token_quant": moe.per_act_token_quant,
-            "per_out_ch_quant": moe.per_out_ch_quant,
-            "block_shape": moe.block_shape,
+            "quant_config": quant_config,
         }
         print(f"Making CutlassExpertsFp8 {kwargs} ...")
         experts = CutlassExpertsFp8(**kwargs)
@@ -450,45 +439,30 @@ def make_fused_experts(
             "max_experts_per_worker": moe.num_local_experts,
             "num_dispatchers": num_dispatchers,
             "out_dtype": moe.in_dtype,
-            "per_act_token_quant": moe.per_act_token_quant,
-            "per_out_ch_quant": moe.per_out_ch_quant,
-            "block_shape": moe.block_shape,
+            "quant_config": quant_config,
         }
         print(f"Making CutlassBatchedExpertsFp8 {kwargs} ...")
         experts = CutlassBatchedExpertsFp8(**kwargs)
     elif fused_experts_type == CutlassExpertsFp4:
-        assert w1_gs is not None and w2_gs is not None
         num_experts = moe.num_local_experts
         rank = moe.moe_parallel_config.dp_rank
         kwargs = {
-            "g1_alphas": _slice(rank, num_experts, (1 / w1_gs)),
-            "g2_alphas": _slice(rank, num_experts, (1 / w2_gs)),
-            "a1_gscale": _make_gscale(num_experts),
-            "a2_gscale": _make_gscale(num_experts),
             "max_experts_per_worker": num_experts,
-            "out_dtype": moe.in_dtype,
-            "per_act_token_quant": moe.per_act_token_quant,
-            "per_out_ch_quant": moe.per_out_ch_quant,
-            "block_shape": moe.block_shape,
             "num_dispatchers": num_dispatchers,
+            "out_dtype": moe.in_dtype,
+            "quant_config": quant_config,
         }
         print(f"Making CutlassExpertsFp4 {kwargs} ...")
         experts = CutlassExpertsFp4(**kwargs)
     elif fused_experts_type == FlashInferExperts:
-        assert w1_gs is not None and w2_gs is not None
         num_experts = moe.num_local_experts
-        rank = moe.moe_parallel_config.dp_rank
         kwargs = {
-            "g1_alphas": _slice(rank, num_experts, (1 / w1_gs)),
-            "g2_alphas": _slice(rank, num_experts, (1 / w2_gs)),
-            "a1_gscale": _make_gscale(num_experts),
-            "a2_gscale": _make_gscale(num_experts),
             "out_dtype": moe.in_dtype,
-            "quant_dtype": "nvfp4",
             "ep_rank": moe.ep_rank,
             "ep_size": moe.ep_size,
             "tp_rank": moe.tp_rank,
             "tp_size": moe.tp_size,
+            "quant_config": quant_config,
         }
         print(f"Making FlashInferExperts {kwargs} ...")
         experts = FlashInferExperts(**kwargs)
