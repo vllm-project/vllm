@@ -96,7 +96,7 @@ class Executor(ExecutorBase):
         raise NotImplementedError
 
     def get_kv_connector_handshake_metadata(
-            self) -> list[Optional[dict[int, dict[int, dict]]]]:
+            self) -> list[dict[int, dict[int, dict]]]:
         output = self.collective_rpc("get_kv_connector_handshake_metadata")
         return output
 

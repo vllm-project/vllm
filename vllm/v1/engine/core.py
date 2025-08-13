@@ -629,9 +629,8 @@ class EngineCoreProc(EngineCore):
                 "dp_stats_address": dp_stats_address,
             }
 
-            # Include KV connector metadata if available
-            if hasattr(self, 'xfer_handshake_metadata'
-                       ) and self.xfer_handshake_metadata:
+            if (self.xfer_handshake_metadata is not None
+                    and len(self.xfer_handshake_metadata) > 0):
                 # self.xfer_handshake_metadata is list of dicts from workers
                 # Each dict already has structure {dp_rank: {tp_rank: metadata}}
                 # Merge all worker dicts into a single dict

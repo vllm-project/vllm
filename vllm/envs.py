@@ -1131,7 +1131,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # NIXL handshake method ("zmq" or "http")
     "VLLM_NIXL_HANDSHAKE_METHOD":
-    lambda: os.getenv("VLLM_NIXL_HANDSHAKE_METHOD", "zmq"),
+    lambda: os.getenv("VLLM_NIXL_HANDSHAKE_METHOD", "zmq").lower(),
 
     # all2all backend for vllm's expert parallel communication
     # Available options:

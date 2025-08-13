@@ -8,7 +8,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import msgspec
 import zmq
@@ -17,6 +17,8 @@ from vllm import envs
 from vllm.connections import HTTPConnection
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector._nixl_import import (  # noqa: E501
+    NixlWrapper)
 from vllm.logger import init_logger
 from vllm.utils import build_uri, make_zmq_path, make_zmq_socket
 
@@ -191,9 +193,9 @@ class HttpHandshakeStrategy(HandshakeStrategy):
     North-South, not P2P.
     """
 
-    def __init__(self, nixl_wrapper, tp_rank: int, tp_size: int,
+    def __init__(self, nixl_wrapper: NixlWrapper, tp_rank: int, tp_size: int,
                  side_channel_port: int, engine_id: str,
-                 add_remote_agent_func):
+                 add_remote_agent_func: Callable):
         super().__init__(nixl_wrapper, tp_rank, tp_size, side_channel_port,
                          engine_id)
         self.add_remote_agent_func = add_remote_agent_func
@@ -206,20 +208,11 @@ class HttpHandshakeStrategy(HandshakeStrategy):
 
         url = build_uri("http", host, port, path="get_kv_connector_metadata")
 
-        try:
-            http_client = HTTPConnection()
-            response = http_client.get_response(
-                url, timeout=envs.VLLM_NIXL_HANDSHAKE_TIMEOUT)
-            response.raise_for_status()
-            res = response.json()
-        except Exception as e:
-            logger.error("Failed to fetch metadata from %s: %s", url, e)
-            raise
-
-        if res is None:
-            logger.warning(
-                "Remote server returned None metadata, skipping handshake")
-            raise RuntimeError("Remote server returned None metadata")
+        http_client = HTTPConnection()
+        response = http_client.get_response(
+            url, timeout=envs.VLLM_NIXL_HANDSHAKE_TIMEOUT)
+        response.raise_for_status()
+        res = response.json()
 
         # Get dp_rank 0 data (standard for disaggregated prefill-decode)
         dp_data = res.get("0", {})
@@ -228,8 +221,7 @@ class HttpHandshakeStrategy(HandshakeStrategy):
 
         remote_tp_size = len(dp_data.keys())
 
-        # Handshake only with the remote TP rank that current local rank will
-        # pull from. With homogeneous TP it happens to be the same rank_i.
+        # Handshake once per DP rank, get metadata for remote rank_i
         tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
         p_remote_rank = self.tp_rank // tp_ratio
 

@@ -5,7 +5,7 @@ import asyncio
 from typing import Any, Optional
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -34,19 +34,25 @@ class NixlSideChannelServer:
             kv_meta = self.vllm_config.parallel_config.xfer_handshake_metadata
 
             if kv_meta is None:
-                return {}
+                raise HTTPException(
+                    status_code=404,
+                    detail="KV connector handshake metadata is not available")
+            if dp_rank is not None and not (dp_data := kv_meta.get(dp_rank)):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Data parallel rank {dp_rank} not found")
+            if tp_rank is not None and dp_data is not None and not (
+                    tp_data := dp_data.get(tp_rank)):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Tensor parallel rank {tp_rank} not found for data \
+                        parallel rank {dp_rank}")
 
             if dp_rank is None:
                 return kv_meta
 
-            if not (dp_data := kv_meta.get(dp_rank)):
-                return {}
-
             if tp_rank is None:
                 return {dp_rank: dp_data}
-
-            if not (tp_data := dp_data.get(tp_rank)):
-                return {}
 
             return {dp_rank: {tp_rank: tp_data}}
 
