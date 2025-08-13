@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from
 # https://github.com/vllm/vllm/entrypoints/openai/serving_chat.py
 
