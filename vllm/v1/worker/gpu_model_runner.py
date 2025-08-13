@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import dataclasses, inspect
+import dataclasses
 import gc
 import time
 from contextlib import contextmanager
@@ -328,9 +328,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.cache_config.kv_sharing_fast_prefill:
             self.kv_sharing_fast_prefill_logits_indices = torch.zeros(
                 self.max_num_tokens, dtype=torch.int32, device=self.device)
-            
-        # DIEGO: to avoid printing all the stack of calls every single time
-        self.print_stack_calls = True
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -2578,13 +2575,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # This usually takes 5~20 seconds.
         logger.info("Graph capturing finished in %.3f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
-        
-        # DIEGO: print all the stack of calls just the first time
-        # if self.print_stack_calls == True:
-        #     self.print_stack_calls = False
-        #     for frame_info in inspect.stack():
-        #         logger.info(f"DIEGO: File: {frame_info.filename}, Line: {frame_info.lineno}, Function: {frame_info.function}")
-
 
     def _initialize_single_attn_backend(
         self, kv_cache_spec: KVCacheSpec, layer_names: list[str]

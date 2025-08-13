@@ -4,7 +4,6 @@
 import copy
 import gc
 import os
-import time
 from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -67,7 +66,7 @@ class Worker(WorkerBase):
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
         # executed cuda graph
-        self._token_compiled_cudagraphs: set[int] = set()
+        self._token_compiled_cudagraphs: set[int] = set(self.compilation_config.cudagraph_capture_sizes)
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
@@ -359,58 +358,31 @@ class Worker(WorkerBase):
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
 
-        # logger.info("DIEGO: Executing the model")
-        # Adding capture model in execution time
-        # if scheduler_output.total_num_scheduled_tokens not in self._token_compiled_cudagraphs:
-        #     logger.info("DIEGO: CUDAgraph in execution time for %d input tokens", scheduler_output.total_num_scheduled_tokens)
-        #     self._token_compiled_cudagraphs.add(scheduler_output.total_num_scheduled_tokens)
-        #     self.model_runner.capture_model(scheduler_output.total_num_scheduled_tokens)
 
-        def compile_cuda_graph(input_size: int):
-            gc.freeze()
-            start_time = time.perf_counter()
-            self.model_runner._dummy_run(input_size,
-                                         capture_attn_cudagraph=False,
-                                         skip_eplb=True)
-            end_time = time.perf_counter()
-            gc.unfreeze()
-            elapsed_time = end_time - start_time
-            logger.info("Graph capturing finished in %.3f secs", elapsed_time)
+        # Initialize next_comp variable to None
+        next_capture = None
 
-        # # ATTENTION: This code is duplicated in compile_or_warm_up_model method
-        # # so we should clean this part before creating the vllm PR
-        # # warm up sizes that are not in cudagraph capture sizes,
-        # # but users still want to compile for better performance,
-        # # e.g. for the max-num-batched token size in chunked prefill.
-        # warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
-        # logger.info("Warm up sizes %s", str(warmup_sizes))
-        # if not self.model_config.enforce_eager:
-        #     warmup_sizes = [
-        #         x for x in warmup_sizes if x not in
-        #         self.vllm_config.compilation_config.cudagraph_capture_sizes
-        #     ]
-
-        # warmup_sizes_set = set(warmup_sizes)
-        
-        self.cudagraph_batch_sizes_set = set(
-            reversed(self.compilation_config.cudagraph_capture_sizes))
-        # Just compilation with dummy run
-        if scheduler_output.total_num_scheduled_tokens not in self._token_compiled_cudagraphs and scheduler_output.total_num_scheduled_tokens in self.cudagraph_batch_sizes_set and scheduler_output.total_num_scheduled_tokens != 0:
+        # Check if the scheduled token count is in our compiled CUDAgraphs list
+        if scheduler_output.total_num_scheduled_tokens in self._token_compiled_cudagraphs:
+            # If it is, update next_comp and remove the entry from _token_compiled_cudagraphs
+            next_capture = scheduler_output.total_num_scheduled_tokens
+            self._token_compiled_cudagraphs.discard(
+                scheduler_output.total_num_scheduled_tokens)
             logger.info(
                 "LAZY DIEGO: CUDAgraph in execution time for %d input tokens",
-                scheduler_output.total_num_scheduled_tokens)
-            self._token_compiled_cudagraphs.add(
-                scheduler_output.total_num_scheduled_tokens)
-            compile_cuda_graph(scheduler_output.total_num_scheduled_tokens)
-        else:
-            next_comp_set = self.cudagraph_batch_sizes_set.difference(self._token_compiled_cudagraphs)
-            if len(next_comp_set) != 0:
-                next_comp = list(next_comp_set)
-                self._token_compiled_cudagraphs.add(next_comp[0])
-                logger.info(
-                    "DELAYED DIEGO: CUDAgraph in execution time for %d input tokens",
-                    next_comp[0])
-                compile_cuda_graph(next_comp[0])
+                next_capture)
+
+        # Check if there are any entries left in _token_compiled_cudagraphs
+        elif len(self._token_compiled_cudagraphs) > 0:
+            # If so, update next_comp to the first item and remove it from the list
+            next_capture = self._token_compiled_cudagraphs.pop()
+            logger.info(
+                "DELAYED DIEGO: CUDAgraph in execution time for %d input tokens",
+                next_capture)
+
+        # If we have a value for next_comp, call the model_runner to capture the model
+        if next_capture:
+            self.model_runner.capture_model(next_capture)
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
