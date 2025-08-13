@@ -108,6 +108,15 @@ class WorkerLoRAManager(AbstractWorkerManager):
             # loading weights, throwing an exception if validation fails.
             peft_helper.validate_legal(self.lora_config)
 
+            # Warn if max_lora_rank is larger than actual rank
+            if peft_helper.r < self.lora_config.max_lora_rank:
+                logger.warning(
+                    "max_lora_rank (%d) is larger than LoRA rank (%d). "
+                    "This may increase memory usage and impact performance. "
+                    "Consider setting --max-lora-rank %d.",
+                    self.lora_config.max_lora_rank, peft_helper.r,
+                    peft_helper.r)
+
             # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
             # to ensure correct loading of lora weights.
             model = self._adapter_manager.model
