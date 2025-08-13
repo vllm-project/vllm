@@ -1940,7 +1940,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             spec_token_ids = draft_token_ids.tolist()
 
-            if self.supports_qlen_padding:
+            if spec_decode_metadata is not None and self.supports_qlen_padding:
                 sampled_token_ids = self.get_valid_sampled_token_ids(
                     sampled_token_ids, discard_sampled_tokens_req_indices)
 

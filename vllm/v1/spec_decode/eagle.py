@@ -18,9 +18,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.utils import is_pin_memory_available
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
-                                                  TreeAttentionMetadataBuilder)
+from vllm.v1.attention.backends.tree_attn import TreeAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -206,6 +204,7 @@ class EagleProposer:
             )
             if self.method == "deepseek_mtp":
                 last_hidden_states = ret_hidden_states
+                hidden_states = ret_hidden_states
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
@@ -232,16 +231,6 @@ class EagleProposer:
 
         draft_token_ids = logits.argmax(dim=-1)
 
-        # TODO: Currently, MTP module released by deepseek only has
-        # one layer. Adapt this code to support multiple layers once
-        # there's a multi-layer MTP module.
-
-        # Currently, only FlashAttention and TreeAttention support multi-token
-        # eagle spec decode. This is because the code below
-        # makes assumptions about attn_metadata attributes available.
-        assert isinstance(attn_metadata,
-                          (FlashAttentionMetadata, TreeAttentionMetadata))
-
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
@@ -250,9 +239,12 @@ class EagleProposer:
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
         else:
             input_batch_size = batch_size
-        attn_metadata.num_actual_tokens = batch_size
-        attn_metadata.max_query_len = 1
-        attn_metadata.query_start_loc = self.arange[:batch_size + 1]
+
+        common_attn_metadata.num_actual_tokens = batch_size
+        common_attn_metadata.max_query_len = 1
+        common_attn_metadata.query_start_loc = self.arange[:batch_size + 1]
+        common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
+            self.token_arange_np[:batch_size + 1]).clone()
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
@@ -273,27 +265,37 @@ class EagleProposer:
                                             positions)
 
             # Increment the sequence lengths.
-            attn_metadata.max_seq_len += 1
-            attn_metadata.seq_lens += 1
-            # Consider max model length.
-            attn_metadata.max_seq_len = min(attn_metadata.max_seq_len,
-                                            self.max_model_len)
+            common_attn_metadata.seq_lens += 1
+            common_attn_metadata.seq_lens_cpu += 1
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
-            attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
+            common_attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len,
+                                                       1)
+
+            common_attn_metadata.num_computed_tokens_cpu = \
+                common_attn_metadata.seq_lens_cpu - 1
 
             # Compute the slot mapping.
-            block_numbers = clamped_positions // self.block_size
-            block_ids = attn_metadata.block_table.gather(
+            block_numbers = positions // self.block_size
+            block_ids = common_attn_metadata.block_table_tensor.gather(
                 dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
-            attn_metadata.slot_mapping = (block_ids * self.block_size +
-                                          clamped_positions % self.block_size)
+            common_attn_metadata.slot_mapping = (block_ids * self.block_size +
+                                                 positions % self.block_size)
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with the
             # padding tokens.
-            attn_metadata.slot_mapping.masked_fill_(exceeds_max_model_len,
-                                                    PADDING_SLOT_ID)
+            common_attn_metadata.slot_mapping.masked_fill_(
+                exceeds_max_model_len, PADDING_SLOT_ID)
+
+            # Rebuild attention metadata
+            attn_metadata = self.runner.attn_metadata_builders[
+                0].build_for_drafting(
+                    common_attn_metadata=common_attn_metadata,
+                    draft_index=token_index + 1,
+                )
+            for layer_name in self.attn_layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
 
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
@@ -312,12 +314,17 @@ class EagleProposer:
             with set_forward_context(per_layer_attn_metadata,
                                      self.vllm_config,
                                      num_tokens=input_batch_size):
-                last_hidden_states, hidden_states = self.model(
+                ret_hidden_states = self.model(
                     input_ids=input_ids,
                     positions=self.positions[:input_batch_size],
                     hidden_states=self.hidden_states[:input_batch_size],
                     inputs_embeds=inputs_embeds,
                 )
+                if self.method == "deepseek_mtp":
+                    last_hidden_states = ret_hidden_states
+                    hidden_states = ret_hidden_states
+                else:
+                    last_hidden_states, hidden_states = ret_hidden_states
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
