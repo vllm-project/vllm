@@ -120,8 +120,8 @@ def requantize_with_max_scale(
     if unfused_module_in_checkpoint:
         start = 0
         for idx, logical_width in enumerate(logical_widths):
-            # For decoupled Q/KV in QKVCrossParallelLinear, skip Q component.
-            if idx == 0 and logical_width == 0:
+            # Skip any component with zero width.
+            if logical_width == 0:
                 continue
             end = start + logical_width
             weight_dq = per_tensor_dequantize(weight[start:end, :],
