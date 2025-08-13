@@ -111,7 +111,7 @@ class LLM:
             values will increase the KV cache size and thus improve the model's
             throughput. However, if the value is too high, it may cause out-of-
             memory (OOM) errors.
-        kv_cache_memory: Size of KV Cache per GPU (in GiB). By default, this is
+        kv_cache_memory: Size of KV Cache per GPU in bytes. By default, this is
             set to None and vllm can automatically infer the kv cache size based
             on gpu_memory_utilization. However, pro users may want to manually
             specify the kv cache memory size. Note that this config would not
@@ -192,7 +192,6 @@ class LLM:
         tokenizer_revision: Optional[str] = None,
         seed: Optional[int] = None,
         gpu_memory_utilization: float = 0.9,
-        kv_cache_memory: Optional[float] = None,
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
         enforce_eager: bool = False,
@@ -203,6 +202,7 @@ class LLM:
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         override_pooler_config: Optional[PoolerConfig] = None,
+        kv_cache_memory: Optional[int] = None,
         compilation_config: Optional[Union[int, dict[str, Any],
                                            CompilationConfig]] = None,
         logits_processors: Optional[list[Union[str,

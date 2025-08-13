@@ -321,7 +321,7 @@ class EngineArgs:
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
-    kv_cache_memory: Optional[float] = CacheConfig.kv_cache_memory
+    kv_cache_memory: Optional[int] = CacheConfig.kv_cache_memory
     max_num_batched_tokens: Optional[
         int] = SchedulerConfig.max_num_batched_tokens
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills

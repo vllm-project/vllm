@@ -119,10 +119,10 @@ class CacheConfig:
     necessary for implementating this optimization in some models (e.g. Gemma3n)
     """
 
-    kv_cache_memory: Optional[float] = None
-    """Size of KV Cache per GPU (in GiB). By default, this is set to None
+    kv_cache_memory: Optional[int] = None
+    """Size of KV Cache per GPU in bytes. By default, this is set to None
     and vllm can automatically infer the kv cache size based on
-    gpu_memory_utilization. However, pro users may want to manually specify
+    gpu_memory_utilization. However, users may want to manually specify
     the kv cache memory size. Note that this config would not respect
     gpu_memory_utilization."""
 

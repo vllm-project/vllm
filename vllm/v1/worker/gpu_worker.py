@@ -237,14 +237,15 @@ class Worker(WorkerBase):
         GiB = lambda b: b / GiB_bytes
 
         if kv_cache_memory := self.cache_config.kv_cache_memory:
-            msg = (f"(Reserved {kv_cache_memory:.2f}GiB memory for KV Cache "
-                   "as specified by kv_cache_memory config and skipped "
-                   "memory profiling. This does does not respect the "
-                   "gpu_memory_utilization config. Only use kv_cache_memory "
-                   "config when you want manual control of KV cache memory "
-                   "size.")
+            msg = (
+                f"(Reserved {GiB(kv_cache_memory):.2f}GiB memory for KV Cache "
+                "as specified by kv_cache_memory config and skipped "
+                "memory profiling. This does does not respect the "
+                "gpu_memory_utilization config. Only use kv_cache_memory "
+                "config when you want manual control of KV cache memory "
+                "size.")
             logger.debug(msg)
-            return int(kv_cache_memory * GiB_bytes)
+            return kv_cache_memory
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.

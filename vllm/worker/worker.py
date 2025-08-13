@@ -234,14 +234,14 @@ class Worker(LocalOrDistributedWorkerBase):
     def determine_available_kv_cache_memory(self,
                                             total_gpu_memory: int) -> float:
         if kv_cache_memory := self.cache_config.kv_cache_memory:
-            msg = (f"(Reserved {kv_cache_memory:.2f}GiB memory for KV Cache "
-                   "as specified by kv_cache_memory config and skipped "
-                   "memory profiling. This does does not respect the "
-                   "gpu_memory_utilization config. Only use kv_cache_memory "
-                   "config when you want manual control of KV cache memory "
-                   "size.")
+            msg = (f"(Reserved {(kv_cache_memory/GiB_bytes):.2f}GiB memory "
+                   f"for KV Cache as specified by kv_cache_memory config "
+                   f"and skipped memory profiling. This does does not "
+                   f"respect the gpu_memory_utilization config. Only use "
+                   f"kv_cache_memory config when you want manual control "
+                   f"of KV cache memory size.")
             logger.info(msg)
-            return self.cache_config.kv_cache_memory * GiB_bytes
+            return self.cache_config.kv_cache_memory
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
