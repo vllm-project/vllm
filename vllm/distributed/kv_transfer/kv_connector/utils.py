@@ -6,7 +6,7 @@ KV cache helper for store.
 from collections import defaultdict
 from collections.abc import Sequence
 from concurrent.futures import CancelledError, Future
-from typing import Optional, cast
+from typing import TYPE_CHECKING, Optional, cast
 
 import torch
 
@@ -15,11 +15,14 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorType
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVTransferStats)
 from vllm.logger import init_logger
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorType)
 
 logger = init_logger(__name__)
 
@@ -145,7 +148,8 @@ class KVOutputAggregator:
 
         finished_sending = set[str]()
         finished_recving = set[str]()
-        aggregated_kv_transfer_stats = dict[KVConnectorType, KVTransferStats]()
+        aggregated_kv_transfer_stats = dict["KVConnectorType",
+                                            KVTransferStats]()
         for model_runner_output in outputs:
             output = model_runner_output.kv_connector_output
             if not output:
