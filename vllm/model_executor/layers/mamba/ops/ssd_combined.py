@@ -46,7 +46,7 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    mamba_ssm_cache_dtype=None,
                                    out=None):
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
-                                   
+
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
     assert nheads % ngroups == 0
