@@ -978,9 +978,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Split concatenated embeddings for each image item.
         # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
         merge_size = self.visual.spatial_merge_size
-        sizes = (
-            torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
-            merge_size // merge_size).tolist()
+        sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
+                 (merge_size * merge_size)).tolist()
 
         return image_embeds.split(sizes)
 
@@ -1002,9 +1001,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
         # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
-        sizes = (
-            torch.prod(torch.tensor(grid_thw_list, dtype=torch.long), -1) //
-            merge_size // merge_size).tolist()
+        sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
+                 (merge_size * merge_size)).tolist()
 
         return video_embeds.split(sizes)
 
