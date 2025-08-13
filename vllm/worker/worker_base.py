@@ -521,6 +521,9 @@ class WorkerWrapperBase:
                 init_cached_hf_modules()
 
     def __del__(self):
+        self.shutdown()
+
+    def shutdown(self) -> None:
         ensure_kv_transfer_shutdown()
 
     def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
