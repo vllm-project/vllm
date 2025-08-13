@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Optional
 
 import torch
 
@@ -26,7 +26,9 @@ class Mamba1AttentionMetadata:
     query_start_loc: torch.Tensor
     context_lens_tensor: torch.Tensor
     state_indices_tensor: torch.Tensor
-    has_initial_states: torch.Tensor
+    # has_initial_states_p only contain prefill requests and will be None if
+    # the batch has no prefill request.
+    has_initial_states_p: Optional[torch.Tensor]
     num_prefills: int
     num_prefill_tokens: int
     num_decodes: int
@@ -66,15 +68,15 @@ class Mamba1AttentionMetadataBuilder(
             split_decodes_and_prefills(common_attn_metadata,
                                        decode_threshold=1))
 
-        has_initial_states = None
+        has_initial_states_p = None
 
         if num_prefills > 0:
-            has_initial_states = context_lens_tensor > 0
+            has_initial_states_p = context_lens_tensor > 0
 
         return Mamba1AttentionMetadata(
             query_start_loc=query_start_loc,
             context_lens_tensor=context_lens_tensor,
-            has_initial_states=has_initial_states,
+            has_initial_states_p=has_initial_states_p,
             state_indices_tensor=state_indices_tensor,
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,

@@ -160,6 +160,7 @@ class MambaMixer(MambaBase, CustomOp):
             self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.is_lora_enabled:
+            #  Lora kernel requires contiguous tensor.
             ssm_params = self.x_proj(x.contiguous())[0]
         else:
             ssm_params = self.x_proj(x)[0]
@@ -168,12 +169,12 @@ class MambaMixer(MambaBase, CustomOp):
             [self.time_step_rank, self.ssm_state_size, self.ssm_state_size],
             dim=-1)
         if self.use_rms_norm:
-            if self.dt_layernorm is not None:
-                time_step = self.dt_layernorm(time_step.contiguous())
-            if self.b_layernorm is not None:
-                B = self.b_layernorm(B.contiguous())
-            if self.c_layernorm is not None:
-                C = self.c_layernorm(C.contiguous())
+            assert self.dt_layernorm is not None
+            assert self.b_layernorm is not None
+            assert self.c_layernorm is not None
+            time_step = self.dt_layernorm(time_step.contiguous())
+            B = self.b_layernorm(B.contiguous())
+            C = self.c_layernorm(C.contiguous())
         discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
         return discrete_time_step, B, C
 
@@ -193,7 +194,7 @@ class MambaMixer(MambaBase, CustomOp):
         1. Apply the gated-MLP linear projection to the raw input.
         2. Pass the projected sequence through the convolutional mixing layer.
         3. Feed the result into the State-Space Model (SSM) blocks.
-        4. Perform the recurrence y ← SSM(A, B, C, Δ)(x) 
+        4. Perform the recurrence y ← SSM(A, B, C, Δ)(x)
            to produce contextual representations.
         5. Project the contextualised sequence back
            to the output embedding dimension.
@@ -221,7 +222,7 @@ class MambaMixer(MambaBase, CustomOp):
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 conv_state = self_kv_cache[0].transpose(-1, -2)
                 ssm_state = self_kv_cache[1]
-                has_initial_states_p = mamba1_metadata.has_initial_states
+                has_initial_states_p = mamba1_metadata.has_initial_states_p
         else:
             assert isinstance(attn_metadata, PlaceholderAttentionMetadata)
             assert mamba_cache_params is not None
@@ -253,7 +254,7 @@ class MambaMixer(MambaBase, CustomOp):
         has_prefill = num_prefill_tokens > 0
         has_decode = num_decode_tokens > 0
 
-        pefill_decode_split = split_batch_to_prefill_and_decode(
+        prefill_decode_split = split_batch_to_prefill_and_decode(
             hidden_states_BC,
             gate,
             state_indices_tensor,
@@ -264,14 +265,14 @@ class MambaMixer(MambaBase, CustomOp):
             num_prefills,
             num_decodes,
         )
-        hidden_states_BC_p = pefill_decode_split.hidden_states_BC_p
-        hidden_states_BC_d = pefill_decode_split.hidden_states_BC_d
-        gate_p = pefill_decode_split.gate_p
-        gate_d = pefill_decode_split.gate_d
-        state_indices_tensor_p = pefill_decode_split.state_indices_tensor_p
-        state_indices_tensor_d = pefill_decode_split.state_indices_tensor_d
-        query_start_loc_p = pefill_decode_split.query_start_loc_p
-        initial_states = pefill_decode_split.initial_states
+        hidden_states_BC_p = prefill_decode_split.hidden_states_BC_p
+        hidden_states_BC_d = prefill_decode_split.hidden_states_BC_d
+        gate_p = prefill_decode_split.gate_p
+        gate_d = prefill_decode_split.gate_d
+        state_indices_tensor_p = prefill_decode_split.state_indices_tensor_p
+        state_indices_tensor_d = prefill_decode_split.state_indices_tensor_d
+        query_start_loc_p = prefill_decode_split.query_start_loc_p
+        initial_states = prefill_decode_split.initial_states
 
         ssm_outputs = []
 
@@ -286,7 +287,6 @@ class MambaMixer(MambaBase, CustomOp):
                                           cache_indices=state_indices_tensor_p,
                                           query_start_loc=query_start_loc_p)
             # 3. State Space Model sequence transformations.
-            #  Lora kernel requires contiguous tensor.
             discrete_time_step_p, B_p, C_p = self._ssm_transform(
                 conv_out_p.transpose(-2, -1))
             time_proj_bias = self._time_proj_bias()
