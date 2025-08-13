@@ -983,10 +983,10 @@ class DPAsyncMPClient(AsyncMPClient):
                                      self.first_req_sock_addr,
                                      zmq.PAIR,
                                      bind=False) as first_req_rcv_socket:
-                self.resources.stats_update_socket = socket
-                self.resources.first_req_rcv_socket = first_req_rcv_socket
                 assert isinstance(socket, zmq.asyncio.Socket)
                 assert isinstance(first_req_rcv_socket, zmq.asyncio.Socket)
+                self.resources.stats_update_socket = socket
+                self.resources.first_req_rcv_socket = first_req_rcv_socket
                 # Send subscription message.
                 await socket.send(b'\x01')
 
