@@ -8,6 +8,7 @@ doesn't test correctness
 import pytest
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.platforms import current_platform
 
 from ..models.registry import HF_EXAMPLE_MODELS
 
@@ -16,6 +17,8 @@ MODELS = ["ai21labs/Jamba-tiny-random", "pfnet/plamo-2-1b"]
 
 @pytest.mark.skipif(not is_quant_method_supported("experts_int8"),
                     reason="ExpertsInt8 is not supported on this GPU type.")
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="ExpertsInt8 is not supported on ROCm")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [10])
