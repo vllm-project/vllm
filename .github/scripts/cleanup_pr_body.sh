@@ -15,8 +15,8 @@ NEW=/tmp/new_pr_body.txt
 gh pr view --json body --template "{{.body}}" "${PR_NUMBER}" > "${OLD}"
 cp "${OLD}" "${NEW}"
 
-# Remove "FIX #xxxx (*link existing issues this PR will resolve*)"
-sed -i '/FIX #xxxx.*$/d' "${NEW}"
+# Remove markdown comments (like the <!-- markdownlint-disable --> at the start)
+sed -i '/<!--.*-->$/d' "${NEW}"
 
 # Remove "PLEASE FILL IN THE PR DESCRIPTION HERE ENSURING ALL CHECKLIST ITEMS (AT THE BOTTOM) HAVE BEEN CONSIDERED."
 sed -i '/PLEASE FILL IN THE PR DESCRIPTION HERE.*$/d' "${NEW}"
