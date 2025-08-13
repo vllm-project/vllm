@@ -153,6 +153,13 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
     [Multi-modal processor cache](#processor-cache) is disabled when API server scale-out is enabled
     because it requires a one-to-one correspondance between API and engine core processes.
 
+!!! warning
+    By default, 8 CPU threads are used in each API server to load media items (e.g. images)
+    from request data.
+
+    If you apply API server scale-out, consider adjusting `VLLM_MEDIA_LOADING_THREAD_COUNT`
+    to avoid CPU resource exhaustion.
+
 ### GPU Multi-Modal Processing
 
 You can speed up multi-modal input processing by running Hugging Face processors on the GPU.
@@ -176,9 +183,17 @@ llm = LLM(model="Qwen/Qwen2-Audio-7B-Instruct",
           mm_processor_kwargs={"device": "cuda"})
 ```
 
-!!! warning
-    The speed-up from GPU processing varies from model to model. In some cases, GPU processing may even become detrimental.
+!!! important
+    The speed-up from GPU processing varies from model to model.
+    In some cases, GPU processing may even become detrimental because of resource contention with
+    the forward pass of the model.
     Make sure you perform benchmarking before enabling this!
+
+!!! warning
+    Currently, our memory profiler does not consider the GPU usage of applying input processing.
+
+    Make sure you reserve additional memory beyond what is normally tracked by vLLM to avoid
+    OOM during inference.
 
 ## Multi-Modal Caching
 

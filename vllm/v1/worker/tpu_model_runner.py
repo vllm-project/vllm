@@ -34,7 +34,6 @@ from vllm.model_executor.models.interfaces_base import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem,
                                     PlaceholderRange)
-from vllm.multimodal.profiling import DummyDecoderData
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
@@ -1317,15 +1316,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert mm_budget is not None
 
         max_items_per_seq_by_modality = mm_budget.max_items_per_batch_by_modality  # noqa: E501
-        max_items_per_prompt_by_modality = mm_budget.max_items_per_prompt_by_modality  # noqa: E501
 
         for mode, max_items_per_seq in max_items_per_seq_by_modality.items():
-            max_items_per_prompt = max_items_per_prompt_by_modality[mode]
-            dummy_mm_data = self._get_mm_decoder_dummy_data(
-                mode,
-                max_items_per_prompt,
-            )
-
             logger.info(
                 "Compiling Multimodal %s Encoder with different input"
                 " shapes.", mode)
@@ -1333,9 +1325,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # No padding for MM encoder just yet.
             for num_items in range(1, max_items_per_seq + 1):
                 logger.info("  -- mode: %s items: %d", mode, num_items)
-                batched_dummy_mm_inputs = self._get_mm_decoder_dummy_batch(
+                batched_dummy_mm_inputs = self._get_mm_dummy_batch(
                     mode,
-                    dummy_mm_data,
                     num_items,
                 )
                 # Run multimodal encoder.
@@ -1565,13 +1556,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
 
                 # Create dummy batch of multimodal inputs.
-                dummy_mm_data = self._get_mm_decoder_dummy_data(
+                batched_dummy_mm_inputs = self._get_mm_dummy_batch(
                     dummy_modality,
-                    max_mm_items_per_prompt,
-                )
-                batched_dummy_mm_inputs = self._get_mm_decoder_dummy_batch(
-                    dummy_modality,
-                    dummy_mm_data,
                     max_mm_items_per_batch,
                 )
 
@@ -1818,35 +1804,17 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.grammar_bitmask_cpu[:num_reqs].to(logits.device), \
             self.structured_decode_arange.to(logits.device)
 
-    def _get_mm_decoder_dummy_data(
+    def _get_mm_dummy_batch(
         self,
         modality: str,
-        max_items_per_prompt: int,
-    ) -> DummyDecoderData:
-        """Dummy data for profiling and precompiling multimodal processor."""
-        model_config = self.model_config
-        if model_config.get_multimodal_config().is_mm_processing_gpu:
-            # Result in the maximum GPU consumption of HF processor
-            mm_counts = {modality: max_items_per_prompt}
-            disable_cache = True
-        else:
-            mm_counts = {modality: 1}
-            disable_cache = False
-
-        return self.mm_registry.get_decoder_dummy_data(
-            model_config=model_config,
-            seq_len=self.max_num_tokens,
-            mm_counts=mm_counts,
-            disable_cache=disable_cache,
-        )
-
-    def _get_mm_decoder_dummy_batch(
-        self,
-        modality: str,
-        dummy_decoder_data: DummyDecoderData,
         max_items_per_batch: int,
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
+        dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
+            model_config=self.model_config,
+            seq_len=self.max_num_tokens,
+            mm_counts={modality: 1},
+        )
         dummy_mm_data = dummy_decoder_data.multi_modal_data
 
         # Result in the maximum GPU consumption of the model
