@@ -74,6 +74,17 @@ class GGUFModelLoader(BaseModelLoader):
                         f"model.layers.{idx}.mlp.experts.0.gate_proj.weight"
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = \
                         f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
+        if model_type in ("qwen2_moe", "qwen3_moe"):
+            model_type = model_type.replace("_", "")
+            # GGUF layer map assumes that we will have a merged expert weights
+            # so we need to map them manually
+            for idx in range(config.num_hidden_layers):
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.0.down_proj.weight"
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.0.gate_proj.weight"
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
 
         arch = None
         for key, value in gguf.MODEL_ARCH_NAMES.items():
