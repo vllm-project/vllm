@@ -11,7 +11,6 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import use_rocm_custom_paged_attention
 from vllm.triton_utils import tl, triton
 
 from .prefix_prefill import context_attention_fwd
@@ -296,6 +295,7 @@ def chunked_prefill_paged_decode(
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv),
                                     16)
 
+    from vllm.platforms.rocm import use_rocm_custom_paged_attention
     use_custom = use_rocm_custom_paged_attention(
         query.dtype,
         head_size,
