@@ -703,14 +703,16 @@ def get_moe_configs(
 
     config_file_paths = []
 
+    # note that we prioritize user defined config
+    user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
+    if user_defined_config_folder is not None:
+        user_defined_config_file_path = os.path.join(
+            user_defined_config_folder, json_file_name)
+        config_file_paths.append(user_defined_config_file_path)
+
     default_config_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
     config_file_paths.append(default_config_file_path)
-
-    user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
-    if user_defined_config_folder is not None:
-        user_defined_config_file_path = os.path.join(user_defined_config_folder, json_file_name)
-        config_file_paths.append(user_defined_config_file_path)
 
     for config_file_path in config_file_paths:
         if os.path.exists(config_file_path):
@@ -724,7 +726,7 @@ def get_moe_configs(
     # configuration
     logger.warning(
         ("Using default MoE config. Performance might be sub-optimal! "
-         f"Config file not found at {config_file_paths}"))
+         "Config file not found at %s"), config_file_paths)
     return None
 
 
