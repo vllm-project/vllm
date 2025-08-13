@@ -3555,41 +3555,46 @@ void paged_attention_custom_launcher_navi(
   }
 
 #define CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
-                                   OUTT, PSIZE,MFMA_TYPE)                              \
+                                   OUTT, PSIZE,MFMA_TYPE)                    \
   if (alibi_slopes) {                                                        \
     CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT, PSIZE, \
-                         true,MFMA_TYPE);                                              \
+                         true,MFMA_TYPE);                                    \
   } else {                                                                   \
     CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT, PSIZE, \
-                         false,MFMA_TYPE);                                             \
+                         false,MFMA_TYPE);                                   \
   }
 
 #if defined(__HIPCC__) && defined(__gfx90a__)
-  #define CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,MFMA_TYPE)  \
+  #define CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
+                                   MFMA_TYPE)                              \
     if (fp8_out_scale) {                                                   \
       TORCH_CHECK(false, "fp8 out scale unsupported for gfx90a");          \
     } else {                                                               \
       CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, T, \
-                                 256,MFMA_TYPE);                                     \
+                                 256,MFMA_TYPE);                           \
     }
 #else
-  #define CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, MFMA_TYPE)  \
+  #define CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
+                                   MFMA_TYPE)                              \
     if (fp8_out_scale) {                                                   \
       CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
-                                 uint8_t, 256,MFMA_TYPE);                            \
+                                 uint8_t, 256,MFMA_TYPE);                  \
     } else {                                                               \
       CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, T, \
-                                 256,MFMA_TYPE);                                     \
+                                 256,MFMA_TYPE);                           \
     }
 #endif
 
-#define CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, HEAD_SIZE, MFMA_TYPE)     \
+#define CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, HEAD_SIZE,     \
+                                 MFMA_TYPE)                       \
   switch (block_size) {                                           \
     case 16:                                                      \
-      CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, 16, HEAD_SIZE, MFMA_TYPE);  \
+      CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, 16, HEAD_SIZE,   \
+                               MFMA_TYPE);                        \
       break;                                                      \
     case 32:                                                      \
-      CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, 32, HEAD_SIZE, MFMA_TYPE);  \
+      CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, 32, HEAD_SIZE,   \
+                               MFMA_TYPE);                        \
       break;                                                      \
     default:                                                      \
       TORCH_CHECK(false, "Unsupported block size: ", block_size); \
@@ -3597,16 +3602,16 @@ void paged_attention_custom_launcher_navi(
   }
 
 #define CALL_CUSTOM_LAUNCHER_BLK_HEAD(T, KVT, KV_DTYPE, MFMA_TYPE)  \
-  switch (head_size) {                                          \
-    case 64:                                                    \
-      CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, 64, MFMA_TYPE);           \
-      break;                                                    \
-    case 128:                                                   \
-      CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, 128, MFMA_TYPE);          \
-      break;                                                    \
-    default:                                                    \
-      TORCH_CHECK(false, "Unsupported head size: ", head_size); \
-      break;                                                    \
+  switch (head_size) {                                              \
+    case 64:                                                        \
+      CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, 64, MFMA_TYPE);    \
+      break;                                                        \
+    case 128:                                                       \
+      CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, 128, MFMA_TYPE);   \
+      break;                                                        \
+    default:                                                        \
+      TORCH_CHECK(false, "Unsupported head size: ", head_size);     \
+      break;                                                        \
   }
 
 bool is_navi_gpu() {
