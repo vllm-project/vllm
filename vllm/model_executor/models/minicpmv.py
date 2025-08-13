@@ -84,24 +84,27 @@ class MiniCPMVImagePixelInputs(TensorSchema):
         - h: Height
         - w: Width
     """
+
     def _validate_nested_tensors(
-        self, value: Union[list[torch.Tensor, ...],
-                           tuple[torch.Tensor, ...]], field_name: str,
+        self,
+        value: Union[list[torch.Tensor], tuple[torch.Tensor, ...]],
+        field_name: str,
         expected_shape: tuple[Union[int, str], ...],
-        dynamic_dims: set[str, ...]) -> tuple[int, ...]:
-      """Validate a list/tuple of tensors and return the actual shape."""
-          
-      # value[0] is the scaled image,
-      # and value[1:] is a collection of image slices.
-      # It is ensured that all slices in the collection
-      # have the same shape.
-      if field_name == "pixel_values":
-          value = value[1:] if len(value) > 1 else value
-      return super()._validate_nested_tensors(
-        value, field_name, expected_shape, dynamic_dims
-      )
-      
-      type: Literal["pixel_values"] = "pixel_values"
+        dynamic_dims: set[str],
+    ) -> tuple[int, ...]:
+        """Validate a list/tuple of tensors and return the actual shape."""
+
+        # value[0] is the scaled image,
+        # and value[1:] is a collection of image slices.
+        # It is ensured that all slices in the collection
+        # have the same shape.
+        if field_name == "pixel_values":
+            value = value[1:] if len(value) > 1 else value
+
+        return super()._validate_nested_tensors(value, field_name,
+                                                expected_shape, dynamic_dims)
+
+    type: Literal["pixel_values"] = "pixel_values"
 
     # Note that the image size may vary, so we pass it as a list instead of a
     # batched tensor.
