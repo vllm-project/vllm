@@ -245,7 +245,7 @@ class Worker(WorkerBase):
                 "gpu_memory_utilization config. Only use kv_cache_memory "
                 "config when you want manual control of KV cache memory "
                 "size.")
-            logger.debug(msg)
+            logger.info(msg)
             return kv_cache_memory
 
         torch.cuda.empty_cache()
