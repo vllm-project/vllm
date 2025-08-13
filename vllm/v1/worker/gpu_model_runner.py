@@ -489,7 +489,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         use_audio_in_video=use_audio_in_video,
                     )
                 # ekhvedchenia
-                print(f"Setting mrope for request {req_id}", id(self.requests[req_id]), type(self.requests[req_id]))
+                import os
+                print(f"Setting mrope for request {req_id}", id(self.requests[req_id]), os.getpid(), type(self.requests[req_id]))
                 print("prompt_token_ids", len(self.requests[req_id].prompt_token_ids))
                 print(self.requests[req_id].mrope_positions[0])
                 print(self.requests[req_id].mrope_positions[1])
@@ -1046,7 +1047,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 mrope_pos_ptr += completion_part_len
 
-                print("_calc_mrope_positions (completion_part_len > 0)", f"{req_id=}", id(req), type(req), f"{self.mrope_positions_np.shape=}", f"{req.mrope_position_delta=}")
+                import os
+                print("_calc_mrope_positions (completion_part_len > 0)", f"{req_id=}", id(req), os.getpid(), type(req), f"{self.mrope_positions_np.shape=}", f"{req.mrope_position_delta=}")
                 print(f"{dst_start=} {dst_end=} {prompt_part_len=} {num_computed_tokens=} {completion_part_len=}")
                 print(self.mrope_positions_np[0])
                 print(self.mrope_positions_np[1])
