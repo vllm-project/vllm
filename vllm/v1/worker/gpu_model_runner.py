@@ -1025,7 +1025,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 mrope_pos_ptr += prompt_part_len
                 # ekhvedchenia
-                print("_calc_mrope_positions (prompt_part_len > 0)", req_id, f"{self.mrope_positions_cpu.shape=}")
+                print("_calc_mrope_positions (prompt_part_len > 0)", f"{req_id=}", f"{self.mrope_positions_cpu.shape=}")
                 print(f"{dst_start=} {dst_end=} {src_start=} {src_end=} {prompt_part_len=}")
                 print(self.mrope_positions_cpu[0])
                 print(self.mrope_positions_cpu[1])
@@ -1046,7 +1046,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 mrope_pos_ptr += completion_part_len
 
-                print("_calc_mrope_positions (completion_part_len > 0)", req_id, f"{self.mrope_positions_np.shape=}")
+                print("_calc_mrope_positions (completion_part_len > 0)", f"{req_id=}", f"{self.mrope_positions_np.shape=}")
                 print(f"{dst_start=} {dst_end=} {prompt_part_len=} {num_computed_tokens=} {completion_part_len=}")
                 print(self.mrope_positions_np[0])
                 print(self.mrope_positions_np[1])
@@ -1528,10 +1528,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                         # ekhvedchenia: What request we should update?
                         for i, req_id in enumerate(self.input_batch.req_ids):
-                            req_state = self.requests[req_id]
-                            req_state.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
-                            req_state.mrope_positions_delta = mrope_positions_delta
-                            print(f"Updating positions in req_state[{i}]", positions_scheduled, mrope_positions_delta)
+                            req = self.requests[req_id]
+                            req.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
+                            req.mrope_positions_delta = mrope_positions_delta
+                            print(f"Updating positions in req_state[{i}]", f"{req.mrope_positions_delta=}")
+                            print(req.mrope_positions[0])
+                            print(req.mrope_positions[1])
+                            print(req.mrope_positions[2])
                     else:
                         self.positions[:num_scheduled_tokens].copy(positions_scheduled)
             else:
