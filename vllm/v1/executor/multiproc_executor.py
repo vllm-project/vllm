@@ -491,7 +491,6 @@ class WorkerProc:
         destroy_distributed_environment()
         ensure_kv_transfer_shutdown()
 
-
     @staticmethod
     def worker_main(*args, **kwargs):
         """ Worker initialization and execution loops.
