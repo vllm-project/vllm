@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
-
 import pandas as pd
+import os
+import json
+from typing import List
 
 
 def compare_data_columns(
@@ -42,6 +44,60 @@ def compare_data_columns(
     print(raw_data_cols)
     return concat_df, raw_data_cols
 
+def split_json_by_tp_pp(input_file: str = "benchmark_results.json",
+                        output_root: str = ".") -> List[str]:
+    """
+    Split a benchmark JSON into separate folders by (TP Size, PP Size).
+
+    Creates: <output_root>/tp{TP}_pp{PP}/benchmark_results.json
+    Returns: list of file paths written.
+    """
+    # Load JSON data into DataFrame
+    with open(input_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # If the JSON is a dict with a list under common keys, use that list
+    if isinstance(data, dict):
+        for key in ("results", "serving_results", "benchmarks", "data"):
+            if isinstance(data.get(key), list):
+                data = data[key]
+                break
+
+    df = pd.DataFrame(data)
+
+    # Handle alias column names
+    rename_map = {
+        "tp_size": "TP Size",
+        "tensor_parallel_size": "TP Size",
+        "pp_size": "PP Size",
+        "pipeline_parallel_size": "PP Size",
+    }
+    df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns},
+              inplace=True)
+
+    # Ensure TP/PP columns exist (default to 1 if missing)
+    if "TP Size" not in df.columns:
+        df["TP Size"] = 1
+    if "PP Size" not in df.columns:
+        df["PP Size"] = 1
+
+    # make sure TP/PP are numeric ints with no NaN
+    df["TP Size"] = pd.to_numeric(df.get("TP Size", 1), errors="coerce").fillna(1).astype(int)
+    df["PP Size"] = pd.to_numeric(df.get("PP Size", 1), errors="coerce").fillna(1).astype(int)
+
+    # Split into separate folders
+    saved_paths: List[str] = []
+    for (tp, pp), group_df in df.groupby(["TP Size", "PP Size"], dropna=False):
+        folder_name = os.path.join(output_root, f"tp{int(tp)}_pp{int(pp)}")
+        os.makedirs(folder_name, exist_ok=True)
+        filepath = os.path.join(folder_name, "benchmark_results.json")
+        group_df.to_json(filepath, orient="records", indent=2, force_ascii=False)
+        print(f"Saved: {filepath}")
+        saved_paths.append(filepath)
+
+    return saved_paths
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -65,8 +121,6 @@ if __name__ == "__main__":
         help="column name to use as X Axis in comparision graph",
     )
     args = parser.parse_args()
-    files = args.file
-    print("comparing : " + ", ".join(files))
 
     drop_column = "P99"
     name_column = "Test name"
@@ -86,6 +140,13 @@ if __name__ == "__main__":
         "Median TTFT /n",
         "Median TPOT /n",
     ]
+
+    if len(args.file) == 1:
+        files = split_json_by_tp_pp(args.file[0], output_root="splits")
+        info_cols = [c for c in info_cols if c not in ("TP Size", "PP Size")]
+    else:
+        files = args.file
+    print("comparing : " + ", ".join(files))
     debug = args.debug
     plot = args.plot
     # For Plot feature, assign y axis from one of info_cols
