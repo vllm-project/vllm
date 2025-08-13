@@ -5,8 +5,6 @@ from typing import Optional
 
 import pytest
 import torch
-from packaging.version import Version
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 
@@ -48,13 +46,7 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param("Milos/slovak-gpt-j-405M"),  # gptj
-        pytest.param(
-            "bigcode/tiny_starcoder_py",
-            marks=pytest.mark.skipif(
-                Version(TRANSFORMERS_VERSION) >= Version("4.53.2"),
-                reason="HF model is broken",
-            ),
-        ),  # gpt_bigcode
+        pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
         pytest.param("EleutherAI/pythia-70m"),  # gpt_neox
         pytest.param(
             "google/gemma-1.1-2b-it",  # gemma
