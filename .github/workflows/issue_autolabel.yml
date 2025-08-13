@@ -19,6 +19,7 @@ jobs:
             // Configuration: Add new labels and keywords here
             const labelConfig = {
               rocm: {
+                // Keyword search - matches whole words only (with word boundaries)
                 keywords: [
                   // Core ROCm/AMD terms
                   "rocm",
@@ -50,30 +51,39 @@ jobs:
                   "v710",
                   "v620",
                   "w6800",
-                  // Architecture codes
-                  "cdna3",
-                  "cdna2",
-                  "cdna4",
-                  "cdna",
-                  "gfx942",
-                  "gfx90a",
-                  "gfx1100",
-                  "gfx1101",
-                  "gfx1201",
-                  "gfx1200",
-                  "gfx1030",
-                  "gfx950",
-                  "gfx908",
-                  "rdna4",
-                  "rdna3",
-                  "rdna2",
-                  "rdna",
                   // Libraries and tools
                   "composable kernel",
-                  // "aiter", // problem at 13192 aiter is used in langchain
                   "rccl",
                   "migraphx",
                   "hipgraph",
+                  "pytorch",
+                  "cuda",
+                ],
+                
+                // Substring search - matches anywhere in text (partial matches)
+                substrings: [
+                  // Version patterns
+                  "rocm-",           // matches rocm-5.7, rocm-6.0, etc.
+                  "rocm_",           // matches rocm_5_7, etc.
+                  "hip-",            // matches hip-config, etc.
+                  
+                  // Architecture prefixes
+                  "gfx",             // matches gfx942, gfx90a, etc.
+                  "cdna",            // matches cdna2, cdna3, etc.
+                  "rdna",            // matches rdna2, rdna3, etc.
+                  
+                  // Library patterns
+                  "torch_hip",       // matches pytorch_hip, torch_hip_extension, etc.
+                  "_hip",            // matches any_hip, torch_hip, etc.
+                  "hip_",            // matches hip_version, hip_runtime, etc.
+                  
+                  // ROCm tools and libraries
+                  "hipify",          // matches hipify-perl, hipify-clang, etc.
+                  
+                  // Error patterns
+                  "hipError",        // matches hipErrorMemoryFree, etc.
+                  "rocm error",      // matches various rocm error messages
+                  "amd gpu",         // matches "amd gpu driver", etc.
                 ],
               },
             };
@@ -107,24 +117,44 @@ jobs:
               return result;
             }
             
-            // Helper function to find matching keywords in text with line information
-            function findMatchingKeywordsWithLines(text, keywords) {
+            // Helper function to create regex based on search type
+            function createSearchRegex(term, type) {
+              // Escape special regex characters in the term
+              const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              
+              switch (type) {
+                case 'keyword':
+                  // Word boundary search - matches whole words only
+                  return new RegExp(`\\b${escapedTerm}\\b`, "gi");
+                case 'substring':
+                  // Substring search - matches anywhere in the text
+                  return new RegExp(escapedTerm, "gi");
+                default:
+                  throw new Error(`Unknown search type: ${type}`);
+              }
+            }
+            
+            // Helper function to find matching terms in text with line information
+            function findMatchingTermsWithLines(text, keywords = [], substrings = []) {
               const matches = [];
               const lines = text.split('\n');
               
-              for (const keyword of keywords) {
-                const regex = new RegExp(`\\b${keyword}\\b`, "gi");
-                const keywordMatches = [];
+              // Process keyword searches
+              for (const term of keywords) {
+                const regex = createSearchRegex(term, 'keyword');
+                const termMatches = [];
                 
                 // Check each line for matches
                 lines.forEach((line, lineIndex) => {
                   const lineMatches = line.match(regex);
                   if (lineMatches) {
                     lineMatches.forEach(match => {
-                      keywordMatches.push({
+                      termMatches.push({
                         match: match,
                         lineNumber: lineIndex + 1,
                         lineContent: line.trim(),
+                        searchType: 'keyword',
+                        originalTerm: term,
                         // Show context around the match in the line
                         context: line.length > 100 ? 
                           line.substring(Math.max(0, line.toLowerCase().indexOf(match.toLowerCase()) - 30), 
@@ -135,11 +165,48 @@ jobs:
                   }
                 });
                 
-                if (keywordMatches.length > 0) {
+                if (termMatches.length > 0) {
                   matches.push({
-                    keyword: keyword,
-                    matches: keywordMatches,
-                    count: keywordMatches.length
+                    term: term,
+                    searchType: 'keyword',
+                    matches: termMatches,
+                    count: termMatches.length
+                  });
+                }
+              }
+              
+              // Process substring searches
+              for (const term of substrings) {
+                const regex = createSearchRegex(term, 'substring');
+                const termMatches = [];
+                
+                // Check each line for matches
+                lines.forEach((line, lineIndex) => {
+                  const lineMatches = line.match(regex);
+                  if (lineMatches) {
+                    lineMatches.forEach(match => {
+                      termMatches.push({
+                        match: match,
+                        lineNumber: lineIndex + 1,
+                        lineContent: line.trim(),
+                        searchType: 'substring',
+                        originalTerm: term,
+                        // Show context around the match in the line
+                        context: line.length > 100 ? 
+                          line.substring(Math.max(0, line.toLowerCase().indexOf(match.toLowerCase()) - 30), 
+                                       line.toLowerCase().indexOf(match.toLowerCase()) + match.length + 30) + '...' 
+                          : line.trim()
+                      });
+                    });
+                  }
+                });
+                
+                if (termMatches.length > 0) {
+                  matches.push({
+                    term: term,
+                    searchType: 'substring',
+                    matches: termMatches,
+                    count: termMatches.length
                   });
                 }
               }
@@ -161,18 +228,23 @@ jobs:
               let shouldAddLabel = false;
               let reason = '';
               
-              // Check for keywords in the remaining text (including other details sections)
+              // Check for terms in the remaining text (including other details sections)
               if (textWithoutCollectEnv) {
-                const matchingKeywords = findMatchingKeywordsWithLines(textWithoutCollectEnv, labelConfig[labelName].keywords);
-                if (matchingKeywords.length > 0) {
-                  core.notice(`Found ${matchingKeywords.length} matching keyword(s):`);
+                const keywords = config.keywords || [];
+                const substrings = config.substrings || [];
+                
+                core.notice(`Searching with ${keywords.length} keywords and ${substrings.length} substrings`);
+                
+                const matchingTerms = findMatchingTermsWithLines(textWithoutCollectEnv, keywords, substrings);
+                if (matchingTerms.length > 0) {
+                  core.notice(`Found ${matchingTerms.length} matching term(s):`);
                   
-                  for (const keywordMatch of matchingKeywords) {
-                    core.notice(`  📍 Keyword: "${keywordMatch.keyword}" found ${keywordMatch.count} time(s):`);
+                  for (const termMatch of matchingTerms) {
+                    core.notice(`  📍 Term: "${termMatch.term}" (${termMatch.searchType} search) found ${termMatch.count} time(s):`);
                     
                     // Show details for each match
-                    keywordMatch.matches.forEach((match, index) => {
-                      core.notice(`    ${index + 1}. Line ${match.lineNumber}: "${match.match}"`);
+                    termMatch.matches.forEach((match, index) => {
+                      core.notice(`    ${index + 1}. Line ${match.lineNumber}: "${match.match}" [${match.searchType}]`);
                       core.notice(`       Context: ${match.context}`);
                       if (match.lineContent !== match.context) {
                         core.notice(`       Full line: ${match.lineContent}`);
@@ -181,12 +253,19 @@ jobs:
                   }
                   
                   shouldAddLabel = true;
-                  reason = `Keywords found outside collect_env.py details section (${matchingKeywords.reduce((sum, k) => sum + k.count, 0)} total matches)`;
+                  const totalMatches = matchingTerms.reduce((sum, t) => sum + t.count, 0);
+                  const keywordMatches = matchingTerms.filter(t => t.searchType === 'keyword');
+                  const substringMatches = matchingTerms.filter(t => t.searchType === 'substring');
+                  
+                  const keywordCount = keywordMatches.reduce((sum, t) => sum + t.count, 0);
+                  const substringCount = substringMatches.reduce((sum, t) => sum + t.count, 0);
+                  
+                  reason = `Found ${totalMatches} total matches outside collect_env.py details section (${keywordCount} keyword matches, ${substringCount} substring matches)`;
                 }
               }
               
               core.notice(`Final decision: ${shouldAddLabel ? 'ADD LABEL' : 'DO NOT ADD LABEL'}`);
-              core.notice(`Reason: ${reason || 'No matching keywords found outside collect_env.py details section'}`);
+              core.notice(`Reason: ${reason || 'No matching terms found outside collect_env.py details section'}`);
               
               if (shouldAddLabel) {
                 const existingLabels = context.payload.issue.labels.map(l => l.name);
@@ -204,7 +283,7 @@ jobs:
                 return false;
               }
               
-              core.notice(`No matching keywords found outside collect_env.py details section for label "${labelName}".`);
+              core.notice(`No matching terms found outside collect_env.py details section for label "${labelName}".`);
               return false;
             }
             
