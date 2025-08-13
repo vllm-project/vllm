@@ -690,6 +690,10 @@ class TransformersMoEBase(TransformersBase):
 
     def fused_moe(self):
 
+        if self.parallel_config.enable_eplb:
+            raise NotImplementedError(
+                "Transformers backend does not support EPLB yet!")
+
         def _fused_moe(module: nn.Module, prefix: str = ""):
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
