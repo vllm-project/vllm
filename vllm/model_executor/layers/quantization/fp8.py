@@ -955,8 +955,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert isinstance(layer, FusedMoE)
 
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
-            assert activation == 'silu'
-            assert scoring_func == 'sigmoid'
+            assert activation == 'silu', (
+                f"Expected 'silu' activation but got {activation}")
+            assert scoring_func == 'sigmoid', (
+                f"Expected 'sigmoid' scoring func but got {scoring_func}")
             if self.block_quant:
                 assert (renormalize and use_grouped_topk
                         and custom_routing_function is None)
@@ -1051,11 +1053,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert self.fused_experts is not None
+            assert self.fused_experts is not None, (
+                "Expected self.fused_experts to be initialized")
             assert self.block_quant is None
             assert (not renormalize and custom_routing_function is not None)
-            assert activation == 'silu'
-            assert scoring_func == 'sigmoid'
+            assert activation == 'silu', (
+                f"Expected 'silu' activation but got {activation}")
+            assert scoring_func == 'sigmoid', (
+                f"Expected 'sigmoid' scoring func but got {scoring_func}")
 
             return flashinfer_fp8_cutlass_moe_forward(
                 self.fused_experts,

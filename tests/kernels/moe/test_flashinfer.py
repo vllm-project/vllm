@@ -14,6 +14,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     build_flashinfer_fp8_cutlass_moe_kernel,
     flashinfer_fp8_cutlass_moe_forward, rotate_flashinfer_fp8_moe_weights,
     swap_w13_to_w31)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    input_to_float8)
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
 
@@ -41,21 +43,13 @@ vllm_config.scheduler_config.max_num_seqs = 128
 vllm_config.scheduler_config.max_model_len = 8192
 
 
-def quant_fp8_per_tensor(a):
-    a_global_sf = 448 / a.float().abs().nan_to_num().max()
-
-    a_fp8 = (a * a_global_sf).to(torch.float8_e4m3fn)
-
-    return a_fp8, a_global_sf
-
-
 def quant_fp8_per_tensor_batches(a):
     num_batches = a.size(0)
     a_quant = []
     a_scales = []
 
     for i in range(num_batches):
-        a_fp8, a_global_sf = quant_fp8_per_tensor(a[i])
+        a_fp8, a_global_sf = 1.0 / input_to_float8(a[i])
         a_quant.append(a_fp8)
         a_scales.append(a_global_sf)
 
@@ -85,7 +79,7 @@ class TestData:
         w2 = torch.randn((e, k, n), device="cuda", dtype=torch.bfloat16)
 
         # Scale to fp8
-        _, a1_scale = quant_fp8_per_tensor(hidden_states)
+        _, a1_scale = 1.0 / input_to_float8(hidden_states)
         a2_scale = torch.scalar_tensor(1.0).to(device="cuda").to(
             dtype=torch.float32)
         w13_quantized, w13_weight_scale = quant_fp8_per_tensor_batches(w13)
@@ -183,6 +177,9 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
                                    rtol=1e-2)
 
 
+@pytest.mark.skip(
+    "Requires flashinfer version that contains https://github.com/flashinfer-ai/flashinfer/pull/1472"
+)
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
