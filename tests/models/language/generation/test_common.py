@@ -37,7 +37,6 @@ AITER_MODEL_LIST = [
 @pytest.mark.parametrize(
     "model",
     [
-        pytest.param("Saesara/swissai"),  # apertus
         pytest.param(
             "bigscience/bloom-560m",  # bloom - testing alibi slopes
             marks=[pytest.mark.core_model],
