@@ -214,9 +214,6 @@ class HttpHandshakeStrategy(HandshakeStrategy):
         response.raise_for_status()
         res = response.json()
 
-        if res is None:
-            raise RuntimeError("Remote server returned None metadata")
-
         # Get dp_rank 0 data (standard for disaggregated prefill-decode)
         dp_data = res.get("0", {})
         if not dp_data:
