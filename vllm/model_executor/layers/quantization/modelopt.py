@@ -170,6 +170,9 @@ class ModelOptFp8Config(QuantizationConfig):
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
         if isinstance(layer, LinearBase):
+            # Check if this is a vision model layer that should not be quantized
+            if ("vision_tower" in prefix or "vision_model" in prefix):
+                return UnquantizedLinearMethod()
             if self.is_layer_excluded(prefix):
                 return UnquantizedLinearMethod()
             return ModelOptFp8LinearMethod(self)
