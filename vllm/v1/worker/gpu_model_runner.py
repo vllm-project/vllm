@@ -1507,7 +1507,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     for i, req_id in enumerate(self.input_batch.req_ids):
                         req_state = self.requests[req_id]
                         req_state.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
-
+                        print(f"Updating positions in req_state[{i}]", positions_scheduled)
                     #scheduler_output.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
                 else:
                     self.positions[:num_scheduled_tokens].copy(positions_scheduled)
