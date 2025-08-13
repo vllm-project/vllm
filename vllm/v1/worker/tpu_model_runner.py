@@ -1409,10 +1409,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                       dtype=torch.int32,
                                       device=self.device)
                 torch._dynamo.mark_dynamic(indices, 0)
-                start_time = time.time()
                 self.select_hidden_states(dummy_hidden, indices)
-                end_time = time.time()
-                logger.info("SELECT_HIDDEN_STATES inside _PRECOMPILE. ex time: %f", end_time-start_time)
                 logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
                             num_reqs)
                 # Requests can't be more than tokens. But do compile for the
