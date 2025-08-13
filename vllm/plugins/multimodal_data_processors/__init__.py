@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import logging
+from typing import Optional
+
+from vllm.config import VllmConfig
+from vllm.plugins import load_plugins_by_group
+from vllm.plugins.multimodal_data_processors.interface import (
+    MultimodalDataProcessor)
+from vllm.utils import resolve_obj_by_qualname
+
+logger = logging.getLogger(__name__)
+
+
+def get_multimodal_data_processor(
+        vllm_config: VllmConfig) -> Optional[MultimodalDataProcessor]:
+    # Multimodal processors are loaded as plugins under the
+    # 'vllm.multimodal_data_processor_plugins' group. Similar to platform
+    # plugins, these plugins register a function that returns the class
+    # name for the processor to install.
+
+    # Retrieve the model specific plugin if available
+    # This is using a custom field in the hf_config for the model
+    hf_config = vllm_config.model_config.hf_config.to_dict()
+    model_plugin = hf_config.get("multimodal_processor_plugin")
+    logger.debug("MultiModalProcessor plugin to be loaded ", model_plugin)
+
+    if not model_plugin:
+        raise ValueError("The model does not require a MultimodalProcessor"
+                         " plugin, but one is required.")
+
+    # Load all installed plugin in the group
+    multimodal_data_processor_plugins = \
+        load_plugins_by_group('vllm.multimodal_data_processor_plugins')
+
+    loadable_plugins = {}
+    for name, func in multimodal_data_processor_plugins.items():
+        try:
+            assert callable(func)
+            processor_cls_qualname = func()
+            if processor_cls_qualname is not None:
+                loadable_plugins[name] = processor_cls_qualname
+        except Exception:
+            pass
+
+    num_available_plugins = len(loadable_plugins.keys())
+    if num_available_plugins == 0:
+        raise ValueError("No MultimodalProcessor plugins installed"
+                         " but one is required.")
+
+    if model_plugin not in loadable_plugins:
+        raise ValueError(
+            f"The model requires the '{model_plugin}' plugin but it"
+            " is not installed. "
+            f"Available plugins: {list(loadable_plugins.keys())}")
+
+    activated_plugin_cls = loadable_plugins[model_plugin]
+
+    return resolve_obj_by_qualname(activated_plugin_cls)(vllm_config)
