@@ -502,14 +502,8 @@ class EmbeddingMixin(OpenAIServing):
                                 aggregator['weighted_sum'] = (
                                     current_sum + weighted_embedding)
 
-                        total_weight = aggregator['total_weight']
-                        if isinstance(total_weight, (int, float)):
-                            aggregator['total_weight'] = (total_weight +
-                                                          weight)
-
-                        chunk_count = aggregator['chunk_count']
-                        if isinstance(chunk_count, int):
-                            aggregator['chunk_count'] = chunk_count + 1
+                        aggregator['total_weight'] += weight
+                        aggregator['chunk_count'] += 1
 
                     except (ValueError, IndexError):
                         return self.create_error_response(
