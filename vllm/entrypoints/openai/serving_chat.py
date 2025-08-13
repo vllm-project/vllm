@@ -14,6 +14,7 @@ import regex as re
 from fastapi import Request
 from pydantic import TypeAdapter
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
@@ -577,7 +578,8 @@ class OpenAIServingChat(OpenAIServing):
                         logprobs = None
 
                     delta_text = output.text
-
+                    if envs.VLLM_DETOKENIZE_ON_OPENAI_SERVER:
+                        delta_text = tokenizer.decode([output.token_ids[-1]])
                     if not delta_text and not output.token_ids and \
                         not previous_num_tokens[i]:
                         # Chunked prefill case, don't return empty chunks
