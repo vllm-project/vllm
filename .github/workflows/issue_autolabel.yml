@@ -25,7 +25,6 @@ jobs:
                   "roc",
                   "amd",
                   "hip",
-
                   // GPU Models - Instinct Series
                   "amd instinct",
                   "mi300",
@@ -39,7 +38,6 @@ jobs:
                   "mi350x",
                   "mi355x",
                   "mi308",
-
                   // GPU Models - Radeon Series
                   "amd radeon",
                   "ai pro r9700",
@@ -47,7 +45,6 @@ jobs:
                   "rx 9060",
                   "rx 7900",
                   "rx 7800",
-
                   // GPU Models - Pro Series
                   "amd radeon pro",
                   "w7900",
@@ -56,7 +53,6 @@ jobs:
                   "v710",
                   "v620",
                   "w6800",
-
                   // Architecture codes
                   "cdna3",
                   "cdna2",
@@ -74,7 +70,6 @@ jobs:
                   "rdna4",
                   "rdna3",
                   "rdna2",
-
                   // Libraries and tools
                   "composable kernel",
                   // "aiter", // problem at 13192 aiter is used in langchain
@@ -84,7 +79,7 @@ jobs:
                 ],
                 exclusions: [
                   "rocm used to build pytorch: none",
-                  "rocm used to build pytorch: 0.0.0",
+                  "rocm used to build pytorch: 0\\.0\\.0",
                   "rocm used to build pytorch: not available",
                   "ROCM Version: Could not collect",
                   "ROCM used to build PyTorch: N/A",
@@ -92,29 +87,91 @@ jobs:
                 ],
               },
             };
-
+            
+            // Helper function to find which keywords match
+            function findMatchingKeywords(text, keywords) {
+              const matches = [];
+              for (const keyword of keywords) {
+                const regex = new RegExp(`\\b${keyword}\\b`, "gi");
+                const keywordMatches = text.match(regex);
+                if (keywordMatches) {
+                  matches.push({
+                    keyword: keyword,
+                    matches: keywordMatches,
+                    count: keywordMatches.length
+                  });
+                }
+              }
+              return matches;
+            }
+            
+            // Helper function to find which exclusions match
+            function findMatchingExclusions(text, exclusions) {
+              const matches = [];
+              for (const exclusion of exclusions) {
+                const regex = new RegExp(exclusion, "gi");
+                const exclusionMatches = text.match(regex);
+                if (exclusionMatches) {
+                  matches.push({
+                    exclusion: exclusion,
+                    matches: exclusionMatches,
+                    count: exclusionMatches.length
+                  });
+                }
+              }
+              return matches;
+            }
+            
             // Helper function to check if label should be added
             async function processLabel(labelName, config) {
               const body = context.payload.issue.body || "" ;
               const title = context.payload.issue.title || "";
-              const fullText = title + " " + body
+              const fullText = title + " " + body;
+              
+              // Debug: Find matching keywords
+              const matchingKeywords = findMatchingKeywords(fullText, labelConfig[labelName].keywords);
+              const matchingExclusions = findMatchingExclusions(fullText, labelConfig[labelName].exclusions);
+              
+              core.notice(`=== DEBUG INFO for label "${labelName}" ===`);
+              core.notice(`Issue title: "${title}"`);
+              core.notice(`Issue body length: ${body.length} characters`);
+              
+              if (matchingKeywords.length > 0) {
+                core.notice(`Found ${matchingKeywords.length} matching keyword(s):`);
+                for (const match of matchingKeywords) {
+                  core.notice(`  - Keyword: "${match.keyword}" found ${match.count} time(s): ${JSON.stringify(match.matches)}`);
+                }
+              } else {
+                core.notice(`No matching keywords found`);
+              }
+              
+              if (matchingExclusions.length > 0) {
+                core.notice(`Found ${matchingExclusions.length} matching exclusion(s):`);
+                for (const match of matchingExclusions) {
+                  core.notice(`  - Exclusion: "${match.exclusion}" found ${match.count} time(s): ${JSON.stringify(match.matches)}`);
+                }
+              } else {
+                core.notice(`No matching exclusions found`);
+              }
               
               const keywordPattern = labelConfig[labelName].keywords.join("|");
               const excludePattern = labelConfig[labelName].exclusions.join("|");
-
               const kwRegexLine = `\\b(${keywordPattern})\\b`;
-              const excludeRegexLine = `\\b(${excludePattern})\\b`;
+              const excludeRegexLine = `(${excludePattern})`;
               
               // check the issue title and body
               const kwRegex = new RegExp(kwRegexLine, "gi");
               const excludeRegex = new RegExp(excludeRegexLine, "gi");
-
               const hit = kwRegex.test(fullText);
               const excludeHit = excludeRegex.test(fullText);
               
+              core.notice(`Keyword regex test result: ${hit}`);
+              core.notice(`Exclusion regex test result: ${excludeHit}`);
+              core.notice(`Final decision: ${hit && !excludeHit ? 'ADD LABEL' : 'DO NOT ADD LABEL'}`);
+              core.notice(`=== END DEBUG INFO ===`);
+              
               if (hit && !excludeHit) {
                 const existingLabels = context.payload.issue.labels.map(l => l.name);
-                
                 if (!existingLabels.includes(labelName)) {
                   await github.rest.issues.addLabels({
                     owner: context.repo.owner,
@@ -131,11 +188,9 @@ jobs:
               core.notice(`No keywords found for label "${labelName}".`);
               return false;
             }
-
             // Process all configured labels
             const processLabels = Object.entries(labelConfig)
               .map(([labelName, config]) => processLabel(labelName, config));
             const labelsAdded = await Promise.all(processLabels);
             const numLabelsAdded = labelsAdded.reduce((x, y) => x + y, 0);
-  
-            core.notice(`Processing complete. ${numLabelsAdded} label(s) added.`);
+            core.notice(`Processing complete. ${numLabelsAdded} label(s) added.`);  
