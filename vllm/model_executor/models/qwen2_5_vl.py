@@ -294,10 +294,11 @@ def get_load_balance_assignment(sizes, num_gpus=2):
 
     # Phase 2: Distribute remaining samples using greedy load balancing
     # Sort remaining indices by size (large to small for better balancing)
-    remaining_indices = [
-        idx for idx in range(n_samples) if idx not in used_indices
-    ]
-    remaining_indices.sort(key=lambda i: sizes[i], reverse=True)
+    remaining_indices = sorted(
+        (idx for idx in range(n_samples) if idx not in used_indices),
+        key=lambda i: sizes[i],
+        reverse=True,
+    )
 
     for idx in remaining_indices:
         size = sizes[idx]
@@ -333,11 +334,8 @@ def get_load_balance_assignment(sizes, num_gpus=2):
     grouped_sizes_per_gpu = []
     for rank in range(num_gpus):
         rank_images = image_is_in_rank[rank].nonzero().squeeze(-1)
-        if len(rank_images) > 0:
-            total_size = sum(sizes[i] for i in rank_images.tolist())
-            grouped_sizes_per_gpu.append(total_size)
-        else:
-            grouped_sizes_per_gpu.append(0)
+        total_size = sum(sizes[i] for i in rank_images.tolist())
+        grouped_sizes_per_gpu.append(total_size)
 
     return (shuffle_indices, unshuffle_indices, gpu_sample_counts,
             image_is_in_rank, grouped_sizes_per_gpu)
