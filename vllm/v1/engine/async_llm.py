@@ -27,7 +27,7 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device, cdiv
+from vllm.utils import Device, cdiv, deprecate_kwargs
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -57,6 +57,7 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
         stat_loggers: Optional[list[StatLoggerFactory]] = None,
         client_addresses: Optional[dict[str, str]] = None,
+        client_count: int = 1,
         client_index: int = 0,
     ) -> None:
         """
@@ -120,6 +121,7 @@ class AsyncLLM(EngineClient):
             executor_class=executor_class,
             log_stats=self.log_stats,
             client_addresses=client_addresses,
+            client_count=client_count,
             client_index=client_index,
         )
 
@@ -142,16 +144,23 @@ class AsyncLLM(EngineClient):
             pass
 
     @classmethod
+    @deprecate_kwargs(
+        "disable_log_requests",
+        additional_message=("This argument will have no effect. "
+                            "Use `enable_log_requests` instead."),
+    )
     def from_vllm_config(
-        cls,
-        vllm_config: VllmConfig,
-        start_engine_loop: bool = True,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[list[StatLoggerFactory]] = None,
-        disable_log_requests: bool = False,
-        disable_log_stats: bool = False,
-        client_addresses: Optional[dict[str, str]] = None,
-        client_index: int = 0,
+            cls,
+            vllm_config: VllmConfig,
+            start_engine_loop: bool = True,
+            usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+            stat_loggers: Optional[list[StatLoggerFactory]] = None,
+            enable_log_requests: bool = False,
+            disable_log_stats: bool = False,
+            client_addresses: Optional[dict[str, str]] = None,
+            client_count: int = 1,
+            client_index: int = 0,
+            disable_log_requests: bool = True,  # Deprecated, will be removed
     ) -> "AsyncLLM":
         if not envs.VLLM_USE_V1:
             raise ValueError(
@@ -166,10 +175,11 @@ class AsyncLLM(EngineClient):
             executor_class=Executor.get_class(vllm_config),
             start_engine_loop=start_engine_loop,
             stat_loggers=stat_loggers,
-            log_requests=not disable_log_requests,
+            log_requests=enable_log_requests,
             log_stats=not disable_log_stats,
             usage_context=usage_context,
             client_addresses=client_addresses,
+            client_count=client_count,
             client_index=client_index,
         )
 
@@ -191,7 +201,7 @@ class AsyncLLM(EngineClient):
         return cls(
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_requests=not engine_args.disable_log_requests,
+            log_requests=engine_args.enable_log_requests,
             log_stats=not engine_args.disable_log_stats,
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,

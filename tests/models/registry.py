@@ -465,8 +465,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                         is_available_online=False),
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
                                      trust_remote_code=True),
-    "TarsierForConditionalGeneration": _HfExamplesInfo("omni-research/Tarsier-7b",  # noqa: E501
-                                                        hf_overrides={"architectures": ["TarsierForConditionalGeneration"]}),  # noqa: E501
+    "TarsierForConditionalGeneration": _HfExamplesInfo("omni-research/Tarsier-7b"),  # noqa: E501
     "Tarsier2ForConditionalGeneration": _HfExamplesInfo("omni-research/Tarsier2-Recap-7b",  # noqa: E501
                                                         hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]}),  # noqa: E501
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
@@ -526,6 +525,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
+    "TransformersModel": _HfExamplesInfo("Qwen/Qwen3-Embedding-0.6B"),
     "TransformersForCausalLM": _HfExamplesInfo("hmellor/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
     "TransformersForMultimodalLM": _HfExamplesInfo("OpenGVLab/InternVL3-1B-hf"),
 }

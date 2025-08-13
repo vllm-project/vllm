@@ -164,3 +164,6 @@ class AttnFusionPass(VllmInductorPass):
         logger.debug("Fused quantization onto %s attention nodes", count)
         self.dump_graph(graph, "after_attn_fusion")
         self.end_and_log()
+
+    def uuid(self):
+        return VllmInductorPass.hash_source(self, AttentionStaticQuantPattern)

@@ -18,6 +18,7 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
+from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -54,7 +55,8 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = True  # Decode-only
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.PURE_DECODE_ONLY
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -79,7 +81,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         )
 
         if self.compilation_config.full_cuda_graph:
-        # if False:
+            # if False:
             n = num_splits.size(0)
             # First time around (CUDAGraph capture), allocate the static buffer
             if self.cg_buf_num_splits is None:
@@ -98,7 +100,8 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
                 # Num splits is per-batch, varying size (batch_size,)
                 n = num_splits.size(0)
-                # logger.info(f"N: {n} num splits {self.cg_buf_num_splits.size(0)}")
+                # logger.info(
+                #   f"N: {n} num splits {self.cg_buf_num_splits.size(0)}")
                 # make sure static buffer is large enough
                 assert n <= self.cg_buf_num_splits.size(0)
                 num_splits_view = self.cg_buf_num_splits[:n]

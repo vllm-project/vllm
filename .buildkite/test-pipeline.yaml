@@ -647,13 +647,31 @@ steps:
 - label: Blackwell Test
   working_dir: "/vllm-workspace/"
   gpu: b200
-  optional: true
+  # optional: true
   source_file_dependencies:
-  - csrc/
-  - vllm/
+  - csrc/quantization/fp4/
+  - csrc/attention/mla/
+  - csrc/quantization/cutlass_w8a8/moe/
+  - vllm/model_executor/layers/fused_moe/cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_prepare_finalize.py
+  - vllm/v1/attention/backends/flashinfer.py
+  - vllm/compilation/fusion.py
   commands:
     - nvidia-smi
     - python3 examples/offline_inference/basic/chat.py
+    # Attention
+    # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
+    - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
+    - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_decode_attention.py
+    - pytest -v -s tests/kernels/test_cutlass_mla_decode.py
+    # Quantization
+    - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
+    - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
+    - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
+    - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
+    # Fusion
+    - pytest -v -s tests/compile/test_fusion_all_reduce.py
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
@@ -804,6 +822,7 @@ steps:
     # requires multi-GPU testing for validation.
     - pytest -v -s -x lora/test_chatglm3_tp.py
     - pytest -v -s -x lora/test_llama_tp.py
+    - pytest -v -s -x lora/test_multi_loras_with_tp.py
 
 
 - label: Weight Loading Multiple GPU Test  # 33min
