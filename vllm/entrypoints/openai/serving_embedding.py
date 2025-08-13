@@ -171,10 +171,9 @@ class EmbeddingMixin(OpenAIServing):
         pooling_params,
         trace_headers,
         prompt_idx: int,
-    ) -> list[AsyncGenerator[tuple[int, int, PoolingRequestOutput], None]]:
+    ) -> list[AsyncGenerator[PoolingRequestOutput, None]]:
         """Process a single prompt using chunked processing."""
-        generators: list[AsyncGenerator[tuple[int, int, PoolingRequestOutput],
-                                        None]] = []
+        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         token_ids = original_prompt["prompt_token_ids"]
 
         # Split into chunks using max_position_embeddings
@@ -211,15 +210,7 @@ class EmbeddingMixin(OpenAIServing):
                 priority=getattr(ctx.request, "priority", 0),
             )
 
-            # Wrap the generator to return (prompt_idx, chunk_idx, result)
-            # Use default parameters to capture loop variables
-            async def wrapped_generator(gen=original_generator,
-                                        p_idx=prompt_idx,
-                                        c_idx=chunk_idx):
-                async for result in gen:
-                    yield (p_idx, c_idx, result)
-
-            generators.append(wrapped_generator())
+            generators.append(original_generator)
 
         return generators
 
@@ -305,8 +296,7 @@ class EmbeddingMixin(OpenAIServing):
         pooling_params: PoolingParams,
         trace_headers: Optional[Mapping[str, str]],
         prompt_index: int,
-    ) -> AsyncGenerator[tuple[int, int, Union[RequestOutput,
-                                              PoolingRequestOutput]], None]:
+    ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
         """Create a generator for a single prompt using standard processing."""
         request_id_item = f"{ctx.request_id}-{prompt_index}"
 
@@ -321,8 +311,8 @@ class EmbeddingMixin(OpenAIServing):
         engine_prompt = cast(Union[EngineTokensPrompt, EngineEmbedsPrompt],
                              engine_prompt)
 
-        # Wrap the original generator to return (prompt_idx, chunk_idx, result)
-        original_generator = self.engine_client.encode(
+        # Return the original generator without wrapping
+        return self.engine_client.encode(
             engine_prompt,
             pooling_params,
             request_id_item,
@@ -330,10 +320,6 @@ class EmbeddingMixin(OpenAIServing):
             trace_headers=trace_headers,
             priority=getattr(ctx.request, "priority", 0),
         )
-
-        async for result in original_generator:
-            # chunk_idx is always 0 for non-chunked
-            yield (prompt_index, 0, result)
 
     @override
     async def _prepare_generators(
@@ -351,13 +337,9 @@ class EmbeddingMixin(OpenAIServing):
             return await super()._prepare_generators(ctx)
 
         # Custom logic for chunked processing
-        generators: list[AsyncGenerator[tuple[int, int,
-                                              Union[RequestOutput,
-                                                    PoolingRequestOutput]],
+        generators: list[AsyncGenerator[Union[RequestOutput,
+                                              PoolingRequestOutput],
                                         None]] = []
-
-        # Track which prompts use chunked processing
-        ctx.chunked_prompts = set()
 
         try:
             trace_headers = (None if ctx.raw_request is None else await
@@ -394,7 +376,6 @@ class EmbeddingMixin(OpenAIServing):
                     if (len(text_tokens_prompt["prompt_token_ids"])
                             > max_pos_embeddings):
                         # Use chunked processing for this prompt
-                        ctx.chunked_prompts.add(i)  # Track chunked prompt
                         chunk_generators = await self._process_chunked_request(
                             ctx, text_tokens_prompt, pooling_params,
                             trace_headers, i)
@@ -458,9 +439,16 @@ class EmbeddingMixin(OpenAIServing):
             prompt_aggregators: dict[int, dict[str, Any]] = {}
             short_prompts_results: dict[int, PoolingRequestOutput] = {}
 
-            async for prompt_idx, chunk_idx, result in ctx.result_generator:
-                # This is a chunked result
-                if prompt_idx in ctx.chunked_prompts:
+            async for result_idx, result in ctx.result_generator:
+                if "-chunk-" in result.request_id:
+                    # Extract prompt_idx from chunked request_id
+                    parts = result.request_id.split("-")
+                    try:
+                        prompt_idx = int(parts[parts.index("prompt") + 1])
+                    except (ValueError, IndexError):
+                        # Fallback: extract from result_idx if parsing fails
+                        prompt_idx = result_idx
+
                     # Initialize aggregator for this prompt if needed
                     if prompt_idx not in prompt_aggregators:
                         prompt_aggregators[prompt_idx] = {
@@ -518,7 +506,14 @@ class EmbeddingMixin(OpenAIServing):
                     aggregator['total_weight'] += weight
                     aggregator['chunk_count'] += 1
                 else:
-                    # Non-chunked result (chunk_idx == 0)
+                    # Non-chunked result - extract prompt_idx from request_id
+                    parts = result.request_id.split("-")
+                    try:
+                        # Last part should be prompt index
+                        prompt_idx = int(parts[-1])
+                    except (ValueError, IndexError):
+                        prompt_idx = result_idx  # Fallback to result_idx
+
                     short_prompts_results[prompt_idx] = cast(
                         PoolingRequestOutput, result)
 
