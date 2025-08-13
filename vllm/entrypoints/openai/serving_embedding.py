@@ -497,10 +497,7 @@ class EmbeddingMixin(OpenAIServing):
                             aggregator['weighted_sum'] = weighted_embedding
                         else:
                             # Accumulate
-                            current_sum = aggregator['weighted_sum']
-                            if isinstance(current_sum, torch.Tensor):
-                                aggregator['weighted_sum'] = (
-                                    current_sum + weighted_embedding)
+                            aggregator['weighted_sum'] += weighted_embedding
 
                         aggregator['total_weight'] += weight
                         aggregator['chunk_count'] += 1
