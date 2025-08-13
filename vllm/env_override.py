@@ -20,6 +20,6 @@ os.environ['PYTORCH_NVML_BASED_CUDA_CHECK'] = '1'
 # see https://github.com/vllm-project/vllm/issues/10480
 os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
 # see https://github.com/vllm-project/vllm/issues/10619
-# Guard for older PyTorch without _inductor API
+# Guard for PyTorch _inductor API availability
 if hasattr(torch, "_inductor") and hasattr(torch._inductor, "config"):
     torch._inductor.config.compile_threads = 1
