@@ -1,21 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Adapted from https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
+# Adapted from vllm/model_executor/models/aya_vision.py
+"""Command-A-Vision (Cohere2Vision) multimodal model implementation for vLLM."""
+
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Optional, Union, cast
+from typing import Annotated, Literal, Optional, Union
 
 import torch
 from torch import nn
-from transformers import BatchFeature, GotOcr2ImageProcessor
-from transformers.activations import ACT2FN
-from transformers.image_processing_utils import get_size_dict
-from transformers.models.aya_vision import AyaVisionConfig
-from transformers.models.aya_vision.processing_aya_vision import (
-    AyaVisionProcessor)
-from transformers.models.got_ocr2.image_processing_got_ocr2 import (
-    get_optimal_tiled_canvas)
+from transformers import BatchFeature, PretrainedConfig
+from transformers.models.cohere2_vision import Cohere2VisionConfig
+from transformers.models.cohere2_vision.processing_cohere2_vision import (
+    Cohere2VisionProcessor)
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.activation import MulAndSilu
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               RowParallelLinear)
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargs
@@ -28,7 +31,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -38,7 +40,7 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     merge_multimodal_embeddings)
 
 
-class AyaVisionImagePixelInputs(TensorSchema):
+class Cohere2VisionImagePixelInputs(TensorSchema):
     """
     Dimensions:
         - np: The total number of patches over each image over each prompt in
@@ -62,70 +64,80 @@ class AyaVisionImagePixelInputs(TensorSchema):
     ]
 
 
-class AyaVisionMultiModalProjector(nn.Module):
+class Cohere2VisionMultiModalProjector(nn.Module):
+    """Multimodal projector that maps vision features to text embedding space.
+    
+    Uses pixel shuffle downsampling followed by SwiGLU activation.
+    """
 
-    def __init__(self, config: AyaVisionConfig):
+    def __init__(self, config: Cohere2VisionConfig, prefix: str = ""):
         super().__init__()
-        self.config = config
         self.downsample_factor = config.downsample_factor
-        self.alignment_intermediate_size = getattr(
-            config, "alignment_intermediate_size",
-            config.text_config.hidden_size)
-        self.layernorm = nn.LayerNorm(config.vision_config.hidden_size *
-                                      (config.downsample_factor**2),
-                                      eps=config.adapter_layer_norm_eps)
 
-        self.linear_1 = nn.Linear(
-            config.vision_config.hidden_size * (config.downsample_factor**2),
-            self.alignment_intermediate_size,
+        # Input dimension after pixel shuffle downsampling
+        input_dim = config.vision_config.hidden_size * (
+            config.downsample_factor**2)
+        # MergedColumnParallelLinear expects the intermediate size to be a list
+        # of sizes, so that it will load the weights as two separate linear
+        # layers before applying any parallelism.
+        # We need to divide the alignment intermediate size by 2 because
+        # the weights are merged weights of two linear layers for SwiGLU.
+        self.intermediate_size = config.alignment_intermediate_size // 2
+
+        self.linear_1 = MergedColumnParallelLinear(
+            input_dim,
+            [self.intermediate_size] * 2,
             bias=True,
+            return_bias=False,
+            prefix=f"{prefix}.linear_1",
+        )
+        self.act = MulAndSilu()
+        self.linear_2 = RowParallelLinear(
+            self.intermediate_size,
+            config.text_config.hidden_size,
+            bias=True,
+            return_bias=False,
+            prefix=f"{prefix}.linear_2",
         )
 
-        self.act = ACT2FN["silu"]  # SwiGLU uses SiLU activation
-        # For SwiGLU, project down to half size since we split intermediate dim
-        self.linear_2 = nn.Linear(self.alignment_intermediate_size // 2,
-                                  config.text_config.hidden_size,
-                                  bias=True)
-
-    def forward(self, image_features: torch.Tensor) -> torch.Tensor:
+    def forward(self, image_features):
         image_features = self.pixel_shuffle(image_features)
-        image_features = self.layernorm(image_features)
         hidden_states = self.linear_1(image_features)
-
-        # Split along last dimension and apply SwiGLU
-        x, gate = hidden_states.chunk(2, dim=-1)
-        hidden_states = self.act(gate) * x
-
+        hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
         return hidden_states
 
-    def pixel_shuffle(self,
-                      image_features: torch.Tensor) -> torch.Tensor:  # B, S, D
-        batch_size, seq_length, _ = image_features.shape
-        height = width = int(seq_length**0.5)
-        image_features = image_features.reshape(image_features.shape[0], width,
-                                                height, -1)
-        channels = image_features.shape[-1]
-        image_features = image_features.reshape(
-            batch_size, width, int(height / self.downsample_factor),
-            int(channels * self.downsample_factor))
-        image_features = image_features.permute(0, 2, 1, 3)
-        image_features = image_features.reshape(
-            batch_size, int(height / self.downsample_factor),
-            int(width / self.downsample_factor), -1)
-        image_features = image_features.permute(0, 2, 1, 3)
-        return image_features
+    def pixel_shuffle(self, image_features: torch.Tensor) -> torch.Tensor:
+        """Apply pixel shuffle downsampling to reduce spatial dimensions.
+        
+        Args:
+            image_features: Input tensor of shape [B, S, D] where S = H*W
+            
+        Returns:
+            Downsampled tensor with increased channel dimension
+        """
+        height = width = int(image_features.shape[1]**0.5)
+        x = image_features.reshape(image_features.shape[0], width, height, -1)
+        n, h, w, c = x.size()
+        scale_factor = 1. / self.downsample_factor
+        nh = int(h * scale_factor)
+        nw = int(w * scale_factor)
+        x = x.reshape(n, nh, self.downsample_factor, nw,
+                      self.downsample_factor, c)
+        x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
+        x = x.reshape(n, nh, nw, -1)
+        return x
 
 
-class AyaVisionProcessingInfo(BaseProcessingInfo):
+class Cohere2VisionProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_config(self) -> AyaVisionConfig:
-        return self.ctx.get_hf_config(AyaVisionConfig)
+    def get_hf_config(self) -> Cohere2VisionConfig:
+        return self.ctx.get_hf_config(Cohere2VisionConfig)
 
-    def get_hf_processor(self, **kwargs: object) -> AyaVisionProcessor:
-        return self.ctx.get_hf_processor(AyaVisionProcessor, **kwargs)
+    def get_hf_processor(self, **kwargs: object) -> Cohere2VisionProcessor:
+        return self.ctx.get_hf_processor(Cohere2VisionProcessor, **kwargs)
 
-    def get_image_processor(self, **kwargs: object) -> GotOcr2ImageProcessor:
+    def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -136,26 +148,20 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
         height = image_processor.size['height']
         width = image_processor.size['width']
         max_patches = image_processor.max_patches
-        return ImageSize(height=height * max_patches,
-                         width=width * max_patches)
+        return ImageSize(height=height * max_patches, width=width)
 
-    def get_num_patches(self, *, image_width: int, image_height: int,
-                        size: dict, min_patches: int, max_patches: int) -> int:
+    def get_num_patches(self, image_width: int, image_height: int) -> int:
         """
-        Calculate the number of patches needed for a given image based on size
-        constraints.  This method replicates and adjusts the logic from:
-        transformers/models/got_ocr2/image_processing_got_ocr2
+        Calculate the number of image patches for a given image.
+        Uses the HF processor to determine the actual number of patches.
         """
-        size = get_size_dict(size, default_to_square=False)
-        num_columns, num_rows = get_optimal_tiled_canvas(
-            (image_height, image_width), (size["height"], size["width"]),
-            min_patches, max_patches)
-        num_blocks = num_columns * num_rows
-        return num_blocks if num_blocks == 1 else num_blocks + 1
+        return self.get_hf_processor(
+        ).image_processor.get_number_of_image_patches(image_height,
+                                                      image_width, {})
 
 
-class AyaVisionDummyInputsBuilder(
-        BaseDummyInputsBuilder[AyaVisionProcessingInfo]):
+class Cohere2VisionDummyInputsBuilder(
+        BaseDummyInputsBuilder[Cohere2VisionProcessingInfo]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -182,8 +188,8 @@ class AyaVisionDummyInputsBuilder(
         }
 
 
-class AyaVisionMultiModalProcessor(
-        BaseMultiModalProcessor[AyaVisionProcessingInfo]):
+class Cohere2VisionMultiModalProcessor(
+        BaseMultiModalProcessor[Cohere2VisionProcessingInfo]):
 
     def _call_hf_processor(
         self,
@@ -198,28 +204,21 @@ class AyaVisionMultiModalProcessor(
             mm_kwargs,
             tok_kwargs,
         )
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        image_processor = hf_processor.image_processor
 
-        # HF processor pops the `num_patches` kwarg, which is needed by vLLM
-        if (images := mm_data.get("images")) is not None:
-            parsed_images = (self._get_data_parser().parse_mm_data({
+        # Ensure num_patches is available for proper tensor splitting
+        if "num_patches" not in processed_outputs and (
+                images := mm_data.get("images")) is not None:
+            # Fallback calculation if HF processor didn't provide num_patches
+            parsed_images = self._get_data_parser().parse_mm_data({
                 "image":
                 images
-            }).get_items("image", ImageProcessorItems))
-            image_sizes = [
-                parsed_images.get_image_size(i)
-                for i in range(len(parsed_images))
-            ]
+            }).get_items("image", ImageProcessorItems)
 
             num_patches = [
                 self.info.get_num_patches(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
-                    size=image_processor.size,
-                    min_patches=image_processor.min_patches,
-                    max_patches=image_processor.max_patches)
-                for image_size in image_sizes
+                    image_width=parsed_images.get_image_size(i).width,
+                    image_height=parsed_images.get_image_size(i).height)
+                for i in range(len(parsed_images))
             ]
             processed_outputs["num_patches"] = torch.tensor(num_patches)
 
@@ -246,23 +245,25 @@ class AyaVisionMultiModalProcessor(
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token = hf_processor.image_token
-        img_patch_token = hf_processor.img_patch_token
-        image_processor = hf_processor.image_processor
+        img_line_break_token = hf_processor.img_line_break_token
+        boi_token = hf_processor.boi_token
+        eoi_token = hf_processor.eoi_token
 
         def get_replacement(item_idx: int):
             images: ImageProcessorItems = mm_items.get("image",
                                                        ImageProcessorItems)
             image_size: ImageSize = images.get_image_size(item_idx)
-            num_patches = self.info.get_num_patches(
-                image_width=image_size.width,
-                image_height=image_size.height,
-                size=image_processor.size,
-                min_patches=image_processor.min_patches,
-                max_patches=image_processor.max_patches,
-            )
-            repl = hf_processor._prompt_split_image(num_patches=num_patches)
 
-            return PromptUpdateDetails.select_text(repl, img_patch_token)
+            num_patches = self.info.get_num_patches(image_size.height,
+                                                    image_size.width)
+            img_tokens_per_tile = int(hf_processor.patch_size**2)
+            single_tile_tokens = image_token * img_tokens_per_tile + \
+                img_line_break_token
+            img_string = f"{boi_token}\
+                {single_tile_tokens * num_patches}\
+                {eoi_token}"
+
+            return PromptUpdateDetails.select_text(img_string, image_token)
 
         return [
             PromptReplacement(
@@ -273,71 +274,43 @@ class AyaVisionMultiModalProcessor(
         ]
 
 
-def _get_num_hidden_layers(hf_config: AyaVisionConfig) -> int:
-    feature_layers = hf_config.vision_feature_layer
-    num_hidden_layers = hf_config.vision_config.num_hidden_layers
-    # If we have one feature layer, initialize up to that layer
-    if isinstance(feature_layers, int):
-        return _get_layer_index(feature_layers, num_hidden_layers)
-    # If we have multiple feature layers, initialize up to the deepest m
-    elif isinstance(feature_layers, (list, tuple)):
-        return max(
-            _get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
-    raise TypeError(f"vision_layer_feature type: {type(feature_layers)}"
-                    " is not supported")
-
-
-def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
-    if feature_layer_index < 0:
-        return num_hidden_layers + feature_layer_index + 1
-    return feature_layer_index
-
-
 @MULTIMODAL_REGISTRY.register_processor(
-    AyaVisionMultiModalProcessor,
-    info=AyaVisionProcessingInfo,
-    dummy_inputs=AyaVisionDummyInputsBuilder)
-class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                        SupportsPP):
+    Cohere2VisionMultiModalProcessor,
+    info=Cohere2VisionProcessingInfo,
+    dummy_inputs=Cohere2VisionDummyInputsBuilder)
+class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                            SupportsPP):
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            # mapping for new names in checkpoint saved after transformers v4.52
-            "model.language_model.": "language_model.model.",
             "model.vision_tower.": "vision_tower.",
             "model.multi_modal_projector.": "multi_modal_projector.",
+            "model.language_model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
         })
 
-    @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
-        if modality.startswith("image"):
-            return "<image>"
-
-        raise ValueError("Only image modality is supported")
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config: AyaVisionConfig = vllm_config.model_config.hf_config
+        config: Cohere2VisionConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
-        num_hidden_layers = _get_num_hidden_layers(config)
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
+        self._patch_quant_config(config, quant_config)
 
-        self.vision_tower = SiglipVisionModel(
-            config.vision_config,
-            quant_config,
-            num_hidden_layers_override=num_hidden_layers,
-            prefix=maybe_prefix(prefix, "vision_model"))
+        self.vision_tower = SiglipVisionModel(config.vision_config,
+                                              quant_config,
+                                              prefix=maybe_prefix(
+                                                  prefix, "vision_tower"))
         self.vocab_size = config.text_config.vocab_size
-        self.multi_modal_projector = AyaVisionMultiModalProjector(config)
+        self.multi_modal_projector = \
+            Cohere2VisionMultiModalProjector(
+                config, prefix=maybe_prefix(prefix, "multi_modal_projector"))
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "model"),
-            # Cohere2ForCausalLM and CohereForCausalLM are the same on vllm
+            prefix=maybe_prefix(prefix, "language_model"),
             architectures=["Cohere2ForCausalLM"])
 
     @property
@@ -349,56 +322,45 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
-    def _image_pixels_to_features(self, vision_tower: SiglipVisionModel,
-                                  pixel_values: torch.Tensor,
-                                  **kwargs) -> torch.Tensor:
-        target_dtype = vision_tower.get_input_embeddings().weight.dtype
-        image_features = vision_tower(pixel_values.to(dtype=target_dtype),
-                                      **kwargs)
-
-        def select_features(leaf: torch.Tensor):
-            return self._select_image_features(
-                leaf,
-                strategy=self.config.vision_feature_select_strategy,
-            )
-
-        return cast(
-            Union[torch.Tensor, tuple[torch.Tensor, ...]],
-            json_map_leaves(select_features, image_features),
-        )
-
-    def _select_image_features(self, image_features: torch.Tensor, *,
-                               strategy: str) -> torch.Tensor:
-        if strategy == "default":
-            return image_features[:, 1:]
-        elif strategy == "full":
-            return image_features
-
-        raise ValueError(f"Unexpected select feature strategy: {strategy}")
-
-    def _process_image_input(self, image_input: AyaVisionImagePixelInputs,
+    def _process_image_input(self, image_input: Cohere2VisionImagePixelInputs,
                              **kwargs) -> list[torch.Tensor]:
-        assert self.vision_tower is not None
+        """Process image pixels through vision tower and projector.
+        
+        Args:
+            image_input: Validated image input containing pixel values and 
+                         patch counts
+            
+        Returns:
+            List of flattened image embeddings, one per image
+        """
+        assert self.vision_tower is not None, "Vision tower is required"
+
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
-        image_features = self._image_pixels_to_features(
-            self.vision_tower, pixel_values=pixel_values)
+
+        # Extract visual features
+        image_features = self.vision_tower(pixel_values)
+
+        # Project to text embedding space
         image_embeds = self.multi_modal_projector(image_features)
+
+        # Split and flatten embeddings per image
         return [
             e.flatten(0, 2) for e in image_embeds.split(num_patches.tolist())
         ]
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[AyaVisionImagePixelInputs]:
+            self, **kwargs: object) -> Optional[Cohere2VisionImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         num_patches = kwargs.pop("num_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
-        assert image_embeds is None, "Aya Vision does not support image_embeds."
+        assert image_embeds is None, \
+            "Cohere2Vision does not support image_embeds."
 
         if pixel_values is None:
             return None
 
-        return AyaVisionImagePixelInputs(
+        return Cohere2VisionImagePixelInputs(
             type="pixel_values",
             pixel_values=flatten_bn(pixel_values, concat=True),
             num_patches=flatten_bn(num_patches, concat=True),
@@ -406,6 +368,18 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                 "h": self.config.vision_config.image_size,
                 "w": self.config.vision_config.image_size,
             })
+
+    def _patch_quant_config(self, config: PretrainedConfig,
+                            quant_config: QuantizationConfig):
+        # the awq models from OpenGVLab missing `modules_to_not_convert`
+        # patch the quant_config to add `modules_to_not_convert` back
+        if isinstance(quant_config, AWQConfig):
+            text_config = config.text_config
+            llm_quant_config = getattr(text_config, "quantization_config",
+                                       None)
+            if (not quant_config.modules_to_not_convert) and (llm_quant_config
+                                                              is not None):
+                quant_config.modules_to_not_convert.append("vision_tower")
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
@@ -430,7 +404,7 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,
                 multimodal_embeddings=multimodal_embeddings,
-                placeholder_token_id=self.config.image_token_index,
+                placeholder_token_id=self.config.image_token_id,
             )
 
         return inputs_embeds
