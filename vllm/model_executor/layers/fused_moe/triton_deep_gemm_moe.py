@@ -24,12 +24,12 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         self.triton_expert = TritonExperts(quant_config)
 
-        self.allow_deep_gemm = (allow_deep_gemm and quant_config.use_fp8_w8a8
+        self.allow_deep_gemm = (allow_deep_gemm and self.quant_config.use_fp8_w8a8
                                 and self.block_shape
                                 == deep_gemm_block_shape())
 
         self.deep_gemm_expert = DeepGemmExperts(
-            quant_config) if self.allow_deep_gemm else None
+            self.quant_config) if self.allow_deep_gemm else None
 
     @property
     def activation_formats(

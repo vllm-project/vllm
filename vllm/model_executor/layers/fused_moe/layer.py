@@ -104,7 +104,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @staticmethod
     def _maybe_make_prepare_finalize(
-            moe: FusedMoEConfig) -> Optional[FusedMoEPrepareAndFinalize]:
+        moe: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
@@ -118,9 +120,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 moe.max_num_tokens,
                 moe.hidden_dim,
                 moe.in_dtype,
-                moe.quant_dtype,
-                per_act_token_quant=moe.per_act_token_quant,
-                block_shape=moe.block_shape,
+                quant_config.quant_dtype,
+                per_act_token_quant=quant_config.per_act_token_quant,
+                block_shape=quant_config.block_shape,
             )
 
             all_to_all_args = dict(
@@ -177,10 +179,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
             # Note : We may want to use FP8 dispatch even otherwise just to
             # reduce datamovement
-            use_fp8_dispatch = (moe.quant_config is not None
-                                and moe.quant_config.quant_dtype
+            use_fp8_dispatch = (quant_config.quant_dtype
                                 == current_platform.fp8_dtype()
-                                and moe.quant_config.block_shape
+                                and quant_config.block_shape
                                 == DEEPEP_QUANT_BLOCK_SHAPE)
 
             prepare_finalize = DeepEPLLPrepareAndFinalize(
@@ -195,7 +196,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def maybe_make_prepare_finalize(
             self) -> Optional[FusedMoEPrepareAndFinalize]:
         if self.moe.moe_parallel_config.use_all2all_kernels:
-            return FusedMoEMethodBase._maybe_make_prepare_finalize(self.moe)
+            return FusedMoEMethodBase._maybe_make_prepare_finalize(self.moe, self.moe_quant_config)
         else:
             return None
 

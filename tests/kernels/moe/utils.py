@@ -221,7 +221,7 @@ def make_test_weight(
     in_dtype: torch.dtype = torch.bfloat16,
     quant_dtype: Union[torch.dtype, str, None] = None,
     block_shape: Optional[list[int]] = None,
-    per_act_token_quant: bool = False,
+    per_out_ch_quant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
            Optional[torch.Tensor]]:
     w_16 = torch.randn((e, rows, cols), device="cuda", dtype=in_dtype) / 15
@@ -233,7 +233,7 @@ def make_test_weight(
         w_gs_l = [None] * e
         for idx in range(e):
             w_l[idx], w_s_l[idx], w_gs_l[idx] = moe_quantize_weights(
-                w_16[idx], None, quant_dtype, per_act_token_quant, block_shape)
+                w_16[idx], None, quant_dtype, per_out_ch_quant, block_shape)
 
         w = torch.stack(w_l)
         w_s = torch.stack(w_s_l)
@@ -263,16 +263,16 @@ def make_test_weights(
     in_dtype: torch.dtype = torch.bfloat16,
     quant_dtype: Union[torch.dtype, str, None] = None,
     block_shape: Optional[list[int]] = None,
-    per_act_token_quant: bool = False,
+    per_out_ch_quant: bool = False,
 ) -> tuple[tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                  Optional[torch.Tensor]],
            tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                  Optional[torch.Tensor]]]:
     return (
         make_test_weight(e, 2 * n, k, in_dtype, quant_dtype, block_shape,
-                         per_act_token_quant),
+                         per_out_ch_quant),
         make_test_weight(e, k, n, in_dtype, quant_dtype, block_shape,
-                         per_act_token_quant),
+                         per_out_ch_quant),
     )
 
 
@@ -305,7 +305,7 @@ def make_test_quant_config(
         k,
         in_dtype,
         quant_dtype,
-        per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_act_token_quant, # TODO: fix
         block_shape=block_shape,
     )
 

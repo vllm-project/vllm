@@ -305,13 +305,17 @@ class FusedMoEQuantConfig:
         g2_alphas: Optional[torch.Tensor] = None,
         a1_gscale: Optional[torch.Tensor] = None,
         a2_gscale: Optional[torch.Tensor] = None,
+        w1_bias: Optional[torch.Tensor] = None,
+        w2_bias: Optional[torch.Tensor] = None,
+        w1_precision: Optional["PrecisionConfig"] = None,
+        w2_precision: Optional["PrecisionConfig"] = None,
     ) -> "FusedMoEQuantConfig":
         a_shape, w_shape = _quant_flags_to_group_shape(quant_dtype, per_act_token_quant, per_out_ch_quant, block_shape)
         quant_config = FusedMoEQuantConfig(
             a1=FusedMoEQuantDesc(quant_dtype, a_shape, a1_scale, a1_gscale),
             a2=FusedMoEQuantDesc(quant_dtype, a_shape, a2_scale, a2_gscale),
-            w1=FusedMoEQuantDesc(quant_dtype, w_shape, w1_scale, g1_alphas),
-            w2=FusedMoEQuantDesc(quant_dtype, w_shape, w2_scale, g2_alphas),
+            w1=FusedMoEQuantDesc(quant_dtype, w_shape, w1_scale, g1_alphas, None, w1_bias, w1_precision),
+            w2=FusedMoEQuantDesc(quant_dtype, w_shape, w2_scale, g2_alphas, None, w2_bias, w2_precision),
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
         assert quant_config.per_out_ch_quant == per_out_ch_quant
@@ -335,12 +339,17 @@ def fp8_w8a8_moe_quant_config(
         per_act_token_quant,
         per_out_ch_quant,
         block_shape)
-    return FusedMoEQuantConfig(
+    quant_config = FusedMoEQuantConfig(
         a1=FusedMoEQuantDesc(torch.float8_e4m3fn, a_shape, a1_scale),
         a2=FusedMoEQuantDesc(torch.float8_e4m3fn, a_shape, a2_scale),
         w1=FusedMoEQuantDesc(torch.float8_e4m3fn, w_shape, w1_scale),
         w2=FusedMoEQuantDesc(torch.float8_e4m3fn, w_shape, w2_scale),
     )
+    assert quant_config.quant_dtype == torch.float8_e4m3fn
+    assert quant_config.per_act_token_quant == per_act_token_quant
+    assert quant_config.per_out_ch_quant == per_out_ch_quant
+    assert quant_config.block_shape == block_shape
+    return quant_config
 
 
 def int8_w8a8_moe_quant_config(

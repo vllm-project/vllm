@@ -26,17 +26,17 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.batched_triton_experts = BatchedTritonExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
-            quant_config=quant_config,
+            quant_config=self.quant_config,
         )
 
-        self.allow_deep_gemm = (allow_deep_gemm and self.use_fp8_w8a8
+        self.allow_deep_gemm = (allow_deep_gemm and self.quant_config.use_fp8_w8a8
                                 and self.block_shape
                                 == BatchedDeepGemmExperts.DEEPGEMM_BLOCK_SHAPE)
 
         self.batched_deep_gemm_experts = BatchedDeepGemmExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
-            quant_config=quant_config,
+            quant_config=self.quant_config,
         ) if self.allow_deep_gemm else None
 
         assert (self.batched_deep_gemm_experts is not None

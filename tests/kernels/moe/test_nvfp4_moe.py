@@ -56,7 +56,7 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
              in_dtype=dtype,
              quant_dtype="nvfp4",
              block_shape=None,  # use quant_blocksize?
-             per_act_token_quant=False,
+             per_out_ch_quant=False,
          )
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)

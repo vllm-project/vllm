@@ -519,9 +519,9 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
         assert (block_shape is None
-                or triton.cdiv(B.size(-2), block_shape[0]) == B_scale.size(-2))
+                or triton.cdiv(B.size(-2), block_shape[0]) == B_scale.size(-2)), f"BS {triton.cdiv(B.shape[-2], block_shape[0])} {B_scale.shape[-2]} {B.shape} {B_scale.shape}"
         assert (block_shape is None
-                or triton.cdiv(B.size(-1), block_shape[1]) == B_scale.size(-1))
+                or triton.cdiv(B.size(-1), block_shape[1]) == B_scale.size(-1)), f"BS {triton.cdiv(B.shape[-1], block_shape[1])} {B_scale.shape[-1]} {B.shape} {B_scale.shape}"
 
     elif use_int8_w8a16 or use_int4_w4a16:
         assert B_scale is not None
@@ -1071,7 +1071,7 @@ def inplace_fused_experts(
     w2_zp: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[list[int]] = None,
+    block_shape: Optional[List[int]] = None,  #noqa: UP006
     w1_bias: Optional[torch.Tensor] = None,
     w2_bias: Optional[torch.Tensor] = None,
 ) -> None:
@@ -1830,7 +1830,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
             per_channel_quant=self.per_act_token_quant,
             block_shape=self.block_shape,
-            B_bias=self.quant_config.w1_bias,
+            B_bias=self.w1_bias,
         )
 
         self.activation(activation, intermediate_cache2,
@@ -1863,7 +1863,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
             per_channel_quant=self.per_act_token_quant,
             block_shape=self.block_shape,
-            B_bias=self.quant_config.w2_bias,
+            B_bias=self.w2_bias,
         )
 
         ops.moe_sum(intermediate_cache3, output)

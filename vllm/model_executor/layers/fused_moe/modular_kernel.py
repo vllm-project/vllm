@@ -386,6 +386,14 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         return self.quant_config.w2_zp
 
     @property
+    def w1_bias(self) -> Optional[torch.Tensor]:
+        return self.quant_config.w1_bias
+
+    @property
+    def w2_bias(self) -> Optional[torch.Tensor]:
+        return self.quant_config.w2_bias
+
+    @property
     def g1_alphas(self) -> Optional[torch.Tensor]:
         return self.quant_config.g1_alphas
 
@@ -690,9 +698,13 @@ class FusedMoEModularKernel(torch.nn.Module):
                    Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
             s = chunk_idx * CHUNK_SIZE
             e = min(s + CHUNK_SIZE, M)
-            return (a1q[s:e], _chunk_scales(a1q_scale, s, e),
-                    _chunk_scales(self.fused_experts.a2_scale, s,
-                                  e), topk_ids[s:e], topk_weights[s:e])
+            return (
+                a1q[s:e],
+                _chunk_scales(a1q_scale, s, e),
+                _chunk_scales(self.fused_experts.a2_scale, s, e),
+                topk_ids[s:e],
+                topk_weights[s:e],
+            )
 
         def slice_output_tensor(chunk_idx: int) -> torch.Tensor:
             assert fused_out.size(0) % M == 0, (

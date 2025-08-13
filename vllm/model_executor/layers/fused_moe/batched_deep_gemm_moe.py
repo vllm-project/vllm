@@ -224,8 +224,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         max_num_tokens: Maximum number of tokens from a DP Rank
         num_dispatchers: The number of DP dispatchers.
-        block_shape: Block quantization block shape.
-        per_act_token_quant: Per activation token quantization flag.
+        quant_config: Quantization configuration
         """
         super().__init__(quant_config)
         assert self.block_shape == self.DEEPGEMM_BLOCK_SHAPE
