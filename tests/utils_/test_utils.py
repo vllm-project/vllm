@@ -236,7 +236,6 @@ def test_config_args(parser_with_config, cli_config_file):
         ['serve', 'mymodel', '--config', cli_config_file])
     assert args.tensor_parallel_size == 2
     assert args.trust_remote_code
-    assert not args.multi_step_stream_outputs
 
 
 def test_config_file(parser_with_config):
@@ -828,7 +827,6 @@ def test_model_specification(parser_with_config, cli_config_file,
     ])
     assert args.tensor_parallel_size == 2
     assert args.trust_remote_code is True
-    assert args.multi_step_stream_outputs is False
     assert args.port == 12312
 
 
