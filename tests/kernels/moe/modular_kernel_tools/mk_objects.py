@@ -266,6 +266,7 @@ if has_deep_gemm() and not current_platform.has_device_capability(100):
         supports_chunking=False,
         supports_expert_map=False,
         needs_matching_quant=True,
+        needs_deep_gemm=True,
     )
     register_experts(
         TritonOrDeepGemmExperts,
@@ -275,6 +276,7 @@ if has_deep_gemm() and not current_platform.has_device_capability(100):
         supports_chunking=True,
         supports_expert_map=True,
         needs_matching_quant=True,
+        needs_deep_gemm=True,
     )
 
 if cutlass_fp8_supported():
