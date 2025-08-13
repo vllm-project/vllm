@@ -2037,22 +2037,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             mm_budget = self.mm_budget
             assert mm_budget is not None
 
+            gc.collect()
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+
             time_before_processing = time.perf_counter()
             before_profile = MemorySnapshot(auto_measure=True)
 
-            self.mm_registry.get_decoder_dummy_data(
-                model_config=model_config,
-                seq_len=self.max_num_tokens,
-                mm_counts=mm_budget.max_items_per_batch_by_modality,
-            )
+            for modality, max_items_per_batch in (
+                    mm_budget.max_items_per_batch_by_modality.items()):
+                self.mm_registry.get_decoder_dummy_data(
+                    model_config=model_config,
+                    seq_len=self.max_num_tokens,
+                    mm_counts={modality: max_items_per_batch},
+                )
+
+            gc.collect()
+            torch.cuda.empty_cache()
 
             time_after_processing = time.perf_counter()
             after_profile = MemorySnapshot(auto_measure=True)
 
             diff_profile = after_profile - before_profile
 
-            # TODO: Multiply this by API server count
-            self.processor_memory_usage = diff_profile.torch_peak
+            self.processor_memory_usage = diff_profile.torch_peak * (
+                self.parallel_config._api_server_count)
 
             logger.info("Input processing took %.4f GiB and %.6f seconds",
                         self.processor_memory_usage / GiB_bytes,

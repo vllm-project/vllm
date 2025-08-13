@@ -189,6 +189,10 @@ llm = LLM(model="Qwen/Qwen2-Audio-7B-Instruct",
     the forward pass of the model.
     Make sure you perform benchmarking before enabling this!
 
+!!! note
+    Additional memory needs to be reserved for GPU multi-modal processing,
+    so there is less memory left for your model and KV caching.
+
 ## Multi-Modal Caching
 
 ### Processor Cache
