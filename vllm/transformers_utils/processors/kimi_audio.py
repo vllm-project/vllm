@@ -3,6 +3,7 @@
 # adapted from https://github.com/MoonshotAI/Kimi-Audio/tree/master/kimia_infer/api/prompt_manager.py
 from typing import Union
 
+import os
 import numpy as np
 import librosa
 import torch
@@ -11,7 +12,6 @@ from torch import nn
 from subprocess import CalledProcessError, run
 from typing import Dict, List
 from dataclasses import dataclass
-import os
 from functools import lru_cache
 from typing import Optional, Union
 from transformers.models.whisper.modeling_whisper import WhisperModel
@@ -118,7 +118,8 @@ def log_mel_spectrogram(
     Parameters
     ----------
     audio: Union[str, np.ndarray, torch.Tensor], shape = (*)
-        The path to audio or either a NumPy array or Tensor containing the audio waveform in 16 kHz
+        The path to audio or either a NumPy array or Tensor containing
+        the audio waveform in 16 kHz
 
     n_mels: int
         The number of Mel-frequency filters, only 80 is supported
@@ -186,8 +187,9 @@ class WhisperEncoder(nn.Module):
             # import pdb; pdb.set_trace()
             assert audio_segment.shape[0] <= 480000
             L = audio_segment.shape[0]
-            # to match huggingface logic, with use attention mask to control the
-            # length and the slice with mask[:, ::160], also match the glm4 12.5 logic
+            # to match huggingface logic, with use attention mask to 
+            # control the length and the slice with mask[:, ::160], 
+            # also match the glm4 12.5 logic
             token_len = (L - 1) // (160 * 8) + 1
 
             pad_audio = pad_or_trim(audio_segment.flatten())
@@ -394,8 +396,10 @@ class KimiAContent:
 class KimiAudioProcessor:
     r"""
     Lightweight processor:
-    - audio_tokenizer: has method `tokenize(audio_path=...)` -> torch.Tensor (1, N) of discrete audio token ids (before offset)
-    - text_tokenizer: huggingface tokenizer-like, has `encode` or `encode_plus` and `convert_tokens_to_ids`
+    - audio_tokenizer: has method `tokenize(audio_path=...)` -> 
+    torch.Tensor (1, N) of discrete audio token ids (before offset)
+    - text_tokenizer: huggingface tokenizer-like, 
+    has `encode` or `encode_plus` and `convert_tokens_to_ids`
     """
 
     attributes = ["audio_tokenizer", "text_tokenizer"]
@@ -651,22 +655,26 @@ class KimiAudioProcessor:
         )
         audio_features = ret_msg.continuous_feature
 
-        return dict(
+        data = dict(
             audio_input_ids=audio_input_ids,
             text_input_ids=text_input_ids,
             is_continuous_mask=is_continuous_mask,
             whisper_input_feature=audio_features,
-            text_input_ids=text_input_ids,
         )
+        return BatchFeature(data=data, tensor_type="pt")
 
     @property
-    # NOTE: we don't have default templates anymore, and the below is kept only because the hub config is not yet updated!
+    # NOTE: we don't have default templates anymore, and the below 
+    # is kept only because the hub config is not yet updated!
     def default_chat_template(self):
         """
-        This default vicuna template formats inputs in the form of a chat history. For each message in the chat history:
-        * the template will output the role of the speaker followed by the content of the message.
+        This default vicuna template formats inputs in the form of a chat 
+        history. For each message in the chat history:
+        * the template will output the role of the speaker followed 
+        by the content of the message.
         * content is a list of strings and audios.
-        * If the content element is an audio, the template will output a sequence of <|AUDIO|> tokens
+        * If the content element is an audio, the template will 
+        output a sequence of <|AUDIO|> tokens
 
         Example:
 
@@ -674,12 +682,15 @@ class KimiAudioProcessor:
         messages = [
             {'role': 'system', 'content': 'You are a helpful assistant.'},
             {"role": "user", "content": [
-                {"type": "audio", "audio_url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen2-Audio/audio/glass-breaking-151256.mp3"},
+                {"type": "audio", "audio_url": "https://qianwen-res.oss-cn-bei
+                jing.aliyuncs.com/Qwen2-Audio/audio/glass-breaking-151256.mp3"},
                 {"type": "text", "text": "What's that sound?"},
             ]},
-            {"role": "assistant", "content": "It is the sound of glass shattering."},
+            {"role": "assistant", "content": "It is the sound of glass 
+            shattering."},
             {"role": "user", "content": [
-                {"type": "audio", "audio_url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen2-Audio/audio/f2641_0_throatclearing.wav"},
+                {"type": "audio", "audio_url": "https://qianwen-res.oss-cn-beij
+                ing.aliyuncs.com/Qwen2-Audio/audio/f2641_0_throatclearing.wav"},
                 {"type": "text", "text": "How about this one?"},
             ]},
         ]
@@ -692,16 +703,21 @@ class KimiAudioProcessor:
             "{% set audio_count = namespace(value=0) %}"
             "{% for message in messages %}"
                 "{% if loop.first and message['role'] != 'system' %}"
-                    "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+                    "<|im_start|>system\nYou are a helpful assistant.\
+                    <|im_end|>\n"
                 "{% endif %}"
                 "<|im_start|>{{ message['role'] }}\n"
                 "{% if message['content'] is string %}"
                     "{{ message['content'] }}<|im_end|>\n"
                 "{% else %}"
                     "{% for content in message['content'] %}"
-                        "{% if 'audio' in content or 'audio_url' in content or message['type'] == 'audio' or content['type'] == 'audio' %}"
-                            "{% set audio_count.value = audio_count.value + 1 %}"
-                            "Audio {{ audio_count.value }}: <|audio_bos|><|AUDIO|><|audio_eos|>\n"
+                        "{% if 'audio' in content or 'audio_url' in content or "
+                        "message['type'] == 'audio' or content"
+                        "['type'] == 'audio' %}"
+                            "{% set audio_count.value = "
+                            "audio_count.value + 1 %}"
+                            "Audio {{ audio_count.value }}: \
+                            <|audio_bos|><|AUDIO|><|audio_eos|>\n"
                         "{% elif 'text' in content %}"
                             "{{ content['text'] }}"
                         "{% endif %}"
