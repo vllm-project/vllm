@@ -336,7 +336,7 @@ run_serving_tests() {
     max_concurrency_list=$(echo "$params" | jq -r '.max_concurrency_list')
     if [[ -z "$max_concurrency_list" || "$max_concurrency_list" == "null" ]]; then
         num_prompts=$(echo "$client_params" | jq -r '.num_prompts')
-        max_concurrency_list="$num_prompts"
+        max_concurrency_list="[$num_prompts]"
     fi
     max_concurrency_list=$(echo "$max_concurrency_list" | jq -r '.[] | @sh')
     echo "Running over max concurrency list $max_concurrency_list"
