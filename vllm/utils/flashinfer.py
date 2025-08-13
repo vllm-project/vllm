@@ -154,6 +154,7 @@ def use_trtllm_attention(
     num_qo_heads: Optional[int],
     num_kv_heads: Optional[int],
     attn_head_size: Optional[int],
+    has_sinks: bool = False,
 ) -> bool:
     # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
     if not (current_platform.is_device_capability(100)
@@ -164,6 +165,13 @@ def use_trtllm_attention(
     if (attn_head_size is None or num_qo_heads is None or num_kv_heads is None
             or num_qo_heads % num_kv_heads != 0):
         return False
+
+    # If sinks are being used, we must use TRTLLM attention as it's
+    # the only backend that supports them
+    if has_sinks:
+        logger.info_once(
+            "Using TRTLLM attention (required for attention sinks).")
+        return True
 
     env_value = envs.VLLM_USE_TRTLLM_ATTENTION
     if env_value is not None:
