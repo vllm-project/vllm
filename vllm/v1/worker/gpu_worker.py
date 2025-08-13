@@ -313,7 +313,7 @@ class Worker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
-        if not self.model_config.enforce_eager and not self.model_config.delayed_cudagraphs:
+        if not self.model_config.enforce_eager and not self.vllm_config.compilation_config.delayed_cudagraphs:
             self.model_runner.capture_model()
 
         # Warm up sampler and preallocate memory buffer for logits and other
@@ -393,7 +393,7 @@ class Worker(WorkerBase):
                     all_gather_group=get_tp_group()))
 
 
-        if self.model_config.delayed_cudagraphs and not self.model_config.enforce_eager:
+        if self.vllm_config.compilation_config.delayed_cudagraphs and not self.model_config.enforce_eager:
             self._delayed_cudagraph_capture(scheduler_output.total_num_scheduled_tokens)
 
         output = self.model_runner.execute_model(scheduler_output,
