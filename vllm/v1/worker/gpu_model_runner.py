@@ -1016,6 +1016,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     req.mrope_positions[:,src_start:src_end]
 
                 mrope_pos_ptr += prompt_part_len
+                # ekhvedchenia
+                print("_calc_mrope_positions (prompt_part_len > 0)", req_id, f"{self.mrope_positions_cpu.shape=}")
+                print(self.mrope_positions_cpu[0])
+                print(self.mrope_positions_cpu[1])
+                print(self.mrope_positions_cpu[2])
 
             if completion_part_len > 0:
                 # compute completion's mrope_positions on-the-fly
@@ -1031,6 +1036,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
 
                 mrope_pos_ptr += completion_part_len
+
+                print("_calc_mrope_positions (completion_part_len > 0)", req_id, f"{self.mrope_positions_np.shape=}")
+                print(self.mrope_positions_np[0])
+                print(self.mrope_positions_np[1])
+                print(self.mrope_positions_np[2])
+
 
     def _calc_spec_decode_metadata(
         self,
