@@ -164,6 +164,9 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """If set to True, enable prompt_tokens_details in usage."""
     enable_server_load_tracking: bool = False
     """If set to True, enable tracking server_load_metrics in the app state."""
+    max_server_load: Optional[int] = None
+    """Maximum number of concurrent requests allowed. When exceeded, new requests will be rejected with HTTP 503. 
+    Only effective when --enable-server-load-tracking is enabled."""
     enable_force_include_usage: bool = False
     """If set to True, including usage on every request."""
     enable_tokenizer_info_endpoint: bool = False

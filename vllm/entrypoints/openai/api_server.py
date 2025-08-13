@@ -1762,6 +1762,7 @@ async def init_app_state(
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
+    state.max_server_load = args.max_server_load
 
 
 def create_server_socket(addr: tuple[str, int]) -> socket.socket:
