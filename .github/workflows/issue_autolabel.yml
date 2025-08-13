@@ -27,6 +27,7 @@ jobs:
                   "hip",
 
                   // GPU Models - Instinct Series
+                  "amd instinct",
                   "mi300",
                   "mi300x",
                   "mi300a",
@@ -40,35 +41,21 @@ jobs:
                   "mi308",
 
                   // GPU Models - Radeon Series
-                  "amd radeon rx 9070",
-                  "amd radeon rx 9070 xt",
-                  "amd radeon rx 9070 gre",
-                  "amd radeon ai pro r9700",
-                  "amd radeon rx 9060 xt",
-                  "amd radeon rx 7900 xtx",
-                  "amd radeon rx 7900 xt",
-                  "amd radeon rx 7900 gre",
-                  "amd radeon rx 7800 xt",
+                  "amd radeon",
+                  "ai pro r9700",
+                  "rx 9070",
+                  "rx 9060",
+                  "rx 7900",
+                  "rx 7800",
 
                   // GPU Models - Pro Series
-                  "amd radeon pro w7900",
-                  "amd radeon pro w7900 dual slot",
-                  "amd radeon pro w7800",
-                  "amd radeon pro w7800 48gb",
-                  "amd radeon pro w7700",
-                  "amd radeon pro v710",
-                  "amd radeon pro v620",
-                  "amd radeon pro w6800",
-
-                  // GPU Models - Full Instinct Names
-                  "amd instinct mi325x",
-                  "amd instinct mi300x",
-                  "amd instinct mi300a",
-                  "amd instinct mi250x",
-                  "amd instinct mi250",
-                  "amd instinct mi210",
-                  "amd instinct mi350x",
-                  "amd instinct mi355x",
+                  "amd radeon pro",
+                  "w7900",
+                  "w7800",
+                  "w7700",
+                  "v710",
+                  "v620",
+                  "w6800",
 
                   // Architecture codes
                   "cdna3",
