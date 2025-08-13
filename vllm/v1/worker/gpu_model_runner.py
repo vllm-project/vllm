@@ -2540,6 +2540,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         gc.collect()
 
     def capture_model(self) -> int:
+        # Capture CUDAGraphs and return the cudagraph memory consumption
+        # in bytes.
         if not self.use_cuda_graph:
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
