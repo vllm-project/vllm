@@ -682,7 +682,8 @@ def determine_expert_map(
     return (local_num_experts, expert_map)
 
 
-class FusedMoE(torch.nn.Module):
+@CustomOp.register("fused_moe")
+class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
 
     This layer contains both MergedColumnParallel weights (gate_up_proj /
