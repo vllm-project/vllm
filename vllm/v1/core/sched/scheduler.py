@@ -84,6 +84,9 @@ class Scheduler(SchedulerInterface):
             assert len(self.kv_cache_config.kv_cache_groups) == 1, (
                 "Multiple KV cache groups are not currently supported "
                 "with KV connectors")
+            assert not self.is_encoder_decoder, (
+                "Encoder-decoder models are not currently supported "
+                "with KV connectors")
             self.connector = KVConnectorFactory.create_connector(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
 
@@ -484,12 +487,9 @@ class Scheduler(SchedulerInterface):
                 # This information is used to determine if a load is
                 # needed for this request.
                 if self.connector is not None:
-                    update_blocks = new_computed_blocks + new_blocks
-                    if new_cross_blocks is not None:
-                        update_blocks += new_cross_blocks
                     self.connector.update_state_after_alloc(
                         request,
-                        update_blocks,
+                        new_computed_blocks + new_blocks,
                         num_external_computed_tokens,
                     )
 
