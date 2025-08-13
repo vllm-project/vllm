@@ -158,16 +158,14 @@ def make_modular_kernel(
     num_dispatchers = pgi.world_size // dp_size
 
     if low_latency_mode:
-        assert not per_act_token_quant, "not supported in ll mode"
+        assert not quant_config.per_act_token_quant, "not supported in ll mode"
         fused_experts = BatchedTritonExperts(
             max_num_tokens=MAX_TOKENS_PER_RANK,
             num_dispatchers=num_dispatchers,
             quant_config=quant_config,
         )
     else:
-        fused_experts = TritonExperts(
-            quant_config=quant_config,
-        )
+        fused_experts = TritonExperts(quant_config=quant_config, )
 
     mk = FusedMoEModularKernel(prepare_finalize=a2a,
                                fused_experts=fused_experts)
