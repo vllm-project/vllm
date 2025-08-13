@@ -516,7 +516,7 @@ class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
         )
 
 
-class MultiModalRequestOutput(Generic[_O]):
+class MultiModalRequestOutput:
     """
     The output data of a multimodal request to vLLM. 
     A request generating anything but text

@@ -21,11 +21,13 @@ class LLMForImageTiling(LLM):
 
         # At the momend we generate images (ab-)using pooling models
         # Here we first extract the prompts for the pooling model
-        pooling_prompts = (self.multimodal_processor.pre_process(prompt, ))
+        pooling_prompts = (self.multimodal_processor.pre_process(prompt))
 
         pooling_output = self.encode(pooling_prompts)
 
         output = (self.multimodal_processor.post_process(
             model_out=pooling_output))
+
+        assert isinstance(output, ImageRequestOutput)
 
         return output
