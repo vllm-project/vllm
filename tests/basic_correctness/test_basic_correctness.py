@@ -12,7 +12,6 @@ import pytest
 import torch
 
 from vllm import LLM, envs
-from vllm.platforms import current_platform
 from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
 
 from ..conftest import HfRunner, VllmRunner
@@ -78,11 +77,7 @@ def test_models(
             "VLLM_USE_V1") and envs.VLLM_USE_V1:
         pytest.skip("enable_prompt_embeds is not supported in v1.")
 
-    if backend == "FLASHINFER" and current_platform.is_rocm():
-        pytest.skip("Flashinfer does not support ROCm/HIP.")
-
-    if backend in ("XFORMERS",
-                   "FLASHINFER") and model == "google/gemma-2-2b-it":
+    if backend == "XFORMERS" and model == "google/gemma-2-2b-it":
         pytest.skip(
             f"{backend} does not support gemma2 with full context length.")
 
@@ -141,8 +136,6 @@ def test_models(
         ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4", {}),
         ("distilbert/distilgpt2", "ray", "", "A100", {}),
         ("distilbert/distilgpt2", "mp", "", "A100", {}),
-        ("distilbert/distilgpt2", "mp", "FLASHINFER", "A100", {}),
-        ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100", {}),
     ])
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
 def test_models_distributed(

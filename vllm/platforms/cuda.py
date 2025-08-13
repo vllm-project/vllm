@@ -347,17 +347,7 @@ class CudaPlatformBase(Platform):
             return FLEX_ATTENTION_V1
 
         # Backends for V0 engine
-        if selected_backend == _Backend.FLASHINFER:
-            logger.info("Using FlashInfer backend.")
-            if cls.has_device_capability(100):
-                from vllm.v1.attention.backends.utils import (
-                    set_kv_cache_layout)
-                logger.info_once(
-                    "Using HND KV cache layout on V1 engine by default for "
-                    "Blackwell (SM 10.0) GPUs.")
-                set_kv_cache_layout("HND")
-            return "vllm.attention.backends.flashinfer.FlashInferBackend"
-        elif selected_backend == _Backend.XFORMERS:
+        if selected_backend == _Backend.XFORMERS:
             logger.info("Using XFormers backend.")
             return "vllm.attention.backends.xformers.XFormersBackend"
         elif selected_backend == _Backend.DUAL_CHUNK_FLASH_ATTN:
@@ -413,10 +403,6 @@ class CudaPlatformBase(Platform):
                 if (fp8_kv_cache and not flash_attn_supports_fp8()):
                     logger.info(
                         "Cannot use FlashAttention backend for FP8 KV cache.")
-                    logger.warning(
-                        "Please use FlashInfer backend with FP8 KV Cache for "
-                        "better performance by setting environment variable "
-                        "VLLM_ATTENTION_BACKEND=FLASHINFER")
                     target_backend = _Backend.XFORMERS
             except ImportError:
                 logger.info(

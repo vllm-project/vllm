@@ -34,7 +34,7 @@ class TestSetting:
             model_args=["--max-model-len", "2048"],
             pp_size=2,
             tp_size=2,
-            attn_backend="FLASHINFER",
+            attn_backend="FLASH_ATTN",
             method="generate",
             fullgraph=True,
         ),

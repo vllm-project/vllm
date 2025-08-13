@@ -49,13 +49,7 @@ def use_v0_only(monkeypatch: pytest.MonkeyPatch):
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-@pytest.mark.parametrize("attention_backend", [
-    pytest.param("FLASHINFER",
-                 marks=pytest.mark.skipif(
-                     current_platform.is_rocm(),
-                     reason="FLASHINFER isn't supported on ROCm")),
-    "FLASH_ATTN"
-])
+@pytest.mark.parametrize("attention_backend", ["FLASH_ATTN"])
 def test_models(
     hf_runner: HfRunner,
     vllm_runner: VllmRunner,
@@ -105,13 +99,7 @@ def test_models(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("attention_backend", [
-    pytest.param("FLASHINFER",
-                 marks=pytest.mark.skipif(
-                     current_platform.is_rocm(),
-                     reason="FLASHINFER isn't supported on ROCm")),
-    "FLASH_ATTN"
-])
+@pytest.mark.parametrize("attention_backend", ["FLASH_ATTN"])
 def test_models_distributed(
     hf_runner: HfRunner,
     vllm_runner: VllmRunner,
