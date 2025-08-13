@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import dataclasses, inspect
+import dataclasses
 from contextlib import ExitStack
 from typing import Any, Callable, Optional
 from unittest.mock import patch
@@ -97,9 +97,6 @@ class CUDAPiecewiseBackend:
                 need_to_compile=shape in self.compile_sizes,
                 use_cudagraph=shape in self.cudagraph_capture_sizes,
             )
-        
-        # DIEGO: to avoid printing all the stack of calls every single time
-        self.print_stack_calls = True
 
     def check_for_ending_compilation(self):
         if self.is_last_graph and not self.to_be_compiled_sizes:
@@ -164,11 +161,6 @@ class CUDAPiecewiseBackend:
                 # We only log it in the debug mode.
                 logger.debug("Capturing a cudagraph for shape %s",
                              runtime_shape)
-                # if self.print_stack_calls:
-                #     self.print_stack_calls = False
-                #     for frame_info in inspect.stack():
-                #         logger.debug(f"DIEGO: File: {frame_info.filename}, Line: {frame_info.lineno}, Function: {frame_info.function}")
-
 
             input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
