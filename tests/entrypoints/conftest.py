@@ -184,7 +184,7 @@ def sample_enum_json_schema():
 
 
 @pytest.fixture
-def sample_guided_choice():
+def sample_choices():
     return [
         "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript",
         "Ruby", "Swift", "Kotlin"

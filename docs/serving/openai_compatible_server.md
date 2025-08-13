@@ -133,7 +133,7 @@ completion = client.chat.completions.create(
         {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
     ],
     extra_body={
-        "guided_choice": ["positive", "negative"]
+        "structured_outputs": {"choices": ["positive", "negative"]}
     }
 )
 ```
@@ -374,7 +374,7 @@ The following extra parameters are supported:
     ```python
     --8<-- "vllm/entrypoints/openai/protocol.py:transcription-extra-params"
     ```
-  
+
 [](){ #translations-api }
 
 ### Translations API
