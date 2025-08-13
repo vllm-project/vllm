@@ -139,7 +139,7 @@ The raw benchmarking results (in the format of json files) are in the `Artifacts
 The `compare-json-results.py` helps to compare benchmark results JSON files converted using `convert-results-json-to-markdown.py`.
 When run, benchmark script generates results under `benchmark/results` folder, along with the `benchmark_results.md` and `benchmark_results.json`.
 `compare-json-results.py` compares two `benchmark_results.json` files and provides performance ratio e.g. for Output Tput, Median TTFT and Median TPOT.  
-If only one benchmark_results.json is passed, `compare-json-results.py` compares different TP and PP configurations in the benchmark_results.json instead. 
+If only one benchmark_results.json is passed, `compare-json-results.py` compares different TP and PP configurations in the benchmark_results.json instead.
 
 Here is an example using the script to compare result_a and result_b with Model, Dataset name, input/output lenght, max concurrency and qps.
 `python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json`

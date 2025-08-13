@@ -343,8 +343,12 @@ if __name__ == "__main__":
             columns=latency_column_mapping
         )
     if not serving_results.empty:
-        valid_columns = [col for col in serving_column_mapping.keys() if col in serving_results.columns]
-        serving_results = serving_results[valid_columns].rename(columns=serving_column_mapping)
+        valid_columns = [
+            col for col in serving_column_mapping if col in serving_results.columns
+        ]
+        serving_results = serving_results[valid_columns].rename(
+            columns=serving_column_mapping
+        )
     if not throughput_results.empty:
         throughput_results = throughput_results[
             list(throughput_results_column_mapping.keys())

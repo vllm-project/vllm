@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
-import pandas as pd
-import os
 import json
-from typing import List
+import os
+
+import pandas as pd
 
 
 def compare_data_columns(
@@ -44,8 +44,10 @@ def compare_data_columns(
     print(raw_data_cols)
     return concat_df, raw_data_cols
 
-def split_json_by_tp_pp(input_file: str = "benchmark_results.json",
-                        output_root: str = ".") -> List[str]:
+
+def split_json_by_tp_pp(
+    input_file: str = "benchmark_results.json", output_root: str = "."
+) -> list[str]:
     """
     Split a benchmark JSON into separate folders by (TP Size, PP Size).
 
@@ -53,7 +55,7 @@ def split_json_by_tp_pp(input_file: str = "benchmark_results.json",
     Returns: list of file paths written.
     """
     # Load JSON data into DataFrame
-    with open(input_file, "r", encoding="utf-8") as f:
+    with open(input_file, encoding="utf-8") as f:
         data = json.load(f)
 
     # If the JSON is a dict with a list under common keys, use that list
@@ -72,8 +74,9 @@ def split_json_by_tp_pp(input_file: str = "benchmark_results.json",
         "pp_size": "PP Size",
         "pipeline_parallel_size": "PP Size",
     }
-    df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns},
-              inplace=True)
+    df.rename(
+        columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True
+    )
 
     # Ensure TP/PP columns exist (default to 1 if missing)
     if "TP Size" not in df.columns:
@@ -82,11 +85,15 @@ def split_json_by_tp_pp(input_file: str = "benchmark_results.json",
         df["PP Size"] = 1
 
     # make sure TP/PP are numeric ints with no NaN
-    df["TP Size"] = pd.to_numeric(df.get("TP Size", 1), errors="coerce").fillna(1).astype(int)
-    df["PP Size"] = pd.to_numeric(df.get("PP Size", 1), errors="coerce").fillna(1).astype(int)
+    df["TP Size"] = (
+        pd.to_numeric(df.get("TP Size", 1), errors="coerce").fillna(1).astype(int)
+    )
+    df["PP Size"] = (
+        pd.to_numeric(df.get("PP Size", 1), errors="coerce").fillna(1).astype(int)
+    )
 
     # Split into separate folders
-    saved_paths: List[str] = []
+    saved_paths: list[str] = []
     for (tp, pp), group_df in df.groupby(["TP Size", "PP Size"], dropna=False):
         folder_name = os.path.join(output_root, f"tp{int(tp)}_pp{int(pp)}")
         os.makedirs(folder_name, exist_ok=True)
@@ -96,7 +103,6 @@ def split_json_by_tp_pp(input_file: str = "benchmark_results.json",
         saved_paths.append(filepath)
 
     return saved_paths
-
 
 
 if __name__ == "__main__":
@@ -166,17 +172,18 @@ if __name__ == "__main__":
             raw_data_cols.insert(0, info_cols[y_axis_index])
 
             filtered_info_cols = info_cols[:-2]
-            existing_group_cols = [c for c in filtered_info_cols if c in output_df.columns]
+            existing_group_cols = [
+                c for c in filtered_info_cols if c in output_df.columns
+            ]
             if not existing_group_cols:
                 raise ValueError(
-                    f"No valid group-by columns present after excluding last two from info_cols. "
-                    f"Expected subset: {filtered_info_cols}, but DataFrame has: {list(output_df.columns)}"
+                    f"No valid group-by columns  "
+                    f"Expected subset: {filtered_info_cols}, "
+                    f"but DataFrame has: {list(output_df.columns)}"
                 )
 
             output_df_sorted = output_df.sort_values(by=existing_group_cols)
-            output_groups = output_df_sorted.groupby(
-                existing_group_cols, dropna=False
-            )
+            output_groups = output_df_sorted.groupby(existing_group_cols, dropna=False)
             for name, group in output_groups:
                 html = group.to_html()
                 text_file.write(html_msgs_for_data_cols[i])
