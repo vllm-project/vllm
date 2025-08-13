@@ -26,6 +26,7 @@ from typing import Any, Callable, Optional, Union
 import numpy as np
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
+from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
@@ -867,7 +868,9 @@ class CustomDataset(BenchmarkDataset):
 # Sonnet Dataset Implementation
 # -----------------------------------------------------------------------------
 
-
+@deprecated(
+    "SonnetDataset is deprecated and will be removed in a future version.",
+)
 class SonnetDataset(BenchmarkDataset):
     """
     Simplified implementation of the Sonnet dataset.  Loads poem lines from a
