@@ -17,6 +17,7 @@ from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this docstring
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
+                                              EmbeddingCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
@@ -159,7 +160,9 @@ class EmbeddingMixin(OpenAIServing):
     def _should_use_chunked_processing(self, request) -> bool:
         """Check if chunked processing should be used for this request."""
         return isinstance(
-            request, EmbeddingRequest) and self.supports_chunked_processing
+            request,
+            (EmbeddingCompletionRequest,
+             EmbeddingChatRequest)) and self.supports_chunked_processing
 
     async def _process_chunked_request(
         self,
@@ -221,7 +224,8 @@ class EmbeddingMixin(OpenAIServing):
         token_num = len(input_ids)
 
         # Note: EmbeddingRequest doesn't have max_tokens
-        if isinstance(request, EmbeddingRequest):
+        if isinstance(request,
+                      (EmbeddingCompletionRequest, EmbeddingChatRequest)):
             # Check if chunked processing is enabled for pooling models
             enable_chunked = self._should_use_chunked_processing(request)
 
@@ -377,8 +381,12 @@ class EmbeddingMixin(OpenAIServing):
                         continue
 
                 # Normal processing for short prompts or non-token prompts
+                # Cast engine_prompt to the expected type for mypy
+                engine_prompt_typed = cast(
+                    Union[EngineTokensPrompt, EngineEmbedsPrompt],
+                    engine_prompt)
                 generator = await self._create_single_prompt_generator(
-                    ctx, engine_prompt, request_prompt, pooling_params,
+                    ctx, engine_prompt_typed, request_prompt, pooling_params,
                     trace_headers, i)
                 generators.append(generator)
 
