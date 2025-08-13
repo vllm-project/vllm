@@ -981,8 +981,6 @@ class Scheduler(SchedulerInterface):
         return new_token_ids, stopped
 
     def _free_encoder_inputs(self, request: Request) -> None:
-        if not self.encoder_cache_manager:
-            return
         cached_encoder_input_ids = (
             self.encoder_cache_manager.get_cached_input_ids(request))
         # OPTIMIZATION: Avoid list(set) if the set is empty.
@@ -1059,8 +1057,7 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
 
         delay_free_blocks, kv_xfer_params = self._connector_finished(request)
-        if self.encoder_cache_manager:
-            self.encoder_cache_manager.free(request)
+        self.encoder_cache_manager.free(request)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
