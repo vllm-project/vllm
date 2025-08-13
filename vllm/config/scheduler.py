@@ -115,12 +115,6 @@ class SchedulerConfig:
     (e.g., beam search), recomputation is not currently supported. In
     such a case, we use swapping instead."""
 
-    num_scheduler_steps: int = 1
-    """Maximum number of forward steps per scheduler call."""
-
-    multi_step_stream_outputs: bool = True
-    """If False, then multi-step will stream outputs at the end of all steps"""
-
     send_delta_data: bool = False
     """Private API. If used, scheduler sends delta data to
     workers instead of an entire data. It should be enabled only
@@ -145,12 +139,13 @@ class SchedulerConfig:
     some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
     it will be scheduled as TTTT in one step and IIIIIIIIII in the next."""
 
-    # scheduler class or path. "vllm.v1.core.sched.scheduler.Scheduler" (default)
-    # or "mod.custom_class".
-    scheduler_cls: Union[str, type[object]] = "vllm.v1.core.sched.scheduler.Scheduler"
-    """The scheduler class to use. "vllm.v1.core.sched.scheduler.Scheduler" is the
-    default scheduler. Can be a class directly or the path to a class of form
-    "mod.custom_class"."""
+    # scheduler class or path. "vllm.v1.core.sched.scheduler.Scheduler"
+    # (default) or "mod.custom_class".
+    scheduler_cls: Union[str, type[object]] = (
+        "vllm.v1.core.sched.scheduler.Scheduler")
+    """The scheduler class to use. "vllm.v1.core.sched.scheduler.Scheduler" is
+    the default scheduler. Can be a class directly or the path to a class of
+    form "mod.custom_class"."""
 
     disable_hybrid_kv_cache_manager: bool = False
     """If set to True, KV cache manager will allocate the same size of KV cache
@@ -193,16 +188,7 @@ class SchedulerConfig:
 
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
-                if self.num_scheduler_steps > 1:
-                    # Multi-step Chunked-Prefill doesn't allow prompt-chunking
-                    # for now. Have max_num_batched_tokens set to max_model_len
-                    # so we don't reject sequences on account of a short
-                    # max_num_batched_tokens.
-                    self.max_num_batched_tokens = max(
-                        self.max_model_len, DEFAULT_MAX_NUM_BATCHED_TOKENS)
-                else:
-                    self.max_num_batched_tokens = (
-                        DEFAULT_MAX_NUM_BATCHED_TOKENS)
+                self.max_num_batched_tokens = DEFAULT_MAX_NUM_BATCHED_TOKENS
             else:
                 # If max_model_len is too short, use
                 # DEFAULT_MAX_NUM_BATCHED_TOKENS as the default value
@@ -293,12 +279,6 @@ class SchedulerConfig:
                 f"({self.num_lookahead_slots}) must be greater than or "
                 "equal to 0.")
 
-        if self.num_scheduler_steps < 1:
-            raise ValueError(
-                "num_scheduler_steps "
-                f"({self.num_scheduler_steps}) must be greater than or "
-                "equal to 1.")
-
         if self.max_num_partial_prefills < 1:
             raise ValueError(
                 f"max_num_partial_prefills ({self.max_num_partial_prefills}) "
@@ -323,7 +303,3 @@ class SchedulerConfig:
                 f"max_num_partial_prefills ({self.max_num_partial_prefills}).")
 
         return self
-
-    @property
-    def is_multi_step(self) -> bool:
-        return self.num_scheduler_steps > 1

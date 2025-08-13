@@ -5,9 +5,8 @@ import os
 import pytest
 
 import vllm.envs as envs
-from vllm import LLM
+from vllm import LLM, AsyncLLMEngine
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm import AsyncLLMEngine
 
 UNSUPPORTED_MODELS_V1 = [
     "openai/whisper-large-v3",  # transcription
@@ -56,12 +55,6 @@ def test_unsupported_configs(monkeypatch):
             AsyncEngineArgs(
                 model=MODEL,
                 disable_async_output_proc=True,
-            ).create_engine_config()
-
-        with pytest.raises(NotImplementedError):
-            AsyncEngineArgs(
-                model=MODEL,
-                num_scheduler_steps=5,
             ).create_engine_config()
 
         with pytest.raises(NotImplementedError):
