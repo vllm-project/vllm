@@ -826,6 +826,10 @@ class EngineArgs:
             title="VllmConfig",
             description=VllmConfig.__doc__,
         )
+        # We construct SpeculativeConfig using fields from other configs in
+        # create_engine_config. So we set the type to a JSON string here to
+        # delay the Pydantic validation that comes with SpeculativeConfig.
+        vllm_kwargs["speculative_config"]["type"] = optional_type(json.loads)
         vllm_group.add_argument("--speculative-config",
                                 **vllm_kwargs["speculative_config"])
         vllm_group.add_argument("--kv-transfer-config",
@@ -1600,11 +1604,10 @@ class EngineArgs:
         else:
 
             pooling_type = model_config.pooler_config.pooling_type
-
-            # TODO: when encoder models are supported we'll have to
-            # check for causal attention here.
-            incremental_prefill_supported = (pooling_type is not None and
-                                             pooling_type.lower() == "last")
+            is_causal = getattr(model_config.hf_config, "is_causal", True)
+            incremental_prefill_supported = (pooling_type is not None
+                                             and pooling_type.lower() == "last"
+                                             and is_causal)
 
             action = "Enabling" if \
                 incremental_prefill_supported else "Disabling"
