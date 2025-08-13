@@ -63,7 +63,7 @@ class EmbeddingMixin(OpenAIServing):
         pooler_config = self.model_config.pooler_config
 
         # Avoid repeated attribute lookups
-        self.supports_chunked_processing = (
+        self.supports_chunked_processing = bool(
             pooler_config and pooler_config.enable_chunked_processing)
         self.max_embed_len = (pooler_config.max_embed_len if pooler_config
                               and pooler_config.max_embed_len else None)
