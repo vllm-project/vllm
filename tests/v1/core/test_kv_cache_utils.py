@@ -328,7 +328,7 @@ def test_free_kv_cache_block_queue_get_all_free_blocks():
 
 def test_generate_block_hash_extra_keys():
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(20)],
         mm_positions=[
             PlaceholderRange(offset=0, length=5),
@@ -360,7 +360,7 @@ def test_generate_block_hash_extra_keys():
 
 def test_generate_block_hash_extra_keys_no_mm_inputs():
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=None,
         mm_hashes=None,
@@ -373,7 +373,7 @@ def test_generate_block_hash_extra_keys_no_mm_inputs():
 
 def test_generate_block_hash_extra_keys_cache_salt():
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=None,
         mm_hashes=None,
@@ -394,7 +394,7 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # works together with other extra keys
     request_mm = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(20)],
         mm_positions=[
             PlaceholderRange(offset=0, length=5),
@@ -432,7 +432,7 @@ def test_hash_request_tokens(hash_fn):
     import vllm.v1.core.kv_cache_utils
     init_none_hash(hash_fn)
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=[
             PlaceholderRange(offset=0, length=3),
@@ -462,7 +462,7 @@ def test_hash_tokens_different_mm_input(hash_fn):
     init_none_hash(hash_fn)
 
     request1 = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=[
             PlaceholderRange(offset=0, length=3),
@@ -471,7 +471,7 @@ def test_hash_tokens_different_mm_input(hash_fn):
         mm_hashes=["hash1", "hash2"],
     )
     request2 = make_request(
-        request_id=1,
+        request_id="1",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=[
             PlaceholderRange(offset=0, length=3),
@@ -491,7 +491,7 @@ def test_hash_request_tokens_no_mm_inputs(hash_fn):
     init_none_hash(hash_fn)
 
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=None,
         mm_hashes=None,
@@ -856,7 +856,7 @@ def test_allocate_with_lookahead():
     )
 
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[],
         mm_positions=None,
         mm_hashes=None,
