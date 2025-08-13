@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import Annotated, Any, Callable, Optional, List
+from typing import Annotated, Any, Callable, Optional
 
 import prometheus_client
 import pydantic
@@ -1764,7 +1764,7 @@ async def init_app_state(
     state.server_load_metrics = 0
 
 
-def create_server_socket(addr: tuple[str, int]) -> List[socket.socket]:
+def create_server_socket(addr: tuple[str, int]) -> list[socket.socket]:
     """Create server socket(s) for the given address.
     
     When addr[0] is empty (""), creates sockets for all available addresses
@@ -1772,24 +1772,26 @@ def create_server_socket(addr: tuple[str, int]) -> List[socket.socket]:
     Otherwise, creates a single socket for the specified address.
     """
     host, port = addr
-    
+
     # If host is empty, bind to all available addresses
     if not host:
         sockets = []
-        
+
         # Try to bind to IPv4 addresses
         try:
-            sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
+            sock = socket.socket(family=socket.AF_INET,
+                                 type=socket.SOCK_STREAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             sock.bind(("", port))
             sockets.append(sock)
         except OSError as e:
             logger.debug("Failed to bind IPv4 socket: %s", e)
-        
+
         # Try to bind to IPv6 addresses
         try:
-            sock = socket.socket(family=socket.AF_INET6, type=socket.SOCK_STREAM)
+            sock = socket.socket(family=socket.AF_INET6,
+                                 type=socket.SOCK_STREAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             # Enable dual-stack mode for IPv6 socket
@@ -1798,10 +1800,10 @@ def create_server_socket(addr: tuple[str, int]) -> List[socket.socket]:
             sockets.append(sock)
         except OSError as e:
             logger.debug("Failed to bind IPv6 socket: %s", e)
-        
+
         if not sockets:
             raise OSError("Failed to bind to any address family")
-        
+
         return sockets
     else:
         # Bind to specific address
@@ -1875,12 +1877,12 @@ def setup_server(args):
     else:
         addr, port = sock_addr
         is_ssl = args.ssl_keyfile and args.ssl_certfile
-        # When binding to all addresses (empty host), use "*" to represent all interfaces
+        # When binding to all addresses (empty host), use "*" to represent all
+        # interfaces
         if not addr:
             host_part = "*"
         else:
-            host_part = f"[{addr}]" if is_valid_ipv6_address(
-                addr) else addr
+            host_part = f"[{addr}]" if is_valid_ipv6_address(addr) else addr
         listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
     return listen_address, sockets
 
