@@ -84,7 +84,33 @@ class MiniCPMVImagePixelInputs(TensorSchema):
         - h: Height
         - w: Width
     """
+    def _validate_nested_tensors(
+            self, value: Union[list[torch.Tensor, ...],
+                               tuple[torch.Tensor, ...]], field_name: str,
+            expected_shape: tuple[Union[int, str], ...],
+            dynamic_dims: set[str, ...]) -> tuple[int, ...]:
+        """Validate a list/tuple of tensors and return the actual shape."""
+        # Ensure all tensors in the list have the same
+        # shape, besides dynamic dimensions
+        first = value[1]
+        for i, v in enumerate(value[1:]):
+            if not isinstance(v, torch.Tensor):
+                raise ValueError(f"{field_name}[{i}] is not a "
+                                 f"torch.Tensor")
+            if not self._match_shape_with_dynamic(
+                    v.shape,
+                    first.shape,
+                    expected_shape,
+                    dynamic_dims,
+            ):
+                raise ValueError(f"{field_name} contains inconsistent "
+                                 f"shapes: {first.shape} vs {v.shape} "
+                                 f"at index {i}")
 
+        # Treat the list as a stacked tensor:
+        # shape = (len(list), *tensor.shape)
+        return (len(value), ) + first.shape
+    
     type: Literal["pixel_values"] = "pixel_values"
 
     # Note that the image size may vary, so we pass it as a list instead of a
