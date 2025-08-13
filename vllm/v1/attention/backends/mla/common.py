@@ -200,9 +200,12 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
 from vllm.attention.backends.utils import get_mla_dims
-from vllm.attention.ops.merge_attn_states import merge_attn_states
+from vllm.attention.ops.merge_attn_states import (merge_attn_states,
+                                                  merge_multi_attn_states,
+                                                  reduce_lse_over_tp)
 from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import VllmConfig
+from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
@@ -368,6 +371,9 @@ class MLACommonMetadata(Generic[D]):
                             FlashInferPrefillMetadata,
                             CudnnPrefillMetadata]] = None
 
+    # Whether KV sharding is enabled for this batch/rank
+    sharded_kv: bool = False
+
     def __post_init__(self):
         if self.head_dim is not None:
             MLACommonBackend.validate_head_size(self.head_dim)
@@ -414,6 +420,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.device = device
         scheduler_config = vllm_config.scheduler_config
         self.model_config = vllm_config.model_config
+        self.parallel_config = vllm_config.parallel_config
+        self.enable_mla_sharded_kv = vllm_config.model_config\
+            .enable_mla_sharded_kv
         cache_config = vllm_config.cache_config
         parallel_config = vllm_config.parallel_config
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
@@ -421,6 +430,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
         self.aot_schedule = current_platform.is_cuda()
+
+        self.num_q_heads = vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config)
+        self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.num_q_heads_decode = self.num_q_heads \
+            if self.enable_mla_sharded_kv else self.num_q_heads * self.tp_size
 
         # Dont try to access the runner on AMD
         if self.aot_schedule:
@@ -593,10 +609,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         device = self.device
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
+        # Optional sharding of KV metadata for MLA
+        enable_sharded_kv = self.enable_mla_sharded_kv
 
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
@@ -613,15 +632,54 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         if num_prefills > 0:
             reqs_start = num_decodes  # prefill_start
 
+            # Base context lens per sequence (unsharded)
             context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
             max_context_len_cpu = context_lens_cpu.max().item()
+            dummy_context = False
+
+            if enable_sharded_kv and max_context_len_cpu > 0:
+                B = self.kv_cache_spec.block_size
+                device = block_table_tensor.device
+                bt_pre = block_table_tensor[reqs_start:, ...]
+                # context lengths on device
+                context_lens = context_lens_cpu.to(device, non_blocking=True)
+                # Per-request used blocks and mask across existing table width
+                blocks_per_req = (context_lens +
+                                  (B - 1)) // B  # [num_prefills]
+                max_blocks_per_req = (+B - 1) // B
+                arange_cols = torch.arange(max_blocks_per_req, device=device)
+                used_blocks_mask = arange_cols.unsqueeze(
+                    0) < blocks_per_req.view(-1, 1)
+
+                bt_pre = block_table_tensor[reqs_start:, :max_blocks_per_req]
+                bt_pre.masked_fill_(~used_blocks_mask, -1)
+                # Localize block table to this rank
+                owned = (bt_pre % self.tp_size == self.tp_rank) & (bt_pre >= 0)
+                bt_pre[:] = torch.where(owned, bt_pre // self.tp_size, -1)
+
+                # Per-row last block ownership (handle zero-block requests
+                # safely)
+                last_idx = torch.clamp(blocks_per_req - 1, min=0)
+                last_owned = owned[:, last_idx].flatten().cpu()
+                partial_last = (context_lens_cpu % B) != 0
+
+                # Compute effective per-rank context lengths
+                last_page_len = torch.where(
+                    context_lens_cpu > 0 & partial_last & last_owned,
+                    context_lens_cpu % B + 1, B)
+                owned_counts = owned.sum(dim=1).cpu()
+                context_lens_cpu = (owned_counts - 1) * B + last_page_len
+                # Recompute:
+                max_context_len_cpu = context_lens_cpu.max().item()
+                dummy_context = (max_context_len_cpu == 0)
+
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
             prefill_query_start_loc = query_start_loc[
                 reqs_start:] - query_start_loc[reqs_start]
 
             chunked_context_metadata = None
             if self.chunked_prefill_enabled and num_prefills > 0 \
-                and max_context_len_cpu > 0:
+                and (max_context_len_cpu > 0 or dummy_context):
                 # NOTE: it is recommend you read the `Chunked Prefill` section
                 # in the comment at the top of the file before trying to
                 # understand the following code
@@ -641,7 +699,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                                                    self.page_size)
 
                 assert max_context_chunk > 0
-                num_chunks = cdiv(max_context_len_cpu, max_context_chunk)
+                num_chunks = cdiv(max_context_len_cpu, max_context_chunk) \
+                    if not dummy_context else 1
 
                 # if `max_context_chunk = 256`, `num_chunks = 3`, and
                 #   `num_prefills_with_context = 4`, create a tensor that looks
@@ -702,9 +761,38 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         decode_metadata = None
         if num_decodes > 0:
+            decode_block_table = block_table_tensor[:num_decodes, ...]
+            decode_seq_lens_cpu = seq_lens_cpu[:num_decodes]
+            decode_seq_lens = seq_lens[:num_decodes]
+            if enable_sharded_kv:
+                max_blocks_per_req = (decode_seq_lens_cpu.max().item() + B -
+                                      1) // B
+                decode_block_table = decode_block_table[:, :max_blocks_per_req]
+                blocks_per_req = (decode_seq_lens + B - 1) // B
+                used_blocks_mask = torch.arange(
+                    max_blocks_per_req, device=decode_block_table.device
+                ) < blocks_per_req.unsqueeze(1)
+                decode_block_table = decode_block_table[~used_blocks_mask] = -1
+                # Localize block table and compute per-rank effective lengths
+                owned = (decode_block_table % self.tp_size == self.tp_rank) & \
+                        (decode_block_table != -1)
+                decode_block_table = decode_block_table[owned]
+                # Convert to local physical indices
+                decode_block_table = decode_block_table // self.tp_size
+
+                owned_blocks_per_req = blocks_per_req.sum(dim=1)
+                owns_last_block = owned[:, blocks_per_req - 1]
+                partial_last = (decode_seq_lens % B) != 0
+
+                # Adjust seq_lens to only account for owned blocks
+                decode_seq_lens = owned_blocks_per_req * B \
+                    - torch.where(owns_last_block & partial_last,
+                                  B - decode_seq_lens % B,
+                                  0)
+
             decode_metadata = self._build_decode(
-                block_table_tensor=block_table_tensor[:num_decodes, ...],
-                seq_lens=seq_lens[:num_decodes],
+                block_table_tensor=decode_block_table,
+                seq_lens=decode_seq_lens,
             )
 
         attn_metadata = self.metadata_cls(
@@ -720,6 +808,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             num_prefills=num_prefills,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            sharded_kv=enable_sharded_kv,
         )
 
         if self._use_fi_prefill and num_prefills > 0:
@@ -763,7 +852,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported for MLA")
 
-        self.num_heads = num_heads
+        self.tp_size = get_tp_group().world_size
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_group = get_tp_group()
+        self.num_local_heads = num_heads
+        self.num_global_heads = num_heads * self.tp_size
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
@@ -1102,14 +1195,40 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         if has_context:
             suffix_output, suffix_lse = output
-            context_output, context_lse = self._compute_prefill_context( \
-                q, kv_c_and_k_pe_cache, attn_metadata)
+            use_sharded = attn_metadata.sharded_kv
+            if use_sharded:
+                # All-gather Q across TP so each rank has all heads
+                from vllm.distributed import get_tp_group
+                tp_group = get_tp_group()
+                q_all = tp_group.all_gather(q, dim=1)
+                # Local compute using only local KV
+                #  (metadata/block_table are sharded)
+                context_output_local, context_lse_local = \
+                    self._compute_prefill_context(q_all, kv_c_and_k_pe_cache,
+                                                  attn_metadata)
+                # Reshape to [tp, B, heads_owned, D]
+                B = context_output_local.shape[0]
+                heads_owned = self.num_heads
+                D = context_output_local.shape[2]
+                parts = context_output_local.view(B, self.num_heads, D) \
+                    .view(B, -1, heads_owned, D).movedim(1, 0)
+                lse_parts = context_lse_local.view(B, self.num_heads) \
+                    .view(B, -1, heads_owned).movedim(1, 0)
+                parts_exchanged = tp_group.all_to_all(parts, dim=0)
+                lse_exchanged = tp_group.all_to_all(lse_parts, dim=0)
+                context_output_owned = merge_multi_attn_states(
+                    parts_exchanged, lse_exchanged)
+                context_lse_owned = reduce_lse_over_tp(lse_exchanged)
+            else:
+                context_output_owned, context_lse_owned = \
+                    self._compute_prefill_context(q, kv_c_and_k_pe_cache,
+                                                  attn_metadata)
 
             output = torch.empty_like(suffix_output)
             merge_attn_states(
                 output=output,
-                prefix_output=context_output,
-                prefix_lse=context_lse,
+                prefix_output=context_output_owned,
+                prefix_lse=context_lse_owned,
                 suffix_output=suffix_output,
                 suffix_lse=suffix_lse,
             )
@@ -1120,14 +1239,60 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         return output.flatten(start_dim=-2)
 
-    @abstractmethod
-    def _forward_decode(
+    def _forward_decode_common(
         self,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: M,
     ) -> torch.Tensor:
+        # Multi-rank Strategy B for decode; delegates local decode to
+        # subclass via _forward_decode_local which should return (o, lse)
+        tp = self.parallel_config.tensor_parallel_size
+        use_sharded = bool(attn_metadata.sharded_kv and tp > 1)
+        # Form full-head Q for decode
+        if not use_sharded:
+            o, _ = self._forward_decode_local(ql_nope,
+                                              q_pe,
+                                              kv_c_and_k_pe_cache,
+                                              attn_metadata,
+                                              return_lse=False)
+            return self._v_up_proj(o)
+
+        # All-gather Q across TP so each rank has all heads for local decode
+        ql_nope_all = self.tp_group.all_gather(ql_nope, dim=1)
+        q_pe_all = self.tp_group.all_gather(q_pe, dim=1)
+
+        # Each rank computes local partial for all heads, then exchange+merge
+        local_out, local_lse = self._forward_decode_local(ql_nope_all,
+                                                          q_pe_all,
+                                                          kv_c_and_k_pe_cache,
+                                                          attn_metadata,
+                                                          return_lse=True)
+        if local_lse is None:
+            raise ValueError("LSE is required for shareded-mla decode")
+        B = local_out.shape[0]
+        D = local_out.shape[2]
+        parts = local_out.view(B, self.num_global_heads, D)\
+            .view(B, tp, self.num_local_heads, D)
+        lse_parts = local_lse.view(B, self.num_global_heads)\
+            .view(B, tp, self.num_local_heads)
+        parts_exchanged = self.tp_group.all_to_all(parts, dim=1)
+        lse_exchanged = self.tp_group.all_to_all(lse_parts, dim=1)
+
+        owned = merge_multi_attn_states(parts_exchanged.movedim(1, 0),
+                                        lse_exchanged.movedim(1, 0))
+        return self._v_up_proj(owned)
+
+    @abstractmethod
+    def _forward_decode_local(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: M,
+        return_lse: bool,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         raise NotImplementedError
 
     def forward(
@@ -1179,11 +1344,14 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
+            # slot_mapping already pre-sharded in builder when enabled.
+            slot_map = attn_metadata.slot_mapping.flatten()
+
             ops.concat_and_cache_mla(
                 k_c_normed,
                 k_pe.squeeze(1),
                 kv_cache,
-                attn_metadata.slot_mapping.flatten(),
+                slot_map,
                 kv_cache_dtype=self.kv_cache_dtype,
                 scale=layer._k_scale,
             )
@@ -1204,7 +1372,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             # Convert from (N, B, L) to (B, N, L)
             decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
-            output[:num_decode_tokens] = self._forward_decode(
+            output[:num_decode_tokens] = self._forward_decode_common(
                 decode_ql_nope, decode_q_pe, kv_cache, attn_metadata)
 
         return output_padded

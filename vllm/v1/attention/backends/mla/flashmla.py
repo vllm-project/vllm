@@ -64,8 +64,6 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
                          FlashMLAMetadata)
 
         self.compilation_config = vllm_config.compilation_config
-        self.num_q_heads = vllm_config.model_config.get_num_attention_heads(
-            vllm_config.parallel_config)
 
         self.cg_buf_tile_scheduler_metadata = None
         self.cg_buf_num_splits = None
@@ -91,7 +89,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         tile_scheduler_metadata, num_splits = \
             get_mla_metadata(
             seq_lens,
-            self.num_q_heads,
+            self.num_q_heads_decode,
             1, # MQA for the decode path
         )
 
@@ -167,20 +165,23 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             raise NotImplementedError(
                 "FlashMLA V1 with FP8 KV cache not yet supported")
 
-    def _forward_decode(
+    def _forward_decode_local(
         self,
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLAMetadata,
-    ) -> torch.Tensor:
+        return_lse: bool,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        q = torch.cat([q_nope, q_pe], dim=-1)\
-            .unsqueeze(1) # Add seqlen dim of 1 (decode)
+        # Form full-head query for decode
+        q = torch.cat([q_nope, q_pe], dim=-1).unsqueeze(1)
 
-        o, _ = flash_mla_with_kvcache(
+        # Compute local partial
+        #  (all heads, local KV only due to sharded metadata)
+        o, lse = flash_mla_with_kvcache(
             q=q,
             k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1
             block_table=attn_metadata.decode.block_table,
@@ -192,5 +193,6 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             softmax_scale=self.scale,
             causal=True,
         )
-
-        return self._v_up_proj(o)
+        o = o.squeeze(1)
+        lse = lse.squeeze(-1)
+        return o, (lse if return_lse else None)

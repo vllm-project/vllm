@@ -817,14 +817,23 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
         for layer_name in kv_cache_spec
     ]
 
+    # If MLA sharded KV is enabled with tensor-parallelism, reserve the global
+    # id space as if blocks were replicated across TP ranks. We still only
+    # allocate local blocks physically, but report logical capacity as
+    # num_blocks * tp to the rest of the system.
+    tp = vllm_config.parallel_config.tensor_parallel_size
+    logical_num_blocks = num_blocks * tp if \
+        getattr(vllm_config.model_config, "enable_mla_sharded_kv", False) \
+        and tp > 1 else num_blocks
+
     kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks,
+        num_blocks=logical_num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec,
                                                     grouped_layer_names),
     )
 
-    num_tokens = num_blocks * vllm_config.cache_config.block_size
+    num_tokens = logical_num_blocks * vllm_config.cache_config.block_size
     num_tokens_str = f"{num_tokens:,}"
     logger.info("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
@@ -978,8 +987,13 @@ def _get_kv_cache_config_uniform_page_size(
         kv_cache_tensors.append(
             KVCacheTensor(size=per_memory_pool_size, shared_by=shared_by))
 
+    tp = vllm_config.parallel_config.tensor_parallel_size
+    logical_num_blocks = num_blocks * tp if \
+        getattr(vllm_config.model_config, "enable_mla_sharded_kv", False) \
+        and tp > 1 else num_blocks
+
     kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks,
+        num_blocks=logical_num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
     )
@@ -988,7 +1002,7 @@ def _get_kv_cache_config_uniform_page_size(
         [group.kv_cache_spec.block_size for group in kv_cache_groups])
 
     # Print the KV cache size and maximum concurrency.
-    num_tokens = num_blocks // len(grouped_layers) * min_block_size
+    num_tokens = logical_num_blocks // len(grouped_layers) * min_block_size
     num_tokens_str = f"{num_tokens:,}"
     logger.info("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
