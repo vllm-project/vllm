@@ -61,9 +61,8 @@ class RequestFuncOutput:
         steps count should be the same as output tokens count, 
         as each step would generate 1 token.
         """
-        return self._total_steps \
-            if self._total_steps is not None \
-            else self.output_tokens
+        return (self._total_steps 
+            if self._total_steps is not None else self.output_tokens)
 
 
 async def async_request_openai_completions(
