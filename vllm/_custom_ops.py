@@ -117,9 +117,8 @@ def paged_attention_rocm(
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
     fp8_out_scale: Optional[torch.Tensor] = None,
-    mfma_type: str = "fp16",
+    mfma_type: str = "f16",
 ) -> None:
-    print("paged_attention_rocm", key_cache.dtype, mfma_option)
     torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
                                       key_cache, value_cache, num_kv_heads,
                                       scale, block_tables, seq_lens,
