@@ -117,7 +117,6 @@ class CompilerManager:
              runtime_shape: Optional[int] = None) -> Optional[Callable]:
         if (runtime_shape, graph_index, self.compiler.name) not in self.cache:
             return None
-        start_time = time.time()
         handle = self.cache[(runtime_shape, graph_index, self.compiler.name)]
         compiled_graph = self.compiler.load(handle, graph, example_inputs,
                                             graph_index, runtime_shape)
@@ -150,11 +149,8 @@ class CompilerManager:
         compiled_graph = None
 
         # try to load from the cache
-        start_time = time.time()
         compiled_graph = self.load(graph, example_inputs, graph_index,
                                    runtime_shape)
-        elapsed_time = time.time() - start_time
-        logger.debug("TOTAL LOADING TIME: %f s", elapsed_time)
         if compiled_graph is not None:
             if graph_index == num_graphs - 1:
                 # after loading the last graph for this shape, record the time.
