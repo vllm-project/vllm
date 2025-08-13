@@ -1062,7 +1062,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 print(self.mrope_positions_np[0])
                 print(self.mrope_positions_np[1])
                 print(self.mrope_positions_np[2])
-                pprint(req)
+                # pprint(req)
 
 
     def _calc_spec_decode_metadata(
@@ -1550,13 +1550,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             req._mrope_positions_delta = mrope_positions_delta
                             print(f"Updating positions in req")
                             print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
-
                             print(f"{req.mrope_positions_delta=}")
                             print(f"{req.mrope_positions.shape=}")
                             print(req.mrope_positions[0].tolist())
                             print(req.mrope_positions[1].tolist())
                             print(req.mrope_positions[2].tolist())
-                            pprint(req)
+                            # pprint(req)
 
                     else:
                         self.positions[:num_scheduled_tokens].copy(positions_scheduled)
