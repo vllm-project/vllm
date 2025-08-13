@@ -327,18 +327,8 @@ class RocmPlatform(Platform):
             cache_config.block_size = 16
 
         parallel_config = vllm_config.parallel_config
-        scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
-            if scheduler_config.is_multi_step:
-                if envs.VLLM_USE_V1:
-                    raise NotImplementedError(
-                        "Multi-step scheduling is not supported (and not "
-                        "needed) on vLLM V1. Please launch without "
-                        "--num-scheduler-steps.")
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.worker.multi_step_worker.MultiStepWorker"
-            elif vllm_config.speculative_config:
+            if vllm_config.speculative_config:
                 if not envs.VLLM_USE_V1:
                     raise NotImplementedError(
                         "Speculative decoding is not supported on vLLM V0.")
@@ -346,7 +336,7 @@ class RocmPlatform(Platform):
             else:
                 if envs.VLLM_USE_V1:
                     parallel_config.worker_cls = \
-                            "vllm.v1.worker.gpu_worker.Worker"
+                        "vllm.v1.worker.gpu_worker.Worker"
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
 
