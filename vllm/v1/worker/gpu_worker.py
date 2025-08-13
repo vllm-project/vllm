@@ -377,33 +377,39 @@ class Worker(WorkerBase):
             elapsed_time = end_time - start_time
             logger.info("Graph capturing finished in %.3f secs", elapsed_time)
 
-        # ATTENTION: This code is duplicated in compile_or_warm_up_model method
-        # so we should clean this part before creating the vllm PR
-        # warm up sizes that are not in cudagraph capture sizes,
-        # but users still want to compile for better performance,
-        # e.g. for the max-num-batched token size in chunked prefill.
-        warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
-        logger.info("Warm up sizes %s", str(warmup_sizes))
-        if not self.model_config.enforce_eager:
-            warmup_sizes = [
-                x for x in warmup_sizes if x not in
-                self.vllm_config.compilation_config.cudagraph_capture_sizes
-            ]
+        # # ATTENTION: This code is duplicated in compile_or_warm_up_model method
+        # # so we should clean this part before creating the vllm PR
+        # # warm up sizes that are not in cudagraph capture sizes,
+        # # but users still want to compile for better performance,
+        # # e.g. for the max-num-batched token size in chunked prefill.
+        # warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
+        # logger.info("Warm up sizes %s", str(warmup_sizes))
+        # if not self.model_config.enforce_eager:
+        #     warmup_sizes = [
+        #         x for x in warmup_sizes if x not in
+        #         self.vllm_config.compilation_config.cudagraph_capture_sizes
+        #     ]
 
-        warmup_sizes_set = set(warmup_sizes)
+        # warmup_sizes_set = set(warmup_sizes)
+        
+        self.cudagraph_batch_sizes_set = set(
+            reversed(self.compilation_config.cudagraph_capture_sizes))
         # Just compilation with dummy run
-        if scheduler_output.total_num_scheduled_tokens not in self._token_compiled_cudagraphs and scheduler_output.total_num_scheduled_tokens in warmup_sizes_set and scheduler_output.total_num_scheduled_tokens != 0:
+        if scheduler_output.total_num_scheduled_tokens not in self._token_compiled_cudagraphs and scheduler_output.total_num_scheduled_tokens in self.cudagraph_batch_sizes_set and scheduler_output.total_num_scheduled_tokens != 0:
             logger.info(
-                "DIEGO: CUDAgraph in execution time for %d input tokens",
+                "LAZY DIEGO: CUDAgraph in execution time for %d input tokens",
                 scheduler_output.total_num_scheduled_tokens)
             self._token_compiled_cudagraphs.add(
                 scheduler_output.total_num_scheduled_tokens)
             compile_cuda_graph(scheduler_output.total_num_scheduled_tokens)
         else:
-            next_comp_set = warmup_sizes_set.difference(self._token_compiled_cudagraphs)
+            next_comp_set = self.cudagraph_batch_sizes_set.difference(self._token_compiled_cudagraphs)
             if len(next_comp_set) != 0:
                 next_comp = list(next_comp_set)
                 self._token_compiled_cudagraphs.add(next_comp[0])
+                logger.info(
+                    "DELAYED DIEGO: CUDAgraph in execution time for %d input tokens",
+                    next_comp[0])
                 compile_cuda_graph(next_comp[0])
 
         output = self.model_runner.execute_model(scheduler_output,
