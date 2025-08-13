@@ -2,17 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import huggingface_hub
 import regex as re
 from huggingface_hub import HfApi, hf_hub_download
+from transformers.tokenization_utils_base import BatchEncoding
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_base import TokenizerBase
-from transformers.tokenization_utils_base import BatchEncoding
 from vllm.utils import is_list_of
 
 if TYPE_CHECKING:
@@ -26,7 +25,6 @@ if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 logger = init_logger(__name__)
-
 
 
 def maybe_serialize_tool_calls(request: "ChatCompletionRequest"):
