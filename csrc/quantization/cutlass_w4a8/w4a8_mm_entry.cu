@@ -85,7 +85,7 @@ using ElementZero = ElementScale;  // only for verify
 using LayoutScale = cutlass::layout::RowMajor;
 
 // C/D matrix configuration
-using ElementC = cutlass::half_t;  // Element type for C and D matrix operands
+using ElementC = cutlass::bfloat16_t;  // Element type for C and D matrix operands
 using LayoutC =
     cutlass::layout::RowMajor;  // Layout type for C and D matrix operands
 constexpr int AlignmentC =
@@ -207,9 +207,11 @@ torch::Tensor mm(torch::Tensor const& A,
                  std::optional<torch::Tensor> const& maybe_token_scales) {
   Options options;
   // try mnk = 5120x4096x6144
-  options.m = 5120;
-  options.k = 6144;
-  options.n = 4096;
+  auto a_size = A.sizes();
+  auto b_size = B.sizes();
+  options.m = a_size[0];
+  options.k = a_size[1];
+  options.n = b_size[1];
 
   // Allocate output
   using ElementOutput = typename GemmShuffled::EpilogueOutputOp::ElementOutput;
@@ -222,7 +224,8 @@ torch::Tensor mm(torch::Tensor const& A,
 
   // run logic, pass in S_ptr so we can pass in scales
   auto B_ptr = static_cast<QuantType const*>(B.const_data_ptr());
-
+  auto shape_B = cute::make_shape(options.n, options.k, 1);
+  LayoutB_Reordered layout_B_reordered_local = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
   // Instantiate CUTLASS kernel depending on templates
   GemmShuffled gemm;
 
@@ -251,7 +254,7 @@ torch::Tensor mm(torch::Tensor const& A,
   auto arguments = Args{
       cutlass::gemm::GemmUniversalMode::kGemm,
       {options.n, options.m, options.k, options.l},
-      {B_ptr, layout_B_reordered, A_ptr, stride_A, S_ptr, stride_S, options.g},
+      {B_ptr, layout_B_reordered_local, A_ptr, stride_A, S_ptr, stride_S, options.g},
       {{options.alpha, options.beta},
        D_ptr,  // dont accumulate anything anyways since beta=0
        stride_C,
@@ -281,7 +284,7 @@ torch::Tensor pack_scale_fp8(torch::Tensor const& scales) {
   // TODO: input validation + row/col major ordering of scales? type?
   // template on the mma/scale type?
   auto packed_scales =
-      torch::empty({scales.numel() * 8},
+      torch::empty({scales.numel() * 8}, // TODO: dont hardcode
                    torch::TensorOptions()
                        .dtype(scales.dtype())  // torch.float8_e4m3fn
                        .device(scales.device()));
@@ -289,7 +292,6 @@ torch::Tensor pack_scale_fp8(torch::Tensor const& scales) {
   auto packed_scales_ptr =
       static_cast<cutlass::Array<ElementScale, 8>*>(packed_scales.data_ptr());
   cutlass::pack_scale_fp8(scales_ptr, packed_scales_ptr, scales.numel());
-  // what to return as?
   return packed_scales;
 }
 
@@ -306,10 +308,10 @@ torch::Tensor encode_and_reorder_int4b(torch::Tensor const& B) {
   cutlass::unified_encode_int4b(B_ptr, B_packed_ptr, n * k);  // try this
   // reorder
   auto shape_B = cute::make_shape(n, k, 1);
-  layout_B_reordered = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
+  LayoutB_Reordered layout_B_reordered_local = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
   // layoutright/row major
   auto layout_B = make_layout(shape_B, LayoutRight{});
-  cutlass::reorder_tensor(B_packed_ptr, layout_B, layout_B_reordered);
+  cutlass::reorder_tensor(B_packed_ptr, layout_B, layout_B_reordered_local);
   return B_packed;
 }
 
