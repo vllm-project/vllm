@@ -351,3 +351,22 @@ vllm serve ibm-granite/granite-speech-3.3-2b \
 ```
 
 Note: Default multimodal LoRAs are currently only available for `.generate` and chat completions.
+
+## Using Tips
+
+### Configuring `max_lora_rank`
+
+The `--max-lora-rank` parameter controls the maximum rank allowed for LoRA adapters. This setting affects memory allocation and performance:
+
+- **Set it to the maximum rank** among all LoRA adapters you plan to use
+- **Avoid setting it too high** - using a value much larger than needed wastes memory and can cause performance issues
+
+For example, if your LoRA adapters have ranks [16, 32, 64], use `--max-lora-rank 64` rather than 256
+
+```bash
+# Good: matches actual maximum rank
+vllm serve model --enable-lora --max-lora-rank 64
+
+# Bad: unnecessarily high, wastes memory
+vllm serve model --enable-lora --max-lora-rank 256
+```
