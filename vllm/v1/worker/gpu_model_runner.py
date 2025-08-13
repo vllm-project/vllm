@@ -492,7 +492,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     )
                 # ekhvedchenia
                 req = self.requests[req_id]
-                import os
                 print(f"Setting mrope for request")
                 print("prompt_token_ids", len(req.prompt_token_ids))
                 print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
@@ -1054,7 +1053,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 mrope_pos_ptr += completion_part_len
 
-                import os
                 print("_calc_mrope_positions (completion_part_len > 0)")
                 print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
                 print(f"{dst_start=} {dst_end=} {prompt_part_len=} {num_computed_tokens=} {completion_part_len=}")
