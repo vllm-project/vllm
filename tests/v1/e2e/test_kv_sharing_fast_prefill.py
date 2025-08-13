@@ -33,12 +33,13 @@ class TestGemma3nForConditionalGeneration(Gemma3nForConditionalGeneration):
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds, **kwargs)
+        hidden_states = super().forward(input_ids, positions,
+                                        intermediate_tensors, inputs_embeds,
+                                        **kwargs)
         attn_metadata = get_forward_context().attn_metadata
         # attn_metadata is None during dummy runs
         if (attn_metadata is not None
-                and self.cache_config.kv_sharing_fast_prefill):
+                and self.language_model.cache_config.kv_sharing_fast_prefill):
             assert isinstance(attn_metadata, dict)  # true in V1
             # Gemma3n-E2B has 30 layers, with last 20 layers being
             # cross-decoder layers. Check attention metadata is correct
@@ -53,7 +54,7 @@ class TestGemma3nForConditionalGeneration(Gemma3nForConditionalGeneration):
 
             # Last layer will be a KV sharing layer
             layer_attn_metadata = attn_metadata[
-                self.model.language_model.layers[-1].self_attn.attn.layer_name]
+                self.language_model.model.layers[-1].self_attn.attn.layer_name]
             logits_indices_padded = (layer_attn_metadata.logits_indices_padded)
             assert logits_indices_padded is not None
             num_logits_indices = layer_attn_metadata.num_logits_indices
