@@ -1227,10 +1227,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             "k_proj",
             "v_proj",
         ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "gate_up_proj": ["gate_up_proj"]
     }
 
     # To ensure correct weight loading and mapping.
@@ -1567,7 +1564,26 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
-            language_model="language_model",
+            language_model="language_model.model",
             connector="visual.merger.",
             tower_model="visual.",
         )
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    Glm4vMultiModalProcessor,
+    info=Glm4vProcessingInfo,
+    dummy_inputs=Glm4vDummyInputsBuilder,
+)
+class Glm4vMoeForConditionalGeneration(Glm4vForConditionalGeneration):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
