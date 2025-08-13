@@ -71,7 +71,7 @@ class Mamba2AttentionMetadata:
     prep_initial_states: bool
     chunk_size: int
 
-    # The following tensors only contains prefill requests and will be None if
+    # The following tensors only contain prefill requests and will be None if
     # the batch has no prefill request.
     has_initial_states_p: Optional[torch.Tensor]
     seq_idx_p: Optional[torch.Tensor]
