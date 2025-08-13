@@ -48,8 +48,9 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        GiB_bytes, LazyLoader, check_use_alibi, get_dtype_size,
-                        is_pin_memory_available, round_up, supports_dynamo)
+                        GiB_bytes, LazyLoader, MemorySnapshot, check_use_alibi,
+                        get_dtype_size, is_pin_memory_available, round_up,
+                        supports_dynamo)
 from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
@@ -2021,6 +2022,43 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.model.compile(
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
                 backend=backend)
+
+        # We don't call this from the worker because
+        # not all model runners support this
+        self.maybe_profile_processing()
+
+    def maybe_profile_processing(self) -> None:
+        model_config = self.model_config
+        mm_config = model_config.multimodal_config
+
+        if mm_config and mm_config.is_mm_processing_gpu:
+            self.mm_registry.reset_processor_cache(model_config)
+
+            mm_budget = self.mm_budget
+            assert mm_budget is not None
+
+            time_before_processing = time.perf_counter()
+            before_profile = MemorySnapshot(auto_measure=True)
+
+            self.mm_registry.get_decoder_dummy_data(
+                model_config=model_config,
+                seq_len=self.max_num_tokens,
+                mm_counts=mm_budget.max_items_per_batch_by_modality,
+            )
+
+            time_after_processing = time.perf_counter()
+            after_profile = MemorySnapshot(auto_measure=True)
+
+            diff_profile = after_profile - before_profile
+
+            # TODO: Multiply this by API server count
+            self.processor_memory_usage = diff_profile.torch_peak
+
+            logger.info("Input processing took %.4f GiB and %.6f seconds",
+                        self.processor_memory_usage / GiB_bytes,
+                        time_after_processing - time_before_processing)
+        else:
+            self.processor_memory_usage = 0
 
     def reload_weights(self) -> None:
         assert getattr(self, "model", None) is not None, \

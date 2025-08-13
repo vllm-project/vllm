@@ -189,12 +189,6 @@ llm = LLM(model="Qwen/Qwen2-Audio-7B-Instruct",
     the forward pass of the model.
     Make sure you perform benchmarking before enabling this!
 
-!!! warning
-    Currently, our memory profiler does not consider the GPU usage of applying input processing.
-
-    Make sure you reserve additional memory beyond what is normally tracked by vLLM to avoid
-    OOM during inference.
-
 ## Multi-Modal Caching
 
 ### Processor Cache
