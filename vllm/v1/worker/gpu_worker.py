@@ -254,6 +254,9 @@ class Worker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
+        self.non_torch_memory = profile_result.non_torch_increase
+        self.peak_activation_memory = profile_result.torch_peak_increase
+
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
@@ -322,8 +325,44 @@ class Worker(WorkerBase):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
 
+        cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            self.model_runner.capture_model()
+            cuda_graph_memory_bytes = self.model_runner.capture_model()
+
+        if self.cache_config.kv_cache_memory is None:
+            # When kv_cache_memory is None, we rely on `memory_profiling`
+            # to estimate the KV cache memory, which does not consider
+            # CUDAGraph memory size and may not utilize all gpu memory.
+            # Users may want fine-grained control to specify kv cache
+            # memory bytes.
+            GiB = lambda b: round(b / GiB_bytes, 2)
+            non_kv_cache_memory = (self.model_runner.model_memory_usage +
+                                   self.peak_activation_memory +
+                                   self.non_torch_memory +
+                                   cuda_graph_memory_bytes)
+            kv_cache_memory_bytes_to_gpu_limit = (
+                self.init_snapshot.free_memory - non_kv_cache_memory)
+            kv_cache_memory_bytes_to_requested_limit = (self.requested_memory -
+                                                        non_kv_cache_memory)
+
+            msg = (
+                f"Free memory on device "
+                f"({GiB(self.init_snapshot.free_memory)}/"
+                f"{GiB(self.init_snapshot.total_memory)} GiB) on startup. "
+                f"Desired GPU memory utilization is "
+                f"({self.cache_config.gpu_memory_utilization}, "
+                f"{GiB(self.requested_memory)} GiB). "
+                f"Actual usage is {GiB(self.model_runner.model_memory_usage)} "
+                f"GiB for weight, {GiB(self.peak_activation_memory)} GiB "
+                f"for peak activation, {GiB(self.non_torch_memory)} GiB "
+                f"for non-torch memory, and {GiB(cuda_graph_memory_bytes)} "
+                f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
+                f"config with `kv_cache_memory="
+                f"{kv_cache_memory_bytes_to_requested_limit}` to fit into "
+                f"requested memory, or `kv_cache_memory="
+                f"{kv_cache_memory_bytes_to_gpu_limit}` to fully "
+                f"utilize gpu memory.")
+            logger.info(msg)
 
         # Warm up sampler and preallocate memory buffer for logits and other
         # sampling related tensors of max possible shape to avoid memory

@@ -250,12 +250,15 @@ class Worker(LocalOrDistributedWorkerBase):
                 weights_memory=self.model_runner.model_memory_usage) as result:
             self.model_runner.profile_run()
 
+        self.non_torch_memory = result.non_torch_increase
+        self.peak_activation_memory = result.torch_peak_increase
+
         self._assert_memory_footprint_increased_during_profiling()
 
-        memory_for_current_instance = total_gpu_memory * \
+        self.requested_memory = total_gpu_memory * \
             self.cache_config.gpu_memory_utilization
 
-        available_kv_cache_memory = (memory_for_current_instance -
+        available_kv_cache_memory = (self.requested_memory -
                                      result.non_kv_cache_memory)
 
         msg = (f"Memory profiling takes {result.profile_time:.2f} seconds\n"
@@ -264,7 +267,7 @@ class Worker(LocalOrDistributedWorkerBase):
                f"({(total_gpu_memory / GiB_bytes):.2f}GiB)"
                " x gpu_memory_utilization "
                f"({self.cache_config.gpu_memory_utilization:.2f})"
-               f" = {(memory_for_current_instance / GiB_bytes):.2f}GiB\n"
+               f" = {(self.requested_memory / GiB_bytes):.2f}GiB\n"
                "model weights take "
                f"{(result.weights_memory / GiB_bytes):.2f}GiB;"
                " non_torch_memory takes "
@@ -402,8 +405,48 @@ class Worker(LocalOrDistributedWorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
+
+        cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            self.model_runner.capture_model(self.gpu_cache)
+            cuda_graph_memory_bytes = self.model_runner.capture_model(
+                self.gpu_cache)
+
+        if self.cache_config.kv_cache_memory is None:
+            # When kv_cache_memory is None, we rely on `memory_profiling`
+            # to estimate the KV cache memory, which does not consider
+            # CUDAGraph memory size and may not utilize all gpu memory.
+            # Users may want fine-grained control to specify kv cache
+            # memory bytes.
+            GiB = lambda b: round(b / GiB_bytes, 2)
+            non_kv_cache_memory = (self.model_runner.model_memory_usage +
+                                   self.peak_activation_memory +
+                                   self.non_torch_memory +
+                                   cuda_graph_memory_bytes)
+
+            kv_cache_memory_bytes_to_gpu_limit = (
+                self.baseline_snapshot.free_memory - non_kv_cache_memory)
+            kv_cache_memory_bytes_to_requested_limit = (self.requested_memory -
+                                                        non_kv_cache_memory)
+
+            msg = (
+                f"Free memory on device "
+                f"({GiB(self.baseline_snapshot.free_memory)}/"
+                f"{GiB(self.baseline_snapshot.total_memory)} GiB) on startup. "
+                f"Desired GPU memory utilization is "
+                f"({self.cache_config.gpu_memory_utilization}, "
+                f"{GiB(self.requested_memory)} GiB). "
+                f"Actual usage is {GiB(self.model_runner.model_memory_usage)} "
+                f"GiB for weight, {GiB(self.peak_activation_memory)} GiB "
+                f"for peak activation, {GiB(self.non_torch_memory)} GiB "
+                f"for non-torch memory, and {GiB(cuda_graph_memory_bytes)} "
+                f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
+                f"config with `kv_cache_memory="
+                f"{kv_cache_memory_bytes_to_requested_limit}` to fit into "
+                f"requested memory, or `kv_cache_memory="
+                f"{kv_cache_memory_bytes_to_gpu_limit}` to fully "
+                f"utilize gpu memory.")
+            logger.info(msg)
+
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
