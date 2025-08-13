@@ -220,8 +220,7 @@ class EmbeddingMixin(OpenAIServing):
         token_num = len(input_ids)
 
         # Note: EmbeddingRequest doesn't have max_tokens
-        if isinstance(request,
-                      (EmbeddingChatRequest, EmbeddingCompletionRequest)):
+        if isinstance(request, EmbeddingRequest):
             # Check if chunked processing is enabled for pooling models
             enable_chunked = self._should_use_chunked_processing(request)
 
