@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalRegistry
 from vllm.v1.request import Request
+from collections import OrderedDict
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, SchedulerConfig
@@ -40,129 +41,159 @@ class EncoderCacheManager:
                     tokens from the input sequence.
 
     Attributes:
-        cache_size: Total cache capacity in encoder tokens
-        num_free_slots: Current available cache capacity in encoder tokens
-        cached: Mapping from request_id to set of cached input_ids for that
-                request
-        freed: List of (request_id, input_id) pairs that were recently freed.
-               This is cleared after every call to get_freed_ids().
+        cache_size: Total cache capacity in encoder tokens.
+        num_free_slots: Current available cache capacity in encoder tokens.
+        num_free_able_slots: Capacity that can be immediately reclaimed by
+            evicting entries with zero references (in encoder tokens).
+        cached: Mapping from mm_hash to a set of request IDs that currently
+            reference the cached entry. If the set is empty, the entry exists
+            but is not referenced by any request and is eligible for
+            reclamation.
+        freed_able: List of tuples (mm_hash, num_tokens) representing entries
+            whose reference count has dropped to zero and that can be freed to
+            make space when needed.
+        freed: List of mm_hash strings that were actually evicted since the
+            last call to get_freed_mm_hashes(). This list is cleared on return.
     """
 
+    # ------------------------------------------------------------------ #
     def __init__(self, cache_size: int):
         self.cache_size = cache_size
         self.num_free_slots = cache_size
-        # req_id -> cached input ids
-        self.cached: dict[str, set[int]] = {}
-        # list of [req_id, input_id]
-        self.freed: list[tuple[str, int]] = []
+        self.num_free_able_slots = cache_size
+
+        self.cached: dict[str, set[str]] = {}
+
+        # List of mm_hash
+        self.freed_able: OrderedDict[str, int] = OrderedDict()
+        self.freed: list[str] = []
 
     def has_cache(self, request: Request, input_id: int) -> bool:
-        """Check if encoder output for a specific multimodal input is cached.
+        """Check whether the encoder output for a specific multimodal input is
+        cached.
 
-        Args:
-            request: The request containing the multimodal input
-            input_id: Index of the multimodal input within the request
-
-        Returns:
-            True if the encoder output for this input is already cached
+        If the entry exists but is currently unreferenced (present with an
+        empty request set and listed in `freed_able`), it is moved back to the
+        active set: the item is removed from `freed_able`,
+        `num_free_able_slots` is decreased accordingly, and the current
+        request ID is added to its reference set.
         """
-        req_id = request.request_id
-        return req_id in self.cached and input_id in self.cached[req_id]
+        mm_hash = request.mm_hashes[input_id]
+        request_id = request.request_id
+        # Not cached at all
+        if mm_hash not in self.cached:
+            return False
+
+        # Cached but currently not referenced by any request
+        if not self.cached[mm_hash]:
+            num_tokens = self.freed_able.pop(mm_hash)
+            self.num_free_able_slots -= num_tokens
+        self.cached[mm_hash].add(request_id)
+        return True
 
     def can_allocate(self, request: Request, input_id: int) -> bool:
         """Check if there's sufficient cache space for a multimodal input.
 
+        If there is not enough free space in `num_free_slots` but there is
+        enough reclaimable space in `num_free_able_slots`, entries will be
+        evicted from `freed_able` (their mm_hash appended to `freed`) until
+        enough space is available, and then this method returns True. Returns
+        False only if the requested number of tokens exceeds both the free and
+        reclaimable capacities combined.
+
         Args:
-            request: The request containing the multimodal input
-            input_id: Index of the multimodal input within the request
+            request: The request containing the multimodal input.
+            input_id: Index of the multimodal input within the request.
 
         Returns:
-            True if there's enough free cache space to store the encoder output
-            for this multimodal input
+            True if there's enough capacity to hold the encoder output for this
+            input (possibly after reclaiming `freed_able` entries); otherwise
+            False.
         """
         num_tokens = request.get_num_encoder_tokens(input_id)
-        return num_tokens <= self.num_free_slots
+        if num_tokens <= self.num_free_slots:
+            return True
+        if num_tokens > self.num_free_able_slots:
+            return False
+        # Free some slot
+        while num_tokens > self.num_free_slots:
+            mm_hash, num_free_token = self.freed_able.popitem(last=False)
+            del self.cached[mm_hash]
+            self.freed.append(mm_hash)
+            self.num_free_slots += num_free_token
+        return True
 
     def allocate(self, request: Request, input_id: int) -> None:
         """Allocate cache space for a multimodal input's encoder output.
 
-        This method reserves cache space for storing the encoder output of
-        the specified multimodal input. The actual encoder output storage
-        happens in the model runner, but this method ensures the cache
-        manager tracks the allocation.
-
-        Args:
-            request: The request containing the multimodal input
-            input_id: Index of the multimodal input within the request
+        This reserves cache space for storing the encoder output of the
+        specified multimodal input. The actual encoder output storage happens in
+        the model runner; this method updates the manager's bookkeeping.
 
         Note:
-            This method assumes can_allocate() returned True for the same
-            request and input_id. It will reduce available cache space.
+            This method assumes can_allocate() returned True for the same input
+            and will decrease both `num_free_slots` and `num_free_able_slots`
+            by the number of encoder tokens for the input.
         """
-        req_id = request.request_id
-        if req_id not in self.cached:
-            self.cached[req_id] = set()
-        self.cached[req_id].add(input_id)
+        mm_hash = request.mm_hashes[input_id]
+        request_id = request.request_id
+        if mm_hash not in self.cached:
+            self.cached[mm_hash] = set()
+
+        self.cached[mm_hash].add(request_id)
         self.num_free_slots -= request.get_num_encoder_tokens(input_id)
+        self.num_free_able_slots -= request.get_num_encoder_tokens(input_id)
 
     def get_cached_input_ids(self, request: Request) -> set[int]:
         """Get all cached multimodal input IDs for a request.
 
-        Args:
-            request: The request to query
-
-        Returns:
-            Set of input_ids that have cached encoder outputs for this request.
-            Returns empty set if no inputs are cached for this request.
+        Returns the set of input IDs whose `mm_hash` exists in the cache map.
+        This includes entries that are currently unreferenced (and thus present
+        in `freed_able`); for such entries, freeing for this request will be a
+        no-op.
         """
-        return self.cached.get(request.request_id, set())
+        return {
+            input_id
+            for input_id in range(len(request.mm_hashes))
+            if request.mm_hashes[input_id] in self.cached
+        }
 
     def free_encoder_input(self, request: Request, input_id: int) -> None:
         """Free cache space for a single multimodal input's encoder output.
 
-        This method is called when:
-        - The encoder output has been fully consumed by the decoder and is
-          no longer needed (e.g., in vision-language models after image
-          tokens are processed)
-        - A request is being cancelled or aborted
-
-        Args:
-            request: The request containing the multimodal input
-            input_id: Index of the multimodal input to free from cache
+        When the reference set for the corresponding `mm_hash` becomes empty,
+        the entry is appended to `freed_able` and `num_free_able_slots` is
+        increased by the number of encoder tokens for that input. The entry is
+        not physically freed until capacity is needed (e.g., by
+        `can_allocate`).
         """
         req_id = request.request_id
-        if req_id not in self.cached:
+        mm_hash = request.mm_hashes[input_id]
+        if mm_hash not in self.cached:
             return
-
-        self.cached[req_id].discard(input_id)
-        if len(self.cached[req_id]) == 0:
-            del self.cached[req_id]
-        self.num_free_slots += request.get_num_encoder_tokens(input_id)
-        self.freed.append((req_id, input_id))
+        if not self.cached[mm_hash]:
+            return
+        self.cached[mm_hash].discard(req_id)
+        if not self.cached[mm_hash]:
+            num_tokens = request.get_num_encoder_tokens(input_id)
+            self.freed_able[mm_hash] = num_tokens
+            self.num_free_able_slots += num_tokens
 
     def free(self, request: Request) -> None:
         """Free all cached encoder outputs for a request.
 
-        This method is typically called when a request is finished, cancelled,
-        or aborted, and all its encoder outputs should be freed from cache.
-
-        Args:
-            request: The request whose encoder outputs should be freed
+        Typically called when a request is finished, cancelled, or aborted.
         """
         input_ids = self.get_cached_input_ids(request).copy()
         for input_id in input_ids:
             self.free_encoder_input(request, input_id)
 
-    def get_freed_ids(self) -> list[tuple[str, int]]:
+    def get_freed_mm_hashes(self) -> list[str]:
         """Get and clear the list of recently freed encoder cache entries.
 
-        This method returns all encoder cache entries that were freed since
-        the last call to this method. It's used by the scheduler to notify
-        workers about which encoder outputs can be removed from their caches.
-
         Returns:
-            List of (request_id, input_id) tuples that were freed since the
-            last call. The internal freed list is cleared after this call.
+            List of mm_hash strings that were actually evicted since the last
+            call. The internal list is cleared after this call.
         """
         freed = self.freed
         self.freed = []
@@ -177,16 +208,11 @@ def compute_encoder_budget(
     """Compute the encoder cache budget based on the model and scheduler 
     configurations.
 
-    Args:
-        model_config: Model configuration.
-        scheduler_config: Scheduler configuration.
-        mm_registry: Provides information about the token cost.
-
     Returns:
-        - Compute budget for encoder execution, in unit of number of tokens 
-            in the input sequence.
-        - Space budget for encoder cache size, in unit of number of tokens 
-            in the input sequence.
+        - Compute budget for encoder execution, measured in number of tokens
+          from the input sequence.
+        - Space budget for encoder cache size, measured in number of tokens
+          from the input sequence.
     """
 
     if not mm_registry.supports_multimodal_inputs(model_config):
@@ -210,19 +236,13 @@ def _compute_encoder_budget_multimodal(
     scheduler_config: "SchedulerConfig",
     mm_registry: MultiModalRegistry,
 ) -> tuple[int, int]:
-    """Compute the encoder cache budget based on the model and scheduler 
-    configurations for a multimodal model.
-
-    Args:
-        model_config: Model configuration.
-        scheduler_config: Scheduler configuration.
-        mm_registry: Provides information about the token cost.
+    """Compute the encoder cache budget for a multimodal model.
 
     Returns:
-        - Compute budget for encoder execution, in unit of number of tokens 
-            in the input sequence.
-        - Space budget for encoder cache size, in unit of number of tokens 
-            in the input sequence.
+        - Compute budget for encoder execution, measured in number of tokens
+          from the input sequence.
+        - Space budget for encoder cache size, measured in number of tokens
+          from the input sequence.
     """
 
     max_tokens_by_modality_dict = mm_registry \

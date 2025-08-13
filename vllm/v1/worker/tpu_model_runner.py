@@ -208,8 +208,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
         self.kv_caches: list[torch.Tensor] = []
-        # req_id -> (input_id -> encoder_output)
-        self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
+        # mm_hash -> encoder_output
+        self.encoder_cache: dict[str, torch.Tensor] = {}
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -344,7 +344,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
-            self.encoder_cache.pop(req_id, None)
 
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
@@ -359,12 +358,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 removed_req_indices.append(req_index)
 
         # Free the cached encoder outputs.
-        for req_id, input_id in scheduler_output.free_encoder_input_ids:
-            encoder_outputs = self.encoder_cache.get(req_id)
-            if encoder_outputs is not None:
-                encoder_outputs.pop(input_id, None)
-                if not encoder_outputs:
-                    self.encoder_cache.pop(req_id, None)
+        for mm_hash in scheduler_output.free_encoder_mm_hashes:
+            self.encoder_cache.pop(mm_hash, None)
 
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
@@ -396,6 +391,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 mm_inputs=new_req_data.mm_inputs,
                 mm_positions=new_req_data.mm_positions,
+                mm_hashes=new_req_data.mm_hashes,
                 sampling_params=sampling_params,
                 pooling_params=None,
                 generator=None,
@@ -843,14 +839,25 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Batch the multi-modal inputs.
         mm_inputs = list[MultiModalKwargs]()
-        req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
+        mm_hashes = list[str]()
+        pos_infos = list[PlaceholderRange]()
+
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
 
             for mm_input_id in encoder_input_ids:
+                mm_hash = req_state.mm_hashes[mm_input_id]
+
+                # Skip if already cached
+                if mm_hash in self.encoder_cache:
+                    continue
+
                 mm_inputs.append(req_state.mm_inputs[mm_input_id])
-                req_ids_pos.append(
-                    (req_id, mm_input_id, req_state.mm_positions[mm_input_id]))
+                mm_hashes.append(mm_hash)
+                pos_infos.append(req_state.mm_positions[mm_input_id])
+
+        if not mm_inputs:
+            return  # All inputs already cached
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
@@ -893,19 +900,15 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 for output in curr_group_outputs:
                     encoder_outputs.append(output)
 
-        # Cache the encoder outputs.
+        # Cache the encoder outputs by mm_hash.
         # NOTE (NickLucche) here we diverge from logic in other runners, as we
         # assume to only have whole mm items to process. Hence we avoid the
         # intrinsic dynamism that `scatter_mm_placeholders` introduces.
-        for (req_id, input_id, pos_info), output in zip(
-                req_ids_pos,
-                encoder_outputs,
-        ):
-            if req_id not in self.encoder_cache:
-                self.encoder_cache[req_id] = {}
+        for mm_hash, pos_info, output in zip(mm_hashes, pos_infos,
+                                             encoder_outputs):
             assert pos_info.is_embed is None, "Expected all positions to be"\
                 " contiguous and embeddings."
-            self.encoder_cache[req_id][input_id] = output
+            self.encoder_cache[mm_hash] = output
 
     def _gather_mm_embeddings(
         self,
@@ -918,6 +921,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens
             mm_positions = req_state.mm_positions
+            mm_hashes = req_state.mm_hashes
             # TODO unroll loop and assume/enforce --disable_chunked_mm_input
             # NOTE (NickLucche) here we diverge from logic in other runners, as
             # we assume to only have whole mm items to process. Hence we avoid
@@ -938,11 +942,11 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # in the decoder's KV cache.
                     continue
 
-                assert req_id in self.encoder_cache
-                assert i in self.encoder_cache[req_id]
+                mm_hash = mm_hashes[i]
+                assert mm_hash in self.encoder_cache
                 assert pos_info.is_embed is None, "Expected all positions to"\
                 " be contiguous and embeddings."
-                encoder_output = self.encoder_cache[req_id][i]
+                encoder_output = self.encoder_cache[mm_hash]
                 mm_embeds.append(encoder_output)
         return mm_embeds
 
@@ -1584,9 +1588,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     expected_num_items=max_mm_items_per_batch,
                 )
 
-                # Cache the dummy encoder outputs.
-                self.encoder_cache["tmp"] = dict(
-                    enumerate(dummy_encoder_outputs))
+                # Cache the dummy encoder outputs using dummy mm_hashes.
+                for i, output in enumerate(dummy_encoder_outputs):
+                    self.encoder_cache[f"tmp_{i}"] = output
 
         # Trigger compilation for general shape.
         self._dummy_run(num_tokens, self.num_reqs_max_model_len,
