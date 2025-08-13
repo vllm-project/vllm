@@ -380,6 +380,9 @@ class EngineArgs:
     disable_hybrid_kv_cache_manager: bool = (
         SchedulerConfig.disable_hybrid_kv_cache_manager)
 
+    include_finished_set: bool = (
+        SchedulerConfig.include_finished_set)
+
     guided_decoding_backend: GuidedDecodingBackend = DecodingConfig.backend
     guided_decoding_disable_fallback: bool = DecodingConfig.disable_fallback
     guided_decoding_disable_any_whitespace: bool = \
@@ -814,6 +817,8 @@ class EngineArgs:
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
         scheduler_group.add_argument("--async-scheduling",
                                      **scheduler_kwargs["async_scheduling"])
+        scheduler_group.add_argument("--include-finished-set",
+                                     **scheduler_kwargs["include_finished_set"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1280,6 +1285,7 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.
             disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            include_finished_set=self.include_finished_set,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
