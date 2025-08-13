@@ -92,8 +92,6 @@ class MiniCPMVImagePixelInputs(TensorSchema):
         expected_shape: tuple[Union[int, str], ...],
         dynamic_dims: set[str],
     ) -> tuple[int, ...]:
-        """Validate a list/tuple of tensors and return the actual shape."""
-
         # value[0] is the scaled image,
         # and value[1:] is a collection of image slices.
         # It is ensured that all slices in the collection
