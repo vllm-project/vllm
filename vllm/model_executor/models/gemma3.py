@@ -452,7 +452,7 @@ class Gemma3Model(nn.Module):
                 (".k_scale", ".v_scale", ".q_scale", ".prob_scale")):
                 # Try to remap the scale name first
                 remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                if remapped_name is not None:
+                if remapped_name is not None and remapped_name in params_dict:
                     # Successfully remapped, use the remapped name
                     param = params_dict[remapped_name]
                     weight_loader = getattr(param, "weight_loader",
