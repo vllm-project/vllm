@@ -365,7 +365,8 @@ class OpenAIServingCompletion(OpenAIServing):
                     int, Logprob]]]]
 
                 total_steps += len(res.outputs)
-                total_draft_tokens += res.num_draft_tokens if res.num_draft_tokens is not None else 0
+                total_draft_tokens += (res.num_draft_tokens if
+                                       res.num_draft_tokens is not None else 0)
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
@@ -455,8 +456,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 completion_tokens=total_completion_tokens,
                 total_tokens=total_prompt_tokens + total_completion_tokens,
                 total_steps=total_steps,
-                total_draft_tokens=total_draft_tokens
-                if total_draft_tokens > 0 else None)
+                total_draft_tokens=(total_draft_tokens
+                                    if total_draft_tokens > 0 else None))
 
             if self.enable_prompt_tokens_details and num_cached_tokens:
                 final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(

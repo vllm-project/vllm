@@ -50,7 +50,7 @@ class RequestFuncOutput:
     _total_steps: Optional[int] = None
     
     # Spec decoding metrics
-    _draft_tokens: Optional[int] = None
+    draft_tokens: Optional[int] = None
 
     def get_total_steps(self) -> int:
         """
@@ -61,19 +61,9 @@ class RequestFuncOutput:
         steps count should be the same as output tokens count, 
         as each step would generate 1 token.
         """
-        return self._total_steps if self._total_steps is not None else self.output_tokens
-
-    def get_draft_token_per_step(self) -> float:
-        """
-        Average number of tokens drafted per prefill / decode step.
-        """
-        return self._draft_tokens / self.get_total_steps() if self._draft_tokens is not None else 0
-
-    def get_token_per_step(self) -> float:
-        """
-        Average number of tokens generated per prefill / decode step.
-        """
-        return self.output_tokens / self.get_total_steps()
+        return self._total_steps \
+            if self._total_steps is not None \
+            else self.output_tokens
 
 
 async def async_request_openai_completions(
@@ -166,6 +156,9 @@ async def async_request_openai_completions(
                         elif usage := data.get("usage"):
                             output.output_tokens = usage.get(
                                 "completion_tokens")
+                            output._total_steps = usage.get("total_steps")
+                            output.draft_tokens = \
+                                usage.get("total_draft_tokens")
                 if first_chunk_received:
                     output.success = True
                 else:
@@ -282,8 +275,6 @@ async def async_request_openai_chat_completions(
                         elif usage := data.get("usage"):
                             output.output_tokens = usage.get(
                                 "completion_tokens")
-                            output._total_steps = usage.get("total_steps")
-                            output._draft_tokens = usage.get("total_draft_tokens")
 
                         most_recent_timestamp = timestamp
 

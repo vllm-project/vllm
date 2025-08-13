@@ -576,9 +576,6 @@ class OpenAIServingChat(OpenAIServing):
 
                         # if continuous usage stats are requested, add it
                         if include_continuous_usage:
-                            logger.info(
-                                "===Jialino OpenAIServingChat.chat_completion_stream_generator 1"
-                            )
                             chunk.usage = UsageInfo(
                                 prompt_tokens=num_prompt_tokens,
                                 completion_tokens=0,
@@ -611,9 +608,6 @@ class OpenAIServingChat(OpenAIServing):
                                     choices=[choice_data],
                                     model=model_name)
                                 if include_continuous_usage:
-                                    logger.info(
-                                        "===Jialino OpenAIServingChat.chat_completion_stream_generator 2"
-                                    )
                                     chunk.usage = UsageInfo(
                                         prompt_tokens=num_prompt_tokens,
                                         completion_tokens=0,
@@ -992,9 +986,6 @@ class OpenAIServingChat(OpenAIServing):
                     # handle usage stats if requested & if continuous
                     if include_continuous_usage:
                         completion_tokens = previous_num_tokens[i]
-                        logger.info(
-                            "===Jialino OpenAIServingChat.chat_completion_stream_generator 3"
-                        )
                         chunk.usage = UsageInfo(
                             prompt_tokens=num_prompt_tokens,
                             completion_tokens=completion_tokens,
@@ -1008,9 +999,6 @@ class OpenAIServingChat(OpenAIServing):
             # is sent, send the usage
             if include_usage:
                 completion_tokens = sum(previous_num_tokens)
-                logger.info(
-                    "===Jialino OpenAIServingChat.chat_completion_stream_generator 4"
-                )
                 final_usage = UsageInfo(prompt_tokens=num_prompt_tokens,
                                         completion_tokens=completion_tokens,
                                         total_tokens=num_prompt_tokens +
@@ -1032,9 +1020,6 @@ class OpenAIServingChat(OpenAIServing):
 
             # report to FastAPI middleware aggregate usage across all choices
             num_completion_tokens = sum(previous_num_tokens)
-            logger.info(
-                "===Jialino OpenAIServingChat.chat_completion_stream_generator 5"
-            )
             request_metadata.final_usage_info = UsageInfo(
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=num_completion_tokens,
