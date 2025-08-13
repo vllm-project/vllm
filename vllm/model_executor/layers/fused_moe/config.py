@@ -445,6 +445,10 @@ class FusedMoEConfig:
             from vllm.model_executor.layers.quantization.fp8 import Fp8Config
             if quant_dtype is None and isinstance(quant_config, Fp8Config):
                 quant_dtype = torch.float8_e4m3fn
+            
+            from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config 
+            if (quant_dtype is None and isinstance(quant_config, Mxfp4Config) and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8):
+                quant_dtype = "mxfp8"
 
             from vllm.model_executor.layers.quantization.modelopt import (
                 ModelOptNvFp4Config)

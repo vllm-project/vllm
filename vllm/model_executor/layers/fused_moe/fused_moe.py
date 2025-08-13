@@ -1849,6 +1849,10 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
     ):
+
+        print (f"hidden_states : {hidden_states.shape} {hidden_states.dtype} {hidden_states.device}")
+        print (f"w1 : {w1.shape} {w1.dtype} {w1.device}")
+
         # Check constraints.
         if self.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), (
