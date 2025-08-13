@@ -171,9 +171,10 @@ class EmbeddingMixin(OpenAIServing):
         pooling_params,
         trace_headers,
         prompt_idx: int,
-    ) -> list[AsyncGenerator[PoolingRequestOutput, None]]:
+    ) -> list[AsyncGenerator[tuple[int, int, PoolingRequestOutput], None]]:
         """Process a single prompt using chunked processing."""
-        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
+        generators: list[AsyncGenerator[tuple[int, int, PoolingRequestOutput],
+                                        None]] = []
         token_ids = original_prompt["prompt_token_ids"]
 
         # Split into chunks using max_position_embeddings
@@ -200,8 +201,8 @@ class EmbeddingMixin(OpenAIServing):
                              params=pooling_params,
                              lora_request=ctx.lora_request)
 
-            # Create generator for this chunk
-            generator = self.engine_client.encode(
+            # Create generator for this chunk and wrap it to return indices
+            original_generator = self.engine_client.encode(
                 chunk_engine_prompt,
                 pooling_params,
                 chunk_request_id,
@@ -210,7 +211,15 @@ class EmbeddingMixin(OpenAIServing):
                 priority=getattr(ctx.request, "priority", 0),
             )
 
-            generators.append(generator)
+            # Wrap the generator to return (prompt_idx, chunk_idx, result)
+            # Use default parameters to capture loop variables
+            async def wrapped_generator(gen=original_generator,
+                                        p_idx=prompt_idx,
+                                        c_idx=chunk_idx):
+                async for result in gen:
+                    yield (p_idx, c_idx, result)
+
+            generators.append(wrapped_generator())
 
         return generators
 
@@ -296,7 +305,8 @@ class EmbeddingMixin(OpenAIServing):
         pooling_params: PoolingParams,
         trace_headers: Optional[Mapping[str, str]],
         prompt_index: int,
-    ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
+    ) -> AsyncGenerator[tuple[int, int, Union[RequestOutput,
+                                              PoolingRequestOutput]], None]:
         """Create a generator for a single prompt using standard processing."""
         request_id_item = f"{ctx.request_id}-{prompt_index}"
 
@@ -310,7 +320,9 @@ class EmbeddingMixin(OpenAIServing):
         # https://github.com/python/mypy/issues/8586#issuecomment-2867698435
         engine_prompt = cast(Union[EngineTokensPrompt, EngineEmbedsPrompt],
                              engine_prompt)
-        return self.engine_client.encode(
+
+        # Wrap the original generator to return (prompt_idx, chunk_idx, result)
+        original_generator = self.engine_client.encode(
             engine_prompt,
             pooling_params,
             request_id_item,
@@ -318,6 +330,10 @@ class EmbeddingMixin(OpenAIServing):
             trace_headers=trace_headers,
             priority=getattr(ctx.request, "priority", 0),
         )
+
+        async for result in original_generator:
+            # chunk_idx is always 0 for non-chunked
+            yield (prompt_index, 0, result)
 
     @override
     async def _prepare_generators(
@@ -335,9 +351,13 @@ class EmbeddingMixin(OpenAIServing):
             return await super()._prepare_generators(ctx)
 
         # Custom logic for chunked processing
-        generators: list[AsyncGenerator[Union[RequestOutput,
-                                              PoolingRequestOutput],
+        generators: list[AsyncGenerator[tuple[int, int,
+                                              Union[RequestOutput,
+                                                    PoolingRequestOutput]],
                                         None]] = []
+
+        # Track which prompts use chunked processing
+        ctx.chunked_prompts = set()
 
         try:
             trace_headers = (None if ctx.raw_request is None else await
@@ -374,6 +394,7 @@ class EmbeddingMixin(OpenAIServing):
                     if (len(text_tokens_prompt["prompt_token_ids"])
                             > max_pos_embeddings):
                         # Use chunked processing for this prompt
+                        ctx.chunked_prompts.add(i)  # Track chunked prompt
                         chunk_generators = await self._process_chunked_request(
                             ctx, text_tokens_prompt, pooling_params,
                             trace_headers, i)
@@ -437,85 +458,69 @@ class EmbeddingMixin(OpenAIServing):
             prompt_aggregators: dict[int, dict[str, Any]] = {}
             short_prompts_results: dict[int, PoolingRequestOutput] = {}
 
-            async for result_idx, result in ctx.result_generator:
-                if "-chunk-" in result.request_id:
-                    # Extract prompt_idx from chunked request_id
-                    parts = result.request_id.split("-")
-                    try:
-                        prompt_idx = int(parts[parts.index("prompt") + 1])
+            async for prompt_idx, chunk_idx, result in ctx.result_generator:
+                # This is a chunked result
+                if prompt_idx in ctx.chunked_prompts:
+                    # Initialize aggregator for this prompt if needed
+                    if prompt_idx not in prompt_aggregators:
+                        prompt_aggregators[prompt_idx] = {
+                            'weighted_sum': None,
+                            'total_weight': 0,
+                            'chunk_count': 0,
+                            'request_id': result.request_id.split("-chunk-")[0]
+                        }
 
-                        # Initialize aggregator for this prompt if needed
-                        if prompt_idx not in prompt_aggregators:
-                            prompt_aggregators[prompt_idx] = {
-                                'weighted_sum': None,
-                                'total_weight': 0,
-                                'chunk_count': 0,
-                                'request_id':
-                                result.request_id.split("-chunk-")[0]
-                            }
+                    aggregator = prompt_aggregators[prompt_idx]
 
-                        aggregator = prompt_aggregators[prompt_idx]
-
-                        # MEAN pooling with online weighted averaging
-                        # Ensure result is PoolingRequestOutput
-                        # for embedding processing
-                        if not isinstance(result, PoolingRequestOutput):
-                            return self.create_error_response(
-                                f"Expected PoolingRequestOutput for "
-                                f"chunked embedding, got "
-                                f"{type(result).__name__}")
-
-                        # Handle both PoolingOutput and
-                        # EmbeddingOutput types
-                        if hasattr(result.outputs, 'data'):
-                            # PoolingOutput case
-                            embedding_data = result.outputs.data
-                        elif hasattr(result.outputs, 'embedding'):
-                            # EmbeddingOutput case -
-                            # convert embedding list to tensor
-                            embedding_data = result.outputs.embedding
-                        else:
-                            return self.create_error_response(
-                                f"Unsupported output type: "
-                                f"{type(result.outputs).__name__}")
-
-                        if not isinstance(embedding_data, torch.Tensor):
-                            embedding_data = torch.tensor(embedding_data,
-                                                          dtype=torch.float32)
-
-                        if result.prompt_token_ids is None:
-                            return self.create_error_response(
-                                "prompt_token_ids cannot be None for "
-                                "chunked processing")
-                        weight = len(result.prompt_token_ids)
-
-                        weighted_embedding = embedding_data.to(
-                            dtype=torch.float32) * weight
-
-                        if aggregator['weighted_sum'] is None:
-                            # First chunk
-                            aggregator['weighted_sum'] = weighted_embedding
-                        else:
-                            # Accumulate
-                            aggregator['weighted_sum'] += weighted_embedding
-
-                        aggregator['total_weight'] += weight
-                        aggregator['chunk_count'] += 1
-
-                    except (ValueError, IndexError):
+                    # MEAN pooling with online weighted averaging
+                    # Ensure result is PoolingRequestOutput
+                    # for embedding processing
+                    if not isinstance(result, PoolingRequestOutput):
                         return self.create_error_response(
-                            f"Invalid chunk request ID format: "
-                            f"{result.request_id}")
+                            f"Expected PoolingRequestOutput for "
+                            f"chunked embedding, got "
+                            f"{type(result).__name__}")
+
+                    # Handle both PoolingOutput and
+                    # EmbeddingOutput types
+                    if hasattr(result.outputs, 'data'):
+                        # PoolingOutput case
+                        embedding_data = result.outputs.data
+                    elif hasattr(result.outputs, 'embedding'):
+                        # EmbeddingOutput case -
+                        # convert embedding list to tensor
+                        embedding_data = result.outputs.embedding
+                    else:
+                        return self.create_error_response(
+                            f"Unsupported output type: "
+                            f"{type(result.outputs).__name__}")
+
+                    if not isinstance(embedding_data, torch.Tensor):
+                        embedding_data = torch.tensor(embedding_data,
+                                                      dtype=torch.float32)
+
+                    if result.prompt_token_ids is None:
+                        return self.create_error_response(
+                            "prompt_token_ids cannot be None for "
+                            "chunked processing")
+                    weight = len(result.prompt_token_ids)
+
+                    weighted_embedding = embedding_data.to(
+                        dtype=torch.float32) * weight
+
+                    if aggregator['weighted_sum'] is None:
+                        # First chunk
+                        aggregator['weighted_sum'] = weighted_embedding
+                    else:
+                        # Accumulate
+                        aggregator['weighted_sum'] += weighted_embedding
+
+                    aggregator['total_weight'] += weight
+                    aggregator['chunk_count'] += 1
                 else:
-                    # Non-chunked result
-                    try:
-                        prompt_idx = int(result.request_id.split("-")[-1])
-                        short_prompts_results[prompt_idx] = cast(
-                            PoolingRequestOutput, result)
-                    except ValueError:
-                        return self.create_error_response(
-                            f"Invalid request ID "
-                            f"format: {result.request_id}")
+                    # Non-chunked result (chunk_idx == 0)
+                    short_prompts_results[prompt_idx] = cast(
+                        PoolingRequestOutput, result)
 
             # Finalize aggregated results
             final_res_batch: list[Union[PoolingRequestOutput,
