@@ -1026,6 +1026,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 mrope_pos_ptr += prompt_part_len
                 # ekhvedchenia
+                req.mrope_position_delta = -1275
                 print("_calc_mrope_positions (prompt_part_len > 0)", f"{req_id=}", f"{self.mrope_positions_cpu.shape=}")
                 print(f"{dst_start=} {dst_end=} {src_start=} {src_end=} {prompt_part_len=}")
                 print(self.mrope_positions_cpu[0])
