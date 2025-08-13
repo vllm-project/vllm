@@ -184,13 +184,12 @@ def use_trtllm_attention(
     use_trtllm, env_value = supports_trtllm_attention()
     if not use_trtllm:
         return False
-    
 
     # Check if the dimensions are supported by TRTLLM decode attention
     if (attn_head_size is None or num_qo_heads is None or num_kv_heads is None
             or num_qo_heads % num_kv_heads != 0):
         return False
-    
+
     # If sinks are being used, we must use TRTLLM attention as it's
     # the only backend that supports them
     if has_sinks:
@@ -203,7 +202,7 @@ def use_trtllm_attention(
         use_trtllm = (num_tokens <= 256 and max_seq_len < 131072
                       and kv_cache_dtype == "auto")
         if use_trtllm:
-            logger.info_once("Using TRTLLM attention (auto-detected).")
+            logger.warning_once("Using TRTLLM attention (auto-detected).")
         return use_trtllm
 
     # Environment variable is set to 1 - respect it
