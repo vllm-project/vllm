@@ -60,13 +60,11 @@ class EmbeddingMixin(OpenAIServing):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # Cache chunked processing support to avoid repeated attribute lookups
-        pooler_config = getattr(self.model_config, 'pooler_config', None)
-        self.supports_chunked_processing = (
-            pooler_config is not None
-            and getattr(pooler_config, 'enable_chunked_processing', False))
+        pooler_config = self.model_config.pooler_config
 
-        # Cache max_embed_len to avoid repeated attribute lookups
+        # Avoid repeated attribute lookups
+        self.supports_chunked_processing = (
+            pooler_config and pooler_config.enable_chunked_processing)
         self.max_embed_len = (pooler_config.max_embed_len if pooler_config
                               and pooler_config.max_embed_len else None)
 
