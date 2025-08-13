@@ -24,8 +24,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_flashinfer_per_tensor_scale_fp8, rotate_flashinfer_fp8_moe_weights,
-    swap_w13_to_w31)
+    apply_flashinfer_per_tensor_scale_fp8, get_moe_scaling_factors,
+    rotate_flashinfer_fp8_moe_weights, swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
@@ -538,6 +538,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             allow_cutlass_block_scaled_grouped_gemm=(
                 self.allow_cutlass_block_scaled_grouped_gemm))
 
+        self._output1_scales_scalar: Optional[torch.Tensor] = None
+        self._output1_scales_gate_scalar: Optional[torch.Tensor] = None
+        self._output2_scales_scalar: Optional[torch.Tensor] = None
+
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
@@ -694,6 +698,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w2_weight = layer.w2_weight.data
                 w2_weight_scale_inv = layer.w2_weight_scale_inv.data
                 if not self.block_quant:
+                    self._output1_scales_scalar, \
+                    self._output1_scales_gate_scalar, \
+                        self._output2_scales_scalar = get_moe_scaling_factors(
+                        layer.w13_input_scale, layer.w13_weight_scale,
+                        layer.w2_input_scale, layer.w2_weight_scale
+                    )
                     rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
             else:
                 w13_weight = layer.w13_weight.data
@@ -1020,11 +1030,18 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             else:
                 assert (not renormalize
                         and custom_routing_function is not None)
+                assert self._output1_scales_scalar is not None
+                assert self._output1_scales_gate_scalar is not None
+                assert self._output2_scales_scalar is not None
                 return apply_flashinfer_per_tensor_scale_fp8(
                     layer=layer,
                     hidden_states=x,
                     router_logits=router_logits,
                     routing_bias=e_score_correction_bias,
+                    output1_scales_scalar=self._output1_scales_scalar,
+                    output1_scales_gate_scalar=self.
+                    _output1_scales_gate_scalar,
+                    output2_scales_scalar=self._output2_scales_scalar,
                     global_num_experts=global_num_experts,
                     top_k=top_k,
                     num_expert_group=num_expert_group,

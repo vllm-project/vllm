@@ -75,6 +75,9 @@ def apply_flashinfer_per_tensor_scale_fp8(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     routing_bias: Optional[torch.Tensor],
+    output1_scales_scalar: torch.Tensor,
+    output1_scales_gate_scalar: torch.Tensor,
+    output2_scales_scalar: torch.Tensor,
     top_k: int,
     num_expert_group: Optional[int],
     topk_group: Optional[int],
@@ -92,10 +95,10 @@ def apply_flashinfer_per_tensor_scale_fp8(
         hidden_states=hidden_states,
         input_scale=layer.w13_input_scale,
         gemm1_weights=layer.w13_weight,
-        gemm1_weights_scale=layer.w13_weight_scale,
         gemm2_weights=layer.w2_weight,
-        gemm2_weights_scale=layer.w2_weight_scale,
-        activation_scale=layer.w2_input_scale,
+        output1_scales_scalar=output1_scales_scalar,
+        output1_scales_gate_scalar=output1_scales_gate_scalar,
+        output2_scales_scalar=output2_scales_scalar,
         num_experts=global_num_experts,
         top_k=top_k,
         num_expert_group=num_expert_group,
@@ -106,3 +109,18 @@ def apply_flashinfer_per_tensor_scale_fp8(
         use_routing_scales_on_input=apply_router_weight_on_input,
         routing_method_type=RoutingMethodType.Llama4,
     )
+
+
+def get_moe_scaling_factors(
+    input_scale: torch.Tensor,
+    gemm1_weights_scale: torch.Tensor,
+    activation_scale: torch.Tensor,
+    gemm2_weights_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    output1_scales_scalar = gemm1_weights_scale * input_scale * (
+        1.0 / activation_scale)
+    output1_scales_gate_scalar = gemm1_weights_scale * input_scale
+    output2_scales_scalar = activation_scale * gemm2_weights_scale
+
+    return output1_scales_scalar, output1_scales_gate_scalar, \
+        output2_scales_scalar
