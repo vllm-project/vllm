@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark the latency of processing a single batch of requests."""
 
+# python benchmarks/benchmark_latency.py --model meta-llama/Llama-3.1-8B-Instruct --token-parallel-size 1 --input-len 1024 --output-len 1024 --batch-size 1 --n 1 --num-iters 10 --num-iters-warmup 10 --profile --output-json /lustre/fsw/portfolios/hw/users/sshrestha/models/llama-3.1-8b-instruct-v1.1/latency.json
+
 import argparse
 import dataclasses
 import json

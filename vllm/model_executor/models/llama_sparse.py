@@ -1,3 +1,8 @@
+# Sparse Llama model (masking) for vLLM
+
+
+
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
@@ -34,6 +39,7 @@ from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -55,6 +61,7 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
+from vllm.forward_context import get_forward_context
 
 class LlamaMLP(nn.Module):
 
@@ -113,15 +120,22 @@ class LlamaAttention(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        sp_threshold: float = 0.5,
     ) -> None:
         super().__init__()
-        layer_idx = extract_layer_index(prefix)
+        self.layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
+        
+        # Sparse attention parameters
+        # self.sp_threshold = sp_threshold
+        self.sp_threshold = 0.625
+        self.topk = int(self.sp_threshold * self.num_heads)
+        # print(f' Attention sparse activation: {self.sp_threshold}')
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
@@ -201,6 +215,34 @@ class LlamaAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
+
+        min_position = positions.min()
+        is_decode = True if min_position > 1 and positions.shape[0] < 10 else False
+
+        # if self.layer_idx == 0:
+        #     if is_decode:
+        #         print('decode stage')
+        #     else:
+        #         print('prefill stage')
+
+        if is_decode and self.sp_threshold < 1:
+            batch_size = attn_output.shape[0]
+            attn_out_sparse = attn_output.view(batch_size, self.num_heads, self.head_dim) # shape(batch_size, num_heads, head_dim)
+            # print('attn_out_sparse.shape', attn_out_sparse.shape) if self.layer_idx == 0 else None
+            
+            norms = attn_out_sparse.norm(dim=-1)  # Shape: (batch_size, num_heads)
+            _, topk_indices = norms.topk(self.topk, dim=-1)  # Shapes: (batch_size, k)
+            mask = torch.zeros_like(norms, dtype=torch.bool)  # Shape: (batch_size, num_heads)
+            mask.scatter_(-1, topk_indices, True)  # Now mask has True at top k head positions for each token
+            mask = mask.unsqueeze(-1)  # Shape: (batch_size, num_heads, 1)
+            # print('mask.shape', mask.shape) if self.layer_idx == 0 else None
+
+            attn_out_sparse = attn_out_sparse * mask
+            attn_output = attn_out_sparse.view(batch_size, self.num_heads * self.head_dim)
+            # attn_output = attn_out_sparse.view(-1, self.hidden_size)
+            # print('Sparse attention applied.') if self.layer_idx == 0 else None
+
+
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -231,6 +273,7 @@ class LlamaDecoderLayer(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        sp_threshold: float = 0.0,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -275,6 +318,7 @@ class LlamaDecoderLayer(nn.Module):
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
+            sp_threshold=sp_threshold,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
@@ -319,7 +363,8 @@ class LlamaModel(nn.Module):
                  *,
                  vllm_config: VllmConfig,
                  prefix: str = "",
-                 layer_type: type[nn.Module] = LlamaDecoderLayer):
+                 layer_type: type[nn.Module] = LlamaDecoderLayer,
+                 sp_threshold: float = 0.0):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -329,6 +374,7 @@ class LlamaModel(nn.Module):
 
         self.config = config
         self.quant_config = quant_config
+        self.sp_threshold = sp_threshold
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
@@ -348,7 +394,8 @@ class LlamaModel(nn.Module):
             lambda prefix: layer_type(config=config,
                                       cache_config=cache_config,
                                       quant_config=quant_config,
-                                      prefix=prefix),
+                                      prefix=prefix,
+                                      sp_threshold=self.sp_threshold),
             prefix=f"{prefix}.layers",
         )
         if get_pp_group().is_last_rank:
@@ -513,18 +560,22 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                  *,
                  vllm_config: VllmConfig,
                  prefix: str = "",
-                 layer_type: type[nn.Module] = LlamaDecoderLayer):
+                 layer_type: type[nn.Module] = LlamaDecoderLayer,
+                 sp_threshold: float = 0.0):
         super().__init__()
+        print("✅ LlamaForCausalLM init: Sparse LLM")
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         self.config = config
         self.lora_config = lora_config
+        self.sp_threshold = sp_threshold
 
         self.model = self._init_model(vllm_config=vllm_config,
                                       prefix=maybe_prefix(prefix, "model"),
-                                      layer_type=layer_type)
-
+                                      layer_type=layer_type,
+                                      sp_threshold=self.sp_threshold)
+        # print(f"Model initialized : {self.model}")
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:
@@ -566,10 +617,12 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def _init_model(self,
                     vllm_config: VllmConfig,
                     prefix: str = "",
-                    layer_type: type[nn.Module] = LlamaDecoderLayer):
+                    layer_type: type[nn.Module] = LlamaDecoderLayer,
+                    sp_threshold: float = 0.0):
         return LlamaModel(vllm_config=vllm_config,
                           prefix=prefix,
-                          layer_type=layer_type)
+                          layer_type=layer_type,
+                          sp_threshold=sp_threshold)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)

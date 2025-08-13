@@ -964,12 +964,12 @@ class EngineArgs:
                             action='store_true',
                             help='Disable logging statistics.')
 
-        parser.add_argument(
-            "--token-parallel-size",
-            type=int,
-            default=1,
-            help="Number of token parallel groups for HTTP attention"
-        )
+        # parser.add_argument(
+        #     "--token-parallel-size",
+        #     type=int,
+        #     default=1,
+        #     help="Number of token parallel groups for HTTP attention"
+        # )
         
         parser.add_argument(
             "--enable-http",
