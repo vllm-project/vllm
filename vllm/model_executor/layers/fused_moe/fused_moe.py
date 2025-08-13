@@ -1621,8 +1621,6 @@ def fused_experts_impl(
                                 block_shape=block_shape,
                                 B_bias=w1_bias)
 
-        # TODO fused kernel
-
         # Activation function with multiplication
         if activation == "silu" and is_act_and_mul:
             torch.ops._C.silu_and_mul(intermediate_cache2,
@@ -1631,9 +1629,9 @@ def fused_experts_impl(
             torch.ops._C.gelu_and_mul(intermediate_cache2,
                                       intermediate_cache1.view(-1, N))
         elif activation == "swigluoai" and is_act_and_mul:
+            # alpha = 1.702, limit = 7.0
             torch.ops._C.swigluoai_and_mul(intermediate_cache2,
-                                           intermediate_cache1.view(-1, N),
-                                           1.702, 7.0)
+                                           intermediate_cache1.view(-1, N))
         # Activation function without multiplication
         elif activation == "silu":
             intermediate_cache2 = F.silu(intermediate_cache1.view(-1, N))

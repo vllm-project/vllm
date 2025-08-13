@@ -127,8 +127,7 @@ __global__ void act_and_mul_kernel_with_param(
     out[token_idx * d + idx] = ACT_FN(x, param) * y;
   }
 }
-}  // namespace vllm
-namespace vllm {
+
 template <typename T>
 __device__ __forceinline__ T swigluoai_and_mul(const T& gate, const T& up,
                                                float alpha, float limit) {
