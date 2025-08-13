@@ -339,13 +339,6 @@ class ModelConfig:
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
     flexibility."""
-    delayed_cudagraphs: bool = False
-    """During the initial instantiation of the model, CUDA graph sizes 
-    will not be captured. Instead, the capture of these graphs will occur
-    dynamically as the model executes. This flag facilitates a faster
-    initialization during cold start scenarios. However, it is essential
-    to note that this speedup during initialization may result in an
-    increased Time-To-First-Token (TTFT) for the initial token inferences."""
     max_seq_len_to_capture: int = 8192
     """Maximum sequence len covered by CUDA graphs. When a sequence has context
     length larger than this, we fall back to eager mode. Additionally for
