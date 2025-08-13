@@ -122,16 +122,10 @@ class SupportsMultiModal(Protocol):
 
 @runtime_checkable
 class SupportsInputEmbeddingsAndPositions(Protocol):
-    """The interface required for models that support returning both input embeddings and positions."""
-
+    """The interface required for models that support returning both input embeddings and positions.
+    Model may require custom positions for dynamic pruning of multimodal embeddings.
+    """
     supports_input_embeddings_and_positions: ClassVar[Literal[True]] = True
-    """
-    A flag that indicates this model supports returning both input embeddings and positions.
-
-    Note:
-        There is no need to redefine this flag if this class is in the
-        MRO of your model class.
-    """
 
     def get_input_embeddings_and_positions(
         self,
