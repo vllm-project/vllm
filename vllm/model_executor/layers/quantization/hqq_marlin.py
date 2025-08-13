@@ -14,7 +14,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
-    marlin_make_empty_g_idx, marlin_permute_scales)
+    marlin_make_empty_g_idx, marlin_permute_bias, marlin_permute_scales)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     MarlinWorkspace)
 from vllm.model_executor.layers.quantization.utils.quant_utils import gptq_pack
@@ -283,6 +283,9 @@ class HQQMarlinMethod(LinearMethodBase):
         layer.marlin_qweight = marlin_w_q
         layer.marlin_zeros = marlin_zp
         layer.marlin_scales = marlin_s
+
+        if hasattr(layer, "bias") and layer.bias is not None:
+            layer.bias.data = marlin_permute_bias(layer.bias)
 
     def apply(
         self,
