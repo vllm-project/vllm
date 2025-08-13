@@ -214,11 +214,11 @@ class CudaPlatformBase(Platform):
                 return _Backend.FLASH_ATTN
             logger.warning_once(
                 "Current `vllm-flash-attn` has a bug inside vision "
-                "module, so we use xformers backend instead. You can "
-                "run `pip install flash-attn` to use flash-attention "
+                "module, so we use torch scaled dot product attention instead. "
+                "You can run `pip install flash-attn` to use the flash-attention "
                 "backend.")
         # Fallback for Volta/Turing GPUs or FA not supported
-        return _Backend.XFORMERS
+        return _Backend.TORCH_SDPA
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
@@ -363,8 +363,7 @@ class CudaPlatformBase(Platform):
                 set_kv_cache_layout("HND")
             return "vllm.attention.backends.flashinfer.FlashInferBackend"
         elif selected_backend == _Backend.XFORMERS:
-            logger.info("Using XFormers backend.")
-            return "vllm.attention.backends.xformers.XFormersBackend"
+            raise ValueError("XFormers backend is no longer supported.")
         elif selected_backend == _Backend.DUAL_CHUNK_FLASH_ATTN:
             logger.info("Using DualChunkFlashAttention backend.")
             return ("vllm.attention.backends.dual_chunk_flash_attn."
@@ -386,17 +385,17 @@ class CudaPlatformBase(Platform):
             logger.info(
                 "Cannot use FlashAttention-2 backend for Volta and Turing "
                 "GPUs.")
-            target_backend = _Backend.XFORMERS
+            target_backend = _Backend.TORCH_SDPA
         elif dtype not in (torch.float16, torch.bfloat16):
             logger.info(
                 "Cannot use FlashAttention-2 backend for dtype other than "
                 "torch.float16 or torch.bfloat16.")
-            target_backend = _Backend.XFORMERS
+            target_backend = _Backend.TORCH_SDPA
         elif block_size % 16 != 0:
             logger.info(
                 "Cannot use FlashAttention-2 backend for block size not "
                 "divisible by 16.")
-            target_backend = _Backend.XFORMERS
+            target_backend = _Backend.TORCH_SDPA
 
         # FlashAttn is valid for the model, checking if the package is
         # installed.
@@ -412,7 +411,7 @@ class CudaPlatformBase(Platform):
                     logger.info(
                         "Cannot use FlashAttention-2 backend for head size %d.",
                         head_size)
-                    target_backend = _Backend.XFORMERS
+                    target_backend = _Backend.TORCH_SDPA
                 fp8_kv_cache = (kv_cache_dtype is not None
                                 and kv_cache_dtype.startswith("fp8"))
                 if (fp8_kv_cache and not flash_attn_supports_fp8()):
@@ -422,18 +421,18 @@ class CudaPlatformBase(Platform):
                         "Please use FlashInfer backend with FP8 KV Cache for "
                         "better performance by setting environment variable "
                         "VLLM_ATTENTION_BACKEND=FLASHINFER")
-                    target_backend = _Backend.XFORMERS
+                    target_backend = _Backend.TORCH_SDPA
             except ImportError:
                 logger.info(
                     "Cannot use FlashAttention-2 backend because the "
                     "vllm.vllm_flash_attn package is not found. "
                     "Make sure that vllm_flash_attn was built and installed "
                     "(on by default).")
-                target_backend = _Backend.XFORMERS
+                target_backend = _Backend.TORCH_SDPA
 
-        if target_backend == _Backend.XFORMERS:
-            logger.info("Using XFormers backend.")
-            return "vllm.attention.backends.xformers.XFormersBackend"
+        if target_backend == _Backend.TORCH_SDPA:
+            raise ValueError("No suitable CUDA attention backend found. "
+                             "FlashAttention requirements not met.")
 
         logger.info("Using Flash Attention backend.")
         return "vllm.attention.backends.flash_attn.FlashAttentionBackend"

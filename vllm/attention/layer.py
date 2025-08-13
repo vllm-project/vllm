@@ -346,15 +346,11 @@ class MultiHeadAttention(nn.Module):
         else:
             if backend in (_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1,
                            _Backend.FLEX_ATTENTION):
-                backend = _Backend.XFORMERS
+                backend = _Backend.TORCH_SDPA
 
             self.attn_backend = backend if backend in {
-                _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1
+                _Backend.TORCH_SDPA, _Backend.PALLAS_VLLM_V1
             } else _Backend.TORCH_SDPA
-
-        if (self.attn_backend == _Backend.XFORMERS
-                and not check_xformers_availability()):
-            self.attn_backend = _Backend.TORCH_SDPA
 
     def forward(
         self,
@@ -376,14 +372,7 @@ class MultiHeadAttention(nn.Module):
             key = torch.repeat_interleave(key, num_repeat, dim=2)
             value = torch.repeat_interleave(value, num_repeat, dim=2)
 
-        if self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-
-            out = xops.memory_efficient_attention_forward(query,
-                                                          key,
-                                                          value,
-                                                          scale=self.scale)
-        elif self.attn_backend == _Backend.TORCH_SDPA:
+        if self.attn_backend == _Backend.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2)
                                  for x in (query, key, value))
             out = F.scaled_dot_product_attention(query,

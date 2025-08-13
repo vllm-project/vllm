@@ -44,7 +44,7 @@ UNSTABLE_PROMPT_SEQUENCE = [
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER", "XFORMERS"])
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("cached_position", [0, 1])
@@ -70,8 +70,6 @@ def test_mixed_requests(
     """
     if backend == "FLASHINFER" and current_platform.is_rocm():
         pytest.skip("Flashinfer does not support ROCm/HIP.")
-    if backend == "XFORMERS" and current_platform.is_rocm():
-        pytest.skip("Xformers does not support ROCm/HIP.")
     with monkeypatch.context() as m:
         m.setenv(STR_BACKEND_ENV_VAR, backend)
 
@@ -120,7 +118,7 @@ def test_mixed_requests(
         )
 
 
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER", "XFORMERS"])
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
 def test_unstable_prompt_sequence(
     vllm_runner,
     backend: str,
@@ -129,8 +127,6 @@ def test_unstable_prompt_sequence(
 
     if backend == "FLASHINFER" and current_platform.is_rocm():
         pytest.skip("Flashinfer does not support ROCm/HIP.")
-    if backend == "XFORMERS" and current_platform.is_rocm():
-        pytest.skip("Xformers does not support ROCm/HIP.")
     with monkeypatch.context() as m:
         m.setenv(STR_BACKEND_ENV_VAR, backend)
 

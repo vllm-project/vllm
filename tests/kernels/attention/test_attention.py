@@ -16,9 +16,36 @@ from vllm.utils import get_max_shared_memory_bytes
 
 if not current_platform.is_rocm():
     from xformers import ops as xops
-    from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
+    from xformers.ops.fmha.attn_bias import (
+        AttentionBias,
+        BlockDiagonalCausalMask,
+        LowerTriangularMaskWithTensorBias,
+    )
 
-    from vllm.attention.backends.xformers import _make_alibi_bias
+    def _make_alibi_bias(
+        alibi_slopes: torch.Tensor,
+        num_kv_heads: int,
+        dtype: torch.dtype,
+        seq_lens: list[int],
+    ) -> list[AttentionBias]:
+        attn_biases: list[AttentionBias] = []
+        for seq_len in seq_lens:
+            bias = torch.arange(seq_len, dtype=dtype)
+            bias = bias[None, :] - bias[:, None]
+            padded_len = (seq_len + 7) // 8 * 8
+            num_heads = alibi_slopes.shape[0]
+            bias = torch.empty(
+                1,
+                num_heads,
+                seq_len,
+                padded_len,
+                device=alibi_slopes.device,
+                dtype=dtype,
+            )[:, :, :, :seq_len].copy_(bias)
+            bias.mul_(alibi_slopes[:, None, None])
+            attn_biases.append(LowerTriangularMaskWithTensorBias(bias))
+
+        return attn_biases
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.

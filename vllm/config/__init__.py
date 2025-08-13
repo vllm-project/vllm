@@ -716,7 +716,7 @@ class ModelConfig:
                 and is_interleaved(self.hf_text_config)
                 and not envs.VLLM_USE_V1
                 and (backend := envs.VLLM_ATTENTION_BACKEND)
-                in ("XFORMERS", "FLASHINFER")):
+                == "FLASHINFER"):
             logger.warning_once(
                 "%s has interleaved attention, which is currently not "
                 "supported by the %s backend. Disabling sliding window and "

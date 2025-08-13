@@ -34,7 +34,7 @@ def use_v0_only(monkeypatch):
 
 
 # List of support backends for encoder/decoder models
-LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS, _Backend.FLASH_ATTN]
+LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.FLASH_ATTN]
 HEAD_SIZES = [64, 256]
 
 NUM_HEADS = [1, 16]

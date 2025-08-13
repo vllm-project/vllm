@@ -9,14 +9,42 @@ from collections.abc import Callable
 import pytest
 import torch
 from xformers import ops as xops
-from xformers.ops.fmha.attn_bias import BlockDiagonalCausalFromBottomRightMask
-
-from vllm.attention.backends.xformers import _make_alibi_bias
+from xformers.ops.fmha.attn_bias import (
+    AttentionBias,
+    BlockDiagonalCausalFromBottomRightMask,
+    LowerTriangularMaskWithTensorBias,
+)
 from vllm.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode)
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
 from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+
+
+def _make_alibi_bias(
+    alibi_slopes: torch.Tensor,
+    num_kv_heads: int,
+    dtype: torch.dtype,
+    seq_lens: list[int],
+):
+    attn_biases: list[AttentionBias] = []
+    for seq_len in seq_lens:
+        bias = torch.arange(seq_len, dtype=dtype)
+        bias = bias[None, :] - bias[:, None]
+        padded_len = (seq_len + 7) // 8 * 8
+        num_heads = alibi_slopes.shape[0]
+        bias = torch.empty(
+            1,
+            num_heads,
+            seq_len,
+            padded_len,
+            device=alibi_slopes.device,
+            dtype=dtype,
+        )[:, :, :, :seq_len].copy_(bias)
+        bias.mul_(alibi_slopes[:, None, None])
+        attn_biases.append(LowerTriangularMaskWithTensorBias(bias))
+
+    return attn_biases
 
 NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 8, 64]

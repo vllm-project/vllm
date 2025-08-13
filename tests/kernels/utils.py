@@ -20,7 +20,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 from vllm.platforms.interface import _Backend
 from vllm.utils import (STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL,
-                        STR_XFORMERS_ATTN_VAL, make_tensor_with_pad)
+                        make_tensor_with_pad)
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
 # bugs related to this test in PyTorch 2.4.
@@ -513,8 +513,6 @@ def make_backend(backend_name: str) -> AttentionBackend:
     Construct the backend instance determined by the backend_name string
     argument.
 
-    "XFORMERS" -> construct xformers backend
-
     TODO: other backends
 
     Note: at time of writing the Attention wrapper automatically selects
@@ -528,11 +526,7 @@ def make_backend(backend_name: str) -> AttentionBackend:
 
     * Backend instance
     '''
-    if backend_name == STR_XFORMERS_ATTN_VAL:
-        # NOTE: xFormers backend cannot be imported for CPU and AMD GPUs.
-        from vllm.attention.backends.xformers import XFormersBackend
-        return XFormersBackend()
-    elif backend_name == STR_FLASH_ATTN_VAL:
+    if backend_name == STR_FLASH_ATTN_VAL:
         from vllm.attention.backends.flash_attn import FlashAttentionBackend
         return FlashAttentionBackend()
 
@@ -622,21 +616,15 @@ def make_kv_cache(num_blocks: int,
 
     Returns:
 
-    * kv_cache: 2 x num_blocks x (block_size * num_heads * head_size)
-    *     for backend 'XFORMERS'
     * kv_cache: 2 x num_blocks x block_size x num_heads x head_size
-    *     for backend 'FLASH_ATTN'
+      for backend 'FLASH_ATTN'
     '''
-    if backend == 'XFORMERS':
-        kv_cache = torch.rand(
-            (2, num_blocks, block_size * num_heads * head_size)).to(device)
-    elif backend == 'FLASH_ATTN':
+    if backend == 'FLASH_ATTN':
         kv_cache = torch.rand(
             (2, num_blocks, block_size, num_heads, head_size)).to(device)
     else:
         raise ValueError(
-            f"Unknown backend value: '{backend}'. Expected 'XFORMERS' or "
-            f"'FLASH_ATTN'.")
+            f"Unknown backend value: '{backend}'. Expected 'FLASH_ATTN'.")
     if default_val is not None:
         kv_cache[:, :, :] = default_val
     return kv_cache
@@ -1000,11 +988,7 @@ def assert_actual_matches_ideal(test_params: PhaseTestParameters,
     * output_under_test: actually observed output value
     '''
     ideal_output = test_params.packed_qkvo.ideal_output
-    if backend == 'XFORMERS':
-        torch.testing.assert_close(ideal_output,
-                                   output_under_test.view_as(ideal_output))
-
-    elif backend == 'FLASH_ATTN':
+    if backend == 'FLASH_ATTN':
         # For FlashAttention override the accuracy thresholds to non default
         # values since we notice a higher difference between the ideal and
         # actual output.
@@ -1014,8 +998,7 @@ def assert_actual_matches_ideal(test_params: PhaseTestParameters,
                                    rtol=0.016)
     else:
         raise ValueError(
-            f"Unknown backend value: '{backend}'. Expected 'XFORMERS' or "
-            f"'FLASH_ATTN'.")
+            f"Unknown backend value: '{backend}'. Expected 'FLASH_ATTN'.")
 
 
 # Copied/modified from torch._refs.__init__.py

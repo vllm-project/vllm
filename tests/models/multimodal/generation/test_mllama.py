@@ -26,7 +26,7 @@ from ...utils import check_logprobs_close
 _LIMIT_IMAGE_PER_PROMPT = 3
 MLLAMA_IMAGE_TOKEN_ID = 128256
 
-LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS, _Backend.FLASH_ATTN]
+LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.FLASH_ATTN]
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":

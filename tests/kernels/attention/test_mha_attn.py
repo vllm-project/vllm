@@ -43,11 +43,11 @@ def test_mha_attn_platform(device: str):
     else:
         with patch("vllm.attention.selector.current_platform", CudaPlatform()):
             attn = MultiHeadAttention(16, 64, scale=1)
-            assert attn.attn_backend == _Backend.XFORMERS
+            assert attn.attn_backend == _Backend.TORCH_SDPA
 
         with patch("vllm.attention.selector.current_platform", CudaPlatform()):
             attn = MultiHeadAttention(16, 72, scale=1)
-            assert attn.attn_backend == _Backend.XFORMERS
+            assert attn.attn_backend == _Backend.TORCH_SDPA
 
 
 def ref_attention(
