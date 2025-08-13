@@ -348,8 +348,8 @@ class Worker(WorkerBase):
 
             # empirically observed that the memory profiling may
             # slightly underestimate the memory consumption.
-            # So leave a small buffer (=200MiB) to avoid OOM.
-            redundancy_buffer_memory = 200 * (1 << 20)
+            # So leave a small buffer (=150MiB) to avoid OOM.
+            redundancy_buffer_memory = 150 * (1 << 20)
             non_kv_cache_memory = (self.model_runner.model_memory_usage +
                                    self.peak_activation_memory +
                                    self.non_torch_memory +

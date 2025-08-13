@@ -436,8 +436,8 @@ class Worker(LocalOrDistributedWorkerBase):
 
             # empirically observed that the memory profiling may
             # slightly underestimate the memory consumption.
-            # So leave a small buffer (=200MiB) to avoid OOM.
-            redundancy_buffer_memory = 200 * (1 << 20)
+            # So leave a small buffer (=150MiB) to avoid OOM.
+            redundancy_buffer_memory = 150 * (1 << 20)
             kv_cache_memory_bytes_to_gpu_limit = (
                 self.baseline_snapshot.free_memory - non_kv_cache_memory -
                 redundancy_buffer_memory)
