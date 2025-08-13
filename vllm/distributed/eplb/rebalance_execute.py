@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 The actual execution of the rearrangement.
 
@@ -262,6 +263,8 @@ def move_from_buffer(
                 weight[dst].copy_(buffer[dst], non_blocking=True)
         else:
             expert = new_indices[local2global(dst)]
+            if expert == -1:
+                continue
             src = experts_recv_loc[expert]
             for weight, buffer in zip(expert_weights, expert_weights_buffer):
                 weight[dst].copy_(buffer[src], non_blocking=True)

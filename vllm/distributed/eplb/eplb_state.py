@@ -320,7 +320,7 @@ class EplbState:
             num_gpus = ep_group.size()
 
             if num_gpus % num_nodes != 0:
-                num_nodes = 1
+                self.num_nodes = 1
                 logger.warning_once(
                     f"num_gpus % num_nodes != 0, "
                     "not using hierarchical rearrangement algorithm.\n"
@@ -405,6 +405,7 @@ class EplbState:
         """
         Non-Blocking EPLB don't support profile now,
         because it need build a new thread.
+        TODO: support profile in non-blocking EPLB
         """
         ep_group = get_ep_group().device_group
         if is_profile:
