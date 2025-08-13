@@ -54,38 +54,58 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
     op = context.operation
     assert op is not None
 
-    def no_file_type(case: schemathesis.models.Case):
+    def no_invalid_types(case: schemathesis.models.Case):
         """
-        This filter skips test cases for the `POST /tokenize` endpoint where the
-        HTTP request body uses `"type": "file"` in any message's content.
-        We expect these cases to fail because that type isn't implemented here
-        https://github.com/vllm-project/vllm/blob/0b34593017953051b3225b1483ce0f4670e3eb0e/vllm/entrypoints/chat_utils.py#L1038-L1095
+        This filter skips test cases with invalid data that schemathesis
+        incorrectly generates due to permissive schema configurations.
+        
+        1. Skips `POST /tokenize` endpoint cases with `"type": "file"` in 
+           message content, which isn't implemented.
+        
+        2. Skips tool_calls with `"type": "custom"` which schemathesis 
+           incorrectly generates instead of the valid `"type": "function"`.
 
         Example test cases that are skipped:
         curl -X POST -H 'Content-Type: application/json' \
-            -d '{"messages": [{"role": "assistant"}, {"content": [{"file": {}, "type": "file"}], "role": "user"}]}' \
+            -d '{"messages": [{"content": [{"file": {}, "type": "file"}], "role": "user"}]}' \
             http://localhost:8000/tokenize
 
         curl -X POST -H 'Content-Type: application/json' \
-            -d '{"messages": [{"content": [{"file": {}, "type": "file"}], "role": "user"}]}' \
-            http://localhost:8000/tokenize
+            -d '{"messages": [{"role": "assistant", "tool_calls": [{"custom": {"input": "", "name": ""}, "id": "", "type": "custom"}]}]}' \
+            http://localhost:8000/v1/chat/completions
         """  # noqa: E501
-        if (op.method.lower() == "post" and op.path == "/tokenize"
-                and hasattr(case, "body") and isinstance(case.body, dict)
+        if (hasattr(case, "body") and isinstance(case.body, dict)
                 and "messages" in case.body
                 and isinstance(case.body["messages"], list)
                 and len(case.body["messages"]) > 0):
+
             for message in case.body["messages"]:
                 if not isinstance(message, dict):
                     continue
-                content = message.get("content", [])
-                if not isinstance(content, list) or len(content) == 0:
-                    continue
-                if any(item.get("type") == "file" for item in content):
-                    return False
+
+                # Check for invalid file type in tokenize endpoint
+                if op.method.lower() == "post" and op.path == "/tokenize":
+                    content = message.get("content", [])
+                    if (isinstance(content, list) and len(content) > 0 and any(
+                            item.get("type") == "file" for item in content)):
+                        return False
+
+                # Check for invalid tool_calls with non-function types
+                tool_calls = message.get("tool_calls", [])
+                if isinstance(tool_calls, list):
+                    for tool_call in tool_calls:
+                        if isinstance(tool_call, dict):
+                            # Only "function" is a valid tool call type
+                            if tool_call.get(
+                                    "type"
+                            ) != "function" and "type" in tool_call:
+                                return False
+                            # tool_calls should have "function" field
+                            if "custom" in tool_call:
+                                return False
         return True
 
-    return strategy.filter(no_file_type)
+    return strategy.filter(no_invalid_types)
 
 
 @schema.parametrize()
