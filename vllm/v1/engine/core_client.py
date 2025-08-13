@@ -91,8 +91,6 @@ class EngineCoreClient(ABC):
         client_index: int = 0,
     ) -> "MPClient":
         parallel_config = vllm_config.parallel_config
-        parallel_config._api_server_count = client_count
-
         client_args = (vllm_config, executor_class, log_stats,
                        client_addresses, client_count, client_index)
         if parallel_config.data_parallel_size > 1:
@@ -739,6 +737,7 @@ class AsyncMPClient(MPClient):
             client_addresses=client_addresses,
         )
 
+        self.client_count = client_count
         self.client_index = client_index
         self.outputs_queue = asyncio.Queue[Union[EngineCoreOutputs,
                                                  Exception]]()

@@ -2059,9 +2059,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             after_profile = MemorySnapshot(auto_measure=True)
 
             diff_profile = after_profile - before_profile
-
-            self.processor_memory_usage = diff_profile.torch_peak * (
-                self.parallel_config._api_server_count)
+            self.processor_memory_usage = diff_profile.torch_peak
 
             logger.info("Input processing took %.4f GiB and %.6f seconds",
                         self.processor_memory_usage / GiB_bytes,

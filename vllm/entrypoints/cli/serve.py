@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.cli_args import (make_arg_parser,
 from vllm.entrypoints.utils import (VLLM_SUBCMD_PARSER_EPILOG,
                                     show_filtered_argument_or_group_from_help)
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, decorate_logs, get_tcp_uri,
                         set_process_title)
@@ -224,8 +225,43 @@ def run_api_server_worker_proc(listen_address,
 
     # Set process title and add process-specific prefix to stdout and stderr.
     server_index = client_config.get("client_index", 0) if client_config else 0
-    set_process_title("APIServer", str(server_index))
+    process_name = set_process_title("APIServer", str(server_index))
     decorate_logs()
+
+    # Try to run GPU processing on different devices for each API server
+    if mm_kwargs := args.mm_processor_kwargs:
+        mm_device: str = mm_kwargs.get("device", "cpu")
+        if mm_device != "cpu":
+            if mm_device == current_platform.device_type:
+                engine_device_count = max(
+                    args.tensor_parallel_size or 1,
+                    ((args.data_parallel_size or 1)
+                     if args.data_parallel_size_local == 0 else min(
+                         args.data_parallel_size or 1,
+                         args.data_parallel_size_local or 1,
+                     )),
+                )
+                available_device_count = \
+                    current_platform.device_count()  # type: ignore
+
+                # Try to run processing on GPUs that are not used by the engine
+                device_idx = ((engine_device_count + server_index) %
+                              available_device_count)
+                new_mm_device = f"{current_platform.device_name}:{device_idx}"
+                if new_mm_device != mm_device:
+                    logger.info("Multi-modal processor is mapped to device %s",
+                                process_name, new_mm_device)
+
+                    args.mm_processor_kwargs["device"] = new_mm_device
+            elif not mm_device.endswith(":0"):
+                logger.warning(
+                    "You set a specific device %s for multi-modal processor "
+                    "which is not on rank 0. "
+                    "This potentially leads to OOM during inference because "
+                    "vLLM's memory profiling for input processing is only run "
+                    "on rank 0.",
+                    mm_device,
+                )
 
     uvloop.run(
         run_server_worker(listen_address, sock, args, client_config,
