@@ -424,11 +424,11 @@ void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, f
 }
 
 #ifndef USE_ROCM
-#define LAUNCH_SOFTMAX(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)                                \
-    static_assert(WARP_SIZE == 32,                                                          \
-                  "Unsupported warp size. Only 32 is supported for CUDA");                  \
-    topkGatingSoftmaxLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, WARP_SIZE_CONST, MAX_BYTES>( \
-        gating_output, nullptr, topk_weights, topk_indices,                                 \
+#define LAUNCH_SOFTMAX(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)                          \
+    static_assert(WARP_SIZE == 32,                                                    \
+                  "Unsupported warp size. Only 32 is supported for CUDA");            \
+    topkGatingSoftmaxLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, WARP_SIZE, MAX_BYTES>( \
+        gating_output, nullptr, topk_weights, topk_indices,                           \
         token_expert_indices, num_tokens, topk, 0, num_experts, stream);
 #else
 #define LAUNCH_SOFTMAX(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)                             \
