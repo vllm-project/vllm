@@ -77,20 +77,50 @@ jobs:
                   "migraphx",
                   "hipgraph",
                 ],
-                exclusions: [
-                  "rocm used to build pytorch: none",
-                  "rocm used to build pytorch: 0.0.0",
-                  "rocm used to build pytorch: not available",
-                  "ROCM Version: Could not collect",
-                  "ROCM used to build PyTorch: N/A",
-                  "ROCM used to build PyTorch : N/A",
-                  "ROCm: Disabled",
-                  "rocm: disabled",
-                ],
               },
             };
             
-            // Helper function to find which keywords match
+            // Helper function to extract text outside of <details> tags
+            function extractTextOutsideDetails(text) {
+              // Remove everything between <details> and </details> tags
+              return text.replace(/<details[\s\S]*?<\/details>/gi, '');
+            }
+            
+            // Helper function to extract PyTorch Info section from details
+            function extractPyTorchInfoFromDetails(text) {
+              // Find content within <details> tags
+              const detailsMatch = text.match(/<details[\s\S]*?<\/details>/gi);
+              if (!detailsMatch) return '';
+              
+              let pytorchInfo = '';
+              for (const details of detailsMatch) {
+                // Look for PyTorch Info section
+                const pytorchMatch = details.match(/={30}\s*PyTorch Info\s*={30}([\s\S]*?)={30}/i);
+                if (pytorchMatch) {
+                  pytorchInfo += pytorchMatch[1];
+                }
+              }
+              return pytorchInfo;
+            }
+            
+            // Helper function to check if ROCm has actual version in PyTorch Info
+            function hasRocmVersionInPyTorchInfo(pytorchInfoText) {
+              const rocmMatch = pytorchInfoText.match(/ROCM used to build PyTorch\s*:\s*(.+)/i);
+              if (!rocmMatch) return false;
+              
+              const rocmValue = rocmMatch[1].trim();
+              core.notice(`Found ROCM used to build PyTorch: "${rocmValue}"`);
+              
+              // Check if it's NOT one of the "no ROCm" values
+              const noRocmValues = ['N/A', 'n/a', 'none', 'not available', 'could not collect', '0.0.0'];
+              const isNoRocm = noRocmValues.some(val => 
+                rocmValue.toLowerCase().includes(val.toLowerCase())
+              );
+              
+              return !isNoRocm && rocmValue.length > 0;
+            }
+            
+            // Helper function to find matching keywords in text
             function findMatchingKeywords(text, keywords) {
               const matches = [];
               for (const keyword of keywords) {
@@ -107,72 +137,51 @@ jobs:
               return matches;
             }
             
-            // Helper function to find which exclusions match
-            function findMatchingExclusions(text, exclusions) {
-              const matches = [];
-              for (const exclusion of exclusions) {
-                const regex = new RegExp(exclusion, "gi");
-                const exclusionMatches = text.match(regex);
-                if (exclusionMatches) {
-                  matches.push({
-                    exclusion: exclusion,
-                    matches: exclusionMatches,
-                    count: exclusionMatches.length
-                  });
-                }
-              }
-              return matches;
-            }
-            
             // Helper function to check if label should be added
             async function processLabel(labelName, config) {
-              const body = context.payload.issue.body || "" ;
+              const body = context.payload.issue.body || "";
               const title = context.payload.issue.title || "";
-              const fullText = title + " " + body;
-              
-              // Debug: Find matching keywords
-              const matchingKeywords = findMatchingKeywords(fullText, labelConfig[labelName].keywords);
-              const matchingExclusions = findMatchingExclusions(fullText, labelConfig[labelName].exclusions);
               
               core.notice(`=== DEBUG INFO for label "${labelName}" ===`);
-              core.notice(`Issue title: "${title}"`);
-              core.notice(`Issue body length: ${body.length} characters`);
               
-              if (matchingKeywords.length > 0) {
-                core.notice(`Found ${matchingKeywords.length} matching keyword(s):`);
-                for (const match of matchingKeywords) {
-                  core.notice(`  - Keyword: "${match.keyword}" found ${match.count} time(s): ${JSON.stringify(match.matches)}`);
+              // Extract different parts of the text
+              const textOutsideDetails = extractTextOutsideDetails(title + " " + body);
+              const pytorchInfoText = extractPyTorchInfoFromDetails(body);
+              
+              core.notice(`Text outside details length: ${textOutsideDetails.length}`);
+              core.notice(`PyTorch info text length: ${pytorchInfoText.length}`);
+              
+              let shouldAddLabel = false;
+              let reason = '';
+              
+              // Check PyTorch Info section for actual ROCm version
+              if (pytorchInfoText) {
+                const hasRocmVersion = hasRocmVersionInPyTorchInfo(pytorchInfoText);
+                core.notice(`Has ROCm version in PyTorch Info: ${hasRocmVersion}`);
+                if (hasRocmVersion) {
+                  shouldAddLabel = true;
+                  reason = 'ROCm version found in PyTorch Info section';
                 }
-              } else {
-                core.notice(`No matching keywords found`);
               }
               
-              if (matchingExclusions.length > 0) {
-                core.notice(`Found ${matchingExclusions.length} matching exclusion(s):`);
-                for (const match of matchingExclusions) {
-                  core.notice(`  - Exclusion: "${match.exclusion}" found ${match.count} time(s): ${JSON.stringify(match.matches)}`);
+              // Check text outside details for ROCm keywords
+              if (!shouldAddLabel && textOutsideDetails) {
+                const matchingKeywords = findMatchingKeywords(textOutsideDetails, labelConfig[labelName].keywords);
+                if (matchingKeywords.length > 0) {
+                  core.notice(`Found ${matchingKeywords.length} matching keyword(s) outside details:`);
+                  for (const match of matchingKeywords) {
+                    core.notice(`  - Keyword: "${match.keyword}" found ${match.count} time(s)`);
+                  }
+                  shouldAddLabel = true;
+                  reason = 'ROCm keywords found outside details section';
                 }
-              } else {
-                core.notice(`No matching exclusions found`);
               }
               
-              const keywordPattern = labelConfig[labelName].keywords.join("|");
-              const excludePattern = labelConfig[labelName].exclusions.join("|");
-              const kwRegexLine = `\\b(${keywordPattern})\\b`;
-              const excludeRegexLine = `(${excludePattern})`;
-              
-              // check the issue title and body
-              const kwRegex = new RegExp(kwRegexLine, "gi");
-              const excludeRegex = new RegExp(excludeRegexLine, "gi");
-              const hit = kwRegex.test(fullText);
-              const excludeHit = excludeRegex.test(fullText);
-              
-              core.notice(`Keyword regex test result: ${hit}`);
-              core.notice(`Exclusion regex test result: ${excludeHit}`);
-              core.notice(`Final decision: ${hit && !excludeHit ? 'ADD LABEL' : 'DO NOT ADD LABEL'}`);
+              core.notice(`Final decision: ${shouldAddLabel ? 'ADD LABEL' : 'DO NOT ADD LABEL'}`);
+              core.notice(`Reason: ${reason || 'No ROCm indicators found'}`);
               core.notice(`=== END DEBUG INFO ===`);
               
-              if (hit && !excludeHit) {
+              if (shouldAddLabel) {
                 const existingLabels = context.payload.issue.labels.map(l => l.name);
                 if (!existingLabels.includes(labelName)) {
                   await github.rest.issues.addLabels({
@@ -181,15 +190,17 @@ jobs:
                     issue_number: context.issue.number,
                     labels: [labelName],
                   });
-                  core.notice(`Label "${labelName}" added.`);
+                  core.notice(`Label "${labelName}" added. ${reason}`);
                   return true;
                 }
                 core.notice(`Label "${labelName}" already present.`);
                 return false;
               }
-              core.notice(`No keywords found for label "${labelName}".`);
+              
+              core.notice(`No ROCm indicators found for label "${labelName}".`);
               return false;
             }
+            
             // Process all configured labels
             const processLabels = Object.entries(labelConfig)
               .map(([labelName, config]) => processLabel(labelName, config));
