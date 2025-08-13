@@ -678,6 +678,10 @@ class TransformersMoEBase(TransformersBase):
 
     def fused_moe(self):
 
+        def reduce_results(module, _, output):
+            if (experts := module.experts).tp_size > 1 or experts.ep_size > 1:
+                return experts.maybe_all_reduce_tensor_model_parallel(output)
+
         if self.parallel_config.enable_eplb:
             raise NotImplementedError(
                 "Transformers backend does not support EPLB yet!")
@@ -687,6 +691,7 @@ class TransformersMoEBase(TransformersBase):
                 qual_name = maybe_prefix(prefix, child_name)
                 if (child_name == "experts"
                         and isinstance(child_module, nn.ModuleList)):
+                    # Replace experts module with FusedMoE
                     new_module = FusedMoE(
                         # num_experts=self.text_config.num_experts,
                         num_experts=self.model_config.get_num_experts(),
@@ -694,7 +699,7 @@ class TransformersMoEBase(TransformersBase):
                         hidden_size=self.text_config.hidden_size,
                         intermediate_size=768,  # TODO: set this properly
                         # params_dtype
-                        # reduce_results
+                        reduce_results=False,
                         # renormalize
                         # use_grouped_topk
                         # num_expert_group
@@ -712,6 +717,12 @@ class TransformersMoEBase(TransformersBase):
                     )
                     setattr(module, child_name, new_module)
                     log_replacement(qual_name, child_module, new_module)
+                    # Register all-reduce hook to the parent of the experts
+                    # if tensor parallel or expert parallel is enabled. We do
+                    # this instead of setting reduce_results=True to guarantee
+                    # that the all-reduce happens after any shared experts have
+                    # been added to the hidden state
+                    module.register_forward_hook(reduce_results)
                 else:
                     _fused_moe(child_module, prefix=qual_name)
 
