@@ -244,8 +244,8 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
-LogprobsMode = Literal["raw_logprobs", "raw_logits", "final_logprobs",
-                       "processed_logprobs", "processed_logits"]
+LogprobsMode = Literal["raw_logprobs", "raw_logits", "processed_logprobs",
+                       "processed_logits"]
 
 
 @config
@@ -352,11 +352,10 @@ class ModelConfig:
     logprobs_mode: LogprobsMode = "raw_logprobs"
     """Indicates the content returned in the logprobs and prompt_logprobs.
     Supported mode:
-    1) raw_logprobs, 2) processed_logprobs, 3) final_logprobs, 4) raw_logits,
-    5) processed_logits. Raw means the values before applying any logit
-    processors, like bad words. Processed means the values after applying all
-    processors, except argmax invariant processors (e.g. min_p), temperature
-    and top_k/top_p. Final means after applying all logit processors.
+    1) raw_logprobs, 2) processed_logprobs, 3) raw_logits, 4) processed_logits.
+    Raw means the values before applying any logit processors, like bad words.
+    Processed means the values after applying all processors, including
+    temperature and top_k/top_p.
     """
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
@@ -2611,9 +2610,9 @@ class PoolerConfig:
 
     max_embed_len: Optional[int] = None
     """
-    Maximum input length allowed for embedding generation. When set, allows 
+    Maximum input length allowed for embedding generation. When set, allows
     inputs longer than max_embed_len to be accepted for embedding models.
-    This parameter enables accepting long inputs without requiring 
+    This parameter enables accepting long inputs without requiring
     VLLM_ALLOW_LONG_MAX_MODEL_LEN environment variable. When an input exceeds
     max_embed_len, it will be handled according to the original max_model_len
     validation logic. Defaults to None (i.e. set to max_model_len).

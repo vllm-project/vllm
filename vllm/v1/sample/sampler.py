@@ -25,45 +25,40 @@ class Sampler(nn.Module):
     A layer that samples the next tokens from the model's outputs
     with the following steps in order:
 
-    1. If logprobs are requested:  
+    1. If logprobs are requested:
         a) If `logprobs_mode` is `raw_logprobs`, compute logprobs
-           as the final logprobs to return.  
+           as the final logprobs to return.
         b) If `logprobs_mode` is `raw_logits`, clone the logits
-           as the final logprobs to return.  
-    2. Convert logits to float32.  
-    3. Apply allowed token ids whitelist.  
-    4. Apply bad words exclusion.  
+           as the final logprobs to return.
+    2. Convert logits to float32.
+    3. Apply allowed token ids whitelist.
+    4. Apply bad words exclusion.
     5. Apply logit processors which are not argmax-invariant,
-       i.e. that can impact greedy sampling.  
-        a) Min tokens processor  
-        b) Logit bias processor  
-    6. Apply penalties  
-        a) Repetition penalty  
-        b) Frequency penalty  
-        c) Presence penalty  
-    7. If logprobs are requested:  
-        a) If `logprobs_mode` is `processed_logprobs`, compute logprobs
-           as the final logprobs to return.  
-        b) If `logprobs_mode` is `processed_logits`, clone the logits
-           as the final logprobs to return.  
-    8. Sample the next tokens. `sample` method performs the following steps:  
+       i.e. that can impact greedy sampling.
+        a) Min tokens processor
+        b) Logit bias processor
+    6. Apply penalties
+        a) Repetition penalty
+        b) Frequency penalty
+        c) Presence penalty
+    7. Sample the next tokens. `sample` method performs the following steps:
         a) If not `all_random`, perform greedy sampling. If `all_greedy`,
-           return the greedily sampled tokens and final logprobs if requested.  
-        b) Apply temperature.  
+           return the greedily sampled tokens and final logprobs if requested.
+        b) Apply temperature.
         c) Apply logit processors which are argmax-invariant, by default
-           the min_p processor.  
-        d) Apply top_k and/or top_p.  
-        e) Sample the next tokens with the probability distribution.  
+           the min_p processor.
+        d) Apply top_k and/or top_p.
+        e) Sample the next tokens with the probability distribution.
         f) If `all_random` or temperature >= epsilon (1e-5), return the
            randomly sampled tokens and final logprobs if requested. Else,
-           return the greedily sampled tokens and logprobs if requested.  
-    9. Gather the logprobs of the top `max_num_logprobs` and sampled token
+           return the greedily sampled tokens and logprobs if requested.
+    8. Gather the logprobs of the top `max_num_logprobs` and sampled token
        (if requested). Note that if the sampled token is within the top
        `max_num_logprobs`, the logprob will be eventually merged in
        `LogprobsProcessor` during output processing. Therefore, the
        final output may contain either `max_num_logprobs + 1` or
-       `max_num_logprobs` logprobs.  
-    10. Return the final `SamplerOutput`.
+       `max_num_logprobs` logprobs.
+    9. Return the final `SamplerOutput`.
     """
 
     def __init__(self, logprobs_mode: LogprobsMode = "raw_logprobs"):
@@ -102,17 +97,10 @@ class Sampler(nn.Module):
         # Apply penalties (e.g., min_tokens, freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata)
 
-        # Get the process logprobs or logits.
-        if num_logprobs is not None:
-            if self.logprobs_mode == "processed_logprobs":
-                raw_logprobs = self.compute_logprobs(logits)
-            elif self.logprobs_mode == "processed_logits":
-                raw_logprobs = logits.clone()
-
         # Sample the next token.
-        sampled, final_logprobs = self.sample(logits, sampling_metadata)
-        if final_logprobs is not None:
-            raw_logprobs = final_logprobs
+        sampled, processed_logprobs = self.sample(logits, sampling_metadata)
+        if processed_logprobs is not None:
+            raw_logprobs = processed_logprobs
         # Convert sampled token ids to int64 (long) type to ensure compatibility
         # with subsequent operations that may use these values as indices.
         # This conversion is necessary because FlashInfer sampling operations
@@ -161,16 +149,23 @@ class Sampler(nn.Module):
 
         assert not (sampling_metadata.all_greedy
                     and sampling_metadata.all_random)
-        return_final_logprobs = (sampling_metadata.max_num_logprobs is not None
-                                 and self.logprobs_mode == "final_logprobs")
-        final_logprobs = None
+        return_processed_logits = (
+            sampling_metadata.max_num_logprobs is not None
+            and self.logprobs_mode == "processed_logits")
+        return_processed_logprobs = (
+            sampling_metadata.max_num_logprobs is not None
+            and self.logprobs_mode == "processed_logprobs")
+        processed_logprobs = None
         if sampling_metadata.all_random:
             greedy_sampled = None
         else:
             greedy_sampled = self.greedy_sample(logits)
             if sampling_metadata.all_greedy:
-                final_logprobs = self.compute_logprobs(logits)
-                return greedy_sampled, final_logprobs
+                if return_processed_logits or return_processed_logprobs:
+                    processed_logprobs = logits
+                    if return_processed_logprobs:
+                        processed_logprobs = self.compute_logprobs(logits)
+                return greedy_sampled, processed_logprobs
 
         assert sampling_metadata.temperature is not None
 
@@ -182,13 +177,16 @@ class Sampler(nn.Module):
         for processor in sampling_metadata.logitsprocs.argmax_invariant:
             logits = processor.apply(logits)
 
-        # Apply top_k and/or top_p.
-        if return_final_logprobs:
+        if return_processed_logits or return_processed_logprobs:
             # Apply top_k and/or top_p here to avoid unnecessary computation
             # in `TopKTopPSampler` efficient implementations.
-            final_logprobs = self.compute_logprobs(
-                apply_top_k_top_p(logits.clone(), sampling_metadata.top_k,
-                                  sampling_metadata.top_p))
+            processed_logprobs = apply_top_k_top_p(logits.clone(),
+                                                   sampling_metadata.top_k,
+                                                   sampling_metadata.top_p)
+            if return_processed_logprobs:
+                processed_logprobs = self.compute_logprobs(processed_logprobs)
+
+        # Apply top_k and/or top_p.
         random_sampled = self.topk_topp_sampler(
             logits,
             sampling_metadata.generators,
@@ -197,7 +195,7 @@ class Sampler(nn.Module):
         )
 
         if greedy_sampled is None:
-            return random_sampled, final_logprobs
+            return random_sampled, processed_logprobs
 
         sampled = torch.where(
             sampling_metadata.temperature < _SAMPLING_EPS,
@@ -205,7 +203,7 @@ class Sampler(nn.Module):
             random_sampled,
             out=greedy_sampled,  # Reuse tensor
         )
-        return sampled, final_logprobs
+        return sampled, processed_logprobs
 
     def compute_logprobs(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.log_softmax(dim=-1, dtype=torch.float32)
