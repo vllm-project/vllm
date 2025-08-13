@@ -698,7 +698,6 @@ class TransformersMoEBase(TransformersBase):
                         top_k=8,  # TODO: set this properly
                         hidden_size=self.text_config.hidden_size,
                         intermediate_size=768,  # TODO: set this properly
-                        # params_dtype
                         reduce_results=False,
                         # renormalize
                         # use_grouped_topk
