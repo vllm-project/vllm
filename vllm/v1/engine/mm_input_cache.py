@@ -60,18 +60,22 @@ class MultiModalInputCacheClient:
         self,
         mm_kwargs: list[MultiModalKwargsItem],
         mm_hashes: list[str],
-    ) -> None:
+    ) -> list[MultiModalKwargsItem]:
         if not self.enabled:
-            return
+            return mm_kwargs
 
         assert len(mm_kwargs) == len(mm_hashes)
 
+        out_mm_items = list[MultiModalKwargsItem]()
         for mm_item, mm_hash in zip(mm_kwargs, mm_hashes):
             if self.mm_cache.get(mm_hash) is not None:
-                mm_item.clear_data()
+                out_mm_items.append(mm_item.without_data())
             else:
                 self.mm_cache[mm_hash] = \
                     MultiModalCacheItemMetadata.wraps(mm_item.require_data())
+                out_mm_items.append(mm_item)
+
+        return out_mm_items
 
     def reset(self) -> None:
         self.mm_cache.clear()
@@ -94,17 +98,21 @@ class MultiModalInputCacheServer:
         self,
         mm_kwargs: list[MultiModalKwargsItem],
         mm_hashes: list[str],
-    ) -> None:
+    ) -> list[MultiModalKwargsItem]:
         if not self.enabled:
-            return
+            return mm_kwargs
 
         assert len(mm_kwargs) == len(mm_hashes)
 
+        out_mm_items = list[MultiModalKwargsItem]()
         for mm_item, mm_hash in zip(mm_kwargs, mm_hashes):
             if (mm_data := mm_item.get_data()) is None:
-                mm_item.set_data(self.mm_cache[mm_hash])
+                out_mm_items.append(mm_item.with_data(self.mm_cache[mm_hash]))
             else:
                 self.mm_cache[mm_hash] = mm_data
+                out_mm_items.append(mm_item)
+
+        return out_mm_items
 
     def reset(self) -> None:
         self.mm_cache.clear()

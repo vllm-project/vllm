@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from itertools import accumulate
 from typing import (TYPE_CHECKING, Any, Literal, Optional, TypedDict, TypeVar,
@@ -682,17 +682,18 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
 
         return data
 
-    def set_data(self, data: Mapping[str, NestedTensors]) -> None:
-        for key, elem in self.items():
-            elem.data = data[key]
+    # These methods create a new item to avoid mutating cached items in place
+    def with_data(self, data: Mapping[str, NestedTensors]):
+        return MultiModalKwargsItem({
+            key: replace(elem, data=data[key])
+            for key, elem in self.items()
+        })
 
-        self._is_empty = False
-
-    def clear_data(self) -> None:
-        for elem in self.values():
-            elem.data = None
-
-        self._is_empty = True
+    def without_data(self):
+        return MultiModalKwargsItem({
+            key: replace(elem, data=None)
+            for key, elem in self.items()
+        })
 
 
 # NOTE: UserDict is for V0 compatibility.

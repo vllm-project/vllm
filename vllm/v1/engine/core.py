@@ -414,8 +414,8 @@ class EngineCore:
             # Note on thread safety: no race condition.
             # `mm_input_cache_server` is reset at the end of LLMEngine init,
             # and will only accessed in the input processing thread afterwards.
-            self.mm_input_cache_server.get_and_update(request.mm_kwargs,
-                                                      request.mm_hashes)
+            request.mm_kwargs = self.mm_input_cache_server.get_and_update(
+                request.mm_kwargs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
         if req.use_structured_output:

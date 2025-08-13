@@ -322,7 +322,7 @@ class Processor:
             ]
 
             if sorted_mm_hashes is not None:
-                self.mm_input_cache_client.get_and_update(
+                sorted_mm_inputs = self.mm_input_cache_client.get_and_update(
                     sorted_mm_inputs,
                     sorted_mm_hashes,
                 )
