@@ -1,4 +1,4 @@
-ARG BASE_UBI_IMAGE_TAG=9.5-1741850109
+ARG BASE_UBI_IMAGE_TAG=9.6-1754584681
 
 ###############################################################
 # Stage to build openblas
@@ -7,7 +7,7 @@ ARG BASE_UBI_IMAGE_TAG=9.5-1741850109
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS openblas-builder
 
 ARG MAX_JOBS
-ARG OPENBLAS_VERSION=0.3.29
+ARG OPENBLAS_VERSION=0.3.30
 RUN microdnf install -y dnf && dnf install -y gcc-toolset-13 make wget unzip \
     && source /opt/rh/gcc-toolset-13/enable \
     && wget https://github.com/OpenMathLib/OpenBLAS/releases/download/v$OPENBLAS_VERSION/OpenBLAS-$OPENBLAS_VERSION.zip \
@@ -38,7 +38,7 @@ RUN dnf install -y openjpeg2-devel lcms2-devel tcl-devel tk-devel fribidi-devel 
 FROM centos-deps-builder AS base-builder
 
 ARG PYTHON_VERSION=3.12
-ARG OPENBLAS_VERSION=0.3.29
+ARG OPENBLAS_VERSION=0.3.30
 
 # Set Environment Variables for venv, cargo & openblas
 ENV VIRTUAL_ENV=/opt/vllm
@@ -81,7 +81,7 @@ FROM base-builder AS torch-builder
 ARG MAX_JOBS
 ARG TORCH_VERSION=2.7.0
 ARG _GLIBCXX_USE_CXX11_ABI=1
-ARG OPENBLAS_VERSION=0.3.29
+ARG OPENBLAS_VERSION=0.3.30
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     source /opt/rh/gcc-toolset-13/enable &&  \
@@ -223,7 +223,8 @@ ARG GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 # this step installs vllm and populates uv cache
 # with all the transitive dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
-    dnf install llvm15 llvm15-devel protobuf-lite-devel -y && \
+    dnf install llvm15 llvm15-devel -y && \
+    rpm -ivh --nodeps https://mirror.stream.centos.org/9-stream/CRB/ppc64le/os/Packages/protobuf-lite-devel-3.14.0-16.el9.ppc64le.rpm && \
     source /opt/rh/gcc-toolset-13/enable && \
     git clone https://github.com/huggingface/xet-core.git && cd xet-core/hf_xet/ && \
     uv pip install maturin && \
@@ -270,7 +271,7 @@ RUN git clone --recursive https://github.com/Reference-LAPACK/lapack.git -b v${L
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS vllm-openai
 
 ARG PYTHON_VERSION=3.12
-ARG OPENBLAS_VERSION=0.3.29
+ARG OPENBLAS_VERSION=0.3.30
 
 # Set Environment Variables for venv & openblas
 ENV VIRTUAL_ENV=/opt/vllm
