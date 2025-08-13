@@ -1527,7 +1527,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             
             # Check if the model supports the new mixin for getting both embeddings and positions
             if supports_input_embeddings_and_positions(self.model):
-                inputs_embeds_scheduled, positions_scheduled, mrope_positions_delta = self.model.get_input_embeddings_and_positions(
+                inputs_embeds_scheduled, positions_scheduled, mrope_position_delta = self.model.get_input_embeddings_and_positions(
                     input_ids=self.input_ids[:num_scheduled_tokens],
                     multimodal_embeddings=mm_embeds or None,
                 )
@@ -1545,12 +1545,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         for i, req_id in enumerate(self.input_batch.req_ids):
                             req = self.requests[req_id]
                             req.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
-                            req.mrope_positions_delta = mrope_positions_delta
-                            setattr(req, "_mrope_positions_delta", mrope_positions_delta)
-                            req._mrope_positions_delta = mrope_positions_delta
+                            req.mrope_position_delta = mrope_position_delta
                             print(f"Updating positions in req")
                             print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
-                            print(f"{req.mrope_positions_delta=}")
+                            print(f"{req.mrope_position_delta=}")
                             print(f"{req.mrope_positions.shape=}")
                             print(req.mrope_positions[0].tolist())
                             print(req.mrope_positions[1].tolist())
