@@ -158,6 +158,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
+    VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -1120,6 +1121,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #    never removed from memory until the server terminates.
     "VLLM_ENABLE_RESPONSES_API_STORE":
     lambda: bool(int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))),
+
+    # Allows vllm to find tuned config under customized folder
+    "VLLM_TUNED_CONFIG_FOLDER":
+    lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
+
 }
 
 # --8<-- [end:env-vars-definition]
