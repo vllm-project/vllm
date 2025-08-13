@@ -7,7 +7,7 @@ from typing import AsyncGenerator, Mapping, Optional
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import DecodingConfig, ModelConfig, VllmConfig
-from vllm.core.scheduler import SchedulerOutputs
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.inputs.preprocess import InputPreprocessor
@@ -272,7 +272,7 @@ class EngineClient(ABC):
     @abstractmethod
     async def do_log_stats(
         self,
-        scheduler_outputs: Optional[SchedulerOutputs] = None,
+        scheduler_output: Optional[SchedulerOutput] = None,
         model_output: Optional[list[SamplerOutput]] = None,
     ) -> None:
         ...

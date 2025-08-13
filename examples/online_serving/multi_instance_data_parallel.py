@@ -4,7 +4,7 @@ import asyncio
 from typing import Optional
 
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm import AsyncLLMEngine
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 

@@ -17,7 +17,7 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (_run_task_with_lock, cuda_device_count_stateless,
                         get_distributed_init_method, get_ip, get_open_port,
                         make_async, run_method, update_environment_variables)
-from vllm.worker.worker_base import WorkerWrapperBase
+from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 

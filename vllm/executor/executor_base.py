@@ -19,7 +19,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.tasks import SupportedTask
 from vllm.utils import make_async
-from vllm.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 

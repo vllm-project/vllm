@@ -45,8 +45,8 @@ class NeuronPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = \
-                "vllm.worker.neuron_worker.NeuronWorker"
+            raise NotImplementedError(
+                "Neuron platform is not yet supported on vLLM V1")
 
         if parallel_config.world_size > 1:
             parallel_config.distributed_executor_backend = "uni"

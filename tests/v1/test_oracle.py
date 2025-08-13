@@ -7,7 +7,7 @@ import pytest
 import vllm.envs as envs
 from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm import AsyncLLMEngine
 
 UNSUPPORTED_MODELS_V1 = [
     "openai/whisper-large-v3",  # transcription

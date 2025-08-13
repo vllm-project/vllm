@@ -547,7 +547,7 @@ class AsyncLLM(EngineClient):
 
     async def do_log_stats(
         self,
-        scheduler_outputs=None,
+        scheduler_output=None,
         model_output=None,
     ) -> None:
         if self.logger_manager:

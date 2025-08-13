@@ -36,10 +36,8 @@ ALLOWED_FILES = set([
     'tests/tokenization/test_cached_tokenizer.py',
     'vllm/distributed/utils.py',
     'vllm/distributed/parallel_state.py',
-    'vllm/engine/multiprocessing/client.py',
     'vllm/distributed/device_communicators/custom_all_reduce_utils.py',
     'vllm/distributed/device_communicators/shm_broadcast.py',
-    'vllm/engine/multiprocessing/engine.py',
     'benchmarks/kernels/graph_machete_bench.py',
     'benchmarks/kernels/benchmark_lora.py',
     'benchmarks/kernels/benchmark_machete.py',
@@ -58,8 +56,6 @@ ALLOWED_FILES = set([
     'vllm/v1/executor/multiproc_executor.py',
     'vllm/transformers_utils/config.py',
     'vllm/model_executor/models/registry.py',
-    'vllm/engine/multiprocessing/client.py',
-    'vllm/engine/multiprocessing/engine.py',
 ])
 
 PICKLE_RE = re.compile(r"^\s*(import\s+(pickle|cloudpickle)(\s|$|\sas)"

@@ -16,7 +16,8 @@ import torch
 from vllm import SamplingParams
 from vllm.config import ParallelConfig
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.engine.async_llm_engine import AsyncEngineArgs, AsyncLLMEngine
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm import AsyncLLMEngine
 from vllm.outputs import RequestOutput as RealRequestOutput
 from vllm.sampling_params import RequestOutputKind
 

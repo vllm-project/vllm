@@ -20,10 +20,6 @@ from vllm.attention.backends.utils import (compute_slot_mapping,
 from vllm.attention.ops.rocm_aiter_mla import (aiter_mla_decode_fwd,
                                                get_aiter_mla_metadata)
 
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUBuilder
-
-
 def is_aiter_mla_enabled() -> bool:
     return envs.VLLM_ROCM_USE_AITER \
         and envs.VLLM_ROCM_USE_AITER_MLA
