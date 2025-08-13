@@ -207,6 +207,7 @@ class LoRAModel(AdapterModel):
         """
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
         lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")
+        lora_pt_file_path = os.path.join(lora_dir, "adapter_model.pt")
         new_embeddings_tensor_path = os.path.join(
             lora_dir, "new_embeddings.safetensors")
         new_embeddings_bin_file_path = os.path.join(lora_dir,
@@ -280,6 +281,33 @@ class LoRAModel(AdapterModel):
                     f" but received {unexpected_modules}."
                     f" Please verify that the loaded LoRA module is correct")
             tensors = torch.load(lora_bin_file_path,
+                                 map_location=device,
+                                 weights_only=True)
+        elif os.path.isfile(lora_pt_file_path):
+            # When a pt file is provided, we rely on config to find unexpected
+            # modules.
+            unexpected_modules = []
+            target_modules = peft_helper.target_modules
+            if not isinstance(target_modules, list):
+                target_modules = [target_modules]
+            for module in target_modules:
+                # Compatible with more modules,
+                # such as:layers.11.self_attn.k_proj
+                part_name = module.split(".")[-1]
+                if part_name not in expected_lora_modules:
+                    unexpected_modules.append(module)
+            # loaded lora's target modules must be a subset of
+            # expected_lora_modules. It is not reliable. See
+            # https://github.com/vllm-project/vllm/pull/5909. But there's no
+            # other better mechanism.
+            if unexpected_modules and not is_regex_target_modules(
+                    peft_helper.target_modules, expected_lora_modules):
+                raise ValueError(
+                    f"While loading {lora_dir}, expected"
+                    f" target modules in {expected_lora_modules}"
+                    f" but received {unexpected_modules}."
+                    f" Please verify that the loaded LoRA module is correct")
+            tensors = torch.load(lora_pt_file_path,
                                  map_location=device,
                                  weights_only=True)
         else:
