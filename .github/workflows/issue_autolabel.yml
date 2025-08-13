@@ -80,10 +80,33 @@ jobs:
               },
             };
             
-            // Helper function to extract text outside of <details> tags
-            function extractTextOutsideDetails(text) {
-              // Remove everything between <details> and </details> tags
-              return text.replace(/<details[\s\S]*?<\/details>/gi, '');
+            // Helper function to remove only the collect_env.py details section
+            function removeCollectEnvDetails(text) {
+              // Pattern to match the specific collect_env.py details section
+              // This looks for <details> tags that contain "python collect_env.py" in the summary
+              const collectEnvPattern = /<details[\s\S]*?<summary>[\s\S]*?python collect_env\.py[\s\S]*?<\/summary>[\s\S]*?<\/details>/gi;
+              
+              // Alternative patterns in case the format varies slightly
+              const alternativePatterns = [
+                // Pattern for "The output of python collect_env.py"
+                /<details[\s\S]*?<summary>[\s\S]*?output of[\s\S]*?python collect_env\.py[\s\S]*?<\/summary>[\s\S]*?<\/details>/gi,
+                // Pattern for "collect_env.py output"
+                /<details[\s\S]*?<summary>[\s\S]*?collect_env\.py[\s\S]*?output[\s\S]*?<\/summary>[\s\S]*?<\/details>/gi,
+                // Pattern for environment information
+                /<details[\s\S]*?<summary>[\s\S]*?environment[\s\S]*?information[\s\S]*?<\/summary>[\s\S]*?<\/details>/gi,
+              ];
+              
+              let result = text;
+              
+              // Try the main pattern first
+              result = result.replace(collectEnvPattern, '');
+              
+              // Try alternative patterns if the main one didn't match
+              for (const pattern of alternativePatterns) {
+                result = result.replace(pattern, '');
+              }
+              
+              return result;
             }
             
             // Helper function to find matching keywords in text
@@ -110,29 +133,30 @@ jobs:
               
               core.notice(`=== DEBUG INFO for label "${labelName}" ===`);
               
-              // Extract text outside of details tags only
-              const textOutsideDetails = extractTextOutsideDetails(title + " " + body);
+              // Remove only the collect_env.py details section, keep other details
+              const textWithoutCollectEnv = removeCollectEnvDetails(title + " " + body);
               
-              core.notice(`Text outside details length: ${textOutsideDetails.length}`);
+              core.notice(`Original text length: ${(title + " " + body).length}`);
+              core.notice(`Text after removing collect_env details: ${textWithoutCollectEnv.length}`);
               
               let shouldAddLabel = false;
               let reason = '';
               
-              // Only check text outside details for keywords
-              if (textOutsideDetails) {
-                const matchingKeywords = findMatchingKeywords(textOutsideDetails, labelConfig[labelName].keywords);
+              // Check for keywords in the remaining text (including other details sections)
+              if (textWithoutCollectEnv) {
+                const matchingKeywords = findMatchingKeywords(textWithoutCollectEnv, labelConfig[labelName].keywords);
                 if (matchingKeywords.length > 0) {
-                  core.notice(`Found ${matchingKeywords.length} matching keyword(s) outside details:`);
+                  core.notice(`Found ${matchingKeywords.length} matching keyword(s):`);
                   for (const match of matchingKeywords) {
                     core.notice(`  - Keyword: "${match.keyword}" found ${match.count} time(s)`);
                   }
                   shouldAddLabel = true;
-                  reason = 'Keywords found outside details section';
+                  reason = 'Keywords found outside collect_env.py details section';
                 }
               }
               
               core.notice(`Final decision: ${shouldAddLabel ? 'ADD LABEL' : 'DO NOT ADD LABEL'}`);
-              core.notice(`Reason: ${reason || 'No matching keywords found outside details section'}`);
+              core.notice(`Reason: ${reason || 'No matching keywords found outside collect_env.py details section'}`);
               core.notice(`=== END DEBUG INFO ===`);
               
               if (shouldAddLabel) {
@@ -151,7 +175,7 @@ jobs:
                 return false;
               }
               
-              core.notice(`No matching keywords found outside details section for label "${labelName}".`);
+              core.notice(`No matching keywords found outside collect_env.py details section for label "${labelName}".`);
               return false;
             }
             
