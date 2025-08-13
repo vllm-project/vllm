@@ -66,7 +66,8 @@ class Worker(WorkerBase):
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
         # executed cuda graph
-        self._token_compiled_cudagraphs: set[int] = set(self.compilation_config.cudagraph_capture_sizes)
+        self._token_compiled_cudagraphs: set[int] = set(
+            self.compilation_config.cudagraph_capture_sizes)
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
@@ -313,7 +314,8 @@ class Worker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
-        if not self.model_config.enforce_eager and not self.vllm_config.compilation_config.delayed_cudagraphs:
+        if (not self.model_config.enforce_eager and
+                not self.vllm_config.compilation_config.delayed_cudagraphs):
             self.model_runner.capture_model()
 
         # Warm up sampler and preallocate memory buffer for logits and other
@@ -355,29 +357,31 @@ class Worker(WorkerBase):
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
-    
-    def _delayed_cudagraph_capture(self, total_num_scheduled_tokens: int) -> None:
+
+    def _delayed_cudagraph_capture(self,
+                                   total_num_scheduled_tokens: int) -> None:
         # Initialize next_capture variable to None
         next_capture = None
 
         # Check if the scheduled token count is in our compiled CUDAgraphs list
         if total_num_scheduled_tokens in self._token_compiled_cudagraphs:
-            # If it is, update next_comp and remove the entry from _token_compiled_cudagraphs
+            # Update next_comp and
+            # remove the entry from _token_compiled_cudagraphs
             next_capture = total_num_scheduled_tokens
             self._token_compiled_cudagraphs.discard(total_num_scheduled_tokens)
 
         # Check if there are any entries left in _token_compiled_cudagraphs
         elif len(self._token_compiled_cudagraphs) > 0:
-            # If so, update next_comp to the first item and remove it from the list
+            # Update next_comp to the first item and remove it from the list
             next_capture = self._token_compiled_cudagraphs.pop()
 
-        # If we have a value for next_comp, call the model_runner to capture the model
+        # If value in next_comp, call the model_runner to capture the model
         if next_capture:
             logger.debug(
                 "CUDAgraph in execution model time for %d input tokens",
                 next_capture)
             self.model_runner.capture_model(next_capture)
-   
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -389,9 +393,10 @@ class Worker(WorkerBase):
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
 
-
-        if self.vllm_config.compilation_config.delayed_cudagraphs and not self.model_config.enforce_eager:
-            self._delayed_cudagraph_capture(scheduler_output.total_num_scheduled_tokens)
+        if (self.vllm_config.compilation_config.delayed_cudagraphs
+                and not self.model_config.enforce_eager):
+            self._delayed_cudagraph_capture(
+                scheduler_output.total_num_scheduled_tokens)
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
