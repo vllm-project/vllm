@@ -38,7 +38,7 @@ class MultiModalHasher:
             exif = obj.getexif()
             if Image.ExifTags.Base.ImageID in exif and isinstance(
                     exif[Image.ExifTags.Base.ImageID], uuid.UUID):
-                # If the image has exif ImageID tag, use that instead of real data
+                # If the image has exif ImageID tag, use that
                 return exif[Image.ExifTags.Base.ImageID].bytes
             return cls.item_to_bytes(
                 "image", np.asarray(convert_image_mode(obj, "RGBA")))
