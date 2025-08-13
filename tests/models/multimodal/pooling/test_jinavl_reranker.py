@@ -49,14 +49,14 @@ def vllm_reranker(
 
     with vllm_runner(
             model_name,
-            task="score",
+            runner="pooling",
             dtype=dtype,
             max_num_seqs=2,
             max_model_len=2048,
             mm_processor_kwargs=mm_processor_kwargs,
             limit_mm_per_prompt=limit_mm_per_prompt,
     ) as vllm_model:
-        outputs = vllm_model.model.score(query, documents)
+        outputs = vllm_model.llm.score(query, documents)
 
     return [output.outputs.score for output in outputs]
 

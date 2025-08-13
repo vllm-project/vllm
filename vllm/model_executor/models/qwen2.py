@@ -49,6 +49,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import is_interleaved
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
@@ -285,8 +286,7 @@ class Qwen2Model(nn.Module):
         quant_config = vllm_config.quant_config
 
         # TODO (@robertgshaw2): see if this can be moved out
-        if (cache_config.sliding_window is not None
-                and hasattr(config, "max_window_layers")):
+        if is_interleaved(vllm_config.model_config.hf_text_config):
             assert config.max_window_layers == config.num_hidden_layers, (
                 "Sliding window for some but all layers is not supported. "
                 "This model uses sliding window but `max_window_layers` = {} "
@@ -330,6 +330,8 @@ class Qwen2Model(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
+        self.aux_hidden_state_layers: tuple[int] = tuple()
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -350,18 +352,25 @@ class Qwen2Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in self.layers[self.start_layer:self.end_layer]:
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+
+        aux_hidden_states = []
+        for idx, layer in enumerate(
+                self.layers[self.start_layer:self.end_layer]):
+            if idx in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
+            hidden_states, residual = layer(positions, hidden_states, residual)
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
                 "residual": residual
             })
+
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
+
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -399,9 +408,18 @@ class Qwen2Model(nn.Module):
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
+                if name.endswith("scale"):
+                    # Remapping the name of FP8 kv-scale.
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
+                        continue
                 param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                if weight_loader == default_weight_loader:
+                    weight_loader(param, loaded_weight)
+                else:
+                    weight_loader(param, loaded_weight, shard_id)
                 break
             else:
                 # Skip loading extra bias for GPTQ models.

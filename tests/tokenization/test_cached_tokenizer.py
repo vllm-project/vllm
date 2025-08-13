@@ -10,7 +10,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                get_cached_tokenizer)
 
 
-@pytest.mark.parametrize("model_id", ["gpt2", "THUDM/chatglm3-6b"])
+@pytest.mark.parametrize("model_id", ["gpt2", "zai-org/chatglm3-6b"])
 def test_cached_tokenizer(model_id: str):
     reference_tokenizer = AutoTokenizer.from_pretrained(model_id,
                                                         trust_remote_code=True)

@@ -23,6 +23,9 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    apply_flashinfer_per_tensor_scale_fp8, rotate_flashinfer_fp8_moe_weights,
+    swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
@@ -42,7 +45,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
+from vllm.utils.deep_gemm import (is_blackwell_deep_gemm_e8m0_used,
+                                  is_deep_gemm_supported)
 from vllm.utils.flashinfer import has_flashinfer_moe
 
 if TYPE_CHECKING:
@@ -51,11 +55,6 @@ if TYPE_CHECKING:
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
-
-
-def _swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
-    return x.reshape(-1, 2, x.shape[-2] // 2,
-                     x.shape[-1]).flip(dims=[1]).reshape(x.shape)
 
 
 def _is_col_major(x: torch.Tensor) -> bool:
@@ -257,9 +256,16 @@ class Fp8LinearMethod(LinearMethodBase):
                     f"{input_size_per_partition} is not divisible by "
                     f"weight quantization block_k = {block_k}.")
             # Required by column parallel or enabling merged weights
-            if (tp_size > 1 and output_size // output_size_per_partition
-                    == tp_size) or len(output_partition_sizes) > 1:
-                for output_partition_size in output_partition_sizes:
+            is_tp_split = (tp_size > 1 and
+                           output_size // output_size_per_partition == tp_size)
+            is_merged_gemm = len(output_partition_sizes) > 1
+            if is_tp_split or is_merged_gemm:
+                sizes_to_check = output_partition_sizes
+                if not is_tp_split and is_merged_gemm:
+                    # In case of merged matrices, we allow the last
+                    # matrix to not be a multiple of block size
+                    sizes_to_check = output_partition_sizes[:-1]
+                for output_partition_size in sizes_to_check:
                     if output_partition_size % block_n != 0:
                         raise ValueError(
                             f"Weight output_partition_size = "
@@ -410,10 +416,10 @@ class Fp8LinearMethod(LinearMethodBase):
             # Activations not quantized for marlin.
             del layer.input_scale
 
-        # On B200, DeepGemm only support E8M0 scale, which means we need to
+        # On B200, if E8M0 for DeepGemm is used, we need to
         # requantize the weight and input to the specific scale
         # at the same time.
-        if is_blackwell_deep_gemm_used():
+        if is_blackwell_deep_gemm_e8m0_used():
             assert layer.weight_block_size is not None
             block_sz = tuple(layer.weight_block_size)
             requant_weight_ue8m0_inplace(
@@ -500,14 +506,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             elif not self.block_quant:
                 logger.warning_once("Model is not block quantized. Not using "
                                     "DeepGemm kernels")
-            elif (current_platform.is_cuda()
-                  and current_platform.is_device_capability(90)):
+            elif (is_deep_gemm_supported()):
                 logger.info_once("Using DeepGemm kernels for Fp8MoEMethod.")
-                self.allow_deep_gemm = True
-            elif (current_platform.is_cuda()
-                  and is_blackwell_deep_gemm_used()):
-                logger.info_once("Using DeepGemm SM100 kernels for "
-                                 "Fp8MoEMethod.")
                 self.allow_deep_gemm = True
             else:
                 logger.warning_once(
@@ -688,11 +688,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             elif self.flashinfer_moe_enabled:
                 # NOTE: weights have to be swapped since the activation is
                 # applied on different half for flashinfer vs vllm
-                w13_weight = _swap_w13_to_w31(layer.w13_weight.data)
-                w13_weight_scale_inv = _swap_w13_to_w31(
+                w13_weight = swap_w13_to_w31(layer.w13_weight.data)
+                w13_weight_scale_inv = swap_w13_to_w31(
                     layer.w13_weight_scale_inv.data)
                 w2_weight = layer.w2_weight.data
                 w2_weight_scale_inv = layer.w2_weight_scale_inv.data
+                if not self.block_quant:
+                    rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
             else:
                 w13_weight = layer.w13_weight.data
                 w13_weight_scale_inv = layer.w13_weight_scale_inv.data
@@ -718,7 +720,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             # DeepGemm scales need to be transposed and aligned.  We try to do
             # it ahead of time for performance reasons.
-            if self.allow_deep_gemm and not is_blackwell_deep_gemm_used():
+            if self.allow_deep_gemm and not is_blackwell_deep_gemm_e8m0_used():
                 # Lazy import to avoid CUDA initialization problems.
                 if _is_col_major(layer.w13_weight_scale_inv):
                     layer.w13_weight_scale_inv = \
@@ -844,7 +846,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-        if is_blackwell_deep_gemm_used():
+        if is_blackwell_deep_gemm_e8m0_used():
             assert layer.weight_block_size is not None
             # Re-quantise the expert weights so their scales are UE8M0.
             block_sz = tuple(layer.weight_block_size)
@@ -991,30 +993,43 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
         elif self.flashinfer_moe_enabled:
-            # Currently only work with DS models
-            assert self.block_quant
-            assert (renormalize and use_grouped_topk
-                    and scoring_func == 'sigmoid'
-                    and custom_routing_function is None)
-            assert activation == "silu"
-            return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
-                routing_logits=router_logits.to(torch.float32),
-                routing_bias=e_score_correction_bias,
-                x=x,
-                w13_weight=layer.w13_weight,
-                w13_weight_scale_inv=layer.w13_weight_scale_inv,
-                w2_weight=layer.w2_weight,
-                w2_weight_scale_inv=layer.w2_weight_scale_inv,
-                global_num_experts=global_num_experts,
-                top_k=top_k,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                intermediate_size=layer.intermediate_size_per_partition,
-                expert_offset=layer.ep_rank * layer.local_num_experts,
-                local_num_experts=layer.local_num_experts,
-                block_shape=self.quant_config.weight_block_size,
-                routed_scaling=1.0,
-            )
+            assert activation == 'silu'
+            assert scoring_func == 'sigmoid'
+            if self.block_quant:
+                assert (renormalize and use_grouped_topk
+                        and custom_routing_function is None)
+
+                return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
+                    routing_logits=router_logits.to(torch.float32),
+                    routing_bias=e_score_correction_bias,
+                    x=x,
+                    w13_weight=layer.w13_weight,
+                    w13_weight_scale_inv=layer.w13_weight_scale_inv,
+                    w2_weight=layer.w2_weight,
+                    w2_weight_scale_inv=layer.w2_weight_scale_inv,
+                    global_num_experts=global_num_experts,
+                    top_k=top_k,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    intermediate_size=layer.intermediate_size_per_partition,
+                    expert_offset=layer.ep_rank * layer.local_num_experts,
+                    local_num_experts=layer.local_num_experts,
+                    block_shape=self.quant_config.weight_block_size,
+                    routed_scaling=1.0,
+                )
+            else:
+                assert (not renormalize
+                        and custom_routing_function is not None)
+                return apply_flashinfer_per_tensor_scale_fp8(
+                    layer=layer,
+                    hidden_states=x,
+                    router_logits=router_logits,
+                    routing_bias=e_score_correction_bias,
+                    global_num_experts=global_num_experts,
+                    top_k=top_k,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    apply_router_weight_on_input=apply_router_weight_on_input)
         else:
             return self.fused_experts(
                 hidden_states=x,

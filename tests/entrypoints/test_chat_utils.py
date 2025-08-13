@@ -6,6 +6,10 @@ from collections.abc import Mapping
 from typing import Literal, Optional
 
 import pytest
+from mistral_common.tokens.tokenizers.base import (SpecialTokenPolicy,
+                                                   SpecialTokens)
+from mistral_common.tokens.tokenizers.tekken import (SpecialTokenInfo,
+                                                     Tekkenizer)
 
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -21,6 +25,7 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import (encode_audio_base64, encode_image_base64,
                                    encode_video_base64)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
+from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import VLLM_PATH
@@ -42,12 +47,8 @@ MISTRAL_MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 @pytest.fixture(scope="function")
 def phi3v_model_config():
     return ModelConfig(PHI3V_MODEL_ID,
-                       task="generate",
-                       tokenizer=PHI3V_MODEL_ID,
-                       tokenizer_mode="auto",
+                       runner="generate",
                        trust_remote_code=True,
-                       dtype="auto",
-                       seed=0,
                        limit_mm_per_prompt={
                            "image": 2,
                        })
@@ -56,12 +57,8 @@ def phi3v_model_config():
 @pytest.fixture(scope="function")
 def phi3v_model_config_mm_interleaved():
     return ModelConfig(PHI3V_MODEL_ID,
-                       task="generate",
-                       tokenizer=PHI3V_MODEL_ID,
-                       tokenizer_mode="auto",
+                       runner="generate",
                        trust_remote_code=True,
-                       dtype="auto",
-                       seed=0,
                        interleave_mm_strings=True,
                        limit_mm_per_prompt={
                            "image": 2,
@@ -81,11 +78,7 @@ def phi3v_tokenizer():
 @pytest.fixture(scope="function")
 def qwen25omni_model_config_mm_interleaved():
     return ModelConfig(QWEN25OMNI_MODEL_ID,
-                       task="generate",
-                       tokenizer=QWEN25OMNI_MODEL_ID,
-                       tokenizer_mode="auto",
-                       dtype="auto",
-                       seed=0,
+                       runner="generate",
                        interleave_mm_strings=True,
                        limit_mm_per_prompt={
                            "image": 2,
@@ -107,12 +100,7 @@ def qwen25omni_tokenizer():
 @pytest.fixture(scope="module")
 def mllama_model_config():
     return ModelConfig(MLLAMA_MODEL_ID,
-                       task="generate",
-                       tokenizer=MLLAMA_MODEL_ID,
-                       tokenizer_mode="auto",
-                       trust_remote_code=True,
-                       dtype="auto",
-                       seed=0,
+                       runner="generate",
                        limit_mm_per_prompt={
                            "image": 2,
                        })
@@ -131,12 +119,7 @@ def mllama_tokenizer():
 @pytest.fixture(scope="function")
 def mistral_model_config():
     return ModelConfig(MISTRAL_MODEL_ID,
-                       task="generate",
-                       tokenizer=MISTRAL_MODEL_ID,
-                       tokenizer_mode="auto",
-                       trust_remote_code=True,
-                       dtype="auto",
-                       seed=0,
+                       runner="generate",
                        limit_mm_per_prompt={
                            "image": 2,
                        })
@@ -596,10 +579,7 @@ def test_parse_chat_messages_rejects_too_many_images_in_one_message(
         warnings.filterwarnings(
             "ignore",
             message="coroutine 'async_get_and_parse_image' was never awaited")
-        with pytest.raises(
-                ValueError,
-                match="At most 2 image\\(s\\) may be provided in one request\\."
-        ):
+        with pytest.raises(ValueError, match="At most"):
             parse_chat_messages(
                 [{
                     "role":
@@ -639,10 +619,7 @@ def test_parse_chat_messages_rejects_too_many_images_across_messages(
         warnings.filterwarnings(
             "ignore",
             message="coroutine 'async_get_and_parse_image' was never awaited")
-        with pytest.raises(
-                ValueError,
-                match="At most 2 image\\(s\\) may be provided in one request\\."
-        ):
+        with pytest.raises(ValueError, match="At most"):
             parse_chat_messages(
                 [{
                     "role":
@@ -1100,12 +1077,7 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
 
     # Build a config for the model
     model_config = ModelConfig(model,
-                               task="generate",
-                               tokenizer=model,
-                               tokenizer_mode="auto",
-                               trust_remote_code=True,
-                               dtype="auto",
-                               seed=0,
+                               runner="generate",
                                limit_mm_per_prompt={
                                    "image": 2,
                                })
@@ -1165,6 +1137,7 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
         model,
         tokenizer=model_info.tokenizer or model,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
     )
@@ -1220,6 +1193,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         model,
         tokenizer=model_info.tokenizer or model,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
     )
@@ -1279,6 +1253,7 @@ def test_resolve_content_format_fallbacks(model, expected_format):
         model,
         tokenizer=model_info.tokenizer or model,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
     )
@@ -1374,3 +1349,165 @@ def test_resolve_content_format_examples(template_path, expected_format):
     )
 
     assert resolved_format == expected_format
+
+
+def test_parse_chat_messages_include_thinking_chunk(mistral_model_config,
+                                                    mistral_tokenizer):
+    messages = [{
+        "role":
+        "system",
+        "content": [{
+            "type": "text",
+            "text": "You are a helpful assistant."
+        }, {
+            "type":
+            "thinking",
+            "closed":
+            True,
+            "thinking":
+            "Only return the answer when you are confident."
+        }]
+    }, {
+        "role": "user",
+        "content": "What is 2+2?"
+    }, {
+        "role":
+        "assistant",
+        "content": [{
+            "type": "text",
+            "text": "Let me think about it."
+        }, {
+            "type": "thinking",
+            "closed": True,
+            "thinking": "2+2 = 4"
+        }, {
+            "type": "text",
+            "text": "The answer is 4.",
+        }],
+    }]
+
+    conversation_with_thinking, _ = parse_chat_messages(
+        messages,
+        mistral_model_config,
+        mistral_tokenizer,
+        content_format="openai",
+    )
+
+    expected_conversation = [{
+        "role":
+        "system",
+        "content": [{
+            "type": "text",
+            "text": "You are a helpful assistant."
+        }, {
+            "type": "text",
+            "text": "Only return the answer when you are confident."
+        }],
+    }, {
+        "role":
+        "user",
+        "content": [{
+            "type": "text",
+            "text": "What is 2+2?"
+        }],
+    }, {
+        "role":
+        "assistant",
+        "content": [
+            {
+                "type": "text",
+                "text": "Let me think about it."
+            },
+            {
+                "type": "text",
+                "text": "2+2 = 4"
+            },
+            {
+                "type": "text",
+                "text": "The answer is 4."
+            },
+        ]
+    }]
+
+    assert conversation_with_thinking == expected_conversation
+
+
+def test_apply_mistral_chat_template_thinking_chunk():
+    # Moved import here to avoid yapf and isort conflicts
+    from vllm.entrypoints.chat_utils import apply_mistral_chat_template
+    messages = [{
+        "role":
+        "system",
+        "content": [{
+            "type": "text",
+            "text": "You are a helpful assistant."
+        }, {
+            "type":
+            "thinking",
+            "closed":
+            True,
+            "thinking":
+            "Only return the answer when you are confident."
+        }]
+    }, {
+        "role": "user",
+        "content": "What is 2+2?"
+    }, {
+        "role":
+        "assistant",
+        "content": [{
+            "type": "text",
+            "text": "Let me think about it."
+        }, {
+            "type": "thinking",
+            "closed": True,
+            "thinking": "2+2 = 4"
+        }, {
+            "type": "text",
+            "text": "The answer is 4.",
+        }],
+    }, {
+        "role": "user",
+        "content": "Thanks, what is 3+3?"
+    }]
+
+    # TODO(Julien): upon model release change to a tokenizer already configured.
+    # =================================================================
+    mistral_tokenizer = MistralTokenizer.from_pretrained(
+        "mistralai/Devstral-Small-2507")
+    assert isinstance(mistral_tokenizer.tokenizer, Tekkenizer)
+    # Add think special tokens to the tokenizer
+    mistral_tokenizer.tokenizer._all_special_tokens[35] = SpecialTokenInfo(
+        rank=35, is_control=True, token_str=SpecialTokens.begin_think.value)
+    mistral_tokenizer.tokenizer._all_special_tokens[36] = SpecialTokenInfo(
+        rank=36, is_control=True, token_str=SpecialTokens.end_think.value)
+    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab = {
+        k: v
+        for k, v in
+        mistral_tokenizer.tokenizer._special_tokens_reverse_vocab.items()
+        if v not in {35, 36}
+    }
+    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab[
+        SpecialTokens.begin_think.value] = 35
+    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab[
+        SpecialTokens.end_think.value] = 36
+    mistral_tokenizer.instruct.BEGIN_THINK = 35
+    mistral_tokenizer.instruct.END_THINK = 36
+    # =================================================================
+
+    tokens_ids = apply_mistral_chat_template(mistral_tokenizer,
+                                             messages,
+                                             chat_template=None,
+                                             tools=None)
+
+    string_tokens = mistral_tokenizer.mistral.decode(
+        tokens_ids, special_token_policy=SpecialTokenPolicy.KEEP)
+
+    expected_tokens = (
+        r"<s>[SYSTEM_PROMPT]You are a helpful assistant.[THINK]Only return the"
+        r" answer when you are confident.[/THINK][/SYSTEM_PROMPT]"
+        r"[INST]What is 2+2?[/INST]"
+        r"Let me think about it.[THINK]2+2 = 4[/THINK]The answer is 4.</s>"
+        r"[INST]Thanks, what is 3+3?[/INST]")
+
+    assert string_tokens == expected_tokens

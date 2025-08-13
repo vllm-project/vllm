@@ -186,8 +186,6 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25, 0.5, 1.0)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
-            "disable_mm_preprocessor_cache": True,
-            "enable_prefix_caching": False,
         },
         marks=[pytest.mark.core_model],
     ),
@@ -205,8 +203,6 @@ VLM_TEST_SETTINGS = {
     #     image_size_factors=[(0.25, 0.5, 1.0)],
     #     vllm_runner_kwargs={
     #         "model_impl": "transformers",
-    #         "disable_mm_preprocessor_cache": True,
-    #         "enable_prefix_caching": False,
     #     },
     #     marks=[pytest.mark.core_model],
     # ),
@@ -223,8 +219,6 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25, 0.2, 0.15)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
-            "disable_mm_preprocessor_cache": True,
-            "enable_prefix_caching": False,
         },
         marks=[large_gpu_mark(min_gb=32)],
     ),
@@ -239,8 +233,6 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25, 0.5, 1.0)],
         vllm_runner_kwargs={
             "model_impl": "auto",
-            "disable_mm_preprocessor_cache": True,
-            "enable_prefix_caching": False,
         },
         auto_cls=AutoModelForImageTextToText,
         marks=[pytest.mark.core_model],
@@ -345,6 +337,10 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.fuyu_vllm_to_hf_output,
         num_logprobs=10,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        # FIXME(Isotr0py): This model is broken in Transformers v4.54.1, we
+        # should enable this again after the fix is released:
+        # https://github.com/huggingface/transformers/pull/39915
+        marks=[pytest.mark.skip("HF model is broken")],
     ),
     "gemma3": VLMTestInfo(
         models=["google/gemma-3-4b-it"],
@@ -363,7 +359,7 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
     ),
     "glm4v": VLMTestInfo(
-        models=["THUDM/glm-4v-9b"],
+        models=["zai-org/glm-4v-9b"],
         test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|assistant|>",  # noqa: E501
         single_image_prompts=IMAGE_ASSETS.prompts({
@@ -382,7 +378,7 @@ VLM_TEST_SETTINGS = {
         marks=[large_gpu_mark(min_gb=32)],
     ),
     "glm4_1v": VLMTestInfo(
-        models=["THUDM/GLM-4.1V-9B-Thinking"],
+        models=["zai-org/GLM-4.1V-9B-Thinking"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|assistant|>",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<|begin_of_image|><|image|><|end_of_image|>", # noqa: E501
@@ -396,7 +392,7 @@ VLM_TEST_SETTINGS = {
         marks=[large_gpu_mark(min_gb=32)],
     ),
     "glm4_1v-video": VLMTestInfo(
-        models=["THUDM/GLM-4.1V-9B-Thinking"],
+        models=["zai-org/GLM-4.1V-9B-Thinking"],
         # GLM4.1V require include video metadata for input
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=4096,
@@ -646,7 +642,7 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: f"<|image_{idx}|>\n",
         max_model_len=4096,
         max_num_seqs=2,
-        task="generate",
+        runner="generate",
         # use sdpa mode for hf runner since phi3v didn't work with flash_attn
         hf_model_kwargs={"_attn_implementation": "sdpa"},
         use_tokenizer_eos=True,
@@ -685,6 +681,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
         img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>", # noqa: E501
         video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>", # noqa: E501
+        multi_image_prompt="Picture 1: <vlm_image>\nPicture 2: <vlm_image>\nDescribe these two images with one paragraph respectively.",    # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
@@ -709,12 +706,37 @@ VLM_TEST_SETTINGS = {
     "smolvlm": VLMTestInfo(
         models=["HuggingFaceTB/SmolVLM2-2.2B-Instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt:f"<|im_start|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<image>",
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         hf_output_post_proc=model_utils.smolvlm_trunc_hf_output,
+    ),
+    "tarsier": VLMTestInfo(
+        models=["omni-research/Tarsier-7b"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"USER: {img_prompt} ASSISTANT:",
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        patch_hf_runner=model_utils.tarsier_patch_hf_runner,
+    ),
+    "tarsier2": VLMTestInfo(
+        models=["omni-research/Tarsier2-Recap-7b"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO,
+        ),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>", # noqa: E501
+        video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        marks=[pytest.mark.skip("Model initialization hangs")],
     ),
     ### Tensor parallel / multi-gpu broadcast tests
     "chameleon-broadcast": VLMTestInfo(

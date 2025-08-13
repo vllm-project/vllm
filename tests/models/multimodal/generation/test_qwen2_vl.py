@@ -267,7 +267,7 @@ def run_embedding_input_test(
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
-                     task="generate",
+                     runner="generate",
                      max_model_len=4000,
                      max_num_seqs=3,
                      dtype=dtype,

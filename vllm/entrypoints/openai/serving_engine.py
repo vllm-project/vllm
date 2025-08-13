@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import base64
 import io
 import json
 import sys
@@ -12,6 +11,7 @@ from http import HTTPStatus
 from typing import (Annotated, Any, Callable, ClassVar, Generic, Optional,
                     TypeVar, Union, cast, overload)
 
+import pybase64
 import torch
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -35,6 +35,7 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_mistral_chat_template,
                                          parse_chat_messages_futures,
                                          resolve_chat_template_content_format)
+from vllm.entrypoints.context import ConversationContext
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionResponse,
@@ -46,10 +47,10 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingChatRequest,
                                               EmbeddingCompletionRequest,
                                               EmbeddingRequest,
-                                              EmbeddingResponse, ErrorResponse,
-                                              PoolingResponse, RerankRequest,
-                                              ResponsesRequest, ScoreRequest,
-                                              ScoreResponse,
+                                              EmbeddingResponse, ErrorInfo,
+                                              ErrorResponse, PoolingResponse,
+                                              RerankRequest, ResponsesRequest,
+                                              ScoreRequest, ScoreResponse,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
                                               TokenizeResponse,
@@ -68,7 +69,6 @@ from vllm.multimodal import (  # noqa: F401 - Required to resolve Pydantic error
     MultiModalDataDict)
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob, PromptLogprobs
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
@@ -161,7 +161,6 @@ class ServeContext(RequestProcessingMixin, ResponseGenerationMixin, BaseModel,
     request_id: str
     created_time: int = Field(default_factory=lambda: int(time.time()))
     lora_request: Optional[LoRARequest] = None
-    prompt_adapter_request: Optional[PromptAdapterRequest] = None
 
     # Shared across most requests
     tokenizer: Optional[AnyTokenizer] = None
@@ -343,12 +342,10 @@ class OpenAIServing:
                     return self.create_error_response(
                         "Request prompts not available")
 
-                self._log_inputs(
-                    request_id_item,
-                    ctx.request_prompts[i],
-                    params=pooling_params,
-                    lora_request=ctx.lora_request,
-                    prompt_adapter_request=ctx.prompt_adapter_request)
+                self._log_inputs(request_id_item,
+                                 ctx.request_prompts[i],
+                                 params=pooling_params,
+                                 lora_request=ctx.lora_request)
 
                 # Mypy has an existing bug related to inferring the variance of
                 # TypedDicts with `builtins.enumerate`:
@@ -415,21 +412,18 @@ class OpenAIServing:
             message: str,
             err_type: str = "BadRequestError",
             status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
-        return ErrorResponse(message=message,
-                             type=err_type,
-                             code=status_code.value)
+        return ErrorResponse(error=ErrorInfo(
+            message=message, type=err_type, code=status_code.value))
 
     def create_streaming_error_response(
             self,
             message: str,
             err_type: str = "BadRequestError",
             status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> str:
-        json_str = json.dumps({
-            "error":
+        json_str = json.dumps(
             self.create_error_response(message=message,
                                        err_type=err_type,
-                                       status_code=status_code).model_dump()
-        })
+                                       status_code=status_code).model_dump())
         return json_str
 
     async def _check_model(
@@ -448,13 +442,8 @@ class OpenAIServing:
             if isinstance(load_result, LoRARequest):
                 return None
             if isinstance(load_result, ErrorResponse) and \
-                load_result.code == HTTPStatus.BAD_REQUEST.value:
+                load_result.error.code == HTTPStatus.BAD_REQUEST.value:
                 error_response = load_result
-        if request.model in [
-                prompt_adapter.prompt_adapter_name
-                for prompt_adapter in self.models.prompt_adapter_requests
-        ]:
-            return None
 
         return error_response or self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
@@ -489,25 +478,21 @@ class OpenAIServing:
         self,
         request: AnyRequest,
         supports_default_mm_loras: bool = False,
-    ) -> Union[tuple[None, None], tuple[LoRARequest, None], tuple[
-            None, PromptAdapterRequest]]:
+    ) -> Optional[LoRARequest]:
 
         if request.model in self.models.lora_requests:
-            return self.models.lora_requests[request.model], None
+            return self.models.lora_requests[request.model]
 
         # Currently only support default modality specific loras
         # if we have exactly one lora matched on the request.
         if supports_default_mm_loras:
             default_mm_lora = self._get_active_default_mm_loras(request)
             if default_mm_lora is not None:
-                return default_mm_lora, None
+                return default_mm_lora
 
         if self._is_model_supported(request.model):
-            return None, None
+            return None
 
-        for prompt_adapter in self.models.prompt_adapter_requests:
-            if request.model == prompt_adapter.prompt_adapter_name:
-                return None, prompt_adapter
         # if _check_model has been called earlier, this will be unreachable
         raise ValueError(f"The model `{request.model}` does not exist.")
 
@@ -893,7 +878,10 @@ class OpenAIServing:
         _chat_template_kwargs.update(chat_template_kwargs or {})
 
         request_prompt: Union[str, list[int]]
-        if isinstance(tokenizer, MistralTokenizer):
+
+        if tokenizer is None:
+            request_prompt = "placeholder"
+        elif isinstance(tokenizer, MistralTokenizer):
             request_prompt = apply_mistral_chat_template(
                 tokenizer,
                 messages=messages,
@@ -923,7 +911,14 @@ class OpenAIServing:
             request = tool_parser(tokenizer).adjust_request(  # type: ignore
                 request=request)
 
-        if isinstance(request_prompt, str):
+        if tokenizer is None:
+            assert isinstance(request_prompt, str), (
+                "Prompt has to be a string", \
+                "when the tokenizer is not initialised"
+            )
+            prompt_inputs = TextTokensPrompt(prompt=request_prompt,
+                                             prompt_token_ids=[1])
+        elif isinstance(request_prompt, str):
             prompt_inputs = await self._tokenize_prompt_input_async(
                 request,
                 tokenizer,
@@ -951,6 +946,61 @@ class OpenAIServing:
 
         return conversation, [request_prompt], [engine_prompt]
 
+    async def _generate_with_builtin_tools(
+        self,
+        request_id: str,
+        request_prompt: RequestPrompt,
+        engine_prompt: EngineTokensPrompt,
+        sampling_params: SamplingParams,
+        context: ConversationContext,
+        lora_request: Optional[LoRARequest] = None,
+        priority: int = 0,
+        **kwargs,
+    ):
+        orig_priority = priority
+        while True:
+            self._log_inputs(
+                request_id,
+                request_prompt,
+                params=sampling_params,
+                lora_request=lora_request,
+            )
+            generator = self.engine_client.generate(
+                engine_prompt,
+                sampling_params,
+                request_id,
+                lora_request=lora_request,
+                priority=priority,
+                **kwargs,
+            )
+            async for res in generator:
+                context.append_output(res)
+                # NOTE(woosuk): The stop condition is handled by the engine.
+                yield context
+
+            if not context.need_builtin_tool_call():
+                # The model did not ask for a tool call, so we're done.
+                break
+
+            # Call the tool and update the context with the result.
+            tool_output = await context.call_tool()
+            context.append_output(tool_output)
+
+            # TODO: uncomment this and enable tool output streaming
+            # yield context
+
+            # Create inputs for the next turn.
+            # Render the next prompt token ids.
+            prompt_token_ids = context.render_for_completion()
+            engine_prompt = EngineTokensPrompt(
+                prompt_token_ids=prompt_token_ids)
+            request_prompt = prompt_token_ids
+            # Update the sampling params.
+            sampling_params.max_tokens = (self.max_model_len -
+                                          len(prompt_token_ids))
+            # OPTIMIZATION
+            priority = orig_priority - 1
+
     def _load_prompt_embeds(
         self,
         prompt_embeds: Optional[Union[bytes, list[bytes]]],
@@ -958,11 +1008,14 @@ class OpenAIServing:
     ) -> list[EmbedsPrompt]:
 
         def _load_and_validate_embed(embed: bytes) -> EmbedsPrompt:
-            tensor = torch.load(io.BytesIO(base64.b64decode(embed)),
+            tensor = torch.load(io.BytesIO(
+                pybase64.b64decode(embed, validate=True)),
                                 weights_only=True)
-            assert isinstance(
-                tensor,
-                (torch.FloatTensor, torch.BFloat16Tensor, torch.HalfTensor))
+            assert isinstance(tensor, torch.Tensor) and tensor.dtype in (
+                torch.float32,
+                torch.bfloat16,
+                torch.float16,
+            )
             if tensor.dim() > 2:
                 tensor = tensor.squeeze(0)
                 assert tensor.dim() == 2
@@ -987,7 +1040,6 @@ class OpenAIServing:
         params: Optional[Union[SamplingParams, PoolingParams,
                                BeamSearchParams]],
         lora_request: Optional[LoRARequest],
-        prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> None:
         if self.request_logger is None:
             return
@@ -1009,7 +1061,6 @@ class OpenAIServing:
             prompt_embeds,
             params=params,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
         )
 
     async def _get_trace_headers(

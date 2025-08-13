@@ -21,7 +21,7 @@ class CutlassMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "CUTLASS_MLA_VLLM_V1"
+        return "CUTLASS_MLA"
 
     @staticmethod
     def get_impl_cls() -> type["CutlassMLAImpl"]:
