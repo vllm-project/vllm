@@ -24,6 +24,8 @@ MAXIMUM_AUDIOS = 2
 @pytest.fixture(scope="module")
 def server():
     args = [
+        "--dtype",
+        "float32",
         "--max-model-len",
         "2048",
         "--max-num-seqs",
