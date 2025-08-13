@@ -326,6 +326,8 @@ class BackgroundResources:
     output_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
     input_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
     first_req_send_socket: Optional[zmq.asyncio.Socket] = None
+    first_req_rcv_socket: Optional[zmq.asyncio.Socket] = None
+    stats_update_socket: Optional[zmq.asyncio.Socket] = None
     output_queue_task: Optional[asyncio.Task] = None
     stats_update_task: Optional[asyncio.Task] = None
     shutdown_path: Optional[str] = None
@@ -344,8 +346,13 @@ class BackgroundResources:
             self.coordinator.close()
 
         cancel_task_threadsafe(self.output_queue_task)
-        if self.stats_update_task is not None:
-            self.stats_update_task.cancel()
+
+        # ZMQ context termination can hang if the sockets
+        # aren't explicitly closed first.
+        for socket in (self.first_req_rcv_socket, self.stats_update_socke):
+            if socket is not None:
+                socket.close(linger=0)
+        cancel_task_threadsafe(self.stats_update_task)
 
         # ZMQ context termination can hang if the sockets
         # aren't explicitly closed first.
@@ -976,6 +983,8 @@ class DPAsyncMPClient(AsyncMPClient):
                                      self.first_req_sock_addr,
                                      zmq.PAIR,
                                      bind=False) as first_req_rcv_socket:
+                self.resources.stats_update_socket = socket
+                self.resources.first_req_rcv_socket = first_req_rcv_socket
                 assert isinstance(socket, zmq.asyncio.Socket)
                 assert isinstance(first_req_rcv_socket, zmq.asyncio.Socket)
                 # Send subscription message.
