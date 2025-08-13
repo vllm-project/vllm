@@ -365,20 +365,17 @@ class Worker(WorkerBase):
             # If it is, update next_comp and remove the entry from _token_compiled_cudagraphs
             next_capture = total_num_scheduled_tokens
             self._token_compiled_cudagraphs.discard(total_num_scheduled_tokens)
-            logger.info(
-                "LAZY DIEGO: CUDAgraph in execution time for %d input tokens",
-                next_capture)
 
         # Check if there are any entries left in _token_compiled_cudagraphs
         elif len(self._token_compiled_cudagraphs) > 0:
             # If so, update next_comp to the first item and remove it from the list
             next_capture = self._token_compiled_cudagraphs.pop()
-            logger.info(
-                "DELAYED DIEGO: CUDAgraph in execution time for %d input tokens",
-                next_capture)
 
         # If we have a value for next_comp, call the model_runner to capture the model
         if next_capture:
+            logger.debug(
+                "CUDAgraph in execution model time for %d input tokens",
+                next_capture)
             self.model_runner.capture_model(next_capture)
    
     @torch.inference_mode()
