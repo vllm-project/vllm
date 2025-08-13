@@ -21,7 +21,8 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
 
 from .mk_objects import (expert_info, make_fused_experts,
-                         make_prepare_finalize, prepare_finalize_info, TestMoEQuantConfig)
+                         make_prepare_finalize, prepare_finalize_info,
+                         TestMoEQuantConfig)
 from .parallel_utils import ProcessGroupInfo
 
 
@@ -52,7 +53,7 @@ class Config:
 
     def __post_init__(self):
         if self.quant_config is None:
-            self.quant_config = TestMoEQuantConfig()
+            self.quant_config = TestMoEQuantConfig(None, False, False, None)
 
     def describe(self) -> str:
         s = ""
@@ -312,6 +313,9 @@ class WeightTensors:
             w1_gs = w1_gs[s:e]
             w2_gs = w2_gs[s:e]
 
+        # if self.is_quantized():
+        #     print(f"\nSLICE {w1.shape}/{w1_scale.shape}, {w1.shape}/{w2_scale.shape}\n")
+
         return WeightTensors(w1, w2, w1_scale, w2_scale, w1_gs, w2_gs)
 
     @staticmethod
@@ -323,8 +327,10 @@ class WeightTensors:
             in_dtype=config.dtype,
             quant_dtype=config.quant_dtype,
             block_shape=config.quant_block_shape,
-            per_out_ch_quant=config.is_per_out_ch_quant,
+            per_out_ch_quant=config.is_per_act_token_quant, # or config.is_per_out_ch_quant,
         )
+        # if config.quant_dtype is not None:
+        #     print(f"\nWWWW {w1.shape}/{w1_scale.shape}, {w1.shape}/{w2_scale.shape}\n")
         return WeightTensors(w1=w1,
                              w2=w2,
                              w1_scale=w1_scale,
@@ -585,16 +591,39 @@ def run_modular_kernel(
     # weights for rank
     rank_weights = weights.slice_weights(pgi.rank, config.num_local_experts)
 
+    needs_gscale = config.quant_dtype == "nvfp4"
+
     quant_config = FusedMoEQuantConfig.make(
         config.quant_dtype,
         w1_scale=rank_weights.w1_scale,
-        w2_scale=rank_weights.w1_scale,
+        w2_scale=rank_weights.w2_scale,
         g1_alphas=(1 / rank_weights.w1_gs) if rank_weights.w1_gs is not None else None,
         g2_alphas=(1 / rank_weights.w2_gs) if rank_weights.w2_gs is not None else None,
-        a1_gscale=_make_gscale(config.num_local_experts),
-        a2_gscale=_make_gscale(config.num_local_experts),
+        a1_gscale=_make_gscale(config.num_local_experts) if needs_gscale else None,
+        a2_gscale=_make_gscale(config.num_local_experts) if needs_gscale else None,
         block_shape=config.quant_block_shape,
+        per_act_token_quant=config.is_per_act_token_quant,
+        per_out_ch_quant=config.is_per_out_ch_quant,
     )
+
+    # torch.set_printoptions(threshold=0, edgeitems=0, linewidth=10000)
+    # print(f"\nQQ = {quant_config}\n")
+    # torch.set_printoptions(threshold=1000, edgeitems=5, linewidth=80)
+
+    # print(f"block_shape = {quant_config.block_shape}")
+    # print(f"w1 = {rank_weights.w1.shape}")
+    # print(f"w2 = {rank_weights.w2.shape}")
+    # if quant_config.w1_scale is not None:
+    #     w1_shape = quant_config.w1_scale.shape
+    #     w2_shape = quant_config.w2_scale.shape
+    #     block_shape = quant_config.block_shape
+    #     print(f"w1_scale = {w1_shape}")
+    #     print(f"w2_scale = {w2_shape}")
+    #     if block_shape is not None:
+    #         assert (w1_shape[1] * block_shape[0]) == rank_weights.w1.shape[1]
+    #         assert (w1_shape[2] * block_shape[1]) == rank_weights.w1.shape[2]
+    #         assert (w2_shape[1] * block_shape[0]) == rank_weights.w2.shape[1]
+    #         assert (w2_shape[2] * block_shape[1]) == rank_weights.w2.shape[2]
 
     mk = make_modular_kernel(config, vllm_config, quant_config)
 

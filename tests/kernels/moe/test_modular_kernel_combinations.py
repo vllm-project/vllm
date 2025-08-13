@@ -104,6 +104,14 @@ def rank_worker(
                 atol = 3e-2
                 rtol = 3e-2
 
+            #assert torch.isnan(ref_out).sum() == 0
+            #assert torch.isinf(ref_out).sum() == 0
+            assert torch.isnan(mk_out).sum() == 0
+            assert torch.isinf(mk_out).sum() == 0
+
+            #torch.set_printoptions(profile="full")
+            #print(f"OUT = {mk_out}")
+
             torch.testing.assert_close(ref_out, mk_out, atol=atol, rtol=rtol)
             format_result(verbose, config.describe())
         except Exception as ex:
