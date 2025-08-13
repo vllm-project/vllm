@@ -1779,25 +1779,31 @@ def create_server_socket(addr: tuple[str, int]) -> list[socket.socket]:
 
         # Try to bind to IPv4 addresses
         try:
-            sock = socket.socket(family=socket.AF_INET,
-                                 type=socket.SOCK_STREAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            sock.bind(("", port))
-            sockets.append(sock)
+            sock_ipv4 = socket.socket(family=socket.AF_INET,
+                                      type=socket.SOCK_STREAM)
+            sock_ipv4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, "SO_REUSEPORT"):
+                sock_ipv4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            sock_ipv4.bind(("", port))
+            sockets.append(sock_ipv4)
         except OSError as e:
             logger.debug("Failed to bind IPv4 socket: %s", e)
 
         # Try to bind to IPv6 addresses
         try:
-            sock = socket.socket(family=socket.AF_INET6,
-                                 type=socket.SOCK_STREAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            sock_ipv6 = socket.socket(family=socket.AF_INET6,
+                                      type=socket.SOCK_STREAM)
+            sock_ipv6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, "SO_REUSEPORT"):
+                sock_ipv6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             # Enable dual-stack mode for IPv6 socket
-            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-            sock.bind(("", port))
-            sockets.append(sock)
+            if hasattr(socket, "IPV6_V6ONLY"):
+                try:
+                    sock_ipv6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                except OSError as e:
+                    logger.debug("Failed to set IPV6_V6ONLY=0 on IPv6 socket: %s", e)
+            sock_ipv6.bind(("", port))
+            sockets.append(sock_ipv6)
         except OSError as e:
             logger.debug("Failed to bind IPv6 socket: %s", e)
 
@@ -1813,7 +1819,8 @@ def create_server_socket(addr: tuple[str, int]) -> list[socket.socket]:
 
         sock = socket.socket(family=family, type=socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         sock.bind(addr)
 
         return [sock]
