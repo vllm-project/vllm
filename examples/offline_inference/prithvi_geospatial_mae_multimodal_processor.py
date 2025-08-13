@@ -20,8 +20,8 @@ llm = LLMForImageTiling(
     max_num_seqs=32,
 )
 
-input = {"type": "url", "data": image_url}
+prompt = {"type": "url", "format": "geotiff", "data": image_url}
 
-output = llm.predict(input)
+output = llm.predict(prompt)
 print(output)
 print(output.data)

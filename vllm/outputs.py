@@ -539,7 +539,12 @@ class ImageRequestOutput(MultiModalRequestOutput):
         data (Any): The resulting data.
     """
 
-    def __init__(self, type: str, format: str, data: Any):
+    def __init__(
+        self,
+        type: Literal["path", "object"],
+        format: str,
+        data: Any,
+    ):
         super().__init__(data)
         self.type: Literal["path", "object"] = type
         self.format = format

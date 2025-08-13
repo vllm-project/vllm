@@ -43,8 +43,8 @@ if typing.TYPE_CHECKING:
     from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
     from vllm.engine.async_llm_engine import AsyncLLMEngine
     from vllm.engine.llm_engine import LLMEngine
-    from vllm.entrypoint.llm_for_image_tiling import LLMForImageTiling
     from vllm.entrypoints.llm import LLM
+    from vllm.entrypoints.llm_for_image_tiling import LLMForImageTiling
     from vllm.executor.ray_utils import initialize_ray_cluster
     from vllm.inputs import PromptType, TextPrompt, TokensPrompt
     from vllm.model_executor.models import ModelRegistry
