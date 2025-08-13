@@ -78,7 +78,7 @@ def test_hash_non_contiguous_array():
 def test_hash_image_exif_id():
     # Test that EXIF ImageId tag can be used to store UUID
     # and the hasher will use that instead of the image data.
-    image1 = Image.open(ASSETS_DIR / "image1.png")
+    image1 = image2 = Image.new("1", size=(10, 20))
     id = uuid.uuid4()
     image1.getexif()[Image.ExifTags.Base.ImageID] = id
     image2 = Image.open(ASSETS_DIR / "image1.png")
