@@ -18,6 +18,9 @@ def compare_data_columns(
         # Show all info columns in the first couple columns
         if not frames:
             for col in info_cols:
+                if col not in serving_df.columns:
+                    print(f"Skipping missing column: {col}")
+                    continue
                 frames.append(serving_df[col])
         # only show test name under debug mode
         if debug is True:
@@ -72,6 +75,8 @@ if __name__ == "__main__":
         "Dataset Name",
         "Input Len",
         "Output Len",
+        "TP Size",
+        "PP Size",
         "# of max concurrency.",
         "qps",
     ]
@@ -84,7 +89,7 @@ if __name__ == "__main__":
     debug = args.debug
     plot = args.plot
     # For Plot feature, assign y axis from one of info_cols
-    y_axis_index = info_cols.index(args.xaxis) if args.xaxis in info_cols else 4
+    y_axis_index = info_cols.index(args.xaxis) if args.xaxis in info_cols else 6
     with open("perf_comparison.html", "w") as text_file:
         for i in range(len(data_cols_to_compare)):
             output_df, raw_data_cols = compare_data_columns(
@@ -99,9 +104,17 @@ if __name__ == "__main__":
             # For Plot feature, insert y axis from one of info_cols
             raw_data_cols.insert(0, info_cols[y_axis_index])
 
-            output_df_sorted = output_df.sort_values(by=info_cols[0])
+            filtered_info_cols = info_cols[:-2]
+            existing_group_cols = [c for c in filtered_info_cols if c in output_df.columns]
+            if not existing_group_cols:
+                raise ValueError(
+                    f"No valid group-by columns present after excluding last two from info_cols. "
+                    f"Expected subset: {filtered_info_cols}, but DataFrame has: {list(output_df.columns)}"
+                )
+
+            output_df_sorted = output_df.sort_values(by=existing_group_cols)
             output_groups = output_df_sorted.groupby(
-                [info_cols[0], info_cols[1], info_cols[2], info_cols[3]], dropna=False
+                existing_group_cols, dropna=False
             )
             for name, group in output_groups:
                 html = group.to_html()
