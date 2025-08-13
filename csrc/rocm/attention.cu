@@ -62,7 +62,6 @@ enum class MFMAType
 
   #define GCN_MFMA_INSTR1 __builtin_amdgcn_mfma_f32_16x16x4f32
   #define GCN_MFMA_INSTR __builtin_amdgcn_mfma_f32_4x4x4f16
-  //#define __FP8__PA__ // Enable full fp8 paged attention
 
 using floatx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
 using float16x4 =
@@ -279,7 +278,6 @@ __device__ __forceinline__ _B16x8 convert_b8x8_custom(const _B8x8 input) {
   return ret;
 }
 
-//#ifdef __FP8__PA__
 typedef union u64_cvt {
   half f16x4[4];
   int16_t b16x4[4];
@@ -422,10 +420,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   const int* block_table_seq = block_tables + seq_idx * max_num_blocks_per_seq;
 
   int kphysical_block_number[TLOOP];
-//#ifdef __FP8__PA__
   float q_max = 0;
   float q_scale = 1.0;
-//#endif
 
   // fetch k physical block numbers
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
@@ -475,13 +471,11 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
         Qlocal[qkhe_depth][qkratio].xy[i] =
             shared_logits[qkhe_depth][rowid][lane16id % GQA_RATIO]
                          [2 * qkratio + i];
-//#ifdef __FP8__PA__
         if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto && MFMA_TYPE == MFMAType::Fp8){
            scalar_t* qptr = reinterpret_cast<scalar_t*>(&Qlocal[qkhe_depth][qkratio].xy[i]);
            for(int k = 0; k< 4; k++)
                q_max = fmax(fabs(to_float<scalar_t>(qptr[k])), q_max);
         }
-//#endif
       }
     }
   }
@@ -581,7 +575,6 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto) {
     // multiply by k_scale if fp8 kv cache
     scale2 *= *k_scale;
-//#ifdef __FP8__PA__
     q_max = warpReduceMax(q_max);
     constexpr float FP8_E4M3_SCALE_TARGET = 224.0f;
     if constexpr (MFMA_TYPE == MFMAType::Fp8)
@@ -589,7 +582,6 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
       q_scale = q_max > 0 ? FP8_E4M3_SCALE_TARGET / q_max : 1.0f;
       scale2 /= q_scale;
     }
-//#endif
   }
 
   floatx4 d_out[TLOOP];
@@ -609,7 +601,6 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
         auto Ktmp = Klocal[token_depth][qkhe_depth];
         _B8x16 Ktmp8x16 = *reinterpret_cast<_B8x16*>(&Ktmp);
         for (int qkratio = 0; qkratio < QK_SIZE_RATIO; qkratio++) {
-//#ifndef __FP8__PA__
          if constexpr (MFMA_TYPE == MFMAType::F16)
          {
           _B8x8 Ktmp8x8 = Ktmp8x16.xy[qkratio];
@@ -620,7 +611,6 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
                 d_out[token_depth]);
           }
          }
-//#else
          else
         {
           {
@@ -640,7 +630,6 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
                   d_out[token_depth]);
          }
         }
-//#endif
         }
       }
     }
@@ -729,15 +718,12 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   // disable rtz conversion due to its impact on accuracy.
   constexpr bool LOGITS_RTZ_CONVERSION = false;
 
-//#ifdef __FP8__PA__
   int rowid_8x8 = rowid/2;
   int offset    = rowid%2;
-//#endif
 
   // write logits to shared mem
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     d_out[token_depth] *= inv_sum_scale;
-//#ifndef __FP8__PA__
     if constexpr (MFMA_TYPE != MFMAType::Fp8)
     {
       if constexpr (LOGITS_RTZ_CONVERSION) {
@@ -757,7 +743,6 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
       logits_8x8.b16x4[offset * 2    ] = __builtin_amdgcn_cvt_pk_fp8_f32(d_out[token_depth][0], d_out[token_depth][1],0,false);
       logits_8x8.b16x4[offset * 2 + 1] = __builtin_amdgcn_cvt_pk_fp8_f32(d_out[token_depth][2], d_out[token_depth][3],0,false);
     }
-//#endif
   }
 
   // write out partition max_logits and exp_sum
@@ -809,7 +794,6 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
           _B8x16 Vtmp8x16 = *reinterpret_cast<_B8x16*>(&Vtmp);
           for (int j = 0; j < ELEMS16_ELEMS8_RATIO; j++) {
             _B8x8 Vtmp8x8 = Vtmp8x16.xy[j];
-//#ifndef __FP8__PA__
            if constexpr (MFMA_TYPE == MFMAType::F16)
            {
             _B16x8 Vlocaltmp = convert_b8x8_custom<scalar_t>(Vtmp8x8);
@@ -827,7 +811,6 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
                   tmp_out);
             }
            }
-//#else
            else
            {
             for (int i = 0; i < ELEMS8_ELEMS4_RATIO/2; i++) {
@@ -844,7 +827,6 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
                    tmp_out);
              }
           }
- //#endif
           }
         }
       }
