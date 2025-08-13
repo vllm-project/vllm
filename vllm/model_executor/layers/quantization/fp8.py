@@ -1039,8 +1039,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     router_logits=router_logits,
                     routing_bias=e_score_correction_bias,
                     output1_scales_scalar=self._output1_scales_scalar,
-                    output1_scales_gate_scalar=self.
-                    _output1_scales_gate_scalar,
+                    output1_scales_gate_scalar=\
+                        self._output1_scales_gate_scalar,
                     output2_scales_scalar=self._output2_scales_scalar,
                     global_num_experts=global_num_experts,
                     top_k=top_k,
