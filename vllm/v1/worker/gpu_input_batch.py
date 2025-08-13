@@ -7,9 +7,11 @@ from typing import Optional, cast
 
 import numpy as np
 import torch
+from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.inputs import (MultiModalKwargs, MultiModalKwargsItem,
+                                    PlaceholderRange)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
@@ -29,7 +31,7 @@ class CachedRequestState:
 
     req_id: str
     prompt_token_ids: list[int]
-    mm_inputs: list[MultiModalKwargs]
+    mm_kwargs: list[MultiModalKwargsItem]
     mm_positions: list[PlaceholderRange]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
@@ -50,6 +52,13 @@ class CachedRequestState:
     @property
     def num_tokens(self) -> int:
         return self.num_prompt_tokens + len(self.output_token_ids)
+
+    # Temporary back-compatibility for plugins that define model runner
+    @property
+    @deprecated("`mm_inputs` is superseded by `mm_kwargs` and will be "
+                "removed in v0.13. Please use `mm_kwargs` instead.")
+    def mm_inputs(self) -> list[MultiModalKwargs]:
+        return [MultiModalKwargs.from_items([item]) for item in self.mm_kwargs]
 
     def get_token_id(self, idx: int) -> int:
         if idx < self.num_prompt_tokens:

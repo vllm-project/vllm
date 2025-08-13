@@ -8,7 +8,9 @@ import torch
 
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.inputs import (MultiModalBatchedField,
+                                    MultiModalFieldElem, MultiModalKwargsItem,
+                                    PlaceholderRange)
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -1304,7 +1306,7 @@ def create_requests_with_priority(
         priorities: list[int],
         arrival_times: Optional[list[float]] = None,
         num_tokens: int = 10,
-        mm_positions: Optional[list[PlaceholderRange]] = None,
+        mm_positions: Optional[list[list[PlaceholderRange]]] = None,
         max_tokens: int = 16,
         stop_token_ids: Optional[list[int]] = None,
         prompt_logprobs: Optional[int] = None):
@@ -1323,16 +1325,23 @@ def create_requests_with_priority(
     for i in range(num_requests):
         if mm_positions is not None:
             mm_position = mm_positions[i]
-            mm_inputs = [MultiModalKwargs({})] * len(mm_position)
+            mm_elem = MultiModalFieldElem(
+                modality="dummy_m",
+                key="dummy_k",
+                data=None,
+                field=MultiModalBatchedField(),
+            )
+            mm_item = MultiModalKwargsItem.from_elems([mm_elem])
+            mm_kwargs = [mm_item] * len(mm_position)
         else:
             mm_position = None
-            mm_inputs = None
+            mm_kwargs = None
         request = Request(
             request_id=f"{i}",
             prompt_token_ids=[i] * num_tokens,
             sampling_params=sampling_params,
             pooling_params=None,
-            multi_modal_inputs=mm_inputs,
+            multi_modal_kwargs=mm_kwargs,
             multi_modal_placeholders=mm_position,
             multi_modal_hashes=None,
             eos_token_id=EOS_TOKEN_ID,
@@ -1816,7 +1825,7 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     request = Request(
         request_id="0",
         prompt_token_ids=[0, 1],
-        multi_modal_inputs=None,
+        multi_modal_kwargs=None,
         multi_modal_hashes=None,
         multi_modal_placeholders=None,
         sampling_params=sampling_params,
