@@ -2566,24 +2566,24 @@ class PoolerConfig:
     ## for embeddings models
     normalize: Optional[bool] = None
     """
-    Whether to normalize the embeddings outputs. 
+    Whether to normalize the embeddings outputs.
     """
     dimensions: Optional[int] = None
     """
-    Reduce the dimensions of embeddings if model 
+    Reduce the dimensions of embeddings if model
     support matryoshka representation.
     """
 
     ## for classification models
     activation: Optional[bool] = None
     """
-    Whether to apply activation function to the classification outputs. 
+    Whether to apply activation function to the classification outputs.
     """
 
     ## for reward models
     softmax: Optional[bool] = None
     """
-    Whether to apply softmax to the reward outputs. 
+    Whether to apply softmax to the reward outputs.
     """
     step_tag_id: Optional[int] = None
     """
@@ -2946,26 +2946,26 @@ def get_served_model_name(model: str,
     return served_model_name
 
 
-GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines"]
+StructuredOutputsBackend = Literal["auto", "xgrammar", "guidance", "outlines"]
 
 
 @config
 @dataclass
-class DecodingConfig:
-    """Dataclass which contains the decoding strategy of the engine."""
+class StructuredOutputsConfig:
+    """Dataclass which contains structured outputs config for the engine."""
 
-    backend: GuidedDecodingBackend = "auto"
-    """Which engine will be used for guided decoding (JSON schema / regex etc)
+    backend: StructuredOutputsBackend = "auto"
+    """Which engine will be used for structured outputs (JSON schema / regex etc)
     by default. With "auto", we will make opinionated choices based on request
     contents and what the backend libraries currently support, so the behavior
-    is subject to change in each release."""
+    is subject to change in each release."""  # noqa: E501
 
     disable_fallback: bool = False
     """If `True`, vLLM will not fallback to a different backend on error."""
 
     disable_any_whitespace: bool = False
-    """If `True`, the model will not generate any whitespace during guided
-    decoding. This is only supported for xgrammar and guidance backends."""
+    """If `True`, the model will not generate any whitespace during structured
+    outputs. This is only supported for xgrammar and guidance backends."""
 
     disable_additional_properties: bool = False
     """If `True`, the `guidance` backend will not use `additionalProperties`
@@ -3262,8 +3262,9 @@ class VllmConfig:
     """LoRA configuration."""
     speculative_config: Optional[SpeculativeConfig] = None
     """Speculative decoding configuration."""
-    decoding_config: DecodingConfig = field(default_factory=DecodingConfig)
-    """Decoding configuration."""
+    structured_outputs_config: StructuredOutputsConfig = field(
+        default_factory=StructuredOutputsConfig)
+    """Structured outputs configuration."""
     observability_config: Optional[ObservabilityConfig] = None
     """Observability configuration."""
     quant_config: Optional[QuantizationConfig] = None
@@ -3354,8 +3355,8 @@ class VllmConfig:
             vllm_factors.append(self.speculative_config.compute_hash())
         else:
             vllm_factors.append("None")
-        if self.decoding_config:
-            vllm_factors.append(self.decoding_config.compute_hash())
+        if self.structured_outputs_config:
+            vllm_factors.append(self.structured_outputs_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.observability_config:
@@ -3775,7 +3776,7 @@ class VllmConfig:
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f"device_config={self.device_config.device}, "
-            f"decoding_config={self.decoding_config!r}, "
+            f"decoding_config={self.structured_outputs_config!r}, "
             f"observability_config={self.observability_config!r}, "
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "

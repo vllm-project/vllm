@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# imports for guided decoding tests
+# imports for structured outputs tests
 import json
 import os
 import shutil
@@ -27,8 +27,6 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # technically these adapters use a different base model,
 # but we're not testing generation quality here
 LORA_NAME = "typeof/zephyr-7b-beta-lora"
-
-GUIDED_DECODING_BACKENDS = ["outlines", "xgrammar", "guidance"]
 
 
 @pytest.fixture(scope="module")
@@ -636,12 +634,13 @@ async def test_allowed_token_ids(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-async def test_guided_json_completion(client: openai.AsyncOpenAI,
-                                      guided_decoding_backend: str,
-                                      sample_json_schema, is_v1_server: bool):
+async def test_structured_outputs_json_completion(
+    client: openai.AsyncOpenAI,
+    sample_json_schema,
+    is_v1_server: bool,
+):
     if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
+        pytest.skip("structured outputs is only supported in v1 engine")
 
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -650,8 +649,7 @@ async def test_guided_json_completion(client: openai.AsyncOpenAI,
         n=3,
         temperature=1.0,
         max_tokens=500,
-        extra_body=dict(guided_json=sample_json_schema,
-                        guided_decoding_backend=guided_decoding_backend))
+        extra_body=dict(structured_outputs=dict(json=sample_json_schema)))
 
     assert completion.id is not None
     assert len(completion.choices) == 3
@@ -661,12 +659,13 @@ async def test_guided_json_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-async def test_guided_regex_completion(client: openai.AsyncOpenAI,
-                                       guided_decoding_backend: str,
-                                       sample_regex, is_v1_server: bool):
+async def test_structured_outputs_regex_completion(
+    client: openai.AsyncOpenAI,
+    sample_regex,
+    is_v1_server: bool,
+):
     if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
+        pytest.skip("structured outputs is only supported in v1 engine")
 
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -674,8 +673,7 @@ async def test_guided_regex_completion(client: openai.AsyncOpenAI,
         n=3,
         temperature=1.0,
         max_tokens=20,
-        extra_body=dict(guided_regex=sample_regex,
-                        guided_decoding_backend=guided_decoding_backend))
+        extra_body=dict(structured_outputs=dict(regex=sample_regex)))
 
     assert completion.id is not None
     assert len(completion.choices) == 3
@@ -685,13 +683,13 @@ async def test_guided_regex_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-async def test_guided_choice_completion(client: openai.AsyncOpenAI,
-                                        guided_decoding_backend: str,
-                                        sample_guided_choice,
-                                        is_v1_server: bool):
+async def test_structured_outputs_choice_completion(
+    client: openai.AsyncOpenAI,
+    sample_choices,
+    is_v1_server: bool,
+):
     if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
+        pytest.skip("structured outputs is only supported in v1 engine")
 
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -699,20 +697,20 @@ async def test_guided_choice_completion(client: openai.AsyncOpenAI,
         n=2,
         temperature=1.0,
         max_tokens=10,
-        extra_body=dict(guided_choice=sample_guided_choice,
-                        guided_decoding_backend=guided_decoding_backend))
+        extra_body=dict(structured_outputs=dict(choice=sample_choices)))
 
     assert completion.id is not None
     assert len(completion.choices) == 2
     for i in range(2):
-        assert completion.choices[i].text in sample_guided_choice
+        assert completion.choices[i].text in sample_choices
 
 
 @pytest.mark.asyncio
-async def test_guided_grammar(client: openai.AsyncOpenAI,
-                              sample_sql_statements, is_v1_server: bool):
+async def test_structured_outputs_grammar(client: openai.AsyncOpenAI,
+                                          sample_sql_statements,
+                                          is_v1_server: bool):
     if not is_v1_server:
-        pytest.skip("Guided grammar is only supported in v1 engine")
+        pytest.skip("grammar is only supported in v1 engine")
 
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -720,7 +718,8 @@ async def test_guided_grammar(client: openai.AsyncOpenAI,
                 "table_1 where it is equals to 1"),
         temperature=1.0,
         max_tokens=500,
-        extra_body=dict(guided_grammar=sample_sql_statements))
+        extra_body=dict(
+            structured_outputs=dict(grammar=sample_sql_statements), ))
 
     content = completion.choices[0].text
 
@@ -771,27 +770,26 @@ async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
-                                          guided_decoding_backend: str,
-                                          sample_json_schema, sample_regex,
-                                          is_v1_server: bool):
+async def test_structured_outputs_type_error(client: openai.AsyncOpenAI,
+                                             sample_json_schema, sample_regex,
+                                             is_v1_server: bool):
     if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
+        pytest.skip("structured outputs is only supported in v1 engine")
 
     with pytest.raises(openai.BadRequestError):
         _ = await client.completions.create(
             model=MODEL_NAME,
             prompt="Give an example JSON that fits this schema: 42",
-            extra_body=dict(guided_json=42,
-                            guided_decoding_backend=guided_decoding_backend))
+            extra_body=dict(structured_outputs=dict(json=42)))
 
     with pytest.raises(openai.BadRequestError):
         _ = await client.completions.create(
             model=MODEL_NAME,
             prompt="Give an example string that fits this regex",
-            extra_body=dict(guided_regex=sample_regex,
-                            guided_json=sample_json_schema))
+            extra_body=dict(structured_outputs=dict(
+                regex=sample_regex,
+                json=sample_json_schema,
+            )))
 
 
 @pytest.mark.asyncio

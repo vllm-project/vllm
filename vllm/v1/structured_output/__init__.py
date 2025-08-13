@@ -65,7 +65,7 @@ class StructuredOutputManager:
                 lora_config=self.vllm_config.lora_config,
             ).get_lora_tokenizer(None)
             reasoning_backend = \
-                    self.vllm_config.decoding_config.reasoning_backend
+                    self.vllm_config.structured_outputs_config.reasoning_backend
             if reasoning_backend:
                 reasoner_cls = ReasoningParserManager.get_reasoning_parser(
                     reasoning_backend)
@@ -77,7 +77,7 @@ class StructuredOutputManager:
 
         if TYPE_CHECKING:
             assert request.sampling_params is not None and \
-                request.sampling_params.guided_decoding is not None
+                request.sampling_params.structured_outputs is not None
 
         # Initialize the backend the first time it is needed.
         #
@@ -85,7 +85,7 @@ class StructuredOutputManager:
         # backends on a per-request basis in V1 (for now, anyway...).
         if self.backend is None:
             assert request.sampling_params is not None
-            backend = request.sampling_params.guided_decoding.backend
+            backend = self.vllm_config.structured_outputs_config.backend
             vocab_size = self.vllm_config.model_config.get_vocab_size()
             if backend == "xgrammar":
                 self.backend = XgrammarBackend(

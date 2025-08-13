@@ -98,7 +98,6 @@ async def test_serving_chat_should_set_correct_max_tokens():
             "role": "user",
             "content": "what is 1+1?"
         }],
-        guided_decoding_backend="outlines",
     )
 
     with suppress(Exception):
@@ -143,7 +142,6 @@ async def test_serving_chat_should_set_correct_max_tokens():
             "role": "user",
             "content": "what is 1+1?"
         }],
-        guided_decoding_backend="outlines",
     )
 
     with suppress(Exception):
@@ -198,7 +196,6 @@ async def test_serving_chat_should_set_correct_max_tokens():
             "role": "user",
             "content": "what is 1+1?"
         }],
-        guided_decoding_backend="outlines",
     )
 
     with suppress(Exception):
@@ -254,7 +251,6 @@ async def test_serving_chat_could_load_correct_generation_config():
             "role": "user",
             "content": "what is 1+1?"
         }],
-        guided_decoding_backend="outlines",
     )
 
     with suppress(Exception):

@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import AsyncGenerator, Mapping, Optional
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
-from vllm.config import DecodingConfig, ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
@@ -245,11 +245,6 @@ class EngineClient(ABC):
     @abstractmethod
     async def get_model_config(self) -> ModelConfig:
         """Get the model configuration of the vLLM engine."""
-        ...
-
-    @abstractmethod
-    async def get_decoding_config(self) -> DecodingConfig:
-        """Get the decoding configuration of the vLLM engine."""
         ...
 
     @abstractmethod

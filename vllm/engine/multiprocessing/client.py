@@ -16,7 +16,7 @@ from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
 from vllm import PoolingParams
-from vllm.config import DecodingConfig, ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -93,7 +93,6 @@ class MQLLMEngineClient(EngineClient):
         # Get the configs.
         self.vllm_config = engine_config
         self.model_config = engine_config.model_config
-        self.decoding_config = engine_config.decoding_config
 
         if self.vllm_config.model_config.skip_tokenizer_init:
             self.tokenizer = None
@@ -385,9 +384,6 @@ class MQLLMEngineClient(EngineClient):
 
     async def get_vllm_config(self) -> VllmConfig:
         return self.vllm_config
-
-    async def get_decoding_config(self) -> DecodingConfig:
-        return self.decoding_config
 
     async def get_model_config(self) -> ModelConfig:
         return self.model_config

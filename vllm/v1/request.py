@@ -50,7 +50,7 @@ class Request:
             time.time()
 
         self.status = RequestStatus.WAITING
-        if sampling_params and sampling_params.guided_decoding is not None:
+        if sampling_params and sampling_params.structured_outputs is not None:
             self.status = RequestStatus.WAITING_FOR_FSM
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
@@ -63,7 +63,7 @@ class Request:
         elif sampling_params is not None:
             assert sampling_params.max_tokens is not None
             self.max_tokens = sampling_params.max_tokens
-            if sampling_params.guided_decoding is not None:
+            if sampling_params.structured_outputs is not None:
                 self.status = RequestStatus.WAITING_FOR_FSM
 
             if sampling_params.extra_args is not None:
@@ -175,7 +175,7 @@ class Request:
     @property
     def use_structured_output(self) -> bool:
         return self.sampling_params is not None and \
-            self.sampling_params.guided_decoding is not None
+            self.sampling_params.structured_outputs is not None
 
     def record_event(
         self,

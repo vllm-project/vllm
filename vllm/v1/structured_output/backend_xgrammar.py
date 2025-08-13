@@ -34,7 +34,7 @@ class XgrammarBackend(StructuredOutputBackend):
 
     def __post_init__(self):
         self.disable_any_whitespace = \
-            self.vllm_config.decoding_config.disable_any_whitespace
+            self.vllm_config.structured_outputs_config.disable_any_whitespace
 
         if isinstance(self.tokenizer, MistralTokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
@@ -248,10 +248,10 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
 
     Raises ValueError if the request is not supported.
     """
-    if sampling_params.guided_decoding is None:
+    if sampling_params.structured_outputs is None:
         return
 
-    gd_params = sampling_params.guided_decoding
+    gd_params = sampling_params.structured_outputs
 
     if gd_params.regex:
         try:

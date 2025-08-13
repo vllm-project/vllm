@@ -463,9 +463,6 @@ class MistralTokenizer(TokenizerBase):
 
         return decoded
 
-    # WARN: Outlines logits processors can overwrite this method.
-    # See: guided_decoding/outlines_logits_processors.py::_adapt_tokenizer
-    # for more.
     def decode(self,
                ids: Union[list[int], int],
                skip_special_tokens: bool = True) -> str:
