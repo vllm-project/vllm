@@ -12,6 +12,7 @@ import socket
 import sys
 import time
 import uuid
+import weakref
 from collections import deque
 from collections.abc import Sequence
 from datetime import timedelta
@@ -36,6 +37,13 @@ logger = init_logger(__name__)
 USE_SCHED_YIELD = ((sys.version_info[:3] >= (3, 11, 1))
                    or (sys.version_info[:2] == (3, 10)
                        and sys.version_info[2] >= 8))
+
+# Weak reference dictionary to track if a ProcessGroup was initialized via
+# platform-specific logic
+# Keys: ProcessGroup instances (weakly referenced to allow garbage collection)
+# Values: bool indicating platform-specific initialization
+pg_metadata: weakref.WeakKeyDictionary[ProcessGroup,
+                                       bool] = (weakref.WeakKeyDictionary())
 
 
 def sched_yield():
@@ -513,6 +521,7 @@ def stateless_init_torch_distributed_process_group(
             group_rank=group_rank,
             group_size=group_size,
             timeout=timeout)
+        pg_metadata[pg] = True
     except NotImplementedError:
         # If platform doesn't implement stateless_init_device_torch_dist_pg, it
         # will raise a NotImplementedError. In this case, we fall back to gloo.
@@ -520,6 +529,7 @@ def stateless_init_torch_distributed_process_group(
                                      group_rank=group_rank,
                                      group_size=group_size,
                                      timeout=timeout)
+        pg_metadata[pg] = False
     return pg
 
 
