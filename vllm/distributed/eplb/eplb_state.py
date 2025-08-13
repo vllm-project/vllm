@@ -563,6 +563,7 @@ class EplbState:
             num_gpus = ep_group.size()
 
         if num_gpus % num_nodes != 0:
+            self.num_nodes = 1
             logger.warning_once(
                 f"num_gpus % num_nodes != 0, "
                 "not using hierarchical rearrangement algorithm.\n"
