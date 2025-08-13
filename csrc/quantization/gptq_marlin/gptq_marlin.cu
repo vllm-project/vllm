@@ -208,8 +208,8 @@ int get_kernel_cache_size(thread_config_t const& th_config, int thread_m_blocks,
       sh_zp_size = sh_s_size / 2;
   }
 
-  int total_size = max(sh_b_size, sh_red_size) + sh_a_size + sh_s_size +
-                   sh_zp_size + sh_g_idx_size + sh_bias_size;
+  int total_size =
+      tmp_size + sh_a_size + sh_s_size + sh_zp_size + sh_g_idx_size;
 
   return total_size;
 }
