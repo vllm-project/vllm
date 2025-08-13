@@ -11,6 +11,27 @@ from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 
+def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
+    # Shuffle weight along the last dimension so that
+    # we folded the weights to adjance location
+    # Example:
+    # input:
+    #       [[1, 2, 3, 4, 5, 6],
+    #        [7, 8, 9, 10, 11, 12]]
+    # output:
+    #       [[1, 4, 2, 5, 3, 6],
+    #        [7, 10, 8, 11, 9, 12]]
+    # This will be used together with triton swiglu kernel
+    shape = w.shape
+    N = shape[-1]
+    first = w[..., :N // 2]
+    second = w[..., N // 2:]
+
+    stacked = torch.stack((first, second), dim=-1)
+    w_shuffled = stacked.reshape(shape)
+    return w_shuffled
+
+
 def get_token_bin_counts_and_mask(
     tokens: torch.Tensor,
     vocab_size: int,

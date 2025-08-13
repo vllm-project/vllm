@@ -282,10 +282,81 @@ class cmake_build_ext(build_ext):
             self.copy_file(file, dst_file)
 
 
-class repackage_wheel(build_ext):
+class precompiled_build_ext(build_ext):
+    """Disables extension building when using precompiled binaries."""
+
+    def run(self) -> None:
+        assert _is_cuda(
+        ), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+
+    def build_extensions(self) -> None:
+        print("Skipping build_ext: using precompiled extensions.")
+        return
+
+
+class precompiled_wheel_utils:
     """Extracts libraries and other files from an existing wheel."""
 
-    def get_base_commit_in_main_branch(self) -> str:
+    @staticmethod
+    def extract_precompiled_and_patch_package(wheel_url_or_path: str) -> dict:
+        import tempfile
+        import zipfile
+
+        temp_dir = None
+        try:
+            if not os.path.isfile(wheel_url_or_path):
+                wheel_filename = wheel_url_or_path.split("/")[-1]
+                temp_dir = tempfile.mkdtemp(prefix="vllm-wheels")
+                wheel_path = os.path.join(temp_dir, wheel_filename)
+                print(f"Downloading wheel from {wheel_url_or_path} "
+                      f"to {wheel_path}")
+                from urllib.request import urlretrieve
+                urlretrieve(wheel_url_or_path, filename=wheel_path)
+            else:
+                wheel_path = wheel_url_or_path
+                print(f"Using existing wheel at {wheel_path}")
+
+            package_data_patch = {}
+
+            with zipfile.ZipFile(wheel_path) as wheel:
+                files_to_copy = [
+                    "vllm/_C.abi3.so",
+                    "vllm/_moe_C.abi3.so",
+                    "vllm/_flashmla_C.abi3.so",
+                    "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
+                    "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
+                    "vllm/cumem_allocator.abi3.so",
+                ]
+
+                compiled_regex = re.compile(
+                    r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py")
+                file_members = list(
+                    filter(lambda x: x.filename in files_to_copy,
+                           wheel.filelist))
+                file_members += list(
+                    filter(lambda x: compiled_regex.match(x.filename),
+                           wheel.filelist))
+
+                for file in file_members:
+                    print(f"[extract] {file.filename}")
+                    target_path = os.path.join(".", file.filename)
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    with wheel.open(file.filename) as src, open(
+                            target_path, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+
+                    pkg = os.path.dirname(file.filename).replace("/", ".")
+                    package_data_patch.setdefault(pkg, []).append(
+                        os.path.basename(file.filename))
+
+            return package_data_patch
+        finally:
+            if temp_dir is not None:
+                print(f"Removing temporary directory {temp_dir}")
+                shutil.rmtree(temp_dir)
+
+    @staticmethod
+    def get_base_commit_in_main_branch() -> str:
         # Force to use the nightly wheel. This is mainly used for CI testing.
         if envs.VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL:
             return "nightly"
@@ -334,115 +405,12 @@ class repackage_wheel(build_ext):
                 "wheel may not be compatible with your dev branch: %s", err)
             return "nightly"
 
-    def run(self) -> None:
-        assert _is_cuda(
-        ), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
-
-        wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
-        if wheel_location is None:
-            base_commit = self.get_base_commit_in_main_branch()
-            wheel_location = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
-            # Fallback to nightly wheel if latest commit wheel is unavailable,
-            # in this rare case, the nightly release CI hasn't finished on main.
-            if not is_url_available(wheel_location):
-                wheel_location = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
-
-        import zipfile
-
-        if os.path.isfile(wheel_location):
-            wheel_path = wheel_location
-            print(f"Using existing wheel={wheel_path}")
-        else:
-            # Download the wheel from a given URL, assume
-            # the filename is the last part of the URL
-            wheel_filename = wheel_location.split("/")[-1]
-
-            import tempfile
-
-            # create a temporary directory to store the wheel
-            temp_dir = tempfile.mkdtemp(prefix="vllm-wheels")
-            wheel_path = os.path.join(temp_dir, wheel_filename)
-            print(f"Downloading wheel from {wheel_location} to {wheel_path}")
-            from urllib.request import urlretrieve
-            try:
-                urlretrieve(wheel_location, filename=wheel_path)
-            except Exception as e:
-                from setuptools.errors import SetupError
-                raise SetupError(
-                    f"Failed to get vLLM wheel from {wheel_location}") from e
-
-        # During a docker build: determine correct filename, copy wheel.
-        if envs.VLLM_DOCKER_BUILD_CONTEXT:
-            dist_dir = "/workspace/dist"
-            os.makedirs(dist_dir, exist_ok=True)
-            # Determine correct wheel filename from METADATA
-            with zipfile.ZipFile(wheel_path, "r") as z:
-                metadata_file = next(
-                    (n for n in z.namelist()
-                     if n.endswith(".dist-info/METADATA")),
-                    None,
-                )
-                if not metadata_file:
-                    raise RuntimeError(
-                        "Could not find METADATA in precompiled wheel.")
-                metadata = z.read(metadata_file).decode()
-                version_line = next((line for line in metadata.splitlines()
-                                     if line.startswith("Version: ")), None)
-                if not version_line:
-                    raise RuntimeError(
-                        "Could not determine version from METADATA.")
-                version = version_line.split(": ")[1].strip()
-
-            # Build correct filename using internal version
-            arch_tag = "cp38-abi3-manylinux1_x86_64"
-            corrected_wheel_name = f"vllm-{version}-{arch_tag}.whl"
-            final_wheel_path = os.path.join(dist_dir, corrected_wheel_name)
-
-            print(f"Docker build context detected, copying precompiled wheel "
-                  f"({version}) to {final_wheel_path}")
-            shutil.copy2(wheel_path, final_wheel_path)
-            return
-
-        # Unzip the wheel when not in Docker context
-        with zipfile.ZipFile(wheel_path) as wheel:
-            files_to_copy = [
-                "vllm/_C.abi3.so",
-                "vllm/_moe_C.abi3.so",
-                "vllm/_flashmla_C.abi3.so",
-                "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
-                "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
-                "vllm/cumem_allocator.abi3.so",
-            ]
-            file_members = list(
-                filter(lambda x: x.filename in files_to_copy, wheel.filelist))
-            compiled_regex = re.compile(
-                r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py")
-            file_members += list(
-                filter(lambda x: compiled_regex.match(x.filename),
-                       wheel.filelist))
-
-            for file in file_members:
-                print(f"Extracting and including {file.filename} "
-                      "from existing wheel")
-                package_name = os.path.dirname(file.filename).replace("/", ".")
-                file_name = os.path.basename(file.filename)
-
-                if package_name not in package_data:
-                    package_data[package_name] = []
-
-                wheel.extract(file)
-                if not file_name.endswith(".py"):
-                    package_data[package_name].append(file_name)
-
 
 def _no_device() -> bool:
     return VLLM_TARGET_DEVICE == "empty"
 
 
 def _is_cuda() -> bool:
-    # Allow forced CUDA in Docker/precompiled builds, even without torch.cuda
-    if envs.VLLM_USE_PRECOMPILED and envs.VLLM_DOCKER_BUILD_CONTEXT:
-        return True
     has_cuda = torch.version.cuda is not None
     return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
             and not (_is_neuron() or _is_tpu()))
@@ -667,6 +635,29 @@ package_data = {
     ]
 }
 
+# If using precompiled, extract and patch package_data (in advance of setup)
+if envs.VLLM_USE_PRECOMPILED:
+    assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+    wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
+    if wheel_location is not None:
+        wheel_url = wheel_location
+    else:
+        base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
+        wheel_url = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+        from urllib.request import urlopen
+        try:
+            with urlopen(wheel_url) as resp:
+                if resp.status != 200:
+                    wheel_url = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+        except Exception as e:
+            print(f"[warn] Falling back to nightly wheel: {e}")
+            wheel_url = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+
+    patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
+        wheel_url)
+    for pkg, files in patch.items():
+        package_data.setdefault(pkg, []).extend(files)
+
 if _no_device():
     ext_modules = []
 
@@ -675,7 +666,7 @@ if not ext_modules:
 else:
     cmdclass = {
         "build_ext":
-        repackage_wheel if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
+        precompiled_build_ext if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
     }
 
 setup(
@@ -691,7 +682,9 @@ setup(
         ["runai-model-streamer >= 0.13.3", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile",
                   "mistral_common[audio]"],  # Required for audio processing
-        "video": []  # Kept for backwards compatibility
+        "video": [],  # Kept for backwards compatibility
+        # FlashInfer should be updated together with the Dockerfile
+        "flashinfer": ["flashinfer-python==0.2.11"],
     },
     cmdclass=cmdclass,
     package_data=package_data,

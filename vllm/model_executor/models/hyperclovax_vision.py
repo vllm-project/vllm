@@ -25,8 +25,7 @@ import torch
 import torch.nn as nn
 from timm.layers import LayerNorm, LayerNorm2d
 from timm.models.regnet import RegStage
-from transformers import (AutoProcessor, BatchFeature, CLIPVisionConfig,
-                          SiglipVisionConfig)
+from transformers import BatchFeature, CLIPVisionConfig, SiglipVisionConfig
 from transformers.modeling_utils import no_init_weights
 
 from vllm.config import VllmConfig
@@ -80,25 +79,8 @@ HCXVisionMultimodalInputs = Union[HCXVisionMultimodalPixelInputs]
 
 class HCXVisionProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_config(self):
-        return self.ctx.get_hf_config()
-
     def get_vision_encoder_info(self):
         return get_vision_encoder_info(self.get_hf_config())
-
-    def get_hf_processor(
-        self,
-        **kwargs: object,
-    ):
-        processor_cls = type(
-            AutoProcessor.from_pretrained(
-                self.ctx.model_config.model,
-                trust_remote_code=self.ctx.model_config.trust_remote_code,
-            ))
-        return self.ctx.get_hf_processor(
-            processor_cls,
-            **kwargs,
-        )
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}

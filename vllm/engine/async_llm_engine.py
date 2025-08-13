@@ -15,7 +15,7 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
-from vllm.engine.llm_engine import LLMEngine, SchedulerOutputState
+from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.engine.protocol import EngineClient
 from vllm.executor.executor_base import ExecutorBase
@@ -30,7 +30,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device, weak_bind
+from vllm.utils import Device, deprecate_kwargs, weak_bind
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -308,13 +308,6 @@ class _AsyncLLMEngine(LLMEngine):
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
 
-            if (self.scheduler_config.is_multi_step
-                    and scheduler_outputs.num_lookahead_slots > 0):
-                # cache the scheduler outputs for the next iteration if we have
-                # lookahead slots
-                self._cache_scheduler_outputs_for_multi_step(
-                    virtual_engine, seq_group_metadata_list, scheduler_outputs,
-                    allow_async_output_proc)
         else:
             finished_requests_ids = list()
 
@@ -351,29 +344,14 @@ class _AsyncLLMEngine(LLMEngine):
             outputs = await self.model_executor.execute_model_async(
                 execute_model_req)
 
-            # we need to do this here so that last step's sampled_token_ids can
-            # be passed to the next iteration for PP.
-            if self.scheduler_config.is_multi_step:
-                self._update_cached_scheduler_output(virtual_engine, outputs)
         else:
             if len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
             outputs = []
 
-        # Finish the current step for all the sequence groups.
-        if self.scheduler_config.is_multi_step:
-            for seq_group in seq_group_metadata_list:
-                seq_group.finish_step()
-
         if not self._has_remaining_steps(seq_group_metadata_list):
-            # Clear the cache if we have finished all the steps
-            if self.scheduler_config.is_multi_step:
-                self.cached_scheduler_outputs[
-                    virtual_engine] = SchedulerOutputState()
-
             # is_first_step_output is True only when the num_steps of all
-            # the sequences are 1. When the num_steps > 1,
-            # multi_step_model_runner does the first-step output append.
+            # the sequences are 1.
             is_first_step_output: bool = False if not seq_group_metadata_list \
                 else seq_group_metadata_list[0].state.num_steps == 1
 
@@ -554,14 +532,20 @@ class AsyncLLMEngine(EngineClient):
         return LLMEngine._get_executor_cls(engine_config)
 
     @classmethod
+    @deprecate_kwargs(
+        "disable_log_requests",
+        additional_message=("This argument will have no effect. "
+                            "Use `enable_log_requests` instead."),
+    )
     def from_vllm_config(
-        cls,
-        vllm_config: VllmConfig,
-        start_engine_loop: bool = True,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
-        disable_log_requests: bool = False,
-        disable_log_stats: bool = False,
+            cls,
+            vllm_config: VllmConfig,
+            start_engine_loop: bool = True,
+            usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+            stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+            enable_log_requests: bool = False,
+            disable_log_stats: bool = False,
+            disable_log_requests: bool = True,  # Deprecated, will be removed
     ) -> "AsyncLLMEngine":
         """Create an AsyncLLMEngine from the EngineArgs."""
 
@@ -569,7 +553,7 @@ class AsyncLLMEngine(EngineClient):
             vllm_config=vllm_config,
             executor_class=cls._get_executor_cls(vllm_config),
             start_engine_loop=start_engine_loop,
-            log_requests=not disable_log_requests,
+            log_requests=enable_log_requests,
             log_stats=not disable_log_stats,
             usage_context=usage_context,
             stat_loggers=stat_loggers,
@@ -598,7 +582,7 @@ class AsyncLLMEngine(EngineClient):
             usage_context=usage_context,
             stat_loggers=stat_loggers,
             disable_log_stats=engine_args.disable_log_stats,
-            disable_log_requests=engine_args.disable_log_requests,
+            enable_log_requests=engine_args.enable_log_requests,
         )
 
     @property

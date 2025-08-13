@@ -190,7 +190,7 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union
+from typing import ClassVar, Generic, Optional, TypeVar, Union
 
 import torch
 
@@ -209,10 +209,12 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                UnquantizedLinearMethod)
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
-from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata,
-    get_per_layer_parameters, infer_global_hyperparameters,
-    reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
+from vllm.utils.flashinfer import has_nvidia_artifactory
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata,
+                                              get_per_layer_parameters,
+                                              infer_global_hyperparameters,
+                                              split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 try:
@@ -231,10 +233,6 @@ try:
     flashinfer_available = True
 except ImportError:
     flashinfer_available = False
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
 
 logger = init_logger(__name__)
 
@@ -379,17 +377,16 @@ M = TypeVar("M", bound=MLACommonMetadata)
 
 
 def use_flashinfer_prefill() -> bool:
-    if flashinfer_available and not envs.VLLM_USE_CUDNN_PREFILL:
-        # For blackwell default to flashinfer prefill if its available since
-        #  its faster than FA2.
-        return current_platform.has_device_capability(100)
-    return False
+    # For blackwell default to flashinfer prefill if its available since
+    # it is faster than FA2.
+    return (flashinfer_available and not envs.VLLM_USE_CUDNN_PREFILL
+            and current_platform.is_device_capability(100))
 
 
 def use_cudnn_prefill() -> bool:
-    if flashinfer_available and envs.VLLM_USE_CUDNN_PREFILL:
-        return current_platform.has_device_capability(100)
-    return False
+    return (flashinfer_available and envs.VLLM_USE_CUDNN_PREFILL
+            and current_platform.is_device_capability(100)
+            and has_nvidia_artifactory())
 
 
 # Currently 394MB, this can be tuned based on GEMM sizes used.
@@ -403,6 +400,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+    reorder_batch_threshold: ClassVar[int] = 1
 
     def __init__(self,
                  kv_cache_spec: AttentionSpec,
@@ -558,12 +556,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         prefill.prefill_main = self._fi_prefill_main
         prefill.prefill_chunks = self._fi_prefill_chunks
-
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(input_batch,
-                                                           scheduler_output,
-                                                           decode_threshold=1)
 
     def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor):

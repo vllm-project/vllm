@@ -29,6 +29,7 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
 from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
 from openai.types.responses import ResponseInputImageParam
+from openai_harmony import Message as OpenAIHarmonyMessage
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 # yapf: enable
@@ -48,7 +49,7 @@ from vllm.transformers_utils.chat_templates import (
 # yapf: enable
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import deprecate_kwargs, random_uuid
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -207,7 +208,8 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
 
 
 ChatCompletionMessageParam = Union[OpenAIChatCompletionMessageParam,
-                                   CustomChatCompletionMessageParam]
+                                   CustomChatCompletionMessageParam,
+                                   OpenAIHarmonyMessage]
 
 
 # TODO: Make fields ReadOnly once mypy supports it
@@ -383,17 +385,12 @@ def resolve_mistral_chat_template(
     return None
 
 
-@deprecate_kwargs(
-    "trust_remote_code",
-    additional_message="Please use `model_config.trust_remote_code` instead.",
-)
 def resolve_hf_chat_template(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
     *,
     model_config: ModelConfig,
-    trust_remote_code: Optional[bool] = None,
 ) -> Optional[str]:
     # 1st priority: The given chat template
     if chat_template is not None:
@@ -488,10 +485,6 @@ def _log_chat_template_content_format(
         )
 
 
-@deprecate_kwargs(
-    "trust_remote_code",
-    additional_message="Please use `model_config.trust_remote_code` instead.",
-)
 def resolve_chat_template_content_format(
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
@@ -499,7 +492,6 @@ def resolve_chat_template_content_format(
     tokenizer: AnyTokenizer,
     *,
     model_config: ModelConfig,
-    trust_remote_code: Optional[bool] = None,
 ) -> _ChatTemplateContentFormat:
     if given_format != "auto":
         return given_format
@@ -545,9 +537,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         return self._model_config
 
     @cached_property
-    def model_cls(self):
+    def model_cls(self) -> type[SupportsMultiModal]:
         from vllm.model_executor.model_loader import get_model_cls
-        return get_model_cls(self.model_config)
+        model_cls = get_model_cls(self.model_config)
+        return cast(type[SupportsMultiModal], model_cls)
 
     @property
     def allowed_local_media_path(self):
@@ -557,39 +550,23 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def mm_registry(self):
         return MULTIMODAL_REGISTRY
 
+    @cached_property
+    def mm_processor(self):
+        return self.mm_registry.create_processor(self.model_config)
+
     def add(self, modality: ModalityStr, item: _T) -> Optional[str]:
         """
         Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
         """
-        mm_registry = self.mm_registry
-        model_config = self.model_config
-        model_cls = cast(SupportsMultiModal, self.model_cls)
-
         input_modality = modality.replace("_embeds", "")
+        num_items = len(self._items_by_modality[modality]) + 1
 
-        if mm_registry.has_processor(model_config):
-            mm_processor = mm_registry.create_processor(model_config)
-            allowed_counts = mm_processor.info.get_allowed_mm_limits()
-            allowed_count = allowed_counts.get(input_modality, 0)
-        else:
-            mm_config = model_config.multimodal_config
-            if mm_config is None:
-                msg = "This model does not support multi-modal inputs"
-                raise ValueError(msg)
-
-            allowed_count = mm_config.get_limit_per_prompt(input_modality)
-
-        current_count = len(self._items_by_modality[modality]) + 1
-        if current_count > allowed_count:
-            raise ValueError(
-                f"At most {allowed_count} {modality}(s) may be provided in "
-                "one request. You can set `--limit-mm-per-prompt` to "
-                "increase this limit if the model supports it.")
+        self.mm_processor.validate_num_items(input_modality, num_items)
 
         self._items_by_modality[modality].append(item)
 
-        return model_cls.get_placeholder_str(modality, current_count)
+        return self.model_cls.get_placeholder_str(modality, num_items)
 
     @abstractmethod
     def create_parser(self) -> "BaseMultiModalContentParser":
@@ -1285,10 +1262,6 @@ def parse_chat_messages_futures(
     return conversation, mm_tracker.all_mm_data()
 
 
-@deprecate_kwargs(
-    "trust_remote_code",
-    additional_message="Please use `model_config.trust_remote_code` instead.",
-)
 def apply_hf_chat_template(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     conversation: list[ConversationMessage],
@@ -1297,8 +1270,6 @@ def apply_hf_chat_template(
     *,
     model_config: ModelConfig,
     tokenize: bool = False,  # Different from HF's default
-    # Deprecated, explicitly capture here so it doesn't slit into kwargs.
-    trust_remote_code: Optional[bool] = None,
     **kwargs: Any,
 ) -> str:
     hf_chat_template = resolve_hf_chat_template(

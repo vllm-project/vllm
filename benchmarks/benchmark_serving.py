@@ -5,8 +5,7 @@ r"""Benchmark online serving throughput.
 On the server side, run one of the following commands:
     vLLM OpenAI API server
     vllm serve <your_model> \
-        --swap-space 16 \
-        --disable-log-requests
+        --swap-space 16
 
 On the client side, run:
     python benchmarks/benchmark_serving.py \
@@ -264,7 +263,14 @@ async def benchmark(
         input_requests[0].multi_modal_data,
     )
 
-    assert test_mm_content is None or isinstance(test_mm_content, dict)
+    assert (
+        test_mm_content is None
+        or isinstance(test_mm_content, dict)
+        or (
+            isinstance(test_mm_content, list)
+            and all(isinstance(item, dict) for item in test_mm_content)
+        )
+    ), "multi_modal_data must be a dict or list[dict]"
     test_input = RequestFuncInput(
         model=model_id,
         model_name=model_name,
