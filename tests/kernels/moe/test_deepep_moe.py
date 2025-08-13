@@ -15,6 +15,7 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -129,10 +130,8 @@ def make_modular_kernel(
     num_local_experts: int,
     q_dtype: Optional[torch.dtype],
     use_fp8_dispatch: bool,
-    per_act_token_quant: bool,
+    quant_config: FusedMoEQuantConfig,
 ) -> FusedMoEModularKernel:
-
-    is_quantized = q_dtype is not None
 
     ht_args: Optional[DeepEPHTArgs] = None
     ll_args: Optional[DeepEPLLArgs] = None
@@ -163,19 +162,11 @@ def make_modular_kernel(
         fused_experts = BatchedTritonExperts(
             max_num_tokens=MAX_TOKENS_PER_RANK,
             num_dispatchers=num_dispatchers,
-            use_fp8_w8a8=is_quantized,
-            use_int8_w8a8=False,
-            use_int8_w8a16=False,
-            use_int4_w4a16=False,
-            per_act_token_quant=False,
+            quant_config=quant_config,
         )
     else:
         fused_experts = TritonExperts(
-            use_fp8_w8a8=is_quantized,
-            use_int8_w8a8=False,
-            use_int8_w8a16=False,
-            use_int4_w4a16=False,
-            per_act_token_quant=per_act_token_quant,
+            quant_config=quant_config,
         )
 
     mk = FusedMoEModularKernel(prepare_finalize=a2a,
@@ -217,10 +208,17 @@ def deep_ep_moe_impl(
     if is_quantized:
         q_dtype = torch.float8_e4m3fn
 
+    quant_config = FusedMoEQuantConfig.make(
+        q_dtype,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        per_act_token_quant=per_act_token_quant,
+    )
+
     # Make modular kernel
     mk: FusedMoEModularKernel = make_modular_kernel(
         pg, pgi, low_latency_mode, hidden_size, dp_size, num_experts,
-        num_local_experts, q_dtype, use_fp8_dispatch, per_act_token_quant)
+        num_local_experts, q_dtype, use_fp8_dispatch, quant_config)
 
     out_hidden_states = torch.empty_like(test_tensors.rank_tokens)
     total_num_tokens = test_tensors.rank_tokens.size(0)
@@ -245,12 +243,6 @@ def deep_ep_moe_impl(
                          activation="silu",
                          global_num_experts=num_experts,
                          expert_map=build_expert_map(),
-                         w1_scale=w1_scale,
-                         w2_scale=w2_scale,
-                         w1_zp=None,
-                         w2_zp=None,
-                         a1_scale=rank_token_scales_chunk,
-                         a2_scale=None,
                          apply_router_weight_on_input=False)
 
         if not skip_result_store:

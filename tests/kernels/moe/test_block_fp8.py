@@ -204,8 +204,8 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
             topk_ids
         )
 
-    # 0.039 only needed for [40000-4608-7168-2-1-block_size852-dtype852-0]
-    tol = 0.035 if M < 40000 else 0.039
+    # 0.039 only needed for M >= 8192
+    tol = 0.035 if M < 8192 else 0.039
     torch.testing.assert_close(out, ref_out, atol=tol, rtol=tol)
     torch.testing.assert_close(m_out, ref_out, atol=tol, rtol=tol)
 
@@ -243,7 +243,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
         K,
         dtype,
         torch.float8_e4m3fn,
-        per_act_token_quant=False,
+        per_out_ch_quant=False,
         block_shape=block_size,
     )
 

@@ -22,7 +22,8 @@ from .modular_kernel_tools.common import (Config, RankTensors, WeightTensors,
                                           run_modular_kernel)
 from .modular_kernel_tools.mk_objects import (
     MK_FUSED_EXPERT_TYPES, MK_MULTI_GPU_PREPARE_FINALIZE_TYPES,
-    MK_QUANT_CONFIGS, MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES, expert_info)
+    MK_QUANT_CONFIGS, MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES, expert_info,
+    TestMoEQuantConfig)
 from .modular_kernel_tools.parallel_utils import (ProcessGroupInfo,
                                                   parallel_launch_with_config)
 
@@ -167,7 +168,7 @@ def is_nyi_config(config: Config) -> bool:
 @meets_multi_gpu_requirements
 def test_modular_kernel_combinations_multigpu(
         k: int, n: int, e: int, dtype: torch.dtype,
-        quant_config: Optional[FusedMoEQuantConfig],
+        quant_config: Optional[TestMoEQuantConfig],
         combination: tuple[mk.FusedMoEPrepareAndFinalize,
                            mk.FusedMoEPermuteExpertsUnpermute],
         fused_moe_chunk_size: Optional[int], world_size: int, pytestconfig):
@@ -208,7 +209,7 @@ def test_modular_kernel_combinations_multigpu(
 @pytest.mark.parametrize("world_size", [1])
 def test_modular_kernel_combinations_singlegpu(
         k: int, n: int, e: int, dtype: torch.dtype,
-        quant_config: Optional[FusedMoEQuantConfig],
+        quant_config: Optional[TestMoEQuantConfig],
         combination: tuple[mk.FusedMoEPrepareAndFinalize,
                            mk.FusedMoEPermuteExpertsUnpermute],
         fused_moe_chunk_size: Optional[int], world_size: int, pytestconfig):
