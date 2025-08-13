@@ -277,7 +277,7 @@ class MambaMixer(MambaBase, CustomOp):
         ssm_outputs = []
 
         if has_prefill:
-            # 2.a Prefill: Convolution sequence transformation
+            # 2. Convolution sequence transformation
             conv_out_p = causal_conv1d_fn(hidden_states_BC_p,
                                           conv_weights,
                                           self.conv1d.bias,
@@ -291,7 +291,7 @@ class MambaMixer(MambaBase, CustomOp):
                 conv_out_p.transpose(-2, -1))
             time_proj_bias = self._time_proj_bias()
 
-            # 4.a Prefill: perform the recurrence y ← SSM(A, B, C, Δ)(x)
+            # 4. Perform the recurrence y ← SSM(A, B, C, Δ)(x)
             scan_out_p = selective_scan_fn(
                 conv_out_p,
                 ssm_state,
@@ -309,7 +309,7 @@ class MambaMixer(MambaBase, CustomOp):
             ssm_outputs.append(scan_out_p)
 
         if has_decode:
-            # 2.b Decode: Convolution sequence transformation
+            # 2. Convolution sequence transformation
             conv_out_d = causal_conv1d_update(
                 hidden_states_BC_d.transpose(0, 1),
                 conv_state,
@@ -319,12 +319,11 @@ class MambaMixer(MambaBase, CustomOp):
                 conv_state_indices=state_indices_tensor_d).transpose(0, 1)
 
             # 3. State Space Model sequence transformation.
-            #  Lora kernel requires contiguous tensor.
             discrete_time_step_d, B_d, C_d = self._ssm_transform(
                 conv_out_d.transpose(-2, -1))
             time_proj_bias = self._time_proj_bias()
 
-            # 4.b Decode: perform the recurrence y ← SSM(A, B, C, Δ)(x)
+            # 4. Perform the recurrence y ← SSM(A, B, C, Δ)(x)
             scan_outputs_d = torch.empty_like(
                 hidden_states_BC_d.transpose(0, 1))
             selective_state_update(ssm_state,
