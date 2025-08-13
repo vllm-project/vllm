@@ -579,26 +579,31 @@ class OpenAIServing:
     ) -> TextTokensPrompt:
         token_num = len(input_ids)
 
-        # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
-        # and does not require model context length validation
-        if isinstance(request, (TokenizeCompletionRequest, TokenizeChatRequest,
-                                DetokenizeRequest)):
-            return TextTokensPrompt(prompt=input_text,
-                                    prompt_token_ids=input_ids)
-
-        if token_num >= self.max_model_len:
-            raise ValueError(
-                f"This model's maximum context length is "
-                f"{self.max_model_len} tokens. However, your request has "
-                f"{token_num} input tokens. Please reduce the length of "
-                "the input.")
-
         # Note: EmbeddingRequest, ClassificationRequest,
         # and ScoreRequest doesn't have max_tokens
         if isinstance(request,
                       (EmbeddingChatRequest, EmbeddingCompletionRequest,
                        ScoreRequest, RerankRequest, ClassificationRequest)):
 
+            if token_num > self.max_model_len:
+                operations: dict[type[AnyRequest], str] = {
+                    ScoreRequest: "score",
+                    ClassificationRequest: "classification"
+                }
+                operation = operations.get(type(request),
+                                           "embedding generation")
+                raise ValueError(
+                    f"This model's maximum context length is "
+                    f"{self.max_model_len} tokens. However, you requested "
+                    f"{token_num} tokens in the input for {operation}. "
+                    f"Please reduce the length of the input.")
+            return TextTokensPrompt(prompt=input_text,
+                                    prompt_token_ids=input_ids)
+
+        # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
+        # and does not require model context length validation
+        if isinstance(request, (TokenizeCompletionRequest, TokenizeChatRequest,
+                                DetokenizeRequest)):
             return TextTokensPrompt(prompt=input_text,
                                     prompt_token_ids=input_ids)
 
@@ -608,9 +613,14 @@ class OpenAIServing:
             max_tokens = request.max_completion_tokens or request.max_tokens
         else:
             max_tokens = getattr(request, "max_tokens", None)
-
-        if max_tokens is not None and \
-            token_num + max_tokens > self.max_model_len:
+        if max_tokens is None:
+            if token_num >= self.max_model_len:
+                raise ValueError(
+                    f"This model's maximum context length is "
+                    f"{self.max_model_len} tokens. However, your request has "
+                    f"{token_num} input tokens. Please reduce the length of "
+                    "the input messages.")
+        elif token_num + max_tokens > self.max_model_len:
             raise ValueError(
                 "'max_tokens' or 'max_completion_tokens' is too large: "
                 f"{max_tokens}. This model's maximum context length is "
