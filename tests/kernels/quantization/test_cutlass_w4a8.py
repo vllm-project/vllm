@@ -1,0 +1,254 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Tests for the CUTLASS W4A8 kernel.
+
+Run `pytest tests/kernels/test_cutlass_w4a8.py`.
+"""
+
+import math
+from dataclasses import dataclass, fields
+from typing import Optional
+
+import pytest
+import torch
+
+from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    pack_rows, quantize_weights)
+from vllm.platforms import current_platform
+from vllm.scalar_type import ScalarType, scalar_types
+
+# TODO: in future PR refactor this and `is_quant_method_supported` in the kernel
+#  unit tests to a common utility function. Currently the use of
+#  `is_quant_method_supported` conflates kernels with quantization methods
+#  an assumption which is breaking down as quantizations methods can have
+#  have kernels and some kernels support multiple quantization methods.
+IS_SUPPORTED_BY_GPU = current_platform.get_device_capability()[0] >= 9
+
+MNK_SHAPES = [
+    (1, 128, 128),
+    (1, 512, 1024),
+    (1, 4096, 4096),
+    (1, 8192, 28672),
+    (13, 8192, 4096),
+    (26, 4096, 8192),
+    (64, 4096, 4096),
+    (64, 8192, 28672),
+    (257, 128, 4096),
+    (257, 4096, 4096),
+    (1024, 4096, 8192),
+    (1024, 8192, 4096),
+]
+
+
+@dataclass
+class TypeConfig:
+    act_type: torch.dtype
+    weight_type: ScalarType
+    output_type: Optional[torch.dtype]
+    group_scale_type: Optional[torch.dtype]
+    channel_scale_type: Optional[torch.dtype]
+    token_scale_type: Optional[torch.dtype]
+
+
+@dataclass
+class Tensors:
+    w_ref: torch.Tensor
+    a_ref: torch.Tensor
+    a: torch.Tensor
+    w_q: torch.Tensor
+    w_g_s: Optional[torch.Tensor]
+    w_ch_s: Optional[torch.Tensor]
+    w_tok_s: Optional[torch.Tensor]
+
+
+# (Act Type, Weight Type, Output Type, Scale Type, ZeroPoints,
+#  Ch Scales Type, Tok Scales Type)
+# NOTE: None "Scale Type" means the act type is floating point
+#       None "Output Type" means the output type is the same as the act type
+TestTypeTuple = tuple[list[torch.dtype], ScalarType, Optional[torch.dtype],
+                      Optional[torch.dtype], bool]
+TEST_TYPES = [
+    # TODO: tok scale fp32, out dtype fp16
+    *(TypeConfig(act_type=torch.float8_e4m3fn,
+                 weight_type=w_type,
+                 output_type=o_type,
+                 group_scale_type=torch.float8_e4m3fn,
+                 channel_scale_type=None,
+                 token_scale_type=None)
+      for w_type in [scalar_types.int4]
+      for o_type in [torch.bfloat16]),
+]
+
+# TODO: in future PR refactor this and `is_quant_method_supported` in the kernel
+#  unit tests to a common utility function. Currently the use of
+#  `is_quant_method_supported` conflates kernels with quantization methods
+#  an assumption which is breaking down as quantizations methods can have
+#  have kernels and some kernels support multiple quantization methods.
+IS_SUPPORTED_BY_GPU = current_platform.has_device_capability(90)
+
+
+# For testing quantized linear kernels
+def to_fp8(tensor: torch.Tensor):
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    return tensor.clamp(
+        min=finfo.min, max=finfo.max).to(dtype=torch.float8_e4m3fn)
+
+
+def cutlass_quantize_and_pack(atype: torch.dtype,
+                              w: torch.Tensor,
+                              wtype: ScalarType,
+                              stype: Optional[torch.dtype],
+                              group_size: Optional[int],
+                              zero_points: bool = False):
+    assert wtype.is_integer(), "TODO: support floating point weights"
+
+    w_ref, w_q, w_s, w_zp = quantize_weights(
+        w,
+        wtype,
+        group_size=group_size,
+        zero_points=zero_points)
+
+    # since scales are cast to fp8 we need to compute w_ref this way
+    w_ref = ((w_q).to(torch.float32) * w_s.to(atype).to(torch.float32).repeat_interleave(group_size, dim=0)).to(atype)
+    # prevent sign extend
+    w_q = pack_rows(w_q & 0x0F, wtype.size_bits, *w_q.shape)
+    w_q = w_q.t().contiguous().t()  # convert to col major
+
+    w_q_packed = ops.cutlass_encode_and_reorder_int4b(w_q)
+    w_s_packed = ops.cutlass_pack_scale_fp8(w_s.to(atype))
+    # what is this opcheck for?
+    # opcheck(torch.ops._C.machete_prepack_B, (w_q, atype, wtype.id, stype))
+
+    return w_ref, w_q_packed, w_s_packed, w_zp
+
+
+def create_test_tensors(shape: tuple[int, int, int],
+                        types: TypeConfig,
+                        group_size: Optional[int]) -> Tensors:
+    m, n, k = shape
+
+    print("create_test_tensors, shape:", shape, "types:", types, "group_size:",
+          group_size)
+
+    a = to_fp8(torch.randn((m, k), device="cuda"))
+    w = to_fp8(torch.randn((k, n), device="cuda"))
+
+    if types.group_scale_type is not None:
+        w = w.to(types.group_scale_type)
+    if w.dtype.itemsize == 1:
+        w = w.to(torch.float16)
+
+    w_ref, w_q_packed, w_s, w_zp = cutlass_quantize_and_pack(
+        a.dtype, w, types.weight_type, types.group_scale_type, group_size,
+        False)
+
+    a_ref = a.to(torch.float32)
+    w_ref = w_ref.to(torch.float32)
+
+    # TODO: add when per-tok scales implemented in epilogue
+    w_tok_s = torch.ones((m, 1), device='cuda', dtype=torch.float32)
+    w_ch_s = torch.ones((1, n), device='cuda', dtype=torch.float32)
+
+    return Tensors(w_ref=w_ref,
+                   a_ref=a_ref,
+                   a=a,
+                   w_q=w_q_packed,
+                   w_g_s=w_s,
+                   w_ch_s=w_ch_s,
+                   w_tok_s=w_tok_s)
+
+
+# None stype means scales use the same dtype as a
+def mm_test_helper(types: TypeConfig,
+                           tensors: Tensors,
+                           group_size: Optional[int] = None,
+                           schedule: Optional[str] = None):
+    # CUTLASS upstream uses fp8 with fastaccum as reference
+    # https://github.com/NVIDIA/cutlass/blob/main/examples/55_hopper_mixed_dtype_gemm/55_hopper_int4_fp8_gemm.cu#L406
+    output_ref = torch._scaled_mm(tensors.a_ref.to(types.act_type),
+                                  tensors.w_ref.to(types.act_type).t().contiguous().t(), # col major
+                                  tensors.w_tok_s,
+                                  tensors.w_ch_s,
+                                  out_dtype=types.output_type,
+                                  use_fast_accum=True)
+
+    output = ops.cutlass_w4a8_mm(
+        a=tensors.a,
+        b_q=tensors.w_q,
+        b_type=types.weight_type,
+        b_group_scales=tensors.w_g_s
+    )
+
+    print(output)
+    print(output_ref)
+
+    torch.testing.assert_close(output,
+                               output_ref.to(output.dtype),
+                               rtol=1e-3,
+                               atol=1e-3)
+
+
+@pytest.mark.skipif(not IS_SUPPORTED_BY_GPU,
+                    reason="CUTLASS W4A8 is not supported on this GPU type.")
+@pytest.mark.parametrize("shape",
+                         MNK_SHAPES,
+                         ids=lambda x: "x".join(str(v) for v in x))
+@pytest.mark.parametrize("types", TEST_TYPES)
+def test_cutlass_w4a8(shape, types: TypeConfig):
+    group_sizes = [128]
+    for group_size in group_sizes:
+        tensors = create_test_tensors(shape, types, group_size)
+        mm_test_helper(types, tensors, group_size)
+
+# TODO: cudagraph
+# # Test to make sure cuda graphs work
+# class W4A8Layer(torch.nn.Module):
+
+#     def __init__(self, **kwargs):
+#         super().__init__()
+#         self.kwargs = kwargs
+
+#     def forward(self, a):
+#         return ops.machete_mm(a=a, **self.kwargs)
+
+
+# @pytest.mark.skipif(not IS_SUPPORTED_BY_GPU,
+#                     reason="Machete is not supported on this GPU type.")
+# def test_machete_cuda_graph():
+#     m, n, k = 512, 4096, 4096
+
+#     a = rand_data((m, k), torch.float16)
+#     b = rand_data((k, n), torch.float16)
+#     wtype = scalar_types.uint4b8
+#     stype = torch.float16
+#     group_size = 128
+#     zero_points = False
+
+#     w_ref, w_q_packed, w_s, w_zp = machete_quantize_and_pack(
+#         a.dtype, b, wtype, stype, group_size, zero_points)
+
+#     # Construct a trivial model with a single layer that calls a machete kernel
+#     model = W4A8Layer(
+#         b_q=w_q_packed,
+#         b_type=wtype,
+#         b_group_scales=w_s,
+#         b_group_size=group_size,
+#     )
+
+#     output_ref = torch.matmul(a, w_ref)
+
+#     # Run the model with a cuda graph
+#     stream = torch.cuda.Stream()
+#     with torch.cuda.stream(stream):
+#         g = torch.cuda.CUDAGraph()
+#         with torch.cuda.graph(g):
+#             output = model(a)
+#     output.zero_()
+#     g.replay()
+
+#     # Relax atol as our reduction dim becomes larger (more rounding error)
+#     # Relax atol when we have zeropoints since the way machete applies
+#     #  zeropoints (after scales) causes noise around 0
+#     atol = 1 if zero_points else min(5e-2 * math.sqrt(k), 1)
+#     torch.testing.assert_close(output, output_ref, rtol=1e-1, atol=atol)
