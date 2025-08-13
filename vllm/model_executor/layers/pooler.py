@@ -44,15 +44,14 @@ class ResolvedPoolingConfig:
     task: PoolingTask
 
     @classmethod
-    def from_config_with_defaults(
+    def from_config(
         cls,
         task: PoolingTask,
         pooler_config: PoolerConfig,
-        pooling_type: PoolingType,
     ) -> "ResolvedPoolingConfig":
+        assert pooler_config.pooling_type is not None
         return cls(task=task,
-                   pooling_type=PoolingType[pooler_config.pooling_type]
-                   if pooler_config.pooling_type is not None else pooling_type)
+                   pooling_type=PoolingType[pooler_config.pooling_type])
 
 
 @dataclass(frozen=True)
@@ -73,14 +72,18 @@ class Pooler(nn.Module, ABC):
         *,
         default_pooling_type: PoolingType = PoolingType.ALL,
     ):
-        resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
-            task="encode",
-            pooler_config=pooler_config,
-            pooling_type=default_pooling_type,
-        )
-
-        if resolved_config.pooling_type == PoolingType.STEP:
+        if pooler_config.pooling_type == "STEP":
             return StepPooler()
+
+        # Use original logic: if pooler_config.pooling_type is None, use default
+        if pooler_config.pooling_type is not None:
+            resolved_config = ResolvedPoolingConfig.from_config(
+                task="encode",
+                pooler_config=pooler_config,
+            )
+        else:
+            resolved_config = ResolvedPoolingConfig(
+                task="encode", pooling_type=default_pooling_type)
 
         return SimplePooler.from_config(resolved_config)
 
@@ -91,11 +94,15 @@ class Pooler(nn.Module, ABC):
         default_pooling_type: PoolingType = PoolingType.LAST,
         projector: Optional[nn.Module] = None,
     ):
-        resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
-            task="embed",
-            pooler_config=pooler_config,
-            pooling_type=default_pooling_type,
-        )
+        # Use original logic: if pooler_config.pooling_type is None, use default
+        if pooler_config.pooling_type is not None:
+            resolved_config = ResolvedPoolingConfig.from_config(
+                task="embed",
+                pooler_config=pooler_config,
+            )
+        else:
+            resolved_config = ResolvedPoolingConfig(
+                task="embed", pooling_type=default_pooling_type)
 
         return SimplePooler.from_config(resolved_config, projector=projector)
 
@@ -106,11 +113,15 @@ class Pooler(nn.Module, ABC):
         *,
         default_pooling_type: PoolingType = PoolingType.LAST,
     ):
-        resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
-            task="classify",
-            pooler_config=pooler_config,
-            pooling_type=default_pooling_type,
-        )
+        # Use original logic: if pooler_config.pooling_type is None, use default
+        if pooler_config.pooling_type is not None:
+            resolved_config = ResolvedPoolingConfig.from_config(
+                task="classify",
+                pooler_config=pooler_config,
+            )
+        else:
+            resolved_config = ResolvedPoolingConfig(
+                task="classify", pooling_type=default_pooling_type)
 
         pooling = PoolingMethod.from_pooling_type(resolved_config.pooling_type)
 
@@ -616,11 +627,11 @@ class SimplePooler(Pooler):
     ) -> "SimplePooler":
         pooling = PoolingMethod.from_pooling_type(pooler_config.pooling_type)
         if pooler_config.task == "embed":
-            head = EmbeddingPoolerHead(projector=projector)  # 传递 projector
+            head = EmbeddingPoolerHead(projector=projector)
         elif pooler_config.task == "encode":
-            head = RewardPoolerHead()  # encode 不需要 projector
+            head = RewardPoolerHead()
         else:
-            raise ValueError(f"Unknown task: {pooler_config.task}")
+            raise NotImplementedError(f"Unknown task: {pooler_config.task}")
         return cls(pooling, head)
 
     def __init__(self, pooling: PoolingMethod, head: PoolerHead) -> None:
