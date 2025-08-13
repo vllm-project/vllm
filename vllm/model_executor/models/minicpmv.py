@@ -90,8 +90,12 @@ class MiniCPMVImagePixelInputs(TensorSchema):
             expected_shape: tuple[Union[int, str], ...],
             dynamic_dims: set[str, ...]) -> tuple[int, ...]:
         """Validate a list/tuple of tensors and return the actual shape."""
-        # Ensure all tensors in the list have the same
-        # shape, besides dynamic dimensions
+              
+        # value[0] is the scaled image, and value[1:] is a collection of image slices.
+        # It is ensured that all slices in the collection have the same shape.
+        if len(value) <= 1:
+            return (len(value),) + value[0].shape if value else (0,)
+          
         first = value[1]
         for i, v in enumerate(value[1:]):
             if not isinstance(v, torch.Tensor):
