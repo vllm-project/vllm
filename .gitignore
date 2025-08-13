@@ -209,4 +209,4 @@ shellcheck*/
 csrc/moe/marlin_moe_wna16/kernel_*
 
 # Ignore ep_kernels_workspace folder
-tools/ep_kernels/ep_kernels_workspace/
+ep_kernels_workspace/
