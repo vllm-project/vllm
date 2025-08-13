@@ -493,9 +493,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 req = self.requests[req_id]
                 import os
                 print(f"Setting mrope for request")
-                print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
                 print("prompt_token_ids", len(req.prompt_token_ids))
-                print("req.mrope_position_delta", req.mrope_position_delta)
+                print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
+                print(f"{req.mrope_position_delta=}")
                 print(req.mrope_positions[0])
                 print(req.mrope_positions[1])
                 print(req.mrope_positions[1])
