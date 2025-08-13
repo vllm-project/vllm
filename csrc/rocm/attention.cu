@@ -3679,7 +3679,7 @@ void paged_attention(
       }
       else {
       CALL_CUSTOM_LAUNCHER_BLK_HEAD(__hip_bfloat16, uint8_t,
-                                    vllm::Fp8KVCacheDataType::kFp8E4M3, MFMAType::F16);
+                                    vllm::Fp8KVCacheDataType::kFp8E4M3, MFMAType::Fp8);
       }
     } else {
       TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
