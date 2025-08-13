@@ -1064,7 +1064,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 print(self.mrope_positions_np[0])
                 print(self.mrope_positions_np[1])
                 print(self.mrope_positions_np[2])
-                print()
+                pprint(req)
 
 
     def _calc_spec_decode_metadata(
