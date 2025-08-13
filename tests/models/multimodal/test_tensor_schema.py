@@ -27,6 +27,13 @@ ARCH_TO_SKIP = {
     "MolmoForCausalLM": "incompatible requirements",
     "MiniMaxVL01ForConditionalGeneration": "broken model",
 }
+ARCH_NEEDS_EXTRAS = [
+    "InternVLChatModel",
+    "Idefics3ForConditionalGeneration",
+    "LlavaForConditionalGeneration",
+    "MiniCPMV",
+    "PaliGemmaForConditionalGeneration",
+]
 REPO_ID_TO_SKIP = {"nm-testing/pixtral-12b-FP8-dynamic": "duplicated test"}
 
 ImageInput = list[Image.Image]
@@ -98,10 +105,13 @@ def get_model_id_to_test(
     filtered_results = []
     for model_arch in model_arch_list:
         model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
-        available_repos = list(
-            map(lambda model_id: (model_arch, model_id),
-                [model_info.default, *model_info.extras.values()]))
-        filtered_results.extend(available_repos)
+        if model_info.extras and model_arch in ARCH_NEEDS_EXTRAS:
+            available_repos = list(
+                map(lambda model_id: (model_arch, model_id),
+                    [model_info.default, *model_info.extras.values()]))
+            filtered_results.extend(available_repos)
+        else:
+            filtered_results.append((model_arch, model_info.default))
     return filtered_results
 
 
