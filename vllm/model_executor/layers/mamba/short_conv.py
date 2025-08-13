@@ -158,7 +158,7 @@ class ShortConv(MambaBase, CustomOp):
         )
         # Split along batch dimension
         state_indices_tensor_d, state_indices_tensor_p = torch.split(
-            state_indices_tensor[:num_actual_tokens],
+            state_indices_tensor,
             [num_decodes, num_prefills],
             dim=0,
         )
