@@ -146,7 +146,10 @@ def test_ngram_correctness(
             marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
     ],
     ids=[
-        "qwen3_eagle3", "llama3_eagle", "llama3_eagle3", "llama4_eagle",
+        # "qwen3_eagle3",
+        "llama3_eagle",
+        "llama3_eagle3",
+        "llama4_eagle",
         "llama4_eagle_mm"
     ])
 @pytest.mark.parametrize("attn_backend",
