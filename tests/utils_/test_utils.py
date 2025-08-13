@@ -161,7 +161,6 @@ def parser_with_config():
     parser.add_argument('--port', type=int)
     parser.add_argument('--tensor-parallel-size', type=int)
     parser.add_argument('--trust-remote-code', action='store_true')
-    parser.add_argument('--multi-step-stream-outputs', action=StoreBoolean)
     return parser
 
 
