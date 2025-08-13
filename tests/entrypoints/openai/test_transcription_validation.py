@@ -10,6 +10,7 @@ import librosa
 import numpy as np
 import openai
 import pytest
+import pytest_asyncio
 import soundfile as sf
 from openai._base_client import AsyncAPIClient
 
@@ -37,6 +38,22 @@ def winning_call():
         yield f
 
 
+MODEL_NAME = "openai/whisper-large-v3-turbo"
+
+
+@pytest.fixture(scope="module")
+def server():
+    server_args = ["--enforce-eager"]
+    with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as async_client:
+        yield async_client
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
@@ -61,18 +78,30 @@ async def test_basic_audio(mary_had_lamb, model_name):
 
 
 @pytest.mark.asyncio
-async def test_bad_requests(mary_had_lamb):
-    model_name = "openai/whisper-small"
+async def test_non_asr_model(winning_call):
+    # text to text model
+    model_name = "JackFram/llama-68m"
     server_args = ["--enforce-eager"]
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
+        res = await client.audio.transcriptions.create(model=model_name,
+                                                       file=winning_call,
+                                                       language="en",
+                                                       temperature=0.0)
+        err = res.error
+        assert err["code"] == 400 and not res.text
+        assert err[
+            "message"] == "The model does not support Transcriptions API"
 
-        # invalid language
-        with pytest.raises(openai.BadRequestError):
-            await client.audio.transcriptions.create(model=model_name,
-                                                     file=mary_had_lamb,
-                                                     language="hh",
-                                                     temperature=0.0)
+
+@pytest.mark.asyncio
+async def test_bad_requests(mary_had_lamb, client):
+    # invalid language
+    with pytest.raises(openai.BadRequestError):
+        await client.audio.transcriptions.create(model=MODEL_NAME,
+                                                 file=mary_had_lamb,
+                                                 language="hh",
+                                                 temperature=0.0)
 
 
 @pytest.mark.asyncio
@@ -106,174 +135,135 @@ async def test_long_audio_request(mary_had_lamb, model_name):
 
 
 @pytest.mark.asyncio
-async def test_non_asr_model(winning_call):
+async def test_completion_endpoints(client):
     # text to text model
-    model_name = "JackFram/llama-68m"
-    server_args = ["--enforce-eager"]
-    with RemoteOpenAIServer(model_name, server_args) as remote_server:
-        client = remote_server.get_async_client()
-        res = await client.audio.transcriptions.create(model=model_name,
-                                                       file=winning_call,
-                                                       language="en",
-                                                       temperature=0.0)
-        err = res.error
-        assert err["code"] == 400 and not res.text
-        assert err[
-            "message"] == "The model does not support Transcriptions API"
+    res = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "system",
+            "content": "You are a helpful assistant."
+        }])
+    err = res.error
+    assert err["code"] == 400
+    assert err["message"] == "The model does not support Chat Completions API"
+
+    res = await client.completions.create(model=MODEL_NAME, prompt="Hello")
+    err = res.error
+    assert err["code"] == 400
+    assert err["message"] == "The model does not support Completions API"
 
 
 @pytest.mark.asyncio
-async def test_completion_endpoints():
-    # text to text model
-    model_name = "openai/whisper-small"
-    server_args = ["--enforce-eager"]
-    with RemoteOpenAIServer(model_name, server_args) as remote_server:
-        client = remote_server.get_async_client()
-        res = await client.chat.completions.create(
-            model=model_name,
-            messages=[{
-                "role": "system",
-                "content": "You are a helpful assistant."
-            }])
-        err = res.error
-        assert err["code"] == 400
-        assert err[
-            "message"] == "The model does not support Chat Completions API"
-
-        res = await client.completions.create(model=model_name, prompt="Hello")
-        err = res.error
-        assert err["code"] == 400
-        assert err["message"] == "The model does not support Completions API"
-
-
-@pytest.mark.asyncio
-async def test_streaming_response(winning_call):
-    model_name = "openai/whisper-small"
-    server_args = ["--enforce-eager"]
+async def test_streaming_response(winning_call, client):
     transcription = ""
-    with RemoteOpenAIServer(model_name, server_args) as remote_server:
-        client = remote_server.get_async_client()
-        res_no_stream = await client.audio.transcriptions.create(
-            model=model_name,
+    res_no_stream = await client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=winning_call,
+        response_format="json",
+        language="en",
+        temperature=0.0)
+    # Unfortunately this only works when the openai client is patched
+    # to use streaming mode, not exposed in the transcription api.
+    original_post = AsyncAPIClient.post
+
+    async def post_with_stream(*args, **kwargs):
+        kwargs['stream'] = True
+        return await original_post(*args, **kwargs)
+
+    with patch.object(AsyncAPIClient, "post", new=post_with_stream):
+        res = await client.audio.transcriptions.create(
+            model=MODEL_NAME,
             file=winning_call,
-            response_format="json",
             language="en",
-            temperature=0.0)
-        # Unfortunately this only works when the openai client is patched
-        # to use streaming mode, not exposed in the transcription api.
-        original_post = AsyncAPIClient.post
+            temperature=0.0,
+            extra_body=dict(stream=True),
+            timeout=30)
+        # Reconstruct from chunks and validate
+        async for chunk in res:
+            # just a chunk
+            text = chunk.choices[0]['delta']['content']
+            transcription += text
 
-        async def post_with_stream(*args, **kwargs):
-            kwargs['stream'] = True
-            return await original_post(*args, **kwargs)
-
-        with patch.object(AsyncAPIClient, "post", new=post_with_stream):
-            client = remote_server.get_async_client()
-            res = await client.audio.transcriptions.create(
-                model=model_name,
-                file=winning_call,
-                language="en",
-                temperature=0.0,
-                extra_body=dict(stream=True),
-                timeout=30)
-            # Reconstruct from chunks and validate
-            async for chunk in res:
-                # just a chunk
-                text = chunk.choices[0]['delta']['content']
-                transcription += text
-
-        assert transcription == res_no_stream.text
+    assert transcription == res_no_stream.text
 
 
 @pytest.mark.asyncio
-async def test_stream_options(winning_call):
-    model_name = "openai/whisper-small"
-    server_args = ["--enforce-eager"]
-    with RemoteOpenAIServer(model_name, server_args) as remote_server:
-        original_post = AsyncAPIClient.post
+async def test_stream_options(winning_call, client):
+    original_post = AsyncAPIClient.post
 
-        async def post_with_stream(*args, **kwargs):
-            kwargs['stream'] = True
-            return await original_post(*args, **kwargs)
+    async def post_with_stream(*args, **kwargs):
+        kwargs['stream'] = True
+        return await original_post(*args, **kwargs)
 
-        with patch.object(AsyncAPIClient, "post", new=post_with_stream):
-            client = remote_server.get_async_client()
-            res = await client.audio.transcriptions.create(
-                model=model_name,
-                file=winning_call,
-                language="en",
-                temperature=0.0,
-                extra_body=dict(stream=True,
-                                stream_include_usage=True,
-                                stream_continuous_usage_stats=True),
-                timeout=30)
-            final = False
-            continuous = True
-            async for chunk in res:
-                if not len(chunk.choices):
-                    # final usage sent
-                    final = True
-                else:
-                    continuous = continuous and hasattr(chunk, 'usage')
-            assert final and continuous
+    with patch.object(AsyncAPIClient, "post", new=post_with_stream):
+        res = await client.audio.transcriptions.create(
+            model=MODEL_NAME,
+            file=winning_call,
+            language="en",
+            temperature=0.0,
+            extra_body=dict(stream=True,
+                            stream_include_usage=True,
+                            stream_continuous_usage_stats=True),
+            timeout=30)
+        final = False
+        continuous = True
+        async for chunk in res:
+            if not len(chunk.choices):
+                # final usage sent
+                final = True
+            else:
+                continuous = continuous and hasattr(chunk, 'usage')
+        assert final and continuous
 
 
 @pytest.mark.asyncio
-async def test_sampling_params(mary_had_lamb):
+async def test_sampling_params(mary_had_lamb, client):
     """
     Compare sampling with params and greedy sampling to assert results
     are different when extreme sampling parameters values are picked. 
     """
-    model_name = "openai/whisper-small"
-    server_args = ["--enforce-eager"]
-    with RemoteOpenAIServer(model_name, server_args) as remote_server:
-        client = remote_server.get_async_client()
-        transcription = await client.audio.transcriptions.create(
-            model=model_name,
-            file=mary_had_lamb,
-            language="en",
-            temperature=0.8,
-            extra_body=dict(seed=42,
-                            repetition_penalty=1.9,
-                            top_k=12,
-                            top_p=0.4,
-                            min_p=0.5,
-                            frequency_penalty=1.8,
-                            presence_penalty=2.0))
+    transcription = await client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        temperature=0.8,
+        extra_body=dict(seed=42,
+                        repetition_penalty=1.9,
+                        top_k=12,
+                        top_p=0.4,
+                        min_p=0.5,
+                        frequency_penalty=1.8,
+                        presence_penalty=2.0))
 
-        greedy_transcription = await client.audio.transcriptions.create(
-            model=model_name,
-            file=mary_had_lamb,
-            language="en",
-            temperature=0.0,
-            extra_body=dict(seed=42))
+    greedy_transcription = await client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        temperature=0.0,
+        extra_body=dict(seed=42))
 
-        assert greedy_transcription.text != transcription.text
+    assert greedy_transcription.text != transcription.text
 
 
 @pytest.mark.asyncio
-async def test_audio_prompt(mary_had_lamb):
-    model_name = "openai/whisper-large-v3-turbo"
-    server_args = ["--enforce-eager"]
+async def test_audio_prompt(mary_had_lamb, client):
     prompt = "This is a speech, recorded in a phonograph."
-    with RemoteOpenAIServer(model_name, server_args) as remote_server:
-        #Prompts should not omit the part of original prompt while transcribing.
-        prefix = "The first words I spoke in the original phonograph"
-        client = remote_server.get_async_client()
-        transcription = await client.audio.transcriptions.create(
-            model=model_name,
-            file=mary_had_lamb,
-            language="en",
-            response_format="text",
-            temperature=0.0)
-        out = json.loads(transcription)['text']
-        assert prefix in out
-        transcription_wprompt = await client.audio.transcriptions.create(
-            model=model_name,
-            file=mary_had_lamb,
-            language="en",
-            response_format="text",
-            prompt=prompt,
-            temperature=0.0)
-        out_prompt = json.loads(transcription_wprompt)['text']
-        assert prefix in out_prompt
+    #Prompts should not omit the part of original prompt while transcribing.
+    prefix = "The first words I spoke in the original phonograph"
+    transcription = await client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="text",
+        temperature=0.0)
+    out = json.loads(transcription)['text']
+    assert prefix in out
+    transcription_wprompt = await client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="text",
+        prompt=prompt,
+        temperature=0.0)
+    out_prompt = json.loads(transcription_wprompt)['text']
+    assert prefix in out_prompt
