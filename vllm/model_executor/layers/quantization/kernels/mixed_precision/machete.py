@@ -129,29 +129,10 @@ class MacheteLinearKernel(MPLinearKernel):
                                            group_scales_type=c.act_type)
             return x
 
-        # hack a transform for w4a8 weight
-        def transform_w_q_w4a8(x):
-            assert isinstance(x, BasevLLMParameter)
-            assert not c.has_g_idx, "w4a8 does not support act reordering"
-            # save orig
-            self.w_orig = x.detach().clone().cpu()
-            permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
-            x.data = ops.cutlass_encode_and_reorder_int4b(x.data.t().contiguous().t())
-            return x
-
         def transform_w_s(x):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1)
             x.data = x.data.contiguous()
-            return x
-
-        # hack a transform for w4a8 fp8 scale
-        def transform_w_s_w4a8(x):
-            assert isinstance(x, BasevLLMParameter)
-            permute_param_layout_(x, input_dim=0, output_dim=1)
-            # this needs to be fp8
-            x.data = x.data.contiguous().to(torch.float8_e4m3fn)
-            x.data = ops.cutlass_pack_scale_fp8(x.data)
             return x
 
         def transform_w_zp(x):
@@ -168,9 +149,7 @@ class MacheteLinearKernel(MPLinearKernel):
         # Repack weights and scales for Machete
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
-        # hack w4a8
-        # self._transform_param(layer, self.w_q_name, transform_w_q_w4a8)
-        # self._transform_param(layer, self.w_s_name, transform_w_s_w4a8)
+
         if c.zero_points:
             self._transform_param(layer, self.w_zp_name, transform_w_zp)
 
@@ -193,13 +172,6 @@ class MacheteLinearKernel(MPLinearKernel):
         else:
             w_zp = None
 
-        # czhu: dynamic fp8 quant
-        # x_2d, act_scales = fp8_per_token(x_2d, fake=False)
-        # # # # call cutlass w4a8
-        # output = ops.cutlass_w4a8_mm(a=x_2d,
-        #                              b_q=w_q,
-        #                              b_type=c.weight_type, # not actually used?
-        #                              b_group_scales=w_s)
         output = ops.machete_mm(
                                 a=x_2d,
                                 b_q=w_q,
@@ -207,9 +179,6 @@ class MacheteLinearKernel(MPLinearKernel):
                                 b_group_zeros=w_zp,
                                 b_group_scales=w_s,
                                 b_group_size=c.group_size)
-
-        # simulate per-row fp8 quant, apply in fp32
-        # output = ((output.to(torch.float32)) * (act_scales.to(torch.float32).unsqueeze(1))).to(torch.bfloat16)
 
         if bias is not None:
             output.add_(bias)  # In-place add

@@ -281,12 +281,13 @@ torch::Tensor mm(torch::Tensor const& A,
 }
 
 torch::Tensor pack_scale_fp8(torch::Tensor const& scales) {
-  // TODO: input validation + row/col major ordering of scales? type?
-  // template on the mma/scale type?
+  TORCH_CHECK(scales.dtype() == torch::kFloat8_e4m3fn);
+  TORCH_CHECK(scales.is_contiguous());
+  TORCH_CHECK(scales.is_cuda());
   auto packed_scales =
       torch::empty({scales.numel() * 8}, // TODO: dont hardcode
                    torch::TensorOptions()
-                       .dtype(scales.dtype())  // torch.float8_e4m3fn
+                       .dtype(scales.dtype())
                        .device(scales.device()));
   auto scales_ptr = static_cast<MmaType const*>(scales.const_data_ptr());
   auto packed_scales_ptr =
@@ -296,16 +297,15 @@ torch::Tensor pack_scale_fp8(torch::Tensor const& scales) {
 }
 
 torch::Tensor encode_and_reorder_int4b(torch::Tensor const& B) {
-  // todo: input validation (type, shape, device)
-  auto sizes = B.sizes();
-  int k_packed = sizes[0];
-  int n = sizes[1];
-  int k = k_packed * 8;
+  TORCH_CHECK(B.dtype() == torch::kInt32);
+  TORCH_CHECK(B.dim() == 2);
+  int k = B.size(0) * 8; // logical k
+  int n = B.size(1);
   torch::Tensor B_packed = torch::empty_like(B);
   auto B_ptr = static_cast<QuantType const*>(B.const_data_ptr());
   auto B_packed_ptr = static_cast<QuantType*>(B_packed.data_ptr());
   // encode
-  cutlass::unified_encode_int4b(B_ptr, B_packed_ptr, n * k);  // try this
+  cutlass::unified_encode_int4b(B_ptr, B_packed_ptr, n * k);
   // reorder
   auto shape_B = cute::make_shape(n, k, 1);
   LayoutB_Reordered layout_B_reordered_local = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
