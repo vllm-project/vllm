@@ -176,12 +176,12 @@ class FusedMoEQuantConfig:
         return self.a1.scale
 
     @property
-    def a2_scale(self) -> Optional[torch.Tensor]:
-        return self.a2.scale
-
-    @property
     def a1_gscale(self) -> Optional[torch.Tensor]:
         return self.a1.alpha_or_gscale
+
+    @property
+    def a2_scale(self) -> Optional[torch.Tensor]:
+        return self.a2.scale
 
     @property
     def a2_gscale(self) -> Optional[torch.Tensor]:
@@ -192,36 +192,36 @@ class FusedMoEQuantConfig:
         return self.w1.scale
 
     @property
-    def w2_scale(self) -> Optional[torch.Tensor]:
-        return self.w2.scale
-
-    @property
     def w1_zp(self) -> Optional[torch.Tensor]:
         return self.w1.zp
-
-    @property
-    def w2_zp(self) -> Optional[torch.Tensor]:
-        return self.w2.zp
 
     @property
     def w1_bias(self) -> Optional[torch.Tensor]:
         return self.w1.bias
 
     @property
-    def w2_bias(self) -> Optional[torch.Tensor]:
-        return self.w2.bias
-
-    @property
     def w1_precision(self) -> Optional["PrecisionConfig"]:
         return self.w1.precision
 
     @property
-    def w2_precision(self) -> Optional["PrecisionConfig"]:
-        return self.w2.precision
-
-    @property
     def g1_alphas(self) -> Optional[torch.Tensor]:
         return self.w1.alpha_or_gscale
+
+    @property
+    def w2_scale(self) -> Optional[torch.Tensor]:
+        return self.w2.scale
+
+    @property
+    def w2_zp(self) -> Optional[torch.Tensor]:
+        return self.w2.zp
+
+    @property
+    def w2_bias(self) -> Optional[torch.Tensor]:
+        return self.w2.bias
+
+    @property
+    def w2_precision(self) -> Optional["PrecisionConfig"]:
+        return self.w2.precision
 
     @property
     def g2_alphas(self) -> Optional[torch.Tensor]:
