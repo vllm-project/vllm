@@ -36,7 +36,6 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @simon-mo @aarnphm
 /tests/kernels @tlrmchlsmth @WoosukKwon @yewentao256
 /tests/models @DarkLight1337 @ywang96
-/tests/multi_step @alexm-redhat @comaniac
 /tests/multimodal @DarkLight1337 @ywang96
 /tests/prefix_caching @comaniac @KuntaiDu
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256
