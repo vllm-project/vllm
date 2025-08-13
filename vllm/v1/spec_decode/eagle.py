@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
+import os
 from dataclasses import replace
 from typing import Optional
 
@@ -20,8 +21,6 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.rocm_aiter_fa import (
-    AiterFlashAttentionMetadata)
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
                                                   TreeAttentionMetadataBuilder)
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
@@ -237,10 +236,12 @@ class EagleProposer:
         # On ROCm, both AiterFlashAttention and TritonAttention
         # support multi-token eagle spec decode.
         if current_platform.is_rocm():
-            assert isinstance(
-                attn_metadata,
-                (TritonAttentionMetadata, AiterFlashAttentionMetadata,
-                 FlashAttentionMetadata))
+            allowed_types = (TritonAttentionMetadata, FlashAttentionMetadata)
+            if os.environ.get("VLLM_ROCM_USE_AITER") == "1":
+                from vllm.v1.attention.backends.rocm_aiter_fa import (
+                    AiterFlashAttentionMetadata)
+                allowed_types += (AiterFlashAttentionMetadata, )
+            assert isinstance(attn_metadata, allowed_types)
         else:
             # Currently, only FlashAttention and TreeAttention support
             # multi-token eagle spec decode. This is because the code below
