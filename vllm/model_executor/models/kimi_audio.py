@@ -1,21 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Kimi-Audio model compatible with HuggingFace weights."""
-
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Optional, TypedDict, Union
 
 import os
-import numpy as np
 import torch
 import torch.nn as nn
-import transformers
 
 from transformers import BatchFeature
 from vllm.config import VllmConfig
-from ...transformers_utils.configs import KimiAudioConfig
+from vllm.sequence import IntermediateTensors
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs)
@@ -24,35 +23,11 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.sequence import IntermediateTensors
 from .moonaudio import MoonshotKimiaModel
-from ...transformers_utils.processors import KimiAudioProcessor, WhisperEncoder
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import AutoWeightsLoader, maybe_prefix
-
-from packaging import version
-
-assert version.parse(transformers.__version__) >= version.parse("4.34.1")
-
-if version.parse(transformers.__version__) \
-    >= version.parse("4.35.0"):
-    from transformers.utils import is_flash_attn_2_available as \
-    is_flash_attn_available
-else:
-    from transformers.utils import is_flash_attn_available
-
-if is_flash_attn_available():
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
-    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
-else:
-    raise RuntimeError("flash attention must be installed")
-
-from vllm.config import VllmConfig
-from vllm.sequence import IntermediateTensors
-from .utils import maybe_prefix
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
+from ...transformers_utils.processors import KimiAudioProcessor, WhisperEncoder
+from ...transformers_utils.configs import KimiAudioConfig
 
 
 class KimiAudioMultiModalProjector(nn.Module):

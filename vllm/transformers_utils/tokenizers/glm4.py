@@ -18,7 +18,7 @@
 import math
 import os.path
 import random
-from typing import Optional, Tuple, Union
+from typing import Optional
 
 import numpy as np
 import torch
@@ -27,22 +27,13 @@ import torchaudio
 from torch import nn
 
 from transformers.activations import ACT2FN
-from transformers.cache_utils import EncoderDecoderCache, StaticCache
+from transformers.cache_utils import EncoderDecoderCache
 from transformers import WhisperFeatureExtractor
 from dataclasses import dataclass
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import (
-    is_flash_attn_2_available,
-    is_flash_attn_greater_or_equal_2_10,
-    logging,
-)
+from transformers.utils import logging
 from ..configs import WhisperVQConfig
-
-if is_flash_attn_2_available():
-    from transformers.modeling_flash_attention_utils import (
-        _flash_attention_forward,
-    )
 
 logger = logging.get_logger(__name__)
 
@@ -92,7 +83,7 @@ class CausalConv1d(nn.Conv1d):
         bias=True,
         **kwargs,
     ):
-        super(CausalConv1d, self).__init__(
+        super().__init__(
             in_channels,
             out_channels,
             kernel_size,
@@ -111,7 +102,7 @@ class CausalConv1d(nn.Conv1d):
             inp.unsqueeze(2), (self.left_padding, 0, 0, 0)
         ).squeeze(2)
 
-        return super(CausalConv1d, self).forward(x)
+        return super().forward(x)
 
 
 def sinusoids(
@@ -177,7 +168,8 @@ class WhisperAttention(nn.Module):
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
 
-    # Copied from transformers.models.bart.modeling_bart.BartAttention._shape with BART->whisper
+    # Copied from transformers.models.bart.modeling_bart.
+    # BartAttention._shape with BART->whisper
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return (
             tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
@@ -194,13 +186,13 @@ class WhisperAttention(nn.Module):
         layer_head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-    ) -> Tuple[
-        torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]
+    ) -> tuple[
+        torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]
     ]:
         """Input shape: Batch x Time x Channel"""
 
-        # if key_value_states are provided this layer is used as a cross-attention layer
-        # for the decoder
+        # if key_value_states are provided this layer is used 
+        # as a cross-attention layer for the decoder
         is_cross_attention = key_value_states is not None
         bsz, tgt_len, _ = hidden_states.size()
 
@@ -294,12 +286,13 @@ class WhisperSdpaAttention(WhisperAttention):
         layer_head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-    ) -> Tuple[
-        torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]
+    ) -> tuple[
+        torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]
     ]:
         """Input shape: Batch x Time x Channel"""
         if output_attentions or layer_head_mask is not None:
-            # TODO: Improve this warning with e.g. `model.config._attn_implementation = "manual"` once this is implemented.
+            # TODO: Improve this warning with e.g. `model.config.
+            # _attn_implementation = "manual"` once this is implemented.
             logger.warning_once(
                 "WhisperModel is using WhisperSdpaAttention, "
                 "but `torch.nn.functional.scaled_dot_product_attention` "
@@ -320,8 +313,8 @@ class WhisperSdpaAttention(WhisperAttention):
                 cache_position=cache_position,
             )
 
-        # if key_value_states are provided this layer is used as a cross-attention layer
-        # for the decoder
+        # if key_value_states are provided this layer 
+        # is used as a cross-attention layer for the decoder
         is_cross_attention = key_value_states is not None
         bsz, tgt_len, _ = hidden_states.size()
 
@@ -332,7 +325,8 @@ class WhisperSdpaAttention(WhisperAttention):
         if past_key_value is not None:
             is_updated = past_key_value.is_updated.get(self.layer_idx)
             if is_cross_attention:
-                # after the first generated id, we can subsequently re-use all key/value_states from cache
+                # after the first generated id, we can subsequently 
+                # re-use all key/value_states from cache
                 past_key_value.is_updated[self.layer_idx] = True
                 past_key_value = past_key_value.cross_attention_cache
             else:
@@ -350,7 +344,8 @@ class WhisperSdpaAttention(WhisperAttention):
             key_states = self._shape(self.k_proj(current_states), -1, bsz)
             value_states = self._shape(self.v_proj(current_states), -1, bsz)
             if past_key_value is not None:
-                # save all key/value_states to cache to be re-used for fast auto-regressive generation
+                # save all key/value_states to cache to be re-used for 
+                # fast auto-regressive generation
                 cache_position = (
                     cache_position if not is_cross_attention else None
                 )
@@ -365,17 +360,19 @@ class WhisperSdpaAttention(WhisperAttention):
         if attention_mask is not None:  # no matter the length, we just slice it
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
 
-        # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
-        # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
-        # The tgt_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case tgt_len == 1.
-        is_causal = (
-            True
-            if self.is_causal and causal_mask is None and tgt_len > 1
-            else False
-        )
+        # We dispatch to SDPA's Flash Attention or Efficient kernels via this 
+        # `is_causal` if statement instead of an inline conditional assignment
+        # in SDPA to support both torch.compile's dynamic shapes and full 
+        # graph options. An inline conditional prevents dynamic shapes 
+        # from compiling. The tgt_len > 1 is necessary to match with 
+        # AttentionMaskConverter.to_causal_4d that does not create 
+        # a causal mask in case tgt_len == 1.
+        is_causal = bool(self.is_causal and causal_mask is None and tgt_len > 1)
 
-        # NOTE: SDPA with memory-efficient backend is currently (torch==2.1.2) bugged when using non-contiguous inputs and a custom attn_mask,
-        # but we are fine here as `_shape` do call `.contiguous()`. Reference: https://github.com/pytorch/pytorch/issues/112577
+        # NOTE: SDPA with memory-efficient backend is currently (torch==2.1.2)
+        # bugged when using non-contiguous inputs and a custom attn_mask,
+        # but we are fine here as `_shape` do call `.contiguous()`. 
+        # Reference: https://github.com/pytorch/pytorch/issues/112577
         attn_output = torch.nn.functional.scaled_dot_product_attention(
             query_states,
             key_states,
@@ -394,7 +391,8 @@ class WhisperSdpaAttention(WhisperAttention):
 
         attn_output = attn_output.transpose(1, 2)
 
-        # Use the `embed_dim` from the config (stored in the class) rather than `hidden_state` because `attn_output` can be
+        # Use the `embed_dim` from the config (stored in the class) 
+        # rather than `hidden_state` because `attn_output` can be
         # partitioned across GPUs when using tensor-parallelism.
         attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
 
@@ -410,7 +408,8 @@ WHISPER_ATTENTION_CLASSES = {
 }
 
 
-# Copied from transformers.models.mbart.modeling_mbart.MBartEncoderLayer with MBart->Whisper, MBART->WHISPER
+# Copied from transformers.models.mbart.modeling_mbart.
+# MBartEncoderLayer with MBart->Whisper, MBART->WHISPER
 class WhisperVQEncoderLayer(nn.Module):
     def __init__(self, config: WhisperVQConfig, is_causal=False):
         super().__init__()
@@ -445,13 +444,17 @@ class WhisperVQEncoderLayer(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
+            hidden_states (`torch.FloatTensor`): input to the layer 
+            of shape `(batch, seq_len, embed_dim)`
             attention_mask (`torch.FloatTensor`): attention mask of size
-                `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
-            layer_head_mask (`torch.FloatTensor`): mask for attention heads in a given layer of size
+                `(batch, 1, tgt_len, src_len)` where padding elements 
+                are indicated by very large negative values.
+            layer_head_mask (`torch.FloatTensor`): mask for attention 
+            heads in a given layer of size
                 `(encoder_attention_heads,)`.
             output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
+                Whether or not to return the attentions tensors 
+                of all attention layers. See `attentions` under
                 returned tensors for more detail.
         """
         residual = hidden_states
@@ -532,7 +535,8 @@ class WhisperPreTrainedModel(PreTrainedModel):
 
 class WhisperVQEncoder(WhisperPreTrainedModel):
     """
-    Transformer encoder consisting of *config.encoder_layers* self attention layers. Each layer is a
+    Transformer encoder consisting of *config.encoder_layers* 
+    self attention layers. Each layer is a
     [`WhisperEncoderLayer`].
 
     Args:
@@ -707,34 +711,49 @@ class WhisperVQEncoder(WhisperPreTrainedModel):
     ):
         r"""
         Args:
-            input_features (`torch.LongTensor` of shape `(batch_size, feature_size, sequence_length)`):
-                Float values of mel features extracted from the raw speech waveform. Raw speech waveform can be
-                obtained by loading a `.flac` or `.wav` audio file into an array of type `List[float]` or a
-                `numpy.ndarray`, *e.g.* via the soundfile library (`pip install soundfile`). To prepare the array into
-                `input_features`, the [`AutoFeatureExtractor`] should be used for extracting the mel features, padding
-                and conversion into a tensor of type `torch.FloatTensor`. See [`~WhisperFeatureExtractor.__call__`]
+            input_features (`torch.LongTensor` of shape `(batch_size, 
+            feature_size, sequence_length)`):
+                Float values of mel features extracted from the raw 
+                speech waveform. Raw speech waveform can be obtained by 
+                loading a `.flac` or `.wav` audio file into an array of 
+                type `List[float]` or a `numpy.ndarray`, *e.g.* via the 
+                soundfile library (`pip install soundfile`). To prepare the 
+                array into `input_features`, the [`AutoFeatureExtractor`] 
+                should be used for extracting the mel features, padding
+                and conversion into a tensor of type `torch.FloatTensor`. 
+                See [`~WhisperFeatureExtractor.__call__`]
             attention_mask (`torch.Tensor`)`, *optional*):
-                Whisper does not support masking of the `input_features`, this argument is preserved for compatibility,
-                but it is not used. By default the silence in the input log mel spectrogram are ignored.
-            head_mask (`torch.Tensor` of shape `(encoder_layers, encoder_attention_heads)`, *optional*):
-                Mask to nullify selected heads of the attention modules. Mask values selected in `[0, 1]`:
+                Whisper does not support masking of the `input_features`, 
+                this argument is preserved for compatibility, but it is not 
+                used. By default the silence in the input log mel spectrogram 
+                are ignored.
+            head_mask (`torch.Tensor` of shape `(encoder_layers, 
+            encoder_attention_heads)`, *optional*):
+                Mask to nullify selected heads of the attention modules. 
+                Mask values selected in `[0, 1]`:
 
                 - 1 indicates the head is **not masked**,
                 - 0 indicates the head is **masked**.
             output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
+                Whether or not to return the attentions tensors of all 
+                attention layers. See `attentions` under returned tensors 
+                for more detail.
             output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
+                Whether or not to return the hidden states of all layers. 
+                See `hidden_states` under returned tensors
                 for more detail.
             return_dict (`bool`, *optional*):
-                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+                Whether or not to return a [`~utils.ModelOutput`] instead 
+                of a plain tuple.
         """
 
-        # expected_seq_length = self.config.max_source_positions * self.conv1.stride[0] * self.conv2.stride[0]
+        # expected_seq_length = self.config.max_source_positions * self.conv1.
+        # stride[0] * self.conv2.stride[0]
         # if input_features.shape[-1] != expected_seq_length:
         #     raise ValueError(
-        #         f"Whisper expects the mel input features to be of length {expected_seq_length}, but found {input_features.shape[-1]}. Make sure to pad the input mel features to {expected_seq_length}."
+        #         f"Whisper expects the mel input features to be of 
+        # length {expected_seq_length}, but found {input_features.shape[-1]}. 
+        # Make sure to pad the input mel features to {expected_seq_length}."
         #     )
 
         batch_size, feature_size, seq_length = input_features.shape
@@ -786,11 +805,12 @@ class WhisperVQEncoder(WhisperPreTrainedModel):
         if head_mask is not None:
             assert head_mask.size()[0] == (
                 len(self.layers)
-            ), f"The head_mask should be specified for {len(self.layers)} layers, but it is for {head_mask.size()[0]}."
+            ), f"The head_mask should be specified for {len(self.layers)} \
+            layers, but it is for {head_mask.size()[0]}."
         for idx, encoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
-            # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
+            # add LayerDrop (see https://arxiv.org/abs/1909.11556)
             to_drop = False
             if self.training:
                 dropout_probability = torch.rand([])
