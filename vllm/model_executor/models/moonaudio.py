@@ -43,40 +43,17 @@
 # SOFTWARE.
 from collections.abc import Iterable
 from typing import Optional, Union
+
 import torch
-from torch import nn
+import torch.nn as nn
 
-import transformers
-from packaging import version
-
-assert version.parse(transformers.__version__) >= version.parse("4.34.1")
-
-from ...transformers_utils.configs import KimiAudioConfig
 from transformers.models.qwen2.modeling_qwen2 import (
     Qwen2RMSNorm,
     Qwen2PreTrainedModel,
 )
-
-if version.parse(transformers.__version__) \
-    >= version.parse("4.35.0"):
-    from transformers.utils import is_flash_attn_2_available as is_flash_attn_available
-else:
-    from transformers.utils import is_flash_attn_available
-
-if is_flash_attn_available():
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
-    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
-else:
-    raise RuntimeError("flash attention must be installed")
-
 from vllm.distributed import get_pp_group
 from vllm.config import CacheConfig, VllmConfig
 from vllm.sequence import IntermediateTensors
-from .utils import (PPMissingLayer, LayerFn,
-                    is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory,
-                    maybe_offload_to_cpu)
-from .qwen2 import Qwen2Attention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.attention import AttentionType
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -87,6 +64,11 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader)
 from transformers.activations import ACT2FN
+from .utils import (PPMissingLayer, LayerFn, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory,
+                    maybe_offload_to_cpu)
+from .qwen2 import Qwen2Attention
+from ...transformers_utils.configs import KimiAudioConfig
 
 
 class MoonshotMLP(nn.Module):
