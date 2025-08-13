@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import base64
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from typing import Any, Final, Literal, Optional, Union, cast
 
 import numpy as np
@@ -23,6 +23,7 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               ErrorResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (EmbeddingServeContext,
                                                     OpenAIServing,
+                                                    RequestPrompt,
                                                     ServeContext,
                                                     TextTokensPrompt)
 # yapf: enable
@@ -283,6 +284,37 @@ class EmbeddingMixin(OpenAIServing):
         return (isinstance(prompt, dict) and "prompt_token_ids" in prompt
                 and "prompt_embeds" not in prompt)
 
+    async def _create_single_prompt_generator(
+        self,
+        ctx: EmbeddingServeContext,
+        engine_prompt: Union[EngineTokensPrompt, EngineEmbedsPrompt],
+        request_prompt: RequestPrompt,
+        pooling_params: PoolingParams,
+        trace_headers: Optional[Mapping[str, str]],
+        prompt_index: int,
+    ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
+        """Create a generator for a single prompt using standard processing."""
+        request_id_item = f"{ctx.request_id}-{prompt_index}"
+
+        self._log_inputs(request_id_item,
+                         request_prompt,
+                         params=pooling_params,
+                         lora_request=ctx.lora_request)
+
+        # Mypy has an existing bug related to inferring the variance
+        # of TypedDicts with `builtins.enumerate`:
+        # https://github.com/python/mypy/issues/8586#issuecomment-2867698435
+        engine_prompt = cast(Union[EngineTokensPrompt, EngineEmbedsPrompt],
+                             engine_prompt)
+        return self.engine_client.encode(
+            engine_prompt,
+            pooling_params,
+            request_id_item,
+            lora_request=ctx.lora_request,
+            trace_headers=trace_headers,
+            priority=getattr(ctx.request, "priority", 0),
+        )
+
     @override
     async def _prepare_generators(
         self,
@@ -290,6 +322,15 @@ class EmbeddingMixin(OpenAIServing):
     ) -> Optional[ErrorResponse]:
         """Override to support chunked processing."""
         ctx = cast(EmbeddingServeContext, ctx)
+
+        # Check if we should use chunked processing
+        use_chunked = self._should_use_chunked_processing(ctx.request)
+
+        # If no chunked processing needed, delegate to parent class
+        if not use_chunked:
+            return await super()._prepare_generators(ctx)
+
+        # Custom logic for chunked processing
         generators: list[AsyncGenerator[Union[RequestOutput,
                                               PoolingRequestOutput],
                                         None]] = []
@@ -298,11 +339,9 @@ class EmbeddingMixin(OpenAIServing):
             trace_headers = (None if ctx.raw_request is None else await
                              self._get_trace_headers(ctx.raw_request.headers))
 
-            if not hasattr(ctx.request, "to_pooling_params"):
-                return self.create_error_response(
-                    "Request type does not support pooling parameters")
-
-            pooling_params = ctx.request.to_pooling_params()
+            pooling_params = self._create_pooling_params(ctx)
+            if isinstance(pooling_params, ErrorResponse):
+                return pooling_params
 
             # Verify and set the task for pooling params
             try:
@@ -318,21 +357,18 @@ class EmbeddingMixin(OpenAIServing):
                 return self.create_error_response(
                     "Request prompts not available")
 
-            # Check if we should use chunked processing
-            use_chunked = self._should_use_chunked_processing(ctx.request)
+            max_pos_embeddings = self._get_max_position_embeddings()
 
             for i, engine_prompt in enumerate(ctx.engine_prompts):
                 request_prompt = ctx.request_prompts[i]
 
                 # Check if this specific prompt needs chunked processing
-                max_pos_embeddings = self._get_max_position_embeddings()
-                if (use_chunked
-                        and self._is_text_tokens_prompt(request_prompt)):
-                    # Cast to TextTokensPrompt since we've
-                    # verified prompt_token_ids
+                if self._is_text_tokens_prompt(request_prompt):
+                    # Cast to TextTokensPrompt since we've verified
+                    # prompt_token_ids
                     text_tokens_prompt = cast(TextTokensPrompt, request_prompt)
-                    if len(text_tokens_prompt["prompt_token_ids"]
-                           ) > max_pos_embeddings:
+                    if (len(text_tokens_prompt["prompt_token_ids"])
+                            > max_pos_embeddings):
                         # Use chunked processing for this prompt
                         chunk_generators = await self._process_chunked_request(
                             ctx, text_tokens_prompt, pooling_params,
@@ -341,28 +377,9 @@ class EmbeddingMixin(OpenAIServing):
                         continue
 
                 # Normal processing for short prompts or non-token prompts
-                request_id_item = f"{ctx.request_id}-{i}"
-
-                self._log_inputs(request_id_item,
-                                 request_prompt,
-                                 params=pooling_params,
-                                 lora_request=ctx.lora_request)
-
-                # Mypy has an existing bug related to inferring the variance
-                # of TypedDicts with `builtins.enumerate`:
-                # https://github.com/python/mypy/issues/8586#issuecomment-2867698435
-                engine_prompt = cast(
-                    Union[EngineTokensPrompt, EngineEmbedsPrompt],
-                    engine_prompt)
-                generator = self.engine_client.encode(
-                    engine_prompt,
-                    pooling_params,
-                    request_id_item,
-                    lora_request=ctx.lora_request,
-                    trace_headers=trace_headers,
-                    priority=getattr(ctx.request, "priority", 0),
-                )
-
+                generator = await self._create_single_prompt_generator(
+                    ctx, engine_prompt, request_prompt, pooling_params,
+                    trace_headers, i)
                 generators.append(generator)
 
             from vllm.utils import merge_async_iterators
