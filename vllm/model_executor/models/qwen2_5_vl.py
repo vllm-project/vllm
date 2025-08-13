@@ -41,9 +41,6 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.distributed.communication_op import tensor_model_parallel_all_gather
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
@@ -64,6 +61,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
@@ -222,242 +220,6 @@ def all_gather_interleave(local_tensor, hidden_size: int, tp_size: int):
     ]
     result_tensor = torch.cat(ordered_tensors, dim=-1)
     return result_tensor
-
-
-def get_load_balance_assignment(sizes, num_gpus=2):
-    """
-    Generate load balancing assignment and metadata 
-    for distributing data across GPUs.
-    
-    Args:
-        sizes: List or tensor of flatten image sizes
-        num_gpus: Number of GPUs to balance across
-    
-    Returns:
-        shuffle_indices: 
-            Indices to reorder data for balanced loading
-        unshuffle_indices: 
-            Indices to restore original order
-        gpu_sample_counts: 
-            Number of samples assigned to each GPU
-        image_is_in_rank: 
-            Boolean tensor [num_gpus, num_samples] indicating assignment
-        grouped_sizes_per_gpu: 
-            Total size assigned to each GPU
-    """
-    # Convert to list for efficient indexing and iteration
-    if isinstance(sizes, torch.Tensor):
-        sizes = sizes.tolist()
-
-    n_samples = len(sizes)
-
-    # Handle edge cases
-    if n_samples == 0:
-        empty_assignment = torch.zeros((num_gpus, 0), dtype=torch.bool)
-        return [], [], [0] * num_gpus, empty_assignment, [0] * num_gpus
-
-    if n_samples < num_gpus:
-        shuffle_indices = list(range(n_samples))
-        unshuffle_indices = list(range(n_samples))
-        gpu_sample_counts = [1] * n_samples + [0] * (num_gpus - n_samples)
-
-        # Create assignment matrix
-        image_is_in_rank = torch.zeros((num_gpus, n_samples), dtype=torch.bool)
-        grouped_sizes_per_gpu = []
-
-        for gpu_id in range(num_gpus):
-            if gpu_id < n_samples:
-                image_is_in_rank[gpu_id, gpu_id] = True
-                grouped_sizes_per_gpu.append(sizes[gpu_id])
-            else:
-                grouped_sizes_per_gpu.append(0)
-
-        return (shuffle_indices, unshuffle_indices, gpu_sample_counts,
-                image_is_in_rank, grouped_sizes_per_gpu)
-
-    # Phase 1: Ensure minimum samples per GPU
-    # Sort indices by size (small to large for initial assignment)
-    small_to_large_indices = sorted(range(n_samples), key=lambda i: sizes[i])
-
-    gpu_assignments = [[] for _ in range(num_gpus)]
-    gpu_loads = [0.0] * num_gpus
-    used_indices = set()
-
-    # Assign 1 sample to each GPU (starting with smallest)
-    for gpu_id in range(num_gpus):
-        for idx in small_to_large_indices:
-            if idx not in used_indices:
-                gpu_assignments[gpu_id].append(idx)
-                gpu_loads[gpu_id] += sizes[idx]
-                used_indices.add(idx)
-                break
-
-    # Phase 2: Distribute remaining samples using greedy load balancing
-    # Sort remaining indices by size (large to small for better balancing)
-    remaining_indices = sorted(
-        (idx for idx in range(n_samples) if idx not in used_indices),
-        key=lambda i: sizes[i],
-        reverse=True,
-    )
-
-    for idx in remaining_indices:
-        size = sizes[idx]
-        # Find GPU with minimum current load
-        min_gpu = min(range(num_gpus), key=lambda i: gpu_loads[i])
-        gpu_assignments[min_gpu].append(idx)
-        gpu_loads[min_gpu] += size
-
-    # Create shuffle indices and counts
-    shuffle_indices = []
-    gpu_sample_counts = []
-
-    for gpu_id in range(num_gpus):
-        shuffle_indices.extend(gpu_assignments[gpu_id])
-        gpu_sample_counts.append(len(gpu_assignments[gpu_id]))
-
-    # Create unshuffle indices (inverse permutation)
-    unshuffle_indices = [0] * len(shuffle_indices)
-    for new_pos, original_idx in enumerate(shuffle_indices):
-        unshuffle_indices[original_idx] = new_pos
-
-    # Create assignment matrix
-    image_is_in_rank = torch.zeros((num_gpus, n_samples), dtype=torch.bool)
-    current_idx = 0
-    for rank in range(num_gpus):
-        count = gpu_sample_counts[rank]
-        if count > 0:
-            rank_images = shuffle_indices[current_idx:current_idx + count]
-            image_is_in_rank[rank, rank_images] = True
-            current_idx += count
-
-    # Calculate grouped sizes per GPU
-    grouped_sizes_per_gpu = []
-    for rank in range(num_gpus):
-        rank_images = image_is_in_rank[rank].nonzero().squeeze(-1)
-        total_size = sum(sizes[i] for i in rank_images.tolist())
-        grouped_sizes_per_gpu.append(total_size)
-
-    return (shuffle_indices, unshuffle_indices, gpu_sample_counts,
-            image_is_in_rank, grouped_sizes_per_gpu)
-
-
-def run_dp_sharded_vision_model(
-    vision_model: torch.nn.Module,
-    pixel_values: torch.Tensor,
-    grid_thw_list: list[list[int]],
-) -> torch.Tensor:
-    """Run a vision model with data parallelism (DP) sharding. The function 
-    will shard the input image tensor on the first dimension and run the vision
-    model
-    Args:
-        vision_model (torch.nn.Module): Vision model.
-        pixel_values (torch.Tensor): Image/Video input tensor.
-        grid_thw_list: List of grid dimensions for each image
-    Returns:
-        torch.Tensor: Output image embeddings
-    """
-    image_grid_thw = torch.tensor(grid_thw_list, device=pixel_values.device)
-    tp_size = get_tensor_model_parallel_world_size()
-    tp_rank_local = get_tensor_model_parallel_rank()
-
-    patches_per_image = image_grid_thw.prod(-1)
-    cum_patches_per_image = torch.cumsum(patches_per_image, dim=0)
-    # Add 0 at the beginning for easier indexing
-    cum_patches_per_image = torch.cat([
-        torch.tensor([0], device=cum_patches_per_image.device),
-        cum_patches_per_image
-    ])
-
-    # Get load balancing assignment with all metadata
-    (image_to_tp_rank, unshuffle_indices, gpu_sample_counts, image_is_in_rank,
-     grouped_pixel_values_len) = get_load_balance_assignment(
-         patches_per_image, tp_size)
-
-    # Get the local images assigned to this rank
-    image_idxs_local = image_is_in_rank[tp_rank_local].nonzero().squeeze(-1)
-
-    # Get the pixel values for the local images based on the image_idxs_local
-    if len(image_idxs_local) > 0:
-        pixel_values_local = torch.cat([
-            pixel_values[cum_patches_per_image[i]:cum_patches_per_image[i + 1]]
-            for i in image_idxs_local.tolist()
-        ])
-    else:
-        # Handle case where this rank has no images
-        pixel_values_local = torch.empty((0, pixel_values.shape[1]),
-                                         device=pixel_values.device,
-                                         dtype=pixel_values.dtype)
-
-    embed_dim_reduction_factor = (vision_model.spatial_merge_size *
-                                  vision_model.spatial_merge_size)
-
-    # Find the max length across all ranks
-    max_len_per_rank = max(
-        grouped_pixel_values_len) // embed_dim_reduction_factor
-    local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local.tolist()]
-
-    # Run the vision model on the local pixel_values_local
-    if pixel_values_local.shape[0] > 0:
-        image_embeds_local = vision_model(pixel_values_local,
-                                          local_grid_thw_list)
-    else:
-        # Handle empty case
-        image_embeds_local = torch.empty((0, vision_model.out_hidden_size),
-                                         device=pixel_values.device,
-                                         dtype=pixel_values.dtype)
-
-    # Pad the output based on max_len_per_rank
-    current_len = image_embeds_local.shape[0]
-    if current_len < max_len_per_rank:
-        padding_size = max_len_per_rank - current_len
-        padding = torch.zeros((padding_size, image_embeds_local.shape[1]),
-                              device=image_embeds_local.device,
-                              dtype=image_embeds_local.dtype)
-        image_embeds_local_padded = torch.cat([image_embeds_local, padding],
-                                              dim=0)
-    else:
-        image_embeds_local_padded = image_embeds_local
-
-    # Do all_gather to collect embeddings from all ranks
-    gathered_embeds = tensor_model_parallel_all_gather(
-        image_embeds_local_padded, dim=0)
-
-    # Remove padding and reconstruct per-rank embeddings
-    rank_embeddings = []
-    for rank in range(tp_size):
-        start_idx = rank * max_len_per_rank
-        end_idx = start_idx + (grouped_pixel_values_len[rank] //
-                               embed_dim_reduction_factor)
-        rank_embeddings.append(gathered_embeds[start_idx:end_idx])
-
-    # Reconstruct embeddings in the shuffled order
-    shuffled_embeddings = []
-    current_idx = 0
-    for rank in range(tp_size):
-        count = gpu_sample_counts[rank]
-        if count > 0:
-            # Get images assigned to this rank in shuffled order
-            rank_images = image_to_tp_rank[current_idx:current_idx + count]
-            rank_embed = rank_embeddings[rank]
-            # Split rank embeddings back to individual images
-            embed_start = 0
-            for img_idx in rank_images:
-                img_patches = (patches_per_image[img_idx] //
-                               embed_dim_reduction_factor)
-                img_embed = rank_embed[embed_start:embed_start + img_patches]
-                shuffled_embeddings.append(img_embed)
-                embed_start += img_patches
-            current_idx += count
-
-    # Unshuffle to restore original order
-    original_order_embeddings = [None] * len(shuffled_embeddings)
-    for shuffled_idx, original_idx in enumerate(unshuffle_indices):
-        original_order_embeddings[original_idx] = shuffled_embeddings[
-            shuffled_idx]
-
-    # Concatenate all embeddings in original order
-    final_embeddings = torch.cat(original_order_embeddings, dim=0)
-    return final_embeddings
 
 
 class Qwen2_5_VisionAttention(nn.Module):
@@ -1248,7 +1010,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values = image_input["pixel_values"]
 
             if self.use_data_parallel:
-                image_embeds = run_dp_sharded_vision_model(
+                image_embeds = run_dp_sharded_mrope_vision_model(
                     self.visual, pixel_values, grid_thw_list)
             else:
                 image_embeds = self.visual(pixel_values,
@@ -1273,7 +1035,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
             if self.use_data_parallel:
-                video_embeds = run_dp_sharded_vision_model(
+                video_embeds = run_dp_sharded_mrope_vision_model(
                     self.visual, pixel_values_videos, grid_thw_list)
             else:
                 video_embeds = self.visual(pixel_values_videos,

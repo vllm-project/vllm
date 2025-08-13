@@ -225,6 +225,7 @@ NDArray = "NDArray"
 EOFError = "EOFError"
 fo = "fo"
 ba = "ba"
+thw = "thw"  # time, height, width dimensions
 
 [tool.typos.type.py.extend-words]
 
