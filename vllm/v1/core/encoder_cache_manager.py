@@ -87,6 +87,9 @@ class EncoderCacheManager:
             True if there's enough free cache space to store the encoder output
             for this multimodal input
         """
+        if self.is_encoder_decoder:
+            return True
+
         num_tokens = request.get_num_encoder_tokens(input_id)
         return num_tokens <= self.num_free_slots
 
