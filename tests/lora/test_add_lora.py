@@ -14,7 +14,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.utils import merge_async_iterators
 
-MODEL_PATH = "THUDM/chatglm3-6b"
+MODEL_PATH = "zai-org/chatglm3-6b"
 LORA_RANK = 64
 DEFAULT_MAX_LORAS = 4 * 3
 

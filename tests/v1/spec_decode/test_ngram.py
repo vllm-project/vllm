@@ -47,13 +47,12 @@ def test_ngram_proposer():
         model_config = ModelConfig(model="facebook/opt-125m")
         return NgramProposer(
             vllm_config=VllmConfig(model_config=model_config,
-                                   speculative_config=SpeculativeConfig.
-                                   from_dict({
-                                       "prompt_lookup_min": min_n,
-                                       "prompt_lookup_max": max_n,
-                                       "num_speculative_tokens": k,
-                                       "method": "ngram",
-                                   })))
+                                   speculative_config=SpeculativeConfig(
+                                       prompt_lookup_min=min_n,
+                                       prompt_lookup_max=max_n,
+                                       num_speculative_tokens=k,
+                                       method="ngram",
+                                   )))
 
     # No match.
     result = ngram_proposer(

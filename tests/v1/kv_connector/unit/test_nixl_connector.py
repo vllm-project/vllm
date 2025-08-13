@@ -173,9 +173,9 @@ def test_prompt_less_than_block_size():
     """
     Test that we can handle case where prompt is < block.
 
-    In this case, the P worker will send empty remote_block_ids.
-    The D worker should not schedule an async read in this case,
-    since there is nothing to pull.
+    In this case, the P worker will still send remote_block_ids of the
+    partial block. The D worker should schedule an async read
+    in this case.
     """
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
@@ -184,22 +184,20 @@ def test_prompt_less_than_block_size():
     BLOCK_SIZE = vllm_config.cache_config.block_size
     NUM_TOKENS = int(BLOCK_SIZE * 0.5)
 
-    # Request will have 0 remote blocks.
+    # Request will have 1 partial remote block.
     request = create_request(request_id=1,
                              num_tokens=NUM_TOKENS,
                              do_remote_prefill=True,
-                             num_remote_blocks=0)
+                             num_remote_blocks=1)
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
 
-    # This request should not have to read async.
+    # This request will read async.
     kv_connector_metadata = scheduler_output.kv_connector_metadata
     assert kv_connector_metadata is not None
     assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
-    assert len(kv_connector_metadata.reqs_to_recv) == 0
-
-    # This request should be scheduled regularly.
-    assert len(scheduler_output.scheduled_new_reqs) == 1
+    assert len(kv_connector_metadata.reqs_to_recv) == 1
+    assert len(scheduler_output.scheduled_new_reqs) == 0
 
 
 class FakeNixlConnectorWorker(NixlConnectorWorker):
@@ -420,6 +418,52 @@ class TestNixlHandshake:
                 if cnt_finished_reqs == total_reqs:
                     return
         raise TimeoutError("Took too long to complete async handshake.")
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        FakeNixlWrapper)
+    def test_handshake_fails_on_kv_cache_layout_mismatch(self, dist_init):
+        """
+        Verify that adding a remote agent fails if kv_cache_layout differs.
+        This test is only relevant for heterogeneous TP.
+        """
+        vllm_config = create_vllm_config()
+
+        # Mock TP world size to 2 to force heterogeneous TP when
+        # remote_tp_size=1
+        with patch(
+                "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.get_tensor_model_parallel_world_size",  # noqa: E501
+                return_value=2):
+            # Initialize connector and worker (with fake NIXL wrapper)
+            connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+            connector.connector_worker = FakeNixlConnectorWorker(
+                vllm_config, connector.engine_id, hand_shake_latency=0)
+            worker = connector.connector_worker
+
+            # Minimal local registration params used by add_remote_agent
+            worker.slot_size_bytes = 4096
+            worker.block_len = worker.slot_size_bytes * worker.block_size
+            worker.num_blocks = 1
+            worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+
+            # Metadata with different kv_cache_layout than local worker
+            mismatched_layout = "HND" if worker.kv_cache_layout != "HND" \
+                else "NHD"
+            meta = NixlAgentMetadata(
+                engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+                kv_caches_base_addr=[0],
+                num_blocks=1,
+                block_len=worker.block_len,
+                attn_backend_name=worker.backend_name,
+                kv_cache_layout=mismatched_layout,
+            )
+
+            # We don't check layout for homogeneous TP and MLA for now, as the
+            # whole block is moved.
+            worker.add_remote_agent(meta, remote_tp_size=2)
+            with pytest.raises(AssertionError):
+                worker.add_remote_agent(meta, remote_tp_size=1)
 
 
 # NOTE: resource cleanup in mp backend is a bit finicky, so the order in which

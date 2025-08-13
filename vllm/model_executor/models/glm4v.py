@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
-# https://github.com/THUDM/CogAgent
+# https://github.com/zai-org/CogAgent
 """Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
 from collections.abc import Mapping, Sequence

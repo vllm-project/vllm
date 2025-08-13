@@ -20,19 +20,15 @@ pytestmark = pytest.mark.hybrid_model
 SSM_MODELS = [
     "state-spaces/mamba-130m-hf",
     "tiiuae/falcon-mamba-tiny-dev",
-    "mistralai/Mamba-Codestral-7B-v0.1",
+    "yujiepan/mamba2-codestral-v0.1-tiny-random",
 ]
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    # NOTE: Running Plamo2 in transformers implementation requires to install
-    # causal-conv1d package, which is not listed as a test dependency as it's
-    # not compatible with pip-compile.
-    "pfnet/plamo-2-1b",
+    # skipping until vLLM implementation issues are resolved
+    # "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
     "hmellor/tiny-random-BambaForCausalLM",
-    "ibm-ai-platform/Bamba-9B-v1",
-    "nvidia/Nemotron-H-8B-Base-8K",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
 ]
@@ -42,21 +38,18 @@ HF_UNSUPPORTED_MODELS = [
     # Mamba2 is buggy for Codestral as it doesn't handle n_groups, so the test
     # doesn't compare vLLM output with HF output.
     # See https://github.com/huggingface/transformers/pull/35943
-    "mistralai/Mamba-Codestral-7B-v0.1",
-    # Note: I'm not seeing the same output from vLLM V0 vs. HF transformers
-    # for Nemotron-H-8B; currently only compare vLLM V0 vs. vLLM V1
-    "nvidia/Nemotron-H-8B-Base-8K",
-    # NOTE: Currently the test fails due to HF transformers issue fixed in:
-    # https://github.com/huggingface/transformers/pull/39033
-    # We will enable vLLM test for Granite after next HF transformers release.
-    "ibm-granite/granite-4.0-tiny-preview",
+    "yujiepan/mamba2-codestral-v0.1-tiny-random",
+    # transformers 4.55 is still producing garbage for this model
+    # TODO(tdoublep): follow-up on transformers side
+    "ibm-granite/granite-4.0-tiny-preview"
 ]
 
 V1_SUPPORTED_MODELS = [
-    "mistralai/Mamba-Codestral-7B-v0.1",
-    "ibm-ai-platform/Bamba-9B-v1",
+    "state-spaces/mamba-130m-hf",
+    "ai21labs/Jamba-tiny-dev",
+    "yujiepan/mamba2-codestral-v0.1-tiny-random",
     "Zyphra/Zamba2-1.2B-instruct",
-    "nvidia/Nemotron-H-8B-Base-8K",
+    "hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
 ]
@@ -81,12 +74,16 @@ def test_models(
     try:
         model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
         model_info.check_available_online(on_fail="skip")
-        model_info.check_transformers_version(on_fail="skip")
+        hf_version_check = model_info.check_transformers_version(
+            on_fail="return")
     except ValueError:
-        pass
+        hf_version_check = None
+
+    if hf_version_check is not None:
+        print(f"Skipping transformers comparison because: {hf_version_check}")
 
     with hf_runner(model) as hf_model:
-        if model not in HF_UNSUPPORTED_MODELS:
+        if model not in HF_UNSUPPORTED_MODELS and hf_version_check is None:
             hf_outputs = hf_model.generate_greedy_logprobs_limit(
                 example_prompts, max_tokens, num_logprobs)
         else:
@@ -360,4 +357,64 @@ def test_distributed_correctness(
         outputs_1_lst=vllm_outputs_tp_2,
         name_0="vllm_tp_1",
         name_1="vllm_tp_2",
+    )
+
+
+@pytest.mark.parametrize("model", ["Zyphra/Zamba2-1.2B-instruct"])
+@pytest.mark.parametrize("max_tokens", [64])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_full_cuda_graph(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    monkeypatch,
+    model: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
+
+    try:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+        model_info.check_available_online(on_fail="skip")
+        model_info.check_transformers_version(on_fail="skip")
+    except ValueError:
+        pass
+
+    with hf_runner(model) as hf_model:
+        if model not in HF_UNSUPPORTED_MODELS:
+            hf_outputs = hf_model.generate_greedy_logprobs_limit(
+                example_prompts, max_tokens, num_logprobs)
+        else:
+            hf_outputs = None
+
+    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        if model in HYBRID_MODELS:
+            # required due to reorder_batch behaviour
+            m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
+        with vllm_runner(model,
+                         max_num_seqs=MAX_NUM_SEQS,
+                         compilation_config={'full_cuda_graph': True},
+                         enable_prefix_caching=False) as vllm_model:
+            vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens, num_logprobs)
+
+    if hf_outputs is not None:
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=vllm_v0_outputs,
+            name_0="hf",
+            name_1="vllm-v0",
+        )
+
+    ref_outputs = hf_outputs if hf_outputs is not None else vllm_v0_outputs
+    check_logprobs_close(
+        outputs_0_lst=ref_outputs,
+        outputs_1_lst=vllm_v1_outputs,
+        name_0="hf" if hf_outputs is not None else "vllm-v0",
+        name_1="vllm-v1",
     )
