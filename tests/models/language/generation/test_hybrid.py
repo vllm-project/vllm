@@ -56,6 +56,10 @@ V1_SUPPORTED_MODELS = [
     "LiquidAI/LFM2-1.2B",
 ]
 
+VO_UNSUPPORTED_MODELS = [
+    "LiquidAI/LFM2-1.2B",
+]
+
 # Avoid OOM
 MAX_NUM_SEQS = 4
 
@@ -98,9 +102,12 @@ def test_models(
         else:
             hf_outputs = None
 
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-        vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
+    if model not in VO_UNSUPPORTED_MODELS:
+        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+            vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens, num_logprobs)
+    else:
+        vllm_v0_outputs = None
 
     if model in V1_SUPPORTED_MODELS:
         enforce_eager = False
@@ -122,7 +129,7 @@ def test_models(
     else:
         vllm_v1_outputs = None
 
-    if hf_outputs is not None:
+    if hf_outputs is not None and vllm_v0_outputs is not None:
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=vllm_v0_outputs,
@@ -132,6 +139,7 @@ def test_models(
 
     if model in V1_SUPPORTED_MODELS:
         ref_outputs = hf_outputs if hf_outputs is not None else vllm_v0_outputs
+        assert ref_outputs is not None
         check_logprobs_close(
             outputs_0_lst=ref_outputs,
             outputs_1_lst=vllm_v1_outputs,
@@ -402,9 +410,12 @@ def test_full_cuda_graph(
         else:
             hf_outputs = None
 
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-        vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
+    if model not in VO_UNSUPPORTED_MODELS:
+        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+            vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens, num_logprobs)
+    else:
+        vllm_v0_outputs = None
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
@@ -418,7 +429,7 @@ def test_full_cuda_graph(
             vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, num_logprobs)
 
-    if hf_outputs is not None:
+    if hf_outputs is not None and vllm_v0_outputs is not None:
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=vllm_v0_outputs,
@@ -427,6 +438,7 @@ def test_full_cuda_graph(
         )
 
     ref_outputs = hf_outputs if hf_outputs is not None else vllm_v0_outputs
+    assert ref_outputs is not None
     check_logprobs_close(
         outputs_0_lst=ref_outputs,
         outputs_1_lst=vllm_v1_outputs,
