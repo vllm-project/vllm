@@ -25,7 +25,8 @@ if is_flash_attn_varlen_func_available():
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import cdiv
-from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                              AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
                                               get_kv_cache_layout)
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -99,6 +100,13 @@ class FlashAttentionBackend(AttentionBackend):
             raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
 
+    @staticmethod
+    def get_fp8_dtype_for_flashattn(kv_cache_dtype: str) -> torch.dtype:
+        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            return torch.float8_e4m3fn
+        else:
+            raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
+
 
 @dataclass
 class FlashAttentionMetadata:
@@ -146,7 +154,9 @@ def _get_sliding_window_configs(
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = get_flash_attn_version() == 3
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.NEVER if get_flash_attn_version() == 2 \
+        else AttentionCGSupport.ALWAYS
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -161,6 +171,7 @@ class FlashAttentionMetadataBuilder(
             self.parallel_config)
         self.num_heads_kv = self.model_config.get_num_kv_heads(
             self.parallel_config)
+        self.kv_cache_dtype = kv_cache_spec.dtype
         self.headdim = self.model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
 
@@ -239,17 +250,24 @@ class FlashAttentionMetadataBuilder(
 
         def schedule(batch_size, cu_query_lens, max_query_len, seqlens,
                      max_seq_len, causal):
+            cache_dtype = self.cache_config.cache_dtype
+            if cache_dtype.startswith("fp8"):
+                qkv_dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
+                    cache_dtype)
+            else:
+                qkv_dtype = self.kv_cache_dtype
             if aot_schedule:
                 return get_scheduler_metadata(
                     batch_size=batch_size,
                     max_seqlen_q=max_query_len,
                     max_seqlen_k=max_seq_len,
-                    cache_seqlens=seqlens,
                     num_heads_q=self.num_heads_q,
                     num_heads_kv=self.num_heads_kv,
                     headdim=self.headdim,
-                    page_size=self.block_size,
+                    cache_seqlens=seqlens,
+                    qkv_dtype=qkv_dtype,
                     cu_seqlens_q=cu_query_lens,
+                    page_size=self.block_size,
                     causal=causal,
                     window_size=self.aot_sliding_window,
                     num_splits=self.max_num_splits,
@@ -355,6 +373,7 @@ class FlashAttentionImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
+        sinks: Optional[torch.Tensor] = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -365,6 +384,8 @@ class FlashAttentionImpl(AttentionImpl):
         self.alibi_slopes = alibi_slopes
         if sliding_window is None:
             self.sliding_window = (-1, -1)
+        elif attn_type == AttentionType.ENCODER_ONLY:
+            self.sliding_window = (sliding_window - 1, sliding_window - 1)
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
@@ -391,6 +412,14 @@ class FlashAttentionImpl(AttentionImpl):
             and not flash_attn_supports_fp8():
             raise NotImplementedError(
                 "FlashAttention does not support fp8 kv-cache on this device.")
+
+        self.sinks = sinks
+        if self.sinks is not None:
+            assert self.vllm_flash_attn_version == 3, (
+                "Sinks are only supported in FlashAttention 3")
+            assert self.sinks.shape[0] == num_heads, (
+                "Sinks must have the same number of heads as the number of "
+                "heads in the layer")
 
     def forward(
         self,
@@ -474,8 +503,10 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
         if self.kv_cache_dtype.startswith("fp8"):
-            key_cache = key_cache.view(torch.float8_e4m3fn)
-            value_cache = value_cache.view(torch.float8_e4m3fn)
+            dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
+                self.kv_cache_dtype)
+            key_cache = key_cache.view(dtype)
+            value_cache = value_cache.view(dtype)
             num_tokens, num_heads, head_size = query.shape
             query, _ = ops.scaled_fp8_quant(
                 query.reshape(
@@ -514,6 +545,7 @@ class FlashAttentionImpl(AttentionImpl):
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
                 num_splits=attn_metadata.max_num_splits,
+                s_aux=self.sinks,
             )
             return output
 

@@ -118,20 +118,10 @@ class CudaPlatformBase(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         parallel_config = vllm_config.parallel_config
-        scheduler_config = vllm_config.scheduler_config
         model_config = vllm_config.model_config
 
         if parallel_config.worker_cls == "auto":
-            if scheduler_config.is_multi_step:
-                if envs.VLLM_USE_V1:
-                    raise NotImplementedError(
-                        "Multi-step scheduling is not supported (and not "
-                        "needed) on vLLM V1. Please launch without "
-                        "--num-scheduler-steps.")
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.worker.multi_step_worker.MultiStepWorker"
-            elif vllm_config.speculative_config:
+            if vllm_config.speculative_config:
                 if not envs.VLLM_USE_V1:
                     raise NotImplementedError(
                         "Speculative decoding is not supported on vLLM V0.")
@@ -139,7 +129,7 @@ class CudaPlatformBase(Platform):
             else:
                 if envs.VLLM_USE_V1:
                     parallel_config.worker_cls = \
-                            "vllm.v1.worker.gpu_worker.Worker"
+                        "vllm.v1.worker.gpu_worker.Worker"
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
 
@@ -162,7 +152,10 @@ class CudaPlatformBase(Platform):
                 if cls.is_device_capability(100):
                     # Blackwell => Force CutlassMLA.
                     use_cutlass_mla = True
-                    envs.VLLM_ATTENTION_BACKEND = "CUTLASS_MLA_VLLM_V1"
+                    # TODO: This does not work, because the
+                    # global_force_attn_backend_context_manager is not set.
+                    # See vllm/attention/selector.py:_cached_get_attn_backend
+                    envs.VLLM_ATTENTION_BACKEND = "CUTLASS_MLA"
                 else:
                     # Not Blackwell
                     use_flashmla = True
@@ -170,7 +163,7 @@ class CudaPlatformBase(Platform):
                 # Forced case
                 use_flashmla = (envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
                 use_cutlass_mla = (
-                    envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA_VLLM_V1")
+                    envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA")
 
             from vllm.attention.ops.flashmla import is_flashmla_supported
             if use_flashmla and is_flashmla_supported()[0] \
@@ -182,7 +175,7 @@ class CudaPlatformBase(Platform):
             if use_cutlass_mla and cache_config.block_size != 128:
                 cache_config.block_size = 128
                 logger.info("Forcing kv cache block size to 128 for "
-                            "CUTLASS_MLA_VLLM_V1 backend.")
+                            "CUTLASS_MLA backend.")
 
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
@@ -207,13 +200,29 @@ class CudaPlatformBase(Platform):
         return torch.cuda.max_memory_allocated(device)
 
     @classmethod
+    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
+        if cls.has_device_capability(80) and support_fa:
+            from transformers.utils import is_flash_attn_2_available
+            if is_flash_attn_2_available():
+                return _Backend.FLASH_ATTN
+            logger.warning_once(
+                "Current `vllm-flash-attn` has a bug inside vision "
+                "module, so we use xformers backend instead. You can "
+                "run `pip install flash-attn` to use flash-attention "
+                "backend.")
+        # Fallback for Volta/Turing GPUs or FA not supported
+        return _Backend.XFORMERS
+
+    @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1,
-                             use_mla) -> str:
+                             kv_cache_dtype, block_size, use_v1, use_mla,
+                             has_sink) -> str:
         if use_mla:
-            # TODO(lucas): refactor to  be more concise
+            # TODO(lucas): refactor to be more concise
             #  we should probably consider factoring out V1 here
-            if selected_backend == _Backend.CUTLASS_MLA_VLLM_V1:
+            if selected_backend == _Backend.CUTLASS_MLA or (
+                    cls.is_device_capability(100) and selected_backend is None
+                    and block_size == 128):
                 if use_v1:
                     logger.info_once("Using Cutlass MLA backend on V1 engine.")
                     return ("vllm.v1.attention.backends.mla."
@@ -256,6 +265,8 @@ class CudaPlatformBase(Platform):
             FLEX_ATTENTION_V1 = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
             TRITON_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
             FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
+            TREE_ATTN_V1 = "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend"  # noqa: E501
+            XFORMERS_V1 = "vllm.v1.attention.backends.xformers.XFormersAttentionBackend"  # noqa: E501
 
             if selected_backend == _Backend.FLASHINFER:
                 logger.info_once("Using FlashInfer backend on V1 engine.")
@@ -273,6 +284,12 @@ class CudaPlatformBase(Platform):
             elif selected_backend == _Backend.FLASH_ATTN:
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return FLASH_ATTN_V1
+            elif selected_backend == _Backend.TREE_ATTN:
+                logger.info_once("Using Tree Attention backend on V1 engine.")
+                return TREE_ATTN_V1
+            elif selected_backend == _Backend.XFORMERS_VLLM_V1:
+                logger.info_once("Using XFormers backend on V1 engine.")
+                return XFORMERS_V1
 
             from vllm.attention.selector import is_attn_backend_supported
 
@@ -299,6 +316,9 @@ class CudaPlatformBase(Platform):
 
             # FlashAttention is the default for SM 8.0+ GPUs
             if cls.has_device_capability(80):
+                if has_sink:
+                    logger.info_once("Using Triton backend on V1 engine.")
+                    return TRITON_ATTN_VLLM_V1
                 if is_default_backend_supported := is_attn_backend_supported(
                         FLASH_ATTN_V1, head_size, dtype,
                         allow_import_error=False):

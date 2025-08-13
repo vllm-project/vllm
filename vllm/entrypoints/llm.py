@@ -28,11 +28,15 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_mistral_chat_template,
                                          parse_chat_messages,
                                          resolve_chat_template_content_format)
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam,
                                           _cosine_similarity,
                                           _validate_score_input_lens,
+                                          compress_token_type_ids,
                                           get_score_prompt)
+# yapf: enable
 from vllm.entrypoints.utils import (_validate_truncation_size,
                                     log_non_default_args)
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
@@ -1096,6 +1100,10 @@ class LLM:
                 "Try passing `--runner pooling` to use the model as a "
                 "pooling model.")
 
+        if pooling_task not in self.supported_tasks:
+            raise ValueError(
+                f"pooling_task must be one of {self.supported_tasks}.")
+
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, list[str]]], prompts),
@@ -1189,6 +1197,8 @@ class LLM:
         /,
         *,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[Union[PoolingParams,
+                                       Sequence[PoolingParams]]] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[ClassificationRequestOutput]:
         """
@@ -1207,7 +1217,8 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-
+            pooling_params: The pooling parameters for pooling. If None, we
+                use the default pooling parameters.
         Returns:
             A list of `ClassificationRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
@@ -1220,6 +1231,7 @@ class LLM:
         items = self.encode(
             prompts,
             use_tqdm=use_tqdm,
+            pooling_params=pooling_params,
             lora_request=lora_request,
             pooling_task="classify",
         )
@@ -1272,6 +1284,7 @@ class LLM:
         text_2: list[Union[str, TextPrompt, TokensPrompt]],
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[ScoringRequestOutput]:
 
@@ -1280,6 +1293,7 @@ class LLM:
             truncate_prompt_tokens=truncate_prompt_tokens,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            pooling_params=pooling_params,
             pooling_task="embed",
         )
 
@@ -1306,6 +1320,7 @@ class LLM:
         data_2: Union[list[str], list[ScoreContentPartParam]],
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[ScoringRequestOutput]:
         model_config = self.llm_engine.model_config
@@ -1317,7 +1332,13 @@ class LLM:
         if len(data_1) == 1:
             data_1 = data_1 * len(data_2)
 
-        pooling_params = PoolingParams(task="score")
+        if pooling_params is None:
+            pooling_params = PoolingParams(task="score")
+
+        model_config = self.llm_engine.model_config
+        pooling_params.verify("score", model_config)
+        pooling_params_list = list[PoolingParams]()
+
         tokenization_kwargs: dict[str, Any] = {}
 
         _validate_truncation_size(model_config.max_model_len,
@@ -1327,38 +1348,31 @@ class LLM:
 
         input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
 
-        if model_config.is_multimodal_model:
-            for q, d in input_pairs:
-                _, engine_prompt = get_score_prompt(
-                    model_config=model_config,
-                    data_1=q,
-                    data_2=d,
-                    tokenizer=tokenizer,
-                    tokenization_kwargs=tokenization_kwargs,
-                )
+        model_config = self.llm_engine.model_config
 
-                parsed_prompts.append(engine_prompt)
-        else:
-            for q, t in input_pairs:
-                if model_config.use_pad_token:
-                    # cross_encoder models defaults to using pad_token.
-                    prompt_inputs = tokenizer(
-                        text=q,  # type: ignore[arg-type]
-                        text_pair=t,  # type: ignore[arg-type]
-                        **tokenization_kwargs)
-                else:
-                    # `llm as reranker` models defaults to not using pad_token.
-                    prompt_inputs = tokenizer(
-                        text=q + t,  # type: ignore[operator]
-                        **tokenization_kwargs)
-                engine_prompt = TokensPrompt(
-                    prompt_token_ids=prompt_inputs["input_ids"],
-                    token_type_ids=prompt_inputs.get("token_type_ids"))
-                parsed_prompts.append(engine_prompt)
+        for q, d in input_pairs:
+            _, engine_prompt = get_score_prompt(
+                model_config=model_config,
+                data_1=q,
+                data_2=d,
+                tokenizer=tokenizer,
+                tokenization_kwargs=tokenization_kwargs,
+            )
+
+            if envs.VLLM_USE_V1 and (token_type_ids := engine_prompt.pop(
+                    "token_type_ids", None)):
+                params = pooling_params.clone()
+                compressed = compress_token_type_ids(token_type_ids)
+                params.extra_kwargs = {"compressed_token_type_ids": compressed}
+                pooling_params_list.append(params)
+            else:
+                pooling_params_list.append(pooling_params)
+
+            parsed_prompts.append(engine_prompt)
 
         self._validate_and_add_requests(
             prompts=parsed_prompts,
-            params=pooling_params,
+            params=pooling_params_list,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
         )
@@ -1379,6 +1393,7 @@ class LLM:
         *,
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
@@ -1410,7 +1425,8 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-
+            pooling_params: The pooling parameters for pooling. If None, we
+                use the default pooling parameters.
         Returns:
             A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
@@ -1494,6 +1510,7 @@ class LLM:
                 data_2,  # type: ignore[arg-type]
                 truncate_prompt_tokens,
                 use_tqdm,
+                pooling_params,
                 lora_request)
         else:
             return self._embedding_score(
@@ -1502,6 +1519,7 @@ class LLM:
                 data_2,  # type: ignore[arg-type]
                 truncate_prompt_tokens,
                 use_tqdm,
+                pooling_params,
                 lora_request)
 
     def start_profile(self) -> None:

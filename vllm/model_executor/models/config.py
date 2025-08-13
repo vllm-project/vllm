@@ -44,6 +44,15 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
         }
 
 
+class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        pooler_config = vllm_config.model_config.pooler_config
+        if pooler_config.activation is None:
+            pooler_config.activation = False
+
+
 class JinaRobertaModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
@@ -93,7 +102,7 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         config.num_hidden_layers = config.n_layer
 
         head_dim = config.hidden_size // config.num_attention_heads
-        rotary_emb_dim = head_dim * config.rotary_emb_fraction
+        rotary_emb_dim = int(head_dim * config.rotary_emb_fraction)
         max_trained_positions = getattr(config, "max_trained_positions", 2048)
         config.rotary_kwargs = {
             "head_size": head_dim,
@@ -153,6 +162,26 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
             model_config.encoder_config = encoder_config
 
             vllm_config.recalculate_max_model_len(max_model_len)
+
+
+class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        pooler_config = vllm_config.model_config.pooler_config
+
+        if pooler_config.step_tag_id is None:
+            pooler_config.step_tag_id = 151651
+
+
+class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        pooler_config = vllm_config.model_config.pooler_config
+
+        if pooler_config.softmax is None:
+            pooler_config.softmax = False
 
 
 class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
@@ -216,6 +245,34 @@ class GraniteMoeHybridModelConfig(VerifyAndUpdateConfig):
             "to ensure that CUDA graph capture "
             "covers sequences of length up to max_model_len.",
             config.max_model_len)
+
+
+class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        decoding_config = vllm_config.decoding_config
+        if decoding_config.reasoning_backend == "":
+            decoding_config.reasoning_backend = "GptOss"
+
+        # Increase the max capture size from 512 to 1024 for performance.
+        # NOTE(woosuk): This will increase the number of CUDA graphs
+        # from 67 to 83.
+        scheduler_config = vllm_config.scheduler_config
+        if len(scheduler_config.cuda_graph_sizes) == 1:
+            max_capture_size = scheduler_config.cuda_graph_sizes[0]
+            # FIXME(woosuk): When using full cuda graph with FA3, the max
+            # supported size is 992.
+            if max_capture_size < 1024:
+                cuda_graph_sizes = [1, 2, 4]
+                # Step size 8 for small batch sizes
+                cuda_graph_sizes += [i for i in range(8, 256, 8)]
+                # Step size 16 for larger batch sizes
+                cuda_graph_sizes += [i for i in range(256, 1025, 16)]
+                scheduler_config.cuda_graph_sizes = cuda_graph_sizes
+                logger.info(
+                    "Overriding max cuda graph capture size to "
+                    "%d for performance.", 1024)
 
 
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
@@ -309,8 +366,12 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "NomicBertModel": NomicBertModelConfig,
+    "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
+    "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
+    "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "GraniteMoeHybridForCausalLM": GraniteMoeHybridModelConfig,
+    "GptOssForCausalLM": GptOssForCausalLMConfig,
 }

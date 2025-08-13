@@ -23,7 +23,8 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
-from vllm.utils import get_open_port, get_open_zmq_inproc_path, make_zmq_socket
+from vllm.utils import (cancel_task_threadsafe, get_open_port,
+                        get_open_zmq_inproc_path, make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
                             ReconfigureDistributedRequest, ReconfigureRankType,
@@ -86,11 +87,12 @@ class EngineCoreClient(ABC):
         executor_class: type[Executor],
         log_stats: bool,
         client_addresses: Optional[dict[str, str]] = None,
+        client_count: int = 1,
         client_index: int = 0,
     ) -> "MPClient":
         parallel_config = vllm_config.parallel_config
         client_args = (vllm_config, executor_class, log_stats,
-                       client_addresses, client_index)
+                       client_addresses, client_count, client_index)
         if parallel_config.data_parallel_size > 1:
             if parallel_config.data_parallel_external_lb:
                 # External load balancer - client per DP rank.
@@ -250,7 +252,8 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.get_supported_tasks()
 
     def add_request(self, request: EngineCoreRequest) -> None:
-        self.engine_core.add_request(request)
+        req, request_wave = self.engine_core.preprocess_add_request(request)
+        self.engine_core.add_request(req, request_wave)
 
     def abort_requests(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
@@ -340,10 +343,8 @@ class BackgroundResources:
         if self.coordinator is not None:
             self.coordinator.close()
 
-        if self.output_queue_task is not None:
-            self.output_queue_task.cancel()
-        if self.stats_update_task is not None:
-            self.stats_update_task.cancel()
+        cancel_task_threadsafe(self.output_queue_task)
+        cancel_task_threadsafe(self.stats_update_task)
 
         # ZMQ context termination can hang if the sockets
         # aren't explicitly closed first.
@@ -726,6 +727,7 @@ class AsyncMPClient(MPClient):
                  executor_class: type[Executor],
                  log_stats: bool,
                  client_addresses: Optional[dict[str, str]] = None,
+                 client_count: int = 1,
                  client_index: int = 0):
         super().__init__(
             asyncio_mode=True,
@@ -928,11 +930,12 @@ class DPAsyncMPClient(AsyncMPClient):
                  executor_class: type[Executor],
                  log_stats: bool,
                  client_addresses: Optional[dict[str, str]] = None,
+                 client_count: int = 1,
                  client_index: int = 0):
         self.current_wave = 0
 
         super().__init__(vllm_config, executor_class, log_stats,
-                         client_addresses, client_index)
+                         client_addresses, client_count, client_index)
 
         # List of [waiting, running] pair per engine.
         # Used only by DPLBAsyncMPClient subclass.
@@ -1028,7 +1031,11 @@ class DPAsyncMPClient(AsyncMPClient):
                     counts, wave, running = msgspec.msgpack.decode(buf)
                     self.current_wave = wave
                     self.engines_running = running
-                    self.lb_engines = counts[count_slice]
+                    if counts is not None:
+                        sliced_counts = counts[count_slice]
+                        self.lb_engines = sliced_counts
+                        logger.debug("Received counts: %s (%s)", sliced_counts,
+                                     count_slice)
 
         resources.stats_update_task = asyncio.create_task(
             run_engine_stats_update_task())
@@ -1064,40 +1071,45 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                  executor_class: type[Executor],
                  log_stats: bool,
                  client_addresses: Optional[dict[str, str]] = None,
+                 client_count: int = 1,
                  client_index: int = 0):
+
+        self.client_count = client_count
 
         # To route aborts to the correct engine.
         self.reqs_in_flight: dict[str, EngineIdentity] = {}
 
         super().__init__(vllm_config, executor_class, log_stats,
-                         client_addresses, client_index)
+                         client_addresses, client_count, client_index)
 
         assert len(self.core_engines) > 1
+
+        self.eng_start_index = (len(self.core_engines) *
+                                self.client_index) // client_count
 
     def get_core_engine_for_request(
             self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
+        current_counts = self.lb_engines
         if (eng_index := request.data_parallel_rank) is None:
-            if not self.lb_engines:
+            if not current_counts:
                 return self.core_engine
             # TODO use P2C alg for larger DP sizes
-            num_engines = len(self.lb_engines)
-            min_counts = [sys.maxsize, sys.maxsize]
+            num_engines = len(current_counts)
+            min_score = sys.maxsize
             eng_index = 0
             for i in range(num_engines):
                 # Start from client_index to help with balancing when engines
                 # are empty.
-                idx = (self.client_index + i) % num_engines
-                counts = self.lb_engines[idx]
-                if counts < min_counts:
-                    min_counts = counts
+                idx = (self.eng_start_index + i) % num_engines
+                waiting, running = current_counts[idx]
+                score = waiting * 4 + running
+                if score < min_score:
+                    min_score = score
                     eng_index = idx
-            # Adjust local counts for better balancing between stats updates
-            # from the coordinator (which happen every 100ms).
-            if min_counts[0]:
-                min_counts[0] += 1
-            else:
-                min_counts[1] += 1
+            # Increment local waiting count for better balancing between stats
+            # updates from the coordinator (which happen every 100ms).
+            current_counts[eng_index][0] += self.client_count
 
         chosen_engine = self.core_engines[eng_index]
         # Record which engine is chosen for this request, to handle aborts.
