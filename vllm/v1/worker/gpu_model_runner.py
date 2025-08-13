@@ -1039,6 +1039,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 mrope_pos_ptr += completion_part_len
 
                 print("_calc_mrope_positions (completion_part_len > 0)", req_id, f"{self.mrope_positions_np.shape=}")
+                print(f"{dst_start=} {dst_end=} {prompt_part_len=} {num_computed_tokens=} {completion_part_len=}")
                 print(self.mrope_positions_np[0])
                 print(self.mrope_positions_np[1])
                 print(self.mrope_positions_np[2])
