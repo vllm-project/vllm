@@ -31,6 +31,7 @@ HYBRID_MODELS = [
     "hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
+    "LiquidAI/LFM2-1.2B",
 ]
 
 HF_UNSUPPORTED_MODELS = [
@@ -52,6 +53,7 @@ V1_SUPPORTED_MODELS = [
     "hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
+    "LiquidAI/LFM2-1.2B",
 ]
 
 FULL_CUDA_GRAPH_MODELS = [
