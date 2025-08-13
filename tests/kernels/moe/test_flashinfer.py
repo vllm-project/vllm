@@ -17,6 +17,10 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
 
+if not current_platform.is_device_capability(100):
+    pytest.skip("FlashInfer MoE requires compute capability of 10.0.",
+                allow_module_level=True)
+
 NUM_EXPERTS = [16]
 TOP_KS = [1]
 
