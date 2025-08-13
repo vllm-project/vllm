@@ -129,8 +129,9 @@ class UsageInfo(OpenAIBaseModel):
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
     prompt_tokens_details: Optional[PromptTokenUsageInfo] = None
-    # TODO(Jialin): Add documentation
+    # Total prefill / decode steps
     total_steps: int = 0
+    # Total draft tokens
     total_draft_tokens: Optional[int] = None
 
 

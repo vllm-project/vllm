@@ -59,7 +59,7 @@ class RequestFuncOutput:
         If _total_steps is not set (i.e. spec decoding is off or 
         there's no accepted tokens from spec decoding), 
         steps count should be the same as output tokens count, 
-        as each step would generate 1 token.
+        as each step generates 1 token.
         """
         return (self._total_steps 
             if self._total_steps is not None else self.output_tokens)
@@ -131,6 +131,7 @@ async def async_request_openai_completions(
 
                     if chunk != "[DONE]":
                         data = json.loads(chunk)
+
                         # NOTE: Some completion API might have a last
                         # usage summary response without a token so we
                         # want to check a token was generated
