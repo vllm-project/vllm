@@ -50,12 +50,10 @@ AITER_MODEL_LIST = [
         pytest.param("Milos/slovak-gpt-j-405M"),  # gptj
         pytest.param(
             "bigcode/tiny_starcoder_py",
-            marks=[
-                pytest.mark.skipif(
-                    Version(TRANSFORMERS_VERSION) >= Version("4.53.2"),
-                    reason="HF model is broken",
-                ),
-            ],
+            marks=pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) >= Version("4.53.2"),
+                reason="HF model is broken",
+            ),
         ),  # gpt_bigcode
         pytest.param("EleutherAI/pythia-70m"),  # gpt_neox
         pytest.param(
