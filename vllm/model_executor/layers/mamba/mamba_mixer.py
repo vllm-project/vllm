@@ -233,7 +233,7 @@ class MambaMixer(MambaBase, CustomOp):
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 conv_state = self_kv_cache[0].transpose(-1, -2)
                 ssm_state = self_kv_cache[1]
-                has_initial_states_p = mamba1_metadata.has_initial_states_p
+                has_initial_states = mamba1_metadata.has_initial_states
         else:
             assert isinstance(attn_metadata, PlaceholderAttentionMetadata)
             assert mamba_cache_params is not None
@@ -242,9 +242,9 @@ class MambaMixer(MambaBase, CustomOp):
             state_indices_tensor = mamba_cache_params.state_indices_tensor
             query_start_loc = attn_metadata.query_start_loc
             context_lens_tensor = attn_metadata.context_lens_tensor
-            has_initial_states_p = None
+            has_initial_states = None
             if context_lens_tensor is not None:
-                has_initial_states_p = context_lens_tensor > 0
+                has_initial_states = context_lens_tensor > 0
 
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)
@@ -270,7 +270,7 @@ class MambaMixer(MambaBase, CustomOp):
             gate,
             state_indices_tensor,
             query_start_loc,
-            has_initial_states_p,
+            has_initial_states,
             num_prefill_tokens,
             num_decode_tokens,
             num_prefills,
@@ -404,7 +404,7 @@ def split_batch_to_prefill_and_decode(
     gate: torch.Tensor,
     state_indices_tensor: torch.Tensor,
     query_start_loc: torch.Tensor,
-    has_initial_states_p: Optional[torch.Tensor],
+    has_initial_states: Optional[torch.Tensor],
     num_prefill_tokens: int,
     num_decode_tokens: int,
     num_prefills: int,
@@ -421,8 +421,8 @@ def split_batch_to_prefill_and_decode(
             state_indices_tensor, [num_decodes, num_prefills], dim=0)
         query_start_loc_p = (query_start_loc[-num_prefills - 1:] -
                              num_decodes if num_prefills > 0 else None)
-        has_initial_states_p = has_initial_states_p[-num_prefills:] if (
-            has_initial_states_p is not None and num_prefills > 0) else None
+        has_initial_states_p = has_initial_states[-num_prefills:] if (
+            has_initial_states is not None and num_prefills > 0) else None
     else:
         # In v0, prefill tokens come first, then decode tokens.
         hidden_states_BC_p, hidden_states_BC_d = torch.split(
@@ -434,8 +434,8 @@ def split_batch_to_prefill_and_decode(
             state_indices_tensor, [num_prefills, num_decodes], dim=0)
         query_start_loc_p = (query_start_loc[:num_prefills +
                                              1] if num_prefills > 0 else None)
-        has_initial_states_p = has_initial_states_p[:num_prefills] if (
-            has_initial_states_p is not None and num_prefills > 0) else None
+        has_initial_states_p = has_initial_states[:num_prefills] if (
+            has_initial_states is not None and num_prefills > 0) else None
 
     return PrefillDecodeSplit(
         hidden_states_BC_p=hidden_states_BC_p,
