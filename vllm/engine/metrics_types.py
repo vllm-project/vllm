@@ -52,6 +52,7 @@ class Stats:
     time_queue_requests: List[float]
     time_inference_requests: List[float]
     time_prefill_requests: List[float]
+    time_per_prefill_token_requests: List[float]
     time_decode_requests: List[float]
     #   Metadata
     num_prompt_tokens_requests: List[int]
@@ -59,6 +60,8 @@ class Stats:
     n_requests: List[int]
     max_num_generation_tokens_requests: List[int]
     max_tokens_requests: List[int]
+    total_tokens_in_queue: int
+    total_evicted_tokens_requests: List[int]
     finished_reason_requests: List[str]
     waiting_lora_adapters: List[str]
     running_lora_adapters: List[str]
