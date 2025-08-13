@@ -115,23 +115,22 @@ def load_aware_call(func):
 
         # Check if max load limit is configured and exceeded
         max_load = getattr(raw_request.app.state, 'max_server_load', None)
-        if (max_load is not None and
-            raw_request.app.state.server_load_metrics >= max_load):
+        if (max_load is not None
+                and raw_request.app.state.server_load_metrics >= max_load):
             logger.warning(
                 f"Server overloaded: current load {raw_request.app.state.server_load_metrics} "
-                f">= max load {max_load}. Rejecting request."
-            )
-            return JSONResponse(
-                content={
-                    "error": {
-                        "type": "server_overloaded",
-                        "message": f"Server is currently overloaded. "
-                                 f"Current load: {raw_request.app.state.server_load_metrics}, "
-                                 f"Max load: {max_load}. Please try again later."
-                    }
-                },
-                status_code=503
-            )
+                f">= max load {max_load}. Rejecting request.")
+            return JSONResponse(content={
+                "error": {
+                    "type":
+                    "server_overloaded",
+                    "message":
+                    f"Server is currently overloaded. "
+                    f"Current load: {raw_request.app.state.server_load_metrics}, "
+                    f"Max load: {max_load}. Please try again later."
+                }
+            },
+                                status_code=503)
 
         # ensure the counter exists
         if not hasattr(raw_request.app.state, "server_load_metrics"):
