@@ -344,7 +344,8 @@ class BackgroundResources:
             self.coordinator.close()
 
         cancel_task_threadsafe(self.output_queue_task)
-        cancel_task_threadsafe(self.stats_update_task)
+        if self.stats_update_task is not None:
+            self.stats_update_task.cancel()
 
         # ZMQ context termination can hang if the sockets
         # aren't explicitly closed first.

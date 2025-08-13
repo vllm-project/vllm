@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import gc
 import os
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -159,6 +158,3 @@ async def test_load(output_kind: RequestOutputKind,
 
             assert slogger.finished_req_count > NUM_REQUESTS // (
                 DP_SIZE + 1), f"requests are imbalanced: {stats_loggers}"
-
-        del engine
-        gc.collect()

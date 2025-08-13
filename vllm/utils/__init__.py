@@ -709,8 +709,7 @@ class AsyncMicrobatchTokenizer:
 
 
 def cancel_task_threadsafe(task: Task):
-    if task and not task.done() and not task.cancelled() and not (
-            loop := task.get_loop()).is_closed():
+    if task and not task.done() and not (loop := task.get_loop()).is_closed():
         loop.call_soon_threadsafe(task.cancel)
 
 
