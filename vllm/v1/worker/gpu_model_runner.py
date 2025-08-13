@@ -2539,13 +2539,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.encoder_cache.clear()
         gc.collect()
 
-    def capture_model(self) -> None:
+    def capture_model(self) -> int:
         if not self.use_cuda_graph:
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
                 "set -O %s and ensure `use_cudagraph` was not manually set to "
                 "False", CompilationLevel.PIECEWISE)
-            return
+            return 0
 
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
@@ -2597,6 +2597,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # This usually takes 5~20 seconds.
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
+        return cuda_graph_size
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
