@@ -508,8 +508,8 @@ class SiglipVisionModel(nn.Module):
                     continue
 
             # Check if this is a scale parameter that needs remapping first
-            if name.endswith((".k_scale", ".v_scale", ".q_scale",
-                              ".prob_scale")):
+            if name.endswith(
+                (".k_scale", ".v_scale", ".q_scale", ".prob_scale")):
                 # Try to remap the scale name first
                 remapped_name = maybe_remap_kv_scale_name(name, params_dict)
                 if remapped_name is not None:
