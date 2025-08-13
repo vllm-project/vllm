@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
+    VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MM_INPUT_CACHE_GIB: int = 4
@@ -554,6 +555,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 10 seconds
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
+
+    # Max number of workers for the thread pool handling
+    # media bytes loading. Set to 1 to disable parallel processing.
+    # Default is 8
+    "VLLM_MEDIA_LOADING_THREAD_COUNT":
+    lambda: int(os.getenv("VLLM_MEDIA_LOADING_THREAD_COUNT", "8")),
 
     # Maximum filesize in MB for a single audio file when processing
     # speech-to-text requests. Files larger than this will be rejected.
