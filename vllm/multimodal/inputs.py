@@ -647,10 +647,7 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
     def from_elems(elems: Sequence[MultiModalFieldElem]):
         return MultiModalKwargsItem({elem.key: elem for elem in elems})
 
-    def __init__(
-        self,
-        data: Optional[Mapping[str, MultiModalFieldElem]] = None,
-    ) -> None:
+    def __init__(self, data: Mapping[str, MultiModalFieldElem]) -> None:
         super().__init__(data)
 
         modalities = {elem.modality for elem in self.data.values()}
@@ -769,7 +766,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
 
     def __init__(
         self,
-        data: Optional[Mapping[str, NestedTensors]] = None,
+        data: Mapping[str, NestedTensors],
         *,
         items: Optional[Sequence[MultiModalKwargsItem]] = None,
     ) -> None:

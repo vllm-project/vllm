@@ -6,7 +6,9 @@ import torch
 
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
-from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
+from vllm.multimodal.inputs import (MultiModalBatchedField,
+                                    MultiModalFieldElem, MultiModalKwargsItem,
+                                    PlaceholderRange)
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -129,7 +131,14 @@ def create_requests(
     for i in range(num_requests):
         if mm_positions is not None:
             mm_position = mm_positions[i]
-            mm_kwargs = [MultiModalKwargsItem()] * len(mm_position)
+            mm_elem = MultiModalFieldElem(
+                modality="dummy_m",
+                key="dummy_k",
+                data=None,
+                field=MultiModalBatchedField(),
+            )
+            mm_item = MultiModalKwargsItem.from_elems([mm_elem])
+            mm_kwargs = [mm_item] * len(mm_position)
         else:
             mm_position = None
             mm_kwargs = None

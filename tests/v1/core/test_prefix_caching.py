@@ -9,7 +9,9 @@ import pytest
 import torch
 
 from vllm.distributed.kv_events import AllBlocksCleared, BlockRemoved
-from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
+from vllm.multimodal.inputs import (MultiModalBatchedField,
+                                    MultiModalFieldElem, MultiModalKwargsItem,
+                                    PlaceholderRange)
 from vllm.sampling_params import SamplingParams
 from vllm.utils import sha256, sha256_cbor_64bit
 from vllm.v1.core.block_pool import BlockPool
@@ -21,16 +23,25 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, SlidingWindowSpec)
 
 
-def make_request(request_id,
-                 prompt_token_ids,
-                 mm_positions=None,
-                 mm_hashes=None,
-                 prompt_logprobs: Optional[int] = None,
-                 cache_salt: Optional[str] = None):
+def make_request(
+    request_id: str,
+    prompt_token_ids: list[int],
+    mm_positions: Optional[list[PlaceholderRange]] = None,
+    mm_hashes: Optional[list[str]] = None,
+    prompt_logprobs: Optional[int] = None,
+    cache_salt: Optional[str] = None,
+):
     if mm_positions is None:
         mm_kwargs = None
     else:
-        mm_kwargs = [MultiModalKwargsItem()] * len(mm_positions)
+        mm_elem = MultiModalFieldElem(
+            modality="dummy_m",
+            key="dummy_k",
+            data=None,
+            field=MultiModalBatchedField(),
+        )
+        mm_item = MultiModalKwargsItem.from_elems([mm_elem])
+        mm_kwargs = [mm_item] * len(mm_positions)
 
     return Request(
         request_id=request_id,

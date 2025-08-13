@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
+from typing import Optional
 
 import pytest
 import torch
 
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
-from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
+from vllm.multimodal.inputs import (MultiModalBatchedField,
+                                    MultiModalFieldElem, MultiModalKwargsItem,
+                                    PlaceholderRange)
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes, sha256, sha256_cbor_64bit
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -27,15 +30,24 @@ from vllm.v1.request import Request
 # yapf: enable
 
 
-def make_request(request_id,
-                 prompt_token_ids,
-                 mm_positions=None,
-                 mm_hashes=None,
-                 cache_salt=None):
+def make_request(
+    request_id: str,
+    prompt_token_ids: list[int],
+    mm_positions: Optional[list[PlaceholderRange]] = None,
+    mm_hashes: Optional[list[str]] = None,
+    cache_salt: Optional[str] = None,
+):
     if mm_positions is None:
         mm_kwargs = None
     else:
-        mm_kwargs = [MultiModalKwargsItem()] * len(mm_positions)
+        mm_elem = MultiModalFieldElem(
+            modality="dummy_m",
+            key="dummy_k",
+            data=None,
+            field=MultiModalBatchedField(),
+        )
+        mm_item = MultiModalKwargsItem.from_elems([mm_elem])
+        mm_kwargs = [mm_item] * len(mm_positions)
 
     return Request(
         request_id=request_id,
