@@ -79,17 +79,17 @@ class _HfExamplesInfo:
     def check_transformers_version(
         self,
         *,
-        on_fail: Literal["error", "skip"],
+        on_fail: Literal["error", "skip", "return"],
         check_min_version: bool = True,
         check_max_version: bool = True,
-    ) -> None:
+    ) -> Optional[str]:
         """
         If the installed transformers version does not meet the requirements,
         perform the given action.
         """
         if (self.min_transformers_version is None
                 and self.max_transformers_version is None):
-            return
+            return None
 
         current_version = TRANSFORMERS_VERSION
         cur_base_version = Version(current_version).base_version
@@ -105,15 +105,17 @@ class _HfExamplesInfo:
               and Version(cur_base_version) > Version(max_version)):
             msg += f"<={max_version}` is required to run this model."
         else:
-            return
+            return None
 
         if self.transformers_version_reason:
             msg += f" Reason: {self.transformers_version_reason}"
 
         if on_fail == "error":
             raise RuntimeError(msg)
-        else:
+        elif on_fail == "skip":
             pytest.skip(msg)
+
+        return msg
 
     def check_available_online(
         self,
@@ -148,7 +150,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "BailingMoeForCausalLM": _HfExamplesInfo("inclusionAI/Ling-lite-1.5",
                                          trust_remote_code=True),
-    "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B",
+    "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B-v1",
+                                        min_transformers_version="4.55.1",
                                         extras={"tiny": "hmellor/tiny-random-BambaForCausalLM"}),  # noqa: E501
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloom-560m",
                                         {"1b": "bigscience/bloomz-1b1"}),
@@ -183,7 +186,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-1.1-2b-it"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
-    "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it",    # noqa: E501
+    "Gemma3nForCausalLM": _HfExamplesInfo("google/gemma-3n-E2B-it",
                                           min_transformers_version="4.53"),
     "GlmForCausalLM": _HfExamplesInfo("zai-org/glm-4-9b-chat-hf"),
     "Glm4ForCausalLM": _HfExamplesInfo("zai-org/GLM-4-9B-0414"),
@@ -197,7 +200,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                        {"6b": "EleutherAI/gpt-j-6b"}),
     "GPTNeoXForCausalLM": _HfExamplesInfo("EleutherAI/pythia-70m",
                                           {"1b": "EleutherAI/pythia-1.4b"}),
-    "GptOssForCausalLM": _HfExamplesInfo("openai/gpt-oss-20b"),
+    "GptOssForCausalLM": _HfExamplesInfo("lmsys/gpt-oss-20b-bf16"),
     "GraniteForCausalLM": _HfExamplesInfo("ibm/PowerLM-3b"),
     "GraniteMoeForCausalLM": _HfExamplesInfo("ibm/PowerMoE-3b"),
     "GraniteMoeHybridForCausalLM": _HfExamplesInfo("ibm-granite/granite-4.0-tiny-preview"),  # noqa: E501
@@ -223,6 +226,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini",
+                                        min_transformers_version="4.55.1",
                                         extras={
                                             "tiny": "ai21labs/Jamba-tiny-dev",
                                             "random": "ai21labs/Jamba-tiny-random",  # noqa: E501
@@ -278,6 +282,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          transformers_version_reason="vLLM impl inherits PreTrainedModel and clashes with get_input_embeddings",  # noqa: E501
                                         trust_remote_code=True),
     "QWenLMHeadModel": _HfExamplesInfo("Qwen/Qwen-7B-Chat",
+                                       max_transformers_version="4.53",
+                                       transformers_version_reason="HF model uses remote code that is not compatible with latest Transformers",  # noqa: E501
                                        trust_remote_code=True),
     "Qwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2-0.5B-Instruct",
                                         extras={"2.5": "Qwen/Qwen2.5-0.5B-Instruct"}), # noqa: E501
@@ -285,6 +291,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b"),
+    "SmolLM3ForCausalLM": _HfExamplesInfo("HuggingFaceTB/SmolLM3-3B"),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b"),  # noqa: E501
     "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
     "Starcoder2ForCausalLM": _HfExamplesInfo("bigcode/starcoder2-3b"),
@@ -377,6 +384,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Blip2ForConditionalGeneration": _HfExamplesInfo("Salesforce/blip2-opt-2.7b",  # noqa: E501
                                                      extras={"6b": "Salesforce/blip2-opt-6.7b"}),  # noqa: E501
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),  # noqa: E501
+    "Cohere2VisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/command-a-vision-07-2025"), # noqa: E501
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
                                                 extras={"fork": "Isotr0py/deepseek-vl2-tiny"},  # noqa: E501
                                                 max_transformers_version="4.48",  # noqa: E501
@@ -385,12 +393,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Emu3ForConditionalGeneration": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
+    "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it",    # noqa: E501
+                                        min_transformers_version="4.53"),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo("ibm-granite/granite-speech-3.3-2b"),  # noqa: E501
     "GLM4VForCausalLM": _HfExamplesInfo("zai-org/glm-4v-9b",
                                         trust_remote_code=True,
                                         hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
     "Glm4vForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.1V-9B-Thinking"),  # noqa: E501
-    "Glm4v_moeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V",
+    "Glm4vMoeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V",
                                           is_available_online=False),   # noqa: E501
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m",
                                       trust_remote_code=True,
@@ -517,6 +527,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             trust_remote_code=True,
                                             speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
                                             tokenizer="meta-llama/Llama-3.1-8B-Instruct"),
+    # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611   # noqa: E501
+    # "LlamaForCausalLMEagle3": _HfExamplesInfo("AngelSlim/Qwen3-8B_eagle3",  # noqa: E501
+    #                                         trust_remote_code=True,
+    #                                         speculative_model="AngelSlim/Qwen3-8B_eagle3",   # noqa: E501
+    #                                         tokenizer="Qwen/Qwen3-8B"),
     "EagleLlama4ForCausalLM": _HfExamplesInfo(
         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
         trust_remote_code=True,

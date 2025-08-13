@@ -16,7 +16,7 @@
 # limitations under the License.
 """Wrapper around `transformers` models"""
 from collections.abc import Iterable, Mapping
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from typing import Literal, Optional, Union
 
 import regex as re
@@ -107,10 +107,17 @@ def replace_linear_class(
         raise ValueError(
             f"Unsupported parallel style type {type(style)}, expected str")
 
-    vllm_linear_cls = {
-        "colwise": ColumnParallelLinear,
-        "rowwise": RowParallelLinear,
-    }.get(style, ReplicatedLinear)
+    vllm_linear_cls, vllm_linear_kwargs = {
+        "colwise": (ColumnParallelLinear, {}),
+        "colwise_rep": (ColumnParallelLinear, {
+            "gather_output": True
+        }),
+        "rowwise": (RowParallelLinear, {}),
+        "rowwise_rep": (RowParallelLinear, {
+            "input_is_parallel": False
+        }),
+        "replicate": (ReplicatedLinear, {}),
+    }.get(style, (ReplicatedLinear, {}))
 
     return vllm_linear_cls(
         input_size=linear.in_features,
@@ -118,6 +125,7 @@ def replace_linear_class(
         bias=linear.bias is not None,
         quant_config=quant_config,
         return_bias=False,
+        **vllm_linear_kwargs,
     )
 
 
@@ -382,33 +390,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         )
 
 
-class ConfigOverride:
-    """Context manager to temporarily override config attributes."""
-
-    def __init__(self, config: PretrainedConfig, **kwargs):
-        self.config = config
-        self.kwargs = kwargs
-        self.kwargs_original = {}
-        self.kwargs_delete = set()
-
-    def __enter__(self):
-        """Override config attributes."""
-        for key, value in self.kwargs.items():
-            if not hasattr(self.config, key):
-                self.kwargs_delete.add(key)
-            self.kwargs_original[key] = getattr(self.config, key, None)
-            setattr(self.config, key, value)
-        return self.config
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        """Restore original config attributes."""
-        for key, value in self.kwargs_original.items():
-            if key in self.kwargs_delete:
-                delattr(self.config, key)
-            else:
-                setattr(self.config, key, value)
-
-
 class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"
@@ -434,21 +415,11 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         # To be updated in child classes for use in `load_weights`
         self.skip_prefixes: Optional[list[str]] = None
 
-        # vLLM handles interleaved sliding window attention by creating a new
-        # interleaved_sliding_window attribute and deleting the sliding_window
-        # attribute. This breaks the constructors in Transformers so we
-        # temporarily add the attribute back to construct the model.
-        config_override = nullcontext()
-        if hasattr(self.config, "interleaved_sliding_window"):
-            config_override = ConfigOverride(
-                self.config,
-                sliding_window=self.config.interleaved_sliding_window)
-
         # Set correct attn and init on "meta" to delay allocating GPU tensors
         # TODO: @raushan, use the public `model.set_attn_implementation()`
         # method once its checks are fixed in Transformers.
         self.text_config._attn_implementation = "vllm"
-        with init_on_device_without_buffers("meta"), config_override:
+        with init_on_device_without_buffers("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(
                 self.config,
                 torch_dtype=self.model_config.dtype,
@@ -534,30 +505,47 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         Apply the model's tensor parallelization plan.
         Currently only supports linear layers.
         """
-        tp_plan = getattr(self.model.config, "base_model_tp_plan", None) or {}
+        # Look for tp plans in all of the PreTrainedModels found in self.model
+        is_pretrained_model = lambda m: isinstance(m, PreTrainedModel)
+        supports_tp_plan = lambda m: m.config.base_model_tp_plan is not None
+        pretrained_models = filter(is_pretrained_model, self.model.modules())
+        models_with_tp_plan = filter(supports_tp_plan, pretrained_models)
 
-        if not tp_plan and self.tp_size > 1:
+        if not any(models_with_tp_plan) and self.tp_size > 1:
             raise ValueError(
                 f"{type(self.model)} does not support tensor parallel yet!")
 
-        # Some weight loaders expect linear layers to inherit from vLLM's
-        # LinearBase class, so we set a default style which causes any
-        # unspecified linear layers to be replaced with ReplicatedLinear
-        tp_plan[".*"] = "replicated"
+        def _tensor_parallel(module: nn.Module,
+                             prefix: str = "",
+                             tp_plan=None):
+            tp_plan = tp_plan or {}
 
-        def _tensor_parallel(module: nn.Module, prefix: str = ""):
+            # If the current module is a PreTrainedModel, set the tp_plan for
+            # all of its children
+            if isinstance(module, PreTrainedModel):
+                tp_plan = module.config.base_model_tp_plan or {}
+                tp_plan = {
+                    maybe_prefix(prefix, k): v
+                    for k, v in tp_plan.items()
+                }
+
+            # Some weight loaders expect linear layers to inherit from vLLM's
+            # LinearBase class, so we set a default style which causes any
+            # unspecified linear layers to be replaced with ReplicatedLinear
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
-                for pattern, style in tp_plan.items():
-                    if re.match(pattern, qual_name) and isinstance(
-                            child_module, nn.Linear):
-                        new_module = replace_linear_class(
-                            child_module, style, self.quant_config)
-                        setattr(module, child_name, new_module)
-                        log_replacement(qual_name, child_module, new_module)
-                        break
+                if isinstance(child_module, nn.Linear):
+                    generator = (p for p in tp_plan if re.match(p, qual_name))
+                    pattern = next(generator, None)
+                    style = tp_plan.get(pattern, "replicate")
+                    new_module = replace_linear_class(child_module, style,
+                                                      self.quant_config)
+                    setattr(module, child_name, new_module)
+                    log_replacement(qual_name, child_module, new_module)
                 else:
-                    _tensor_parallel(child_module, prefix=qual_name)
+                    _tensor_parallel(child_module,
+                                     prefix=qual_name,
+                                     tp_plan=tp_plan)
 
         _tensor_parallel(self.model)
 
@@ -575,11 +563,10 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         attention_instances = {}
         for i in range(start, end):
             # Handle interleaved sliding window attention
-            sliding_window = None
-            if (hasattr(self.config, "interleaved_sliding_window")
-                    and hasattr(self.config, "sliding_window_pattern")
-                    and ((i + 1) % self.config.sliding_window_pattern > 0)):
-                sliding_window = self.config.interleaved_sliding_window
+            per_layer_sliding_window = None
+            if (hasattr(self.config, "layer_types")
+                    and self.config.layer_types[i] == "sliding_attention"):
+                per_layer_sliding_window = self.config.sliding_window
 
             attention_instances[i] = Attention(
                 num_heads=num_heads,
@@ -590,7 +577,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
-                per_layer_sliding_window=sliding_window,
+                per_layer_sliding_window=per_layer_sliding_window,
                 prefix=f"{i}.attn")
         return attention_instances
 

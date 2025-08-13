@@ -28,7 +28,7 @@ from typing import Any, Optional, Union
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import Qwen3MoeConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -101,7 +101,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Qwen3MoeConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         enable_eplb: bool = False,
@@ -149,7 +149,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.num_experts,
                                      bias=False,
-                                     quant_config=None,
+                                     quant_config=quant_config,
                                      prefix=f"{prefix}.gate")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -278,7 +278,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Qwen3MoeConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -375,6 +375,7 @@ class Qwen3MoeModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
             prefix=f"{prefix}.embed_tokens")
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
