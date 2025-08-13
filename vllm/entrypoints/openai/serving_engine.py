@@ -585,6 +585,8 @@ class OpenAIServing:
                       (EmbeddingChatRequest, EmbeddingCompletionRequest,
                        ScoreRequest, RerankRequest, ClassificationRequest)):
 
+            # Note: input length can be up to the entire model context length
+            # since these requests don't generate tokens.
             if token_num > self.max_model_len:
                 operations: dict[type[AnyRequest], str] = {
                     ScoreRequest: "score",
@@ -614,6 +616,8 @@ class OpenAIServing:
         else:
             max_tokens = getattr(request, "max_tokens", None)
 
+        # Note: input length can be up to model context length - 1 for
+        # completion-like requests.
         if token_num >= self.max_model_len:
             raise ValueError(
                 f"This model's maximum context length is "
