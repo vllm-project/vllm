@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pickle
+import uuid
 from collections.abc import Iterable, Mapping
 from typing import Union
 
 import numpy as np
 import torch
-import uuid
 from blake3 import blake3
 from PIL import Image
 
@@ -36,7 +36,8 @@ class MultiModalHasher:
 
         if isinstance(obj, Image.Image):
             exif = obj.getexif()
-            if Image.ExifTags.Base.ImageID in exif and isinstance(exif[Image.ExifTags.Base.ImageID], uuid.UUID):
+            if Image.ExifTags.Base.ImageID in exif and isinstance(
+                    exif[Image.ExifTags.Base.ImageID], uuid.UUID):
                 # If the image has exif ImageID tag, use that instead of the image data
                 return exif[Image.ExifTags.Base.ImageID].bytes
             return cls.item_to_bytes(
