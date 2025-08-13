@@ -39,14 +39,13 @@ jobs:
                   "mi355x",
                   "mi308",
                   // GPU Models - Radeon Series
-                  "amd radeon",
-                  "ai pro r9700",
+                  "radeon",
+                  "r9700",
                   "rx 9070",
                   "rx 9060",
                   "rx 7900",
                   "rx 7800",
                   // GPU Models - Pro Series
-                  "amd radeon pro",
                   "w7900",
                   "w7800",
                   "w7700",
