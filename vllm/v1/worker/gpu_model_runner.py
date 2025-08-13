@@ -80,6 +80,7 @@ from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
                     gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 import os
+from pprint import pprint
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -1030,6 +1031,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 mrope_pos_ptr += prompt_part_len
                 # ekhvedchenia
                 print("_calc_mrope_positions (prompt_part_len > 0)")
+                print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
+                print(f"{req.mrope_position_delta=}")
                 print(f"{self.mrope_positions_cpu.shape=}")
                 print(f"{dst_start=} {dst_end=} {src_start=} {src_end=} {prompt_part_len=}")
                 print(self.mrope_positions_cpu[0])
@@ -1055,7 +1058,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 print("_calc_mrope_positions (completion_part_len > 0)")
                 print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
                 print(f"{dst_start=} {dst_end=} {prompt_part_len=} {num_computed_tokens=} {completion_part_len=}")
-                print("req.mrope_position_delta", req.mrope_position_delta)
+                print(f"{req.mrope_position_delta=}")
                 print("req._mrope_position_delta", req._mrope_position_delta if hasattr(req, "_mrope_position_delta") else None)
                 print(f"{self.mrope_positions_np.shape=}")
                 print(self.mrope_positions_np[0])
@@ -1555,6 +1558,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             print(req.mrope_positions[0].tolist())
                             print(req.mrope_positions[1].tolist())
                             print(req.mrope_positions[2].tolist())
+                            pprint(req)
+
                     else:
                         self.positions[:num_scheduled_tokens].copy(positions_scheduled)
             else:
