@@ -349,7 +349,7 @@ class BackgroundResources:
 
         # ZMQ context termination can hang if the sockets
         # aren't explicitly closed first.
-        for socket in (self.first_req_rcv_socket, self.stats_update_socke):
+        for socket in (self.first_req_rcv_socket, self.stats_update_socket):
             if socket is not None:
                 socket.close(linger=0)
         cancel_task_threadsafe(self.stats_update_task)
