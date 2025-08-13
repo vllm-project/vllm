@@ -1523,6 +1523,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 
                 # Update mrope positions if using MRoPE
                 if positions_scheduled is not None:
+                    print(f"{num_scheduled_tokens=} {num_input_tokens=} {self.input_ids.shape=}")
+
                     if self.uses_mrope:
                         self.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
 
