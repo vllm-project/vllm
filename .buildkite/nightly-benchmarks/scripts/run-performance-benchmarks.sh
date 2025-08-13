@@ -334,11 +334,11 @@ run_serving_tests() {
     qps_list=$(echo "$qps_list" | jq -r '.[] | @sh')
     echo "Running over qps list $qps_list"
     max_concurrency_list=$(echo "$params" | jq -r '.max_concurrency_list')
-    max_concurrency_list=$(echo "$max_concurrency_list" | jq -r '.[] | @sh')
     if [[ -z "$max_concurrency_list" || "$max_concurrency_list" == "null" ]]; then
         num_prompts=$(echo "$client_params" | jq -r '.num_prompts')
         max_concurrency_list="$num_prompts"
     fi
+    max_concurrency_list=$(echo "$max_concurrency_list" | jq -r '.[] | @sh')
     echo "Running over max concurrency list $max_concurrency_list"
 
     # check if there is enough resources to run the test
@@ -356,7 +356,6 @@ run_serving_tests() {
         continue
       fi
     fi
-
 
     # check if server model and client model is aligned
     server_model=$(echo "$server_params" | jq -r '.model')
@@ -406,7 +405,7 @@ run_serving_tests() {
 
       # iterate over different max_concurrency
       for max_concurrency in $max_concurrency_list; do
-        new_test_name=$test_name"_qps_"$qps"_users_"$max_concurrency
+        new_test_name=$test_name"_qps_"$qps"_concurrency_"$max_concurrency
         echo " new test name $new_test_name"
         # pass the tensor parallel size to the client so that it can be displayed
         # on the benchmark dashboard
