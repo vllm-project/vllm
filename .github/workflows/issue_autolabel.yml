@@ -36,7 +36,6 @@ jobs:
                   "mi325x",
                   "mi350x",
                   "mi355x",
-                  "mi308",
                   // GPU Models - Radeon Series
                   "radeon",
                   "r9700",
@@ -68,6 +67,7 @@ jobs:
                   "rdna4",
                   "rdna3",
                   "rdna2",
+                  "rdna",
                   // Libraries and tools
                   "composable kernel",
                   // "aiter", // problem at 13192 aiter is used in langchain
