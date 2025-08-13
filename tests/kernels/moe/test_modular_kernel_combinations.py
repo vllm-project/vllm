@@ -191,7 +191,8 @@ def test_modular_kernel_combinations_multigpu(
         pytest.skip(f"Tests config {config} is nyi. Skipping ...")
 
     verbosity = pytestconfig.getoption('verbose')
-    run(config, verbosity > 0)
+    #run(config, verbosity > 0)
+    run(config, True)
 
 
 @pytest.mark.parametrize("k", Ks)
@@ -231,8 +232,8 @@ def test_modular_kernel_combinations_singlegpu(
         pytest.skip(f"Tests config {config} is nyi. Skipping ...")
 
     verbosity = pytestconfig.getoption('verbose')
-
-    run(config, verbosity > 0)
+    #run(config, verbosity > 0)
+    run(config, True)
 
 
 if __name__ == '__main__':
