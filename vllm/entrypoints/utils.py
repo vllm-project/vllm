@@ -118,16 +118,17 @@ def load_aware_call(func):
         if (max_load is not None
                 and raw_request.app.state.server_load_metrics >= max_load):
             logger.warning(
-                f"Server overloaded: current load {raw_request.app.state.server_load_metrics} "
-                f">= max load {max_load}. Rejecting request.")
+                "Server overloaded: current load %s >= max load %s. "
+                "Rejecting request.",
+                raw_request.app.state.server_load_metrics, max_load)
             return JSONResponse(content={
                 "error": {
                     "type":
                     "server_overloaded",
                     "message":
-                    f"Server is currently overloaded. "
-                    f"Current load: {raw_request.app.state.server_load_metrics}, "
-                    f"Max load: {max_load}. Please try again later."
+                    f"Server is currently overloaded. Current load: "
+                    f"{raw_request.app.state.server_load_metrics}, Max load: "
+                    f"{max_load}. Please try again later."
                 }
             },
                                 status_code=503)
