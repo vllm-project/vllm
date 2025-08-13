@@ -7,6 +7,7 @@ from typing import Union
 
 import numpy as np
 import torch
+import uuid
 from blake3 import blake3
 from PIL import Image
 
@@ -34,6 +35,10 @@ class MultiModalHasher:
             return np.array(obj).tobytes()
 
         if isinstance(obj, Image.Image):
+            exif = obj.getexif()
+            if Image.ExifTags.Base.ImageID in exif and isinstance(exif[Image.ExifTags.Base.ImageID], uuid.UUID):
+                # If the image has exif ImageID tag, use that instead of the image data
+                return exif[Image.ExifTags.Base.ImageID].bytes
             return cls.item_to_bytes(
                 "image", np.asarray(convert_image_mode(obj, "RGBA")))
         if isinstance(obj, torch.Tensor):
