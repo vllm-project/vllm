@@ -42,7 +42,7 @@ def get_multimodal_data_processor(
             if processor_cls_qualname is not None:
                 loadable_plugins[name] = processor_cls_qualname
         except Exception:
-            pass
+            logger.warning("Failed to load plugin %s.", name, exc_info=True)
 
     num_available_plugins = len(loadable_plugins.keys())
     if num_available_plugins == 0:
