@@ -110,7 +110,7 @@ def main(
 
         # Using default kv_scale
         k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
-        print(ops.__file__)
+
         for _ in range(num_iters):
             if version == "v1":
                 ops.paged_attention_v1(
