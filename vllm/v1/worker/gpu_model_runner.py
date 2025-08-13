@@ -79,6 +79,7 @@ from ..sample.logits_processor import LogitsProcessorManager
 from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
                     gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
+import os
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -491,7 +492,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # ekhvedchenia
                 req = self.requests[req_id]
                 import os
-                print(f"Setting mrope for request", req_id, id(req), os.getpid(), type(req))
+                print(f"Setting mrope for request")
+                print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
                 print("prompt_token_ids", len(req.prompt_token_ids))
                 print("req.mrope_position_delta", req.mrope_position_delta)
                 print(req.mrope_positions[0])
@@ -1027,7 +1029,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 mrope_pos_ptr += prompt_part_len
                 # ekhvedchenia
-                print("_calc_mrope_positions (prompt_part_len > 0)", f"{req_id=}", f"{self.mrope_positions_cpu.shape=}")
+                print("_calc_mrope_positions (prompt_part_len > 0)")
+                print(f"{self.mrope_positions_cpu.shape=}")
                 print(f"{dst_start=} {dst_end=} {src_start=} {src_end=} {prompt_part_len=}")
                 print(self.mrope_positions_cpu[0])
                 print(self.mrope_positions_cpu[1])
@@ -1049,10 +1052,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 mrope_pos_ptr += completion_part_len
 
                 import os
-                print("_calc_mrope_positions (completion_part_len > 0)", req_id, id(req), os.getpid(), type(req), f"{self.mrope_positions_np.shape=}")
+                print("_calc_mrope_positions (completion_part_len > 0)")
+                print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
                 print(f"{dst_start=} {dst_end=} {prompt_part_len=} {num_computed_tokens=} {completion_part_len=}")
                 print("req.mrope_position_delta", req.mrope_position_delta)
                 print("req._mrope_position_delta", req._mrope_position_delta if hasattr(req, "_mrope_position_delta") else None)
+                print(f"{self.mrope_positions_np.shape=}")
                 print(self.mrope_positions_np[0])
                 print(self.mrope_positions_np[1])
                 print(self.mrope_positions_np[2])
@@ -1542,8 +1547,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             req.mrope_positions_delta = mrope_positions_delta
                             setattr(req, "_mrope_positions_delta", mrope_positions_delta)
                             req._mrope_positions_delta = mrope_positions_delta
-                            import os
-                            print(f"Updating positions in req", req_id, id(req), type(req), os.getpid())
+                            print(f"Updating positions in req")
+                            print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
+
                             print(f"{req.mrope_positions_delta=}")
                             print(f"{req.mrope_positions.shape=}")
                             print(req.mrope_positions[0].tolist())
