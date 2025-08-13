@@ -154,7 +154,7 @@ def create_request(
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
         pooling_params=None,
-        multi_modal_inputs=None,
+        multi_modal_kwargs=None,
         multi_modal_placeholders=None,
         multi_modal_hashes=None,
         eos_token_id=EOS_TOKEN_ID,
