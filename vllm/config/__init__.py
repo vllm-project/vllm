@@ -11,6 +11,7 @@ import json
 import textwrap
 import uuid
 import warnings
+from collections import defaultdict
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
@@ -3727,7 +3728,6 @@ class VllmConfig:
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if (self.kv_transfer_config is not None
                     and self.kv_transfer_config.is_kv_transfer_instance):
-                from collections import defaultdict
                 self.parallel_config.xfer_handshake_metadata = defaultdict(
                     dict)
             if self.kv_events_config is not None:

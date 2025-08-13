@@ -18,6 +18,9 @@ from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+# centralized lazy import
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector._nixl_import import (  # noqa: E501
+    NixlWrapper)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.handshake import (  # noqa: E501
     HandshakeStrategy, HttpHandshakeStrategy, NixlAgentMetadata,
     ZmqHandshakeStrategy)
@@ -42,14 +45,6 @@ EngineId = str
 ReqId = str
 
 logger = init_logger(__name__)
-
-# Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
-try:
-    from nixl._api import nixl_agent as NixlWrapper
-    logger.info("NIXL is available")
-except ImportError:
-    logger.warning("NIXL is not available")
-    NixlWrapper = None
 
 # Supported xPUs and types of kv transfer buffer.
 # {xPU: tuple of supported kv buffer types}
@@ -177,8 +172,7 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
         # Set handshake metadata directly
-        if hasattr(self.connector_worker, 'xfer_metadata'):
-            self._handshake_metadata = self.connector_worker.xfer_metadata
+        self._handshake_metadata = self.connector_worker.xfer_metadata
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         assert self.connector_worker is not None
@@ -540,7 +534,7 @@ class NixlConnectorWorker:
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
 
         # Initialize handshake strategy
-        handshake_method = envs.VLLM_NIXL_HANDSHAKE_METHOD.lower()
+        handshake_method = envs.VLLM_NIXL_HANDSHAKE_METHOD
         if handshake_method == "zmq":
             self._handshake_strategy: HandshakeStrategy = ZmqHandshakeStrategy(
                 self.nixl_wrapper, self.tp_rank, self.world_size,
@@ -556,8 +550,7 @@ class NixlConnectorWorker:
     def __del__(self):
         """Cleanup background threads on destruction."""
         self._handshake_initiation_executor.shutdown(wait=False)
-        if hasattr(self, '_handshake_strategy'):
-            self._handshake_strategy.cleanup()
+        self._handshake_strategy.cleanup()
 
     def _nixl_handshake(
         self,
