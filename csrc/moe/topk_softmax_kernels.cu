@@ -423,12 +423,21 @@ void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, f
         input, finished, output, num_rows, indices, source_row, k, start_expert, end_expert);
 }
 
-#define LAUNCH_SOFTMAX(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)                          \
-    static_assert(WARP_SIZE == 32 || WARP_SIZE == 64,                                 \
-                  "Unsupported warp size. Only 32 and 64 are supported.");            \
-    topkGatingSoftmaxLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, WARP_SIZE, MAX_BYTES>( \
-        gating_output, nullptr, topk_weights, topk_indices,                           \
-        token_expert_indices, num_tokens, topk, 0, num_experts, stream);
+#define LAUNCH_SOFTMAX(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)                           \
+    switch (warpSize) {                                                                \
+        case 32:                                                                       \
+            topkGatingSoftmaxLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, 32, MAX_BYTES>( \
+                gating_output, nullptr, topk_weights, topk_indices,                    \
+                token_expert_indices, num_tokens, topk, 0, num_experts, stream);       \
+            break;                                                                     \
+        case 64:                                                                       \
+            topkGatingSoftmaxLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, 64, MAX_BYTES>( \
+                gating_output, nullptr, topk_weights, topk_indices,                    \
+                token_expert_indices, num_tokens, topk, 0, num_experts, stream);       \
+            break;                                                                     \
+        default:                                                                       \
+            TORCH_CHECK(false, "Unsupported warp size: ", warpSize);                   \
+    }
 
 template <typename IndType>
 void topkGatingSoftmaxKernelLauncher(
@@ -442,6 +451,7 @@ void topkGatingSoftmaxKernelLauncher(
     const int topk,
     cudaStream_t stream) {
     static constexpr int WARPS_PER_TB = 4;
+    auto warpSize = WARP_SIZE;
     static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
     static constexpr int BYTES_PER_LDG_MULTIPLE_64 = 8;
     switch (num_experts) {
