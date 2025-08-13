@@ -707,7 +707,7 @@ def get_moe_configs(
         os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
     config_file_paths.append(default_config_file_path)
 
-    user_defined_config_folder = os.getenv("VLLM_FUSED_MOE_CONFIG_FOLDER", None)
+    user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
     if user_defined_config_folder is not None:
         user_defined_config_file_path = os.path.join(user_defined_config_folder, json_file_name)
         config_file_paths.append(user_defined_config_file_path)
