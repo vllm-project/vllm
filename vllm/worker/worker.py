@@ -238,12 +238,19 @@ class Worker(LocalOrDistributedWorkerBase):
             # max_num_batched_tokens
             self.model_runner.profile_run()
 
-            msg = (f"(Reserved {(kv_cache_memory/GiB_bytes):.2f}GiB memory "
-                   f"for KV Cache as specified by kv_cache_memory config "
-                   f"and skipped memory profiling. This does does not "
-                   f"respect the gpu_memory_utilization config. Only use "
-                   f"kv_cache_memory config when you want manual control "
-                   f"of KV cache memory size.")
+            GiB = lambda b: b / GiB_bytes
+            msg = (
+                f"Initial free memory "
+                f"{GiB(self.baseline_snapshot.free_memory):.2f} "
+                f"GiB, reserved {GiB(kv_cache_memory):.2f}GiB memory for "
+                "KV Cache as specified by kv_cache_memory config and skipped "
+                "memory profiling. This does does not respect the "
+                "gpu_memory_utilization config. Only use kv_cache_memory "
+                "config when you want manual control of KV cache memory "
+                "size. If OOM'ed, check the difference of initial free "
+                "memory between the current run and the previous run "
+                "where kv_cache_memory is suggested and update it "
+                "correspondingly.")
             logger.info(msg)
             return self.cache_config.kv_cache_memory
 
@@ -427,10 +434,16 @@ class Worker(LocalOrDistributedWorkerBase):
                                    self.non_torch_memory +
                                    cuda_graph_memory_bytes)
 
+            # empirically observed that the memory profiling may
+            # slightly underestimate the memory consumption.
+            # So leave a small buffer (=200MiB) to avoid OOM.
+            redundancy_buffer_memory = 200 * (1 << 20)
             kv_cache_memory_bytes_to_gpu_limit = (
-                self.baseline_snapshot.free_memory - non_kv_cache_memory)
+                self.baseline_snapshot.free_memory - non_kv_cache_memory -
+                redundancy_buffer_memory)
             kv_cache_memory_bytes_to_requested_limit = (
-                int(self.requested_memory) - non_kv_cache_memory)
+                int(self.requested_memory) - non_kv_cache_memory -
+                redundancy_buffer_memory)
 
             msg = (
                 f"Free memory on device "
@@ -444,9 +457,9 @@ class Worker(LocalOrDistributedWorkerBase):
                 f"for peak activation, {GiB(self.non_torch_memory)} GiB "
                 f"for non-torch memory, and {GiB(cuda_graph_memory_bytes)} "
                 f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
-                f"config with `kv_cache_memory="
+                f"config with `--kv-cache-memory="
                 f"{kv_cache_memory_bytes_to_requested_limit}` to fit into "
-                f"requested memory, or `kv_cache_memory="
+                f"requested memory, or `--kv-cache-memory="
                 f"{kv_cache_memory_bytes_to_gpu_limit}` to fully "
                 f"utilize gpu memory.")
             logger.info(msg)
