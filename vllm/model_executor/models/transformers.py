@@ -729,6 +729,15 @@ class TransformersMoEBase(TransformersBase):
 
         _fused_moe(self.model)
 
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self, skip_prefixes=self.skip_prefixes)
+        return loader.load_weights(
+            weights,
+            mapper=self.hf_to_vllm_mapper,
+            expert_mapping=self.get_expert_mapping(),
+        )
+
 
 @support_torch_compile
 class TransformersModel(TransformersBase):
