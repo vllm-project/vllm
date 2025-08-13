@@ -2,12 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
-
-from vllm.entrypoints.harmony_utils import (get_streamable_parser_for_assistant,
-                                            parse_output_into_messages)
+from vllm.entrypoints.harmony_utils import (
+    get_streamable_parser_for_assistant, parse_output_into_messages)
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -22,6 +21,7 @@ if TYPE_CHECKING:
 
 @ToolParserManager.register_module("openai")
 class OpenAIToolParser(ToolParser):
+
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
 
@@ -29,15 +29,13 @@ class OpenAIToolParser(ToolParser):
         self,
         model_output: str,
         request: ChatCompletionRequest,
+        token_ids: Sequence[int] | None = None,
     ) -> ExtractedToolCallInformation:
-        raise NotImplementedError(
-            "OpenAIToolParser requires token IDs and does not support "
-            "text-based extraction.")
+        if token_ids is None:
+            raise NotImplementedError(
+                "OpenAIToolParser requires token IDs and does not support text-based extraction."  # noqa: E501
+            )
 
-    def extract_tool_calls_from_ids(
-        self,
-        token_ids: Sequence[int],
-    ) -> ExtractedToolCallInformation:
         parser = parse_output_into_messages(token_ids)
         tool_calls = []
         reasoning_content = None
@@ -93,16 +91,14 @@ class OpenAIToolParser(ToolParser):
             delta_message = DeltaMessage(
                 content=stream_parser.last_content_delta)
         elif (stream_parser.current_channel == "commentary"
-              and stream_parser.current_recipient and
-              stream_parser.current_recipient.startswith("functions.")):
+              and stream_parser.current_recipient
+              and stream_parser.current_recipient.startswith("functions.")):
             if stream_parser.current_recipient != prev_recipient:
                 # New tool call
                 tool_info = {
                     "name":
-                    stream_parser.current_recipient.split("functions.")
-                    [1],
-                    "args":
-                    "",
+                    stream_parser.current_recipient.split("functions.")[1],
+                    "args": "",
                 }
                 tool_calls_info.append(tool_info)
                 delta_message = DeltaMessage(tool_calls=[
@@ -118,10 +114,10 @@ class OpenAIToolParser(ToolParser):
                     tool_calls_info[current_tool_index][
                         "args"] += stream_parser.last_content_delta
                     delta_message = DeltaMessage(tool_calls=[
-                        DeltaToolCall(index=current_tool_index,
-                                      function=DeltaFunctionCall(
-                                          arguments=stream_parser.
-                                          last_content_delta))
+                        DeltaToolCall(
+                            index=current_tool_index,
+                            function=DeltaFunctionCall(
+                                arguments=stream_parser.last_content_delta))
                     ])
 
         return delta_message

@@ -1092,8 +1092,9 @@ class OpenAIServingChat(OpenAIServing):
 
             if self.use_harmony:
                 tool_parser = self.tool_parser(tokenizer)
-                tool_call_info = tool_parser.extract_tool_calls_from_ids(
-                    token_ids)
+                # NOTE: We use token_ids for openai tool parser
+                tool_call_info = tool_parser.extract_tool_calls(
+                    "", request=request, token_ids=token_ids)
                 message = ChatMessage(
                     role=role,
                     reasoning_content=None if not request.include_reasoning

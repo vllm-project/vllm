@@ -43,28 +43,30 @@ def assert_tool_calls(actual_tool_calls: list[ToolCall],
         assert actual_tool_call.function == expected_tool_call.function
 
 
-def test_extract_tool_calls_from_ids_no_tools(openai_tool_parser,
-                                              harmony_encoding):
+def test_extract_tool_calls_no_tools(openai_tool_parser, harmony_encoding):
     msg = Message.from_role_and_content(Role.ASSISTANT,
                                         "This is a test").with_channel("final")
     stop_token = harmony_encoding.token_from_string("<|return|>")
     token_ids = harmony_encoding.render_message(msg) + [stop_token]
 
-    extracted_info = openai_tool_parser.extract_tool_calls_from_ids(token_ids)
+    extracted_info = openai_tool_parser.extract_tool_calls("",
+                                                           request=None,
+                                                           token_ids=token_ids)
     assert not extracted_info.tools_called
     assert extracted_info.tool_calls == []
     assert extracted_info.content == "This is a test"
 
 
-def test_extract_tool_calls_from_ids_single_tool(openai_tool_parser,
-                                                 harmony_encoding):
+def test_extract_tool_calls_single_tool(openai_tool_parser, harmony_encoding):
     msg = Message.from_role_and_content(
         Role.ASSISTANT, '{"city": "Dallas"}').with_channel("commentary"). \
         with_recipient("functions.get_current_weather").with_content_type("json")
     stop_token = harmony_encoding.token_from_string("<|call|>")
     token_ids = harmony_encoding.render_message(msg) + [stop_token]
 
-    extracted_info = openai_tool_parser.extract_tool_calls_from_ids(token_ids)
+    extracted_info = openai_tool_parser.extract_tool_calls("",
+                                                           request=None,
+                                                           token_ids=token_ids)
     assert extracted_info.tools_called
     expected_tool_calls = [
         ToolCall(
@@ -75,8 +77,8 @@ def test_extract_tool_calls_from_ids_single_tool(openai_tool_parser,
     assert extracted_info.content is None
 
 
-def test_extract_tool_calls_from_ids_multiple_tools(openai_tool_parser,
-                                                    harmony_encoding):
+def test_extract_tool_calls_multiple_tools(openai_tool_parser,
+                                           harmony_encoding):
     msg1 = Message.from_role_and_content(
         Role.ASSISTANT, '{"city": "Dallas"}').with_channel("commentary"). \
         with_recipient("functions.get_current_weather").with_content_type("json")
@@ -87,7 +89,9 @@ def test_extract_tool_calls_from_ids_multiple_tools(openai_tool_parser,
     token_ids = harmony_encoding.render_message(
         msg1) + harmony_encoding.render_message(msg2) + [stop_token]
 
-    extracted_info = openai_tool_parser.extract_tool_calls_from_ids(token_ids)
+    extracted_info = openai_tool_parser.extract_tool_calls("",
+                                                           request=None,
+                                                           token_ids=token_ids)
     assert extracted_info.tools_called
     expected_tool_calls = [
         ToolCall(
@@ -100,8 +104,8 @@ def test_extract_tool_calls_from_ids_multiple_tools(openai_tool_parser,
     assert extracted_info.content is None
 
 
-def test_extract_tool_calls_from_ids_with_reasoning(openai_tool_parser,
-                                                    harmony_encoding):
+def test_extract_tool_calls_with_reasoning(openai_tool_parser,
+                                           harmony_encoding):
     msg1 = Message.from_role_and_content(
         Role.ASSISTANT, "Thinking about the weather.").with_channel("analysis")
     msg2 = Message.from_role_and_content(
@@ -115,7 +119,9 @@ def test_extract_tool_calls_from_ids_with_reasoning(openai_tool_parser,
         msg1) + harmony_encoding.render_message(
             msg2) + harmony_encoding.render_message(msg3) + [stop_token]
 
-    extracted_info = openai_tool_parser.extract_tool_calls_from_ids(token_ids)
+    extracted_info = openai_tool_parser.extract_tool_calls("",
+                                                           request=None,
+                                                           token_ids=token_ids)
     assert extracted_info.tools_called
     assert extracted_info.reasoning_content == "Thinking about the weather."
     expected_tool_calls = [
