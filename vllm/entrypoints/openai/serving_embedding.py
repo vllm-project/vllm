@@ -17,7 +17,6 @@ from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this docstring
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
-                                              EmbeddingCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
@@ -158,7 +157,8 @@ class EmbeddingMixin(OpenAIServing):
 
     def _should_use_chunked_processing(self, request) -> bool:
         """Check if chunked processing should be used for this request."""
-        return isinstance(request, EmbeddingRequest) and self.supports_chunked_processing
+        return isinstance(
+            request, EmbeddingRequest) and self.supports_chunked_processing
 
     async def _process_chunked_request(
         self,
@@ -224,21 +224,16 @@ class EmbeddingMixin(OpenAIServing):
             # Check if chunked processing is enabled for pooling models
             enable_chunked = self._should_use_chunked_processing(request)
 
-            # Use cached max_embed_len value
-            max_embed_len = self.max_embed_len
-
             # Use max_position_embeddings for chunked processing decisions
             max_pos_embeddings = self._get_max_position_embeddings()
 
             # Determine the effective max length for validation
-            if max_embed_len is not None:
+            if self.max_embed_len is not None:
                 # Use max_embed_len for validation instead of max_model_len
-                effective_max_len = max_embed_len
                 length_type = "maximum embedding input length"
-                max_length_value = max_embed_len
+                max_length_value = self.max_embed_len
             else:
                 # Fall back to max_model_len validation (original behavior)
-                effective_max_len = self.max_model_len
                 length_type = "maximum context length"
                 max_length_value = self.max_model_len
 
@@ -253,8 +248,8 @@ class EmbeddingMixin(OpenAIServing):
                 "embedding generation. Please reduce the length of the input "
                 "or enable chunked processing.")
 
-            # Check if input exceeds effective max length
-            if token_num > effective_max_len:
+            # Check if input exceeds max length
+            if token_num > max_length_value:
                 raise ValueError(
                     validation_error_msg.format(
                         length_type=length_type,
