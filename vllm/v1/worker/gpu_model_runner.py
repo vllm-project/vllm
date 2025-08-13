@@ -1500,17 +1500,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
                 
                 # Update mrope positions if using MRoPE
-                if self.uses_mrope:
-                    self.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
+                if positions_scheduled is not None:
+                    if self.uses_mrope:
+                        self.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
 
-                    # ekhvedchenia: What request we should update?
-                    for i, req_id in enumerate(self.input_batch.req_ids):
-                        req_state = self.requests[req_id]
-                        req_state.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
-                        print(f"Updating positions in req_state[{i}]", positions_scheduled)
-                    #scheduler_output.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
-                else:
-                    self.positions[:num_scheduled_tokens].copy(positions_scheduled)
+                        # ekhvedchenia: What request we should update?
+                        # for i, req_id in enumerate(self.input_batch.req_ids):
+                        #     req_state = self.requests[req_id]
+                        #     req_state.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
+                        #     print(f"Updating positions in req_state[{i}]", positions_scheduled)
+                        #scheduler_output.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
+                    else:
+                        self.positions[:num_scheduled_tokens].copy(positions_scheduled)
             else:
                 inputs_embeds_scheduled = self.model.get_input_embeddings(
                     input_ids=self.input_ids[:num_scheduled_tokens],
