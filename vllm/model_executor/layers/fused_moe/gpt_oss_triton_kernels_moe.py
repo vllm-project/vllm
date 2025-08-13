@@ -9,6 +9,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.utils import has_triton_kernels
+from vllm.distributed import get_ep_group
 
 logger = init_logger(__name__)
 
@@ -18,6 +19,8 @@ if has_triton_kernels():
         from triton_kernels.matmul_ogs import (FnSpecs, FusedActivation,
                                                matmul_ogs)
         from triton_kernels.routing import routing
+        from triton_kernels.topk import topk
+        from triton_kernels.routing import RoutingData, GatherIndx, ScatterIndx, compute_expt_data
     except ModuleNotFoundError:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
@@ -25,6 +28,63 @@ if has_triton_kernels():
 
 if TYPE_CHECKING:
     from triton_kernels.matmul_ogs import PrecisionConfig
+
+
+def ep_routing_naive(
+    gating_output: torch.Tensor,
+    top_k: int,
+    sm_first: bool = False,
+    n_rows: Optional[int] = None,
+    ep_size: Optional[int] = None,
+    ep_rank: Optional[int] = None,
+):
+    E = gating_output.shape[0]
+    if ep_size is None:
+        ep_size = get_ep_group().world_size
+    if ep_rank is None:
+        ep_rank = get_ep_group().rank_in_group
+
+    if sm_first:
+            logits = torch.softmax(logits, dim=-1)
+    expt_scal, expt_indx, _ = topk(logits, top_k, apply_softmax=not sm_first, n_rows=n_rows)
+    expt_indx = expt_indx.int()
+    
+    expt_indx, sort_indices = torch.sort(expt_indx, dim=1, stable=True)
+    expt_scal = torch.gather(expt_scal, 1, sort_indices)
+
+    num_local_expert = E // ep_size
+
+    mask = (expt_indx // num_local_expert) == ep_rank
+    expt_indx -= ep_rank * num_local_expert
+    expt_scal = expt_scal.masked_fill(~mask, 0)
+    expt_indx = expt_indx.masked_fill(~mask, E)
+
+    expt_scal = expt_scal.reshape(-1)
+    expt_indx = expt_indx.reshape(-1).to(torch.int32)
+
+    # Sort by expert_id for contiguous experts in matmul
+    expt_indx, topk_indx = torch.sort(expt_indx, stable=True)
+    gate_indx = torch.argsort(topk_indx, stable=True)
+
+    mask = expt_indx != E
+    topk_indx[~mask] = -1
+    gate_indx[gate_indx >= mask.sum()] = -1
+    gate_scal = expt_scal[topk_indx]
+    hist = torch.histc(expt_indx[mask], bins=num_local_expert, min=0, max=num_local_expert - 1)
+
+    # Pack the matmul data structures
+    gather_indx = GatherIndx(src_indx=topk_indx.int(), dst_indx=gate_indx.int())
+    scatter_indx = ScatterIndx(src_indx=gate_indx.int(), dst_indx=topk_indx.int())
+    n_gates = mask.sum().item()
+    expt_data = compute_expt_data(hist, num_local_expert, n_gates)
+
+    return RoutingData(
+            gate_scal, 
+            hist, 
+            num_local_expert, 
+            top_k, 
+            expt_data=expt_data), gather_indx,scatter_indx,
+
 
 
 def triton_kernel_moe_forward(
