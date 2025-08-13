@@ -246,7 +246,7 @@ def get_load_balance_assignment(sizes, num_gpus=2):
             Total size assigned to each GPU
     """
     # Convert to list for efficient indexing and iteration
-    if hasattr(sizes, 'tolist'):  # Handle tensor input
+    if isinstance(sizes, torch.Tensor):
         sizes = sizes.tolist()
 
     n_samples = len(sizes)
