@@ -626,7 +626,7 @@ class OpenAIServing:
                 f"{max_tokens}. This model's maximum context length is "
                 f"{self.max_model_len} tokens and your request has "
                 f"{token_num} input tokens ({max_tokens} > {self.max_model_len}"
-                f" - {token_num}.")
+                f" - {token_num}).")
 
         return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
