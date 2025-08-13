@@ -12,7 +12,6 @@ import importlib.metadata
 import os
 from dataclasses import dataclass
 
-import huggingface_hub
 import lm_eval
 import pytest
 import torch
@@ -134,9 +133,8 @@ class GSM8KAccuracyTestConfig:
 
 ACCURACY_CONFIGS = [
     # Private model.
-    GSM8KAccuracyTestConfig(
-        model_name="/data/amd/DeepSeek-R1-MXFP4-Preview",
-        excepted_value=0.96),
+    GSM8KAccuracyTestConfig(model_name="/data/amd/DeepSeek-R1-MXFP4-Preview",
+                            excepted_value=0.96),
 ]
 
 
