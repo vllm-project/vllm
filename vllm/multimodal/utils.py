@@ -474,7 +474,7 @@ def get_load_balance_assignment(sizes, num_gpus=2):
     # Handle edge cases
     if n_samples == 0:
         empty_assignment = torch.zeros((num_gpus, 0), dtype=torch.bool)
-        return [], [], [0] * num_gpus, empty_assignment, [0] * num_gpus
+        return [], [0] * num_gpus, empty_assignment, [0] * num_gpus
 
     if n_samples < num_gpus:
         shuffle_indices = list(range(n_samples))

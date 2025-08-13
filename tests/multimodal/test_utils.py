@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import base64
+import math
 import mimetypes
 import os
 from tempfile import NamedTemporaryFile, TemporaryDirectory
@@ -19,8 +20,9 @@ from vllm.distributed.parallel_state import (init_distributed_environment,
                                              initialize_model_parallel)
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
-from vllm.multimodal.utils import (MediaConnector,
+from vllm.multimodal.utils import (MediaConnector, get_load_balance_assignment,
                                    merge_and_sort_multimodal_metadata,
+                                   run_dp_sharded_mrope_vision_model,
                                    run_dp_sharded_vision_model)
 from vllm.platforms import current_platform
 from vllm.utils import get_open_port, update_environment_variables
@@ -512,3 +514,406 @@ def run_dp_sharded_vision_model_vs_direct(local_rank: int, world_size: int,
 
     # Check that the outputs are close (they should be identical)
     assert torch.allclose(direct_output, sharded_output, rtol=1e-5, atol=1e-5)
+
+
+def test_get_load_balance_assignment_empty_input():
+    """Test get_load_balance_assignment with empty sizes list."""
+    result = get_load_balance_assignment([], num_gpus=2)
+    (shuffle_indices, gpu_sample_counts, image_is_in_rank,
+     grouped_sizes_per_gpu) = result
+
+    assert shuffle_indices == []
+    assert gpu_sample_counts == [0, 0]
+    assert image_is_in_rank.shape == (2, 0)
+    assert grouped_sizes_per_gpu == [0, 0]
+
+
+def test_get_load_balance_assignment_fewer_samples_than_gpus():
+    """Test when number of samples is less than number of GPUs."""
+    sizes = [100, 200]
+    result = get_load_balance_assignment(sizes, num_gpus=4)
+    (shuffle_indices, gpu_sample_counts, image_is_in_rank,
+     grouped_sizes_per_gpu) = result
+
+    assert shuffle_indices == [0, 1]
+    assert gpu_sample_counts == [1, 1, 0, 0]
+    assert image_is_in_rank.shape == (4, 2)
+    assert image_is_in_rank[0, 0]
+    assert image_is_in_rank[1, 1]
+    assert grouped_sizes_per_gpu == [100, 200, 0, 0]
+
+
+def test_get_load_balance_assignment_single_gpu():
+    """Test get_load_balance_assignment with single GPU."""
+    sizes = [100, 200, 300]
+    result = get_load_balance_assignment(sizes, num_gpus=1)
+    (shuffle_indices, gpu_sample_counts, image_is_in_rank,
+     grouped_sizes_per_gpu) = result
+
+    assert len(shuffle_indices) == 3
+    assert gpu_sample_counts == [3]
+    assert image_is_in_rank.shape == (1, 3)
+    assert torch.all(image_is_in_rank[0])
+    assert grouped_sizes_per_gpu == [600]
+
+
+def test_get_load_balance_assignment_balanced():
+    """Test load balancing with equal-sized samples."""
+    sizes = [100, 100, 100, 100]
+    result = get_load_balance_assignment(sizes, num_gpus=2)
+    (shuffle_indices, gpu_sample_counts, image_is_in_rank,
+     grouped_sizes_per_gpu) = result
+
+    assert len(shuffle_indices) == 4
+    assert sum(gpu_sample_counts) == 4
+    assert gpu_sample_counts == [2, 2]  # Should be evenly distributed
+    assert image_is_in_rank.shape == (2, 4)
+    assert grouped_sizes_per_gpu == [200, 200]
+
+
+def test_get_load_balance_assignment_unbalanced_sizes():
+    """Test load balancing with different-sized samples."""
+    sizes = [1000, 100, 200, 50]  # One large, three small
+    result = get_load_balance_assignment(sizes, num_gpus=2)
+    (shuffle_indices, gpu_sample_counts, image_is_in_rank,
+     grouped_sizes_per_gpu) = result
+
+    assert len(shuffle_indices) == 4
+    assert sum(gpu_sample_counts) == 4
+    assert image_is_in_rank.shape == (2, 4)
+
+    # Check that load is reasonably balanced
+    load_diff = abs(grouped_sizes_per_gpu[0] - grouped_sizes_per_gpu[1])
+    assert load_diff <= max(sizes)  # Difference should be at most one sample
+
+
+def test_get_load_balance_assignment_torch_tensor_input():
+    """Test get_load_balance_assignment with torch.Tensor input."""
+    sizes_tensor = torch.tensor([100, 200, 300])
+    sizes_list = [100, 200, 300]
+
+    result_tensor = get_load_balance_assignment(sizes_tensor, num_gpus=2)
+    result_list = get_load_balance_assignment(sizes_list, num_gpus=2)
+
+    # Results should be identical
+    assert result_tensor[0] == result_list[0]  # shuffle_indices
+    assert result_tensor[1] == result_list[1]  # gpu_sample_counts
+    assert torch.equal(result_tensor[2], result_list[2])  # image_is_in_rank
+    assert result_tensor[3] == result_list[3]  # grouped_sizes_per_gpu
+
+
+def test_get_load_balance_assignment_consistency():
+    """Test that assignment matrix is consistent with shuffle indices."""
+    sizes = [100, 200, 300, 400, 500]
+    result = get_load_balance_assignment(sizes, num_gpus=3)
+    (shuffle_indices, gpu_sample_counts, image_is_in_rank,
+     grouped_sizes_per_gpu) = result
+
+    # Check that each sample is assigned to exactly one GPU
+    for sample_idx in range(len(sizes)):
+        assigned_gpus = image_is_in_rank[:, sample_idx].sum()
+        assert assigned_gpus == 1
+
+    # Check that shuffle_indices contains all original indices
+    assert set(shuffle_indices) == set(range(len(sizes)))
+
+    # Check that gpu_sample_counts sum to total samples
+    assert sum(gpu_sample_counts) == len(sizes)
+
+
+@pytest.mark.parametrize("num_gpus", [2, 3, 4])
+@pytest.mark.parametrize("num_samples", [1, 5, 10, 17])
+def test_get_load_balance_assignment_various_configurations(
+        num_gpus: int, num_samples: int):
+    """Test get_load_balance_assignment with various configurations."""
+    sizes = [100 + i * 50 for i in range(num_samples)]  # Varying sizes
+    result = get_load_balance_assignment(sizes, num_gpus=num_gpus)
+    (shuffle_indices, gpu_sample_counts, image_is_in_rank,
+     grouped_sizes_per_gpu) = result
+
+    # Basic consistency checks
+    assert len(shuffle_indices) == num_samples
+    assert len(gpu_sample_counts) == num_gpus
+    assert image_is_in_rank.shape == (num_gpus, num_samples)
+    assert len(grouped_sizes_per_gpu) == num_gpus
+
+    # Each sample assigned to exactly one GPU
+    for sample_idx in range(num_samples):
+        assert image_is_in_rank[:, sample_idx].sum() == 1
+
+    # All samples accounted for
+    assert sum(gpu_sample_counts) == num_samples
+
+
+class SimpleMRopeVisionModel(torch.nn.Module):
+    """A simple vision model for testing mrope functionality."""
+
+    def __init__(self, spatial_merge_size: int = 2, out_hidden_size: int = 64):
+        super().__init__()
+        self.spatial_merge_size = spatial_merge_size
+        self.out_hidden_size = out_hidden_size
+        self.linear = torch.nn.Linear(768, out_hidden_size)
+
+    def forward(self, pixel_values: torch.Tensor,
+                grid_thw_list: list[list[int]]):
+        """Simple forward pass that simulates spatial merging."""
+        # Apply linear transformation
+        embeddings = self.linear(pixel_values)
+
+        # Simulate spatial merging by reducing the number of patches
+        merge_factor = self.spatial_merge_size * self.spatial_merge_size
+
+        # Group patches and merge spatially
+        merged_embeddings = []
+        start_idx = 0
+
+        for thw in grid_thw_list:
+            num_patches = math.prod(thw)
+            end_idx = start_idx + num_patches
+
+            # Get patches for this image
+            image_patches = embeddings[start_idx:end_idx]
+
+            # Simulate spatial merging by averaging groups of patches
+            merged_patches = num_patches // merge_factor
+            if merged_patches > 0:
+                # Reshape and average to simulate merging
+                reshaped = image_patches[:merged_patches * merge_factor].view(
+                    merged_patches, merge_factor, -1)
+                merged = reshaped.mean(dim=1)
+                merged_embeddings.append(merged)
+
+            start_idx = end_idx
+
+        if merged_embeddings:
+            return torch.cat(merged_embeddings, dim=0)
+        else:
+            return torch.empty((0, self.out_hidden_size),
+                               device=pixel_values.device,
+                               dtype=pixel_values.dtype)
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "batch_size",
+    [
+        1,  # Single image
+        3,  # Small batch
+        5,  # Odd batch size (for testing padding)
+    ],
+)
+def test_run_dp_sharded_mrope_vision_model(batch_size: int):
+    world_size = 2
+    # Launch processes
+    mp.spawn(
+        run_dp_sharded_mrope_vision_model_vs_direct,
+        args=(
+            world_size,
+            batch_size,
+            get_open_port(),
+        ),
+        nprocs=world_size,
+    )
+
+
+def run_dp_sharded_mrope_vision_model_vs_direct(local_rank: int,
+                                                world_size: int,
+                                                batch_size: int,
+                                                master_port: int):
+    """
+    Test that run_dp_sharded_mrope_vision_model produces the same results as 
+    calling the model directly.
+    """
+    # Set random seed for reproducibility
+    current_platform.seed_everything(0)
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+    torch.set_default_device(device)
+
+    update_environment_variables({
+        'RANK': str(local_rank),
+        'LOCAL_RANK': str(local_rank),
+        'WORLD_SIZE': str(world_size),
+        'MASTER_ADDR': 'localhost',
+        'MASTER_PORT': str(master_port),
+    })
+
+    # initialize distributed
+    init_distributed_environment()
+    initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+    # Create test data
+    grid_thw_list = []
+    pixel_values_list = []
+
+    for i in range(batch_size):
+        # Varying image sizes for better testing
+        t, h, w = 1, 4 + i, 4 + i
+        grid_thw_list.append([t, h, w])
+
+        num_patches = t * h * w
+        # Create random pixel values for this image
+        image_pixels = torch.randn(num_patches, 768)
+        pixel_values_list.append(image_pixels)
+
+    # Concatenate all pixel values
+    pixel_values = torch.cat(pixel_values_list, dim=0)
+
+    # Create a simple mrope vision model
+    vision_model = SimpleMRopeVisionModel()
+
+    # Run the model directly on the full input (only on rank 0)
+    if local_rank == 0:
+        with torch.inference_mode():
+            direct_output = vision_model(pixel_values, grid_thw_list)
+
+    # Run the model through the sharded function
+    with torch.inference_mode():
+        sharded_output = run_dp_sharded_mrope_vision_model(
+            vision_model, pixel_values, grid_thw_list)
+
+    # Check that the world size is setup correctly
+    assert get_tensor_model_parallel_world_size() == world_size
+
+    # Compare outputs (only on rank 0)
+    if local_rank == 0:
+        # Check that the outputs have the same shape
+        assert direct_output.shape == sharded_output.shape
+        # Check that the outputs are close (they should be identical)
+        assert torch.allclose(direct_output,
+                              sharded_output,
+                              rtol=1e-5,
+                              atol=1e-5)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_run_dp_sharded_mrope_vision_model_empty_input():
+    world_size = 2
+    mp.spawn(
+        run_dp_sharded_mrope_vision_model_empty_input_worker,
+        args=(world_size, get_open_port()),
+        nprocs=world_size,
+    )
+
+
+def run_dp_sharded_mrope_vision_model_empty_input_worker(
+        local_rank: int, world_size: int, master_port: int):
+    """Test run_dp_sharded_mrope_vision_model with empty input."""
+    # Set up distributed environment
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+    torch.set_default_device(device)
+
+    update_environment_variables({
+        'RANK': str(local_rank),
+        'LOCAL_RANK': str(local_rank),
+        'WORLD_SIZE': str(world_size),
+        'MASTER_ADDR': 'localhost',
+        'MASTER_PORT': str(master_port),
+    })
+
+    init_distributed_environment()
+    initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+    # Create empty inputs
+    pixel_values = torch.empty((0, 768))
+    grid_thw_list = []
+
+    vision_model = SimpleMRopeVisionModel()
+
+    # Should handle empty input gracefully
+    with torch.inference_mode():
+        output = run_dp_sharded_mrope_vision_model(vision_model, pixel_values,
+                                                   grid_thw_list)
+
+    assert output.shape[0] == 0
+    assert output.shape[1] == vision_model.out_hidden_size
+
+
+@multi_gpu_test(num_gpus=4)
+def test_run_dp_sharded_mrope_vision_model_uneven_load():
+    world_size = 4
+    mp.spawn(
+        run_dp_sharded_mrope_vision_model_uneven_load_worker,
+        args=(world_size, get_open_port()),
+        nprocs=world_size,
+    )
+
+
+def run_dp_sharded_mrope_vision_model_uneven_load_worker(
+        local_rank: int, world_size: int, master_port: int):
+    """Test run_dp_sharded_mrope_vision_model with uneven load distribution."""
+    # Set up distributed environment
+    current_platform.seed_everything(123)
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+    torch.set_default_device(device)
+
+    update_environment_variables({
+        'RANK': str(local_rank),
+        'LOCAL_RANK': str(local_rank),
+        'WORLD_SIZE': str(world_size),
+        'MASTER_ADDR': 'localhost',
+        'MASTER_PORT': str(master_port),
+    })
+
+    init_distributed_environment()
+    initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+    # Create images with very different sizes
+    grid_thw_list = [
+        [1, 2, 2],  # Small: 4 patches
+        [1, 8, 8],  # Large: 64 patches  
+        [1, 3, 3],  # Medium: 9 patches
+    ]
+
+    pixel_values_list = []
+    for thw in grid_thw_list:
+        num_patches = math.prod(thw)
+        image_pixels = torch.randn(num_patches, 768)
+        pixel_values_list.append(image_pixels)
+
+    pixel_values = torch.cat(pixel_values_list, dim=0)
+    vision_model = SimpleMRopeVisionModel()
+
+    # Should handle uneven distribution without errors
+    with torch.inference_mode():
+        output = run_dp_sharded_mrope_vision_model(vision_model, pixel_values,
+                                                   grid_thw_list)
+
+    # Verify output shape is reasonable
+    expected_patches = sum(math.prod(thw) for thw in grid_thw_list)
+    merge_factor = vision_model.spatial_merge_size**2
+    expected_output_patches = expected_patches // merge_factor
+
+    assert output.shape[0] == expected_output_patches
+    assert output.shape[1] == vision_model.out_hidden_size
+
+
+@pytest.mark.parametrize("spatial_merge_size", [2, 4])
+def test_simple_mrope_vision_model_spatial_merge(spatial_merge_size: int):
+    """Test SimpleMRopeVisionModel with different spatial merge sizes."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    grid_thw_list = [[1, 4, 4], [1, 6, 6]]  # Two images
+    pixel_values_list = []
+
+    for thw in grid_thw_list:
+        num_patches = math.prod(thw)
+        image_pixels = torch.randn(num_patches, 768, device=device)
+        pixel_values_list.append(image_pixels)
+
+    pixel_values = torch.cat(pixel_values_list, dim=0)
+    vision_model = SimpleMRopeVisionModel(
+        spatial_merge_size=spatial_merge_size).to(device)
+
+    with torch.inference_mode():
+        output = vision_model(pixel_values, grid_thw_list)
+
+    # Verify output dimensions based on spatial merging
+    total_patches = sum(math.prod(thw) for thw in grid_thw_list)
+    merge_factor = spatial_merge_size**2
+    expected_output_patches = total_patches // merge_factor
+
+    assert output.shape[0] == expected_output_patches
+    assert output.shape[1] == vision_model.out_hidden_size
