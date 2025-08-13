@@ -106,6 +106,7 @@ if TYPE_CHECKING:
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
     VLLM_HPU_USE_DELAYED_SAMPLING: bool = False
     VLLM_HPU_FORCE_CHANNEL_FP8: bool = True
+    VLLM_HPU_FORCE_MARK_STEP: bool = True
     VLLM_DETOKENIZE_ON_OPENAI_SERVER: bool = False
     VLLM_HPU_CONVERT_TO_FP8UZ: bool = True
     VLLM_DP_RANK: int = 0
@@ -744,6 +745,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # between each step.
     "VLLM_HPU_USE_DELAYED_SAMPLING":
     lambda: os.environ.get("VLLM_DELAYED_SAMPLING", "false").lower() in
+    ("1", "true"),
+
+    # Do mark_step for HPU to split hpu graph or prevent fused kernel
+    "VLLM_HPU_FORCE_MARK_STEP":
+    lambda: os.environ.get("VLLM_HPU_FORCE_MARK_STEP", "true").lower() in
     ("1", "true"),
 
     # Converts model weights to FP8UZ format.

@@ -31,6 +31,7 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
+import vllm.envs as envs
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -374,6 +375,7 @@ class LlamaModel(nn.Module):
 
         self.config = config
         self.quant_config = quant_config
+        self.do_mark_step = envs.VLLM_HPU_FORCE_MARK_STEP
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
@@ -431,7 +433,7 @@ class LlamaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        if is_hpu:
+        if is_hpu and self.do_mark_step:
             import habana_frameworks.torch as htorch
             htorch.core.mark_step()
 
