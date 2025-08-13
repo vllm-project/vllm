@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 import time
 from abc import ABC, abstractmethod
 from typing import Callable, Optional, Union
@@ -642,7 +643,7 @@ class StatLoggerManager:
         if custom_stat_loggers is not None:
             factories.extend(custom_stat_loggers)
 
-        if enable_default_loggers:
+        if enable_default_loggers and logger.isEnabledFor(logging.INFO):
             factories.append(LoggingStatLogger)
 
         # For Prometheus, need to share the metrics between EngineCores.
