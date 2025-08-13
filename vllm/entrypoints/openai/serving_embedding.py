@@ -397,7 +397,11 @@ class EmbeddingMixin(OpenAIServing):
             if ctx.engine_prompts is None:
                 return self.create_error_response(
                     "Engine prompts not available")
+            # Check if we used chunked processing
+            use_chunked = self._should_use_chunked_processing(ctx.request)
 
+            if not use_chunked:
+                return await super()._collect_batch(ctx=ctx)
             if ctx.request_prompts is None:
                 return self.create_error_response(
                     "Request prompts not available")
