@@ -1533,6 +1533,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             req = self.requests[req_id]
                             req.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
                             req.mrope_positions_delta = mrope_positions_delta
+                            req._mrope_position_delta = mrope_positions_delta
                             print(f"Updating positions in req_state[{i}]", f"{req.mrope_positions.shape=}", f"{req.mrope_positions_delta=}")
                             print(req.mrope_positions[0])
                             print(req.mrope_positions[1])
