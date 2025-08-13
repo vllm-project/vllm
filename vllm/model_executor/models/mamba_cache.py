@@ -68,15 +68,15 @@ class MambaCacheManager(ConstantSizeCache):
             cache_t[:, to_index].copy_(cache_t[:, from_index],
                                        non_blocking=True)
 
-    def current_run_tensors(self, mamba_ssm_cache_dtype: Optional[torch.dtype],
-                            **kwargs) -> MambaCacheParams:
+    def current_run_tensors(self, **kwargs) -> MambaCacheParams:
         """
         Return the tensors for the current run's conv and ssm state.
         """
         cache_tensors, state_indices_tensor = super().current_run_tensors(
             **kwargs)
         return MambaCacheParams(cache_tensors[0], cache_tensors[1],
-                                state_indices_tensor, mamba_ssm_cache_dtype)
+                                state_indices_tensor,
+                                self.mamba_ssm_cache_dtype)
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         """

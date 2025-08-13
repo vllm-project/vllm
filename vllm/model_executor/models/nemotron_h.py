@@ -582,8 +582,7 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                     conv_state_shape=mamba_state_shape[0],
                     temporal_state_shape=mamba_state_shape[1])
 
-            mamba_cache_params = self.mamba_cache.current_run_tensors(
-                mamba_ssm_cache_dtype=mamba_ssm_cache_dtype, **kwargs)
+            mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
         hidden_states = self.model(input_ids, positions, mamba_cache_params,
                                    intermediate_tensors, inputs_embeds)
