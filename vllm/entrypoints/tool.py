@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
-
-from openai_harmony import Message
+from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
 
@@ -13,6 +11,30 @@ if TYPE_CHECKING:
     from vllm.entrypoints.context import ConversationContext
 
 logger = init_logger(__name__)
+
+
+def validate_gpt_oss_install():
+    """
+    Check if the gpt-oss is installed and its version is at least 0.0.3.
+    If not, raise an ImportError.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        pkg_version_str = version("gpt_oss")  # e.g., "0.0.5"
+        pkg_version = Version(pkg_version_str)
+    except PackageNotFoundError:
+        raise ImportError("Package 'gpt_oss' is not installed.") from None
+    except InvalidVersion as e:
+        raise ImportError(
+            f"Invalid version string for 'gpt_oss': {e}") from None
+
+    if pkg_version < Version("0.0.3"):
+        raise ImportError(
+            f"gpt_oss >= 0.0.3 is required, but {pkg_version} is installed."
+        ) from None
 
 
 class Tool(ABC):
@@ -33,12 +55,14 @@ class HarmonyBrowserTool(Tool):
             return
 
         try:
+            validate_gpt_oss_install()
             from gpt_oss.tools.simple_browser import SimpleBrowserTool
             from gpt_oss.tools.simple_browser.backend import ExaBackend
-        except ImportError:
+        except ImportError as e:
             self.enabled = False
             logger.warning_once(
-                "gpt_oss is not installed, browsing is disabled")
+                "gpt_oss is not installed properly (%s), browsing is disabled",
+                e)
             return
 
         browser_backend = ExaBackend(source="web", api_key=exa_api_key)
@@ -65,23 +89,16 @@ class HarmonyPythonTool(Tool):
         self.enabled = True
 
         try:
+            validate_gpt_oss_install()
             from gpt_oss.tools.python_docker.docker_tool import PythonTool
-        except ImportError:
+        except ImportError as e:
             self.enabled = False
             logger.warning_once(
-                "gpt_oss is not installed, code interpreter is disabled")
+                "gpt_oss is not installed properly (%s), code interpreter is "
+                "disabled", e)
             return
 
-        # NOTE (Chen): as of gpt-oss 0.0.2, there is a bug in _make_response
-        # and we do the following monkey patch to fix it.
-        class PatchedGptOssPythonTool(PythonTool):
-
-            def _make_response(self,
-                               output: str,
-                               channel: Optional[str] = None) -> Message:
-                return super()._make_response(output)
-
-        self.python_tool = PatchedGptOssPythonTool()
+        self.python_tool = PythonTool()
         logger.info_once("Code interpreter tool initialized")
 
     async def get_result(self, context: "ConversationContext") -> Any:
