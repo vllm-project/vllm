@@ -654,15 +654,39 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 class TransformersMoEBase(TransformersBase):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
+        """
+        Params for weights, fp8 weight scales, fp8 activation scales
+        (param_name, weight_name, expert_id, shard_id)
+        """
+        num_experts = self.model_config.get_num_experts()
+        num_redundant_experts = 0  # TODO: enable EPLB
+        # Most common MoE style
+        expert_mapping = FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.model_config.get_num_experts(),
-            # num_redundant_experts=self.num_redundant_experts,
+            num_experts=num_experts,
+            num_redundant_experts=num_redundant_experts,
         )
+        # Granite, Mixtral, Phi MoE style
+        expert_mapping.extend(
+            FusedMoE.make_expert_params_mapping(
+                ckpt_gate_proj_name="w1",
+                ckpt_down_proj_name="w2",
+                ckpt_up_proj_name="w3",
+                num_experts=num_experts,
+                num_redundant_experts=num_redundant_experts,
+            ))
+        # Grok1 style
+        expert_mapping.extend(
+            FusedMoE.make_expert_params_mapping(
+                ckpt_gate_proj_name="linear",
+                ckpt_down_proj_name="linear_1",
+                ckpt_up_proj_name="linear_v",
+                num_experts=num_experts,
+                num_redundant_experts=num_redundant_experts,
+            ))
+        return expert_mapping
 
     def fused_moe(self):
 
