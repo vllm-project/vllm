@@ -940,6 +940,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         intermediate_cache2 = _resize_cache(workspace2,
                                             (E, max_num_tokens, N // 2))
 
+        # TODO(bnell): should this be done for any quantized type?
         if self.quant_config.use_fp8_w8a8:
             intermediate_cache1.fill_(0)
 
@@ -954,7 +955,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             compute_type=compute_type,
             A_scale=a1q_scale,
             B_scale=self.w1_scale,
-            B_zp=self.quant_config.w1_zp,
+            B_zp=self.w1_zp,
             use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
             use_int8_w8a16=self.quant_config.use_int8_w8a16,
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
@@ -981,7 +982,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             compute_type=compute_type,
             A_scale=a2q_scale,
             B_scale=self.w2_scale,
-            B_zp=self.quant_config.w2_zp,
+            B_zp=self.w2_zp,
             use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
             use_int8_w8a16=self.quant_config.use_int8_w8a16,
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
