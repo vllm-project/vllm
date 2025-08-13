@@ -23,24 +23,18 @@ struct Utils {
     return result;
   }
 
-  static __host__ __device__ constexpr int get_warp_size_const() {
+  static __device__ constexpr int get_warp_size() {
   #ifdef __GFX9__
     return 64;
   #else
     return 32;
   #endif
   }
-
-  static __device__ constexpr int get_warp_size() {
-    return get_warp_size_const();
-  }
 };
 
   #define WARP_SIZE Utils::get_warp_size()
-  #define WARP_SIZE_CONST Utils::get_warp_size_const()
 #else
   #define WARP_SIZE 32
-  #define WARP_SIZE_CONST WARP_SIZE
 #endif
 
 #ifndef USE_ROCM
