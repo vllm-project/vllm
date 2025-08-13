@@ -488,6 +488,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         audio_feature_lengths=audio_feature_lengths,
                         use_audio_in_video=use_audio_in_video,
                     )
+                # ekhvedchenia
+                print(f"Setting mrope for request {req_id}")
+                print("prompt_token_ids", len(self.requests[req_id].prompt_token_ids))
+                print(self.requests[req_id].mrope_positions[0])
+                print(self.requests[req_id].mrope_positions[1])
+                print(self.requests[req_id].mrope_positions[1])
+                print(self.requests[req_id].mrope_position_delta)
+
 
             req_ids_to_add.append(req_id)
 
