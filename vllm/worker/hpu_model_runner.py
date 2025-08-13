@@ -1113,8 +1113,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
     @property
     def model_is_mrope(self) -> bool:
-        config = self.model_config.hf_config
-        return uses_mrope(config)
+        self._model_is_mrope = getattr(self, '_model_is_mrope', None)
+        if self._model_is_mrope is None:
+            config = self.model_config.hf_config
+            self._model_is_mrope = uses_mrope(config)
+        return self._model_is_mrope
 
     def _is_quant_with_inc(self):
         quant_config = os.getenv("QUANT_CONFIG", None) is not None
