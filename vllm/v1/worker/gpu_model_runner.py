@@ -2031,6 +2031,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
+<<<<<<< HEAD
         # when DBO is enabled, `num_tokens_after_padding`
         # represents the per-ubatch DP token count.
         dp_tokens_for_forward = num_tokens_after_padding
@@ -2044,6 +2045,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                  num_tokens_across_dp=dp_tokens_for_forward,
                                  skip_cuda_graphs=skip_cuda_graphs):
             self.maybe_setup_kv_connector(scheduler_output)
+=======
+        self.maybe_setup_kv_connector(scheduler_output)
+>>>>>>> db77e4a92 (revert kv connector fix)
         model_output = self._run_model(
             attn_metadata=attn_metadata,
             num_scheduled_tokens=num_input_tokens,
