@@ -178,6 +178,17 @@ class MambaMixer(MambaBase, CustomOp):
         discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
         return discrete_time_step, B, C
 
+    def forward(self,
+                hidden_states: torch.Tensor,
+                mamba_cache_params: Optional[MambaCacheParams] = None):
+        if not envs.VLLM_USE_V1:
+            return CustomOp.forward(self, hidden_states, mamba_cache_params)
+        else:
+            return self.forward_cuda(
+                hidden_states,
+                mamba_cache_params,
+            )
+
     def forward_native(self,
                        hidden_states: torch.Tensor,
                        mamba_cache_params: Optional[MambaCacheParams] = None):
@@ -272,20 +283,21 @@ class MambaMixer(MambaBase, CustomOp):
         state_indices_tensor_p = prefill_decode_split.state_indices_tensor_p
         state_indices_tensor_d = prefill_decode_split.state_indices_tensor_d
         query_start_loc_p = prefill_decode_split.query_start_loc_p
-        initial_states = prefill_decode_split.initial_states
+        has_initial_states_p = prefill_decode_split.has_initial_states_p
 
         ssm_outputs = []
 
         if has_prefill:
             # 2. Convolution sequence transformation
-            conv_out_p = causal_conv1d_fn(hidden_states_BC_p,
-                                          conv_weights,
-                                          self.conv1d.bias,
-                                          activation=self.activation,
-                                          conv_states=conv_state,
-                                          has_initial_state=initial_states,
-                                          cache_indices=state_indices_tensor_p,
-                                          query_start_loc=query_start_loc_p)
+            conv_out_p = causal_conv1d_fn(
+                hidden_states_BC_p,
+                conv_weights,
+                self.conv1d.bias,
+                activation=self.activation,
+                conv_states=conv_state,
+                has_initial_state=has_initial_states_p,
+                cache_indices=state_indices_tensor_p,
+                query_start_loc=query_start_loc_p)
             # 3. State Space Model sequence transformations.
             discrete_time_step_p, B_p, C_p = self._ssm_transform(
                 conv_out_p.transpose(-2, -1))
@@ -304,7 +316,7 @@ class MambaMixer(MambaBase, CustomOp):
                 time_proj_bias,
                 delta_softplus=True,
                 cache_indices=state_indices_tensor_p,
-                has_initial_state=initial_states,
+                has_initial_state=has_initial_states_p,
                 query_start_loc=query_start_loc_p)
             ssm_outputs.append(scan_out_p)
 
@@ -384,7 +396,7 @@ class PrefillDecodeSplit(NamedTuple):
     state_indices_tensor_p: torch.Tensor
     state_indices_tensor_d: torch.Tensor
     query_start_loc_p: Optional[torch.Tensor]
-    initial_states: Optional[torch.Tensor]
+    has_initial_states_p: Optional[torch.Tensor]
 
 
 def split_batch_to_prefill_and_decode(
@@ -409,7 +421,7 @@ def split_batch_to_prefill_and_decode(
             state_indices_tensor, [num_decodes, num_prefills], dim=0)
         query_start_loc_p = (query_start_loc[-num_prefills - 1:] -
                              num_decodes if num_prefills > 0 else None)
-        initial_states = has_initial_states_p[-num_prefills:] if (
+        has_initial_states_p = has_initial_states_p[-num_prefills:] if (
             has_initial_states_p is not None and num_prefills > 0) else None
     else:
         # In v0, prefill tokens come first, then decode tokens.
@@ -422,7 +434,7 @@ def split_batch_to_prefill_and_decode(
             state_indices_tensor, [num_prefills, num_decodes], dim=0)
         query_start_loc_p = (query_start_loc[:num_prefills +
                                              1] if num_prefills > 0 else None)
-        initial_states = has_initial_states_p[:num_prefills] if (
+        has_initial_states_p = has_initial_states_p[:num_prefills] if (
             has_initial_states_p is not None and num_prefills > 0) else None
 
     return PrefillDecodeSplit(
@@ -433,5 +445,5 @@ def split_batch_to_prefill_and_decode(
         state_indices_tensor_p=state_indices_tensor_p,
         state_indices_tensor_d=state_indices_tensor_d,
         query_start_loc_p=query_start_loc_p,
-        initial_states=initial_states,
+        has_initial_states_p=has_initial_states_p,
     )
