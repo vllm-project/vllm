@@ -1799,9 +1799,11 @@ def create_server_socket(addr: tuple[str, int]) -> list[socket.socket]:
             # Enable dual-stack mode for IPv6 socket
             if hasattr(socket, "IPV6_V6ONLY"):
                 try:
-                    sock_ipv6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                    sock_ipv6.setsockopt(socket.IPPROTO_IPV6,
+                                         socket.IPV6_V6ONLY, 0)
                 except OSError as e:
-                    logger.debug("Failed to set IPV6_V6ONLY=0 on IPv6 socket: %s", e)
+                    logger.debug(
+                        "Failed to set IPV6_V6ONLY=0 on IPv6 socket: %s", e)
             sock_ipv6.bind(("", port))
             sockets.append(sock_ipv6)
         except OSError as e:
