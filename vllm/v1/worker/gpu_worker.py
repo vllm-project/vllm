@@ -21,13 +21,11 @@ from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
-from vllm.model_executor.warmup.kernel_warmup import (flashinfer_autotune,
-                                                      kernel_warmup)
+from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
-from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
@@ -313,9 +311,6 @@ class Worker(WorkerBase):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
 
-        if has_flashinfer() and current_platform.is_device_capability(100):
-            flashinfer_autotune(self.model_runner)
-
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
 
@@ -346,8 +341,7 @@ class Worker(WorkerBase):
                     hidden_states=last_hidden_states)
 
         # Warmup kernels used during model execution
-        kernel_warmup(self.get_model(),
-                      max_tokens=self.scheduler_config.max_num_batched_tokens)
+        kernel_warmup(self)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
