@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import asyncio
+import atexit
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
@@ -33,6 +37,10 @@ else:
     MultiModalKwargs = Any
     MultiModalKwargsItem = Any
     MultiModalPlaceholderDict = Any
+
+global_thread_pool = ThreadPoolExecutor(
+    max_workers=envs.VLLM_MEDIA_LOADING_THREAD_COUNT)
+atexit.register(global_thread_pool.shutdown)
 
 
 class MediaConnector:
@@ -140,19 +148,26 @@ class MediaConnector:
         fetch_timeout: Optional[int] = None,
     ) -> _M:
         url_spec = urlparse(url)
+        loop = asyncio.get_running_loop()
 
         if url_spec.scheme.startswith("http"):
             connection = self.connection
             data = await connection.async_get_bytes(url, timeout=fetch_timeout)
-
-            return media_io.load_bytes(data)
+            future = loop.run_in_executor(global_thread_pool,
+                                          media_io.load_bytes, data)
+            return await future
 
         if url_spec.scheme == "data":
-            return self._load_data_url(url_spec, media_io)
+            future = loop.run_in_executor(global_thread_pool,
+                                          self._load_data_url, url_spec,
+                                          media_io)
+            return await future
 
         if url_spec.scheme == "file":
-            return self._load_file_url(url_spec, media_io)
-
+            future = loop.run_in_executor(global_thread_pool,
+                                          self._load_file_url, url_spec,
+                                          media_io)
+            return await future
         msg = "The URL must be either a HTTP, data or file URL."
         raise ValueError(msg)
 
