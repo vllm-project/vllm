@@ -604,6 +604,10 @@ class MambaMixer2(MambaBase, CustomOp):
                 dim=0,
             )
 
+        mamba_ssm_cache_dtype = (getattr(mamba_cache_params,
+                                         "mamba_ssm_cache_dtype", None)
+                                 if mamba_cache_params is not None else None)
+
         # Process prefill requests
         if has_prefill:
             # 2. Convolution sequence transformation
@@ -668,7 +672,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
                                                 self.head_dim),
-                mamba_ssm_cache_dtype=mamba_cache_params.mamba_ssm_cache_dtype)
+                mamba_ssm_cache_dtype=mamba_ssm_cache_dtype)
 
             # update ssm states
             # - varlen state is a (num_prefills, nheads, headdim, dstate) tensor
