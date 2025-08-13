@@ -429,8 +429,8 @@ class Worker(LocalOrDistributedWorkerBase):
 
             kv_cache_memory_bytes_to_gpu_limit = (
                 self.baseline_snapshot.free_memory - non_kv_cache_memory)
-            kv_cache_memory_bytes_to_requested_limit = (self.requested_memory -
-                                                        non_kv_cache_memory)
+            kv_cache_memory_bytes_to_requested_limit = (
+                int(self.requested_memory) - non_kv_cache_memory)
 
             msg = (
                 f"Free memory on device "
