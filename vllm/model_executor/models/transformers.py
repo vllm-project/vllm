@@ -678,10 +678,12 @@ class TransformersMoEBase(TransformersBase):
 
     def fused_moe(self):
 
+        text_config = self.text_config
+
         # TODO: replace with self.text_config.num_experts,
         num_experts = self.model_config.get_num_experts()
-        top_k = 8  # TODO: set this properly
-        hidden_size = self.text_config.hidden_size
+        top_k = text_config.num_experts_per_token
+        hidden_size = text_config.hidden_size
         intermediate_size = 768  # TODO: set this properly
         renormalize: bool = getattr(self.hf_text_config, "norm_topk_prob",
                                     top_k > 1)
