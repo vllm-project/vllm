@@ -160,7 +160,7 @@ adjustments). As a result, the returned logprobs do not reflect the final adjust
 probabilities used during sampling.
 
 You can adjust this behavior by setting the `--logprobs-mode` flag.
-We support 5 modes: `raw_logprobs` (default), `processed_logprobs`, `raw_logits`, `processed_logits`.
+Four modes are supported: `raw_logprobs` (default), `processed_logprobs`, `raw_logits`, `processed_logits`.
 Raw means the values before applying any logit processors, like bad words.
 Processed means the values after applying all processors, including temperature and top_k/top_p.
 
