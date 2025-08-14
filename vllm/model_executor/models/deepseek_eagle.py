@@ -84,9 +84,6 @@ class DeepseekV2Model(nn.Module):
             [self.enorm(input_embeds),
              self.hnorm(hidden_states)], dim=-1)
         hidden_states = self.fc(inputs)
-
-        # masking inputs at position=0
-        hidden_states[positions == 0] = 0
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
@@ -103,6 +100,8 @@ class DeepseekV2Model(nn.Module):
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
+            ("fused_qkv_a_proj", "q_a_proj", 0),
+            ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
 
         # Params for weights, fp8 weight scales, fp8 activation scales
@@ -131,7 +130,17 @@ class DeepseekV2Model(nn.Module):
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
-                name = name.replace(weight_name, param_name)
+                name_mapped = name.replace(weight_name, param_name)
+
+                # QKV fusion is optional, fall back to normal
+                # weight loading if it's not enabled
+                # if go with fusion option, then update name
+                if ((param_name == "fused_qkv_a_proj")
+                        and name_mapped not in params_dict):
+                    continue
+                else:
+                    name = name_mapped
+
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
