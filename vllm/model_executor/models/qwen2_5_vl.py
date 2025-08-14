@@ -882,13 +882,18 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.visual = Qwen2_5_VisionTransformer(
-            config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(self.quant_config),
-            prefix=maybe_prefix(prefix, "visual"),
-            use_data_parallel=self.use_data_parallel,
-        )
+        if multimodal_config.get_limit_per_prompt("image") or \
+            multimodal_config.get_limit_per_prompt("video"):
+            self.visual = Qwen2_5_VisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=self._maybe_ignore_quant_config(
+                    self.quant_config),
+                prefix=maybe_prefix(prefix, "visual"),
+                use_data_parallel=self.use_data_parallel,
+            )
+        else:
+            self.visual = None
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
@@ -1017,10 +1022,12 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                            grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
+        # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
         merge_size = self.visual.spatial_merge_size
-        sizes = grid_thw.prod(-1) // merge_size // merge_size
+        sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
+                 (merge_size * merge_size)).tolist()
 
-        return image_embeds.split(sizes.tolist())
+        return image_embeds.split(sizes)
 
     def _process_video_input(
             self,
@@ -1043,9 +1050,11 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
-        sizes = grid_thw.prod(-1) // merge_size // merge_size
+        # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
+        sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
+                 (merge_size * merge_size)).tolist()
 
-        return video_embeds.split(sizes.tolist())
+        return video_embeds.split(sizes)
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
@@ -1202,7 +1211,10 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
 
-        loader = AutoWeightsLoader(self)
+        skip_prefixes = []
+        if self.visual is None:
+            skip_prefixes.extend(["visual."])
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:

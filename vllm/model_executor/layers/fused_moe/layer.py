@@ -255,7 +255,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.fused_experts = fused_experts  # type: ignore
         self.topk_indices_dtype = None
         self.moe = moe
-
+        self.has_bias = self.moe.has_bias
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
         if self.rocm_aiter_moe_enabled:
             from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
@@ -291,7 +291,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
-
+        if self.has_bias:
+            w13_bias = torch.nn.Parameter(torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                dtype=params_dtype),
+                                          requires_grad=False)
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
         # down_proj (row parallel)
         w2_weight = torch.nn.Parameter(torch.empty(
             num_experts,
@@ -301,6 +308,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
+        if self.has_bias:
+            w2_bias = torch.nn.Parameter(torch.zeros(num_experts,
+                                                     hidden_size,
+                                                     dtype=params_dtype),
+                                         requires_grad=False)
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
@@ -461,7 +475,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         else:
-            return self.fused_experts(
+            # add w1_bias/w2_bias to kwargs if they exist
+            kwargs = dict(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
@@ -473,6 +488,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
             )
+            if isinstance(self.fused_experts,
+                          FusedMoEModularKernel) and self.has_bias:
+                raise ValueError(
+                    "FusedMoEModularKernel does not support bias.")
+            if self.has_bias:
+                kwargs.update({
+                    "w1_bias": getattr(layer, "w13_bias", None),
+                    "w2_bias": getattr(layer, "w2_bias", None),
+                })
+
+            return self.fused_experts(**kwargs)
 
     def forward_cpu(
         self,
@@ -656,7 +682,8 @@ def determine_expert_map(
     return (local_num_experts, expert_map)
 
 
-class FusedMoE(torch.nn.Module):
+@CustomOp.register("fused_moe")
+class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
 
     This layer contains both MergedColumnParallel weights (gate_up_proj /
@@ -702,6 +729,7 @@ class FusedMoE(torch.nn.Module):
         activation: str = "silu",
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
+        has_bias: bool = False,
     ):
         super().__init__()
         if params_dtype is None:
@@ -724,12 +752,14 @@ class FusedMoE(torch.nn.Module):
 
         # we padding globally so EP buffer allocation works
         if quant_config and quant_config.get_name() == "mxfp4":
-            if not is_torch_equal_or_newer("2.8.0"):
-                raise RuntimeError("Mxfp4 on hopper requires torch >= 2.8.0")
-            if current_platform.is_device_capability(
-                    90) and not has_triton_kernels():
-                raise NotImplementedError(
-                    "Triton kernels must be installed for mxfp4 on hopper")
+            if not current_platform.is_device_capability(100):
+                if not is_torch_equal_or_newer("2.8.0"):
+                    raise RuntimeError(
+                        "Mxfp4 on non-blackwell requires torch >= 2.8.0")
+                if not has_triton_kernels():
+                    raise NotImplementedError(
+                        "triton_kernels must be installed for "
+                        "mxfp4 on non-blackwell")
             if (current_platform.is_rocm()
                     or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
                     or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
@@ -793,16 +823,15 @@ class FusedMoE(torch.nn.Module):
             # since model_config is not set in the pytest test.
             model_dtype = params_dtype
 
-        moe = FusedMoEConfig.make(
-            num_experts=self.global_num_experts,
-            experts_per_token=top_k,
-            hidden_dim=hidden_size,
-            num_local_experts=self.local_num_experts,
-            moe_parallel_config=self.moe_parallel_config,
-            in_dtype=model_dtype,
-            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
-            quant_config=quant_config,
-        )
+        moe = FusedMoEConfig.make(num_experts=self.global_num_experts,
+                                  experts_per_token=top_k,
+                                  hidden_dim=hidden_size,
+                                  num_local_experts=self.local_num_experts,
+                                  moe_parallel_config=self.moe_parallel_config,
+                                  in_dtype=model_dtype,
+                                  max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
+                                  quant_config=quant_config,
+                                  has_bias=has_bias)
         self.moe_config = moe
         self.quant_config = quant_config
 
