@@ -12,8 +12,9 @@ from PIL import Image
 from vllm.config import ModelConfig
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
 from vllm.inputs import InputProcessingContext
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.utils import GiB_bytes, is_list_of, set_default_torch_num_threads
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
@@ -43,6 +44,7 @@ AudioInput = list[tuple[np.ndarray, int]]
 
 def _resize_data(_data: Union[Image.Image, np.ndarray],
                  size_factor: float) -> Union[Image.Image, np.ndarray]:
+    assert size_factor <= 1, "Size factor must be less than 1"
     if isinstance(_data, Image.Image):
         W, H = _data.width, _data.height
         W, H = map(lambda x: int(x * size_factor), (W, H))
@@ -51,7 +53,6 @@ def _resize_data(_data: Union[Image.Image, np.ndarray],
         return _data[:int(len(_data) * size_factor)]
     elif _data.ndim >= 4:
         T, H, W, C = _data.shape[-4:]
-        print(T, H, W, C)
         T, H, W = map(lambda x: max(int(x * size_factor), 1), (T, H, W))
         return _data[..., :T, :H, :W, :C]
     raise AssertionError("This line should be unreachable.")
@@ -71,10 +72,10 @@ def resize_mm_data(
 
 
 def create_batched_mm_kwargs(
-        model_config: ModelConfig,
-        processor: BaseMultiModalProcessor,
-        size_factors: tuple[float, ...] = (1.0, 0.5, 0.25),
-) -> MultiModalKwargs:
+    model_config: ModelConfig,
+    processor: BaseMultiModalProcessor,
+    size_factors: tuple[float, ...] = (1.0, 0.5, 0.25),
+) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
     processing_info = processor.info
     dummy_inputs = processor.dummy_inputs
     supported_mm_limits = processing_info.get_supported_mm_limits()
@@ -97,8 +98,11 @@ def create_batched_mm_kwargs(
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         tokenization_kwargs=processor_inputs.tokenization_kwargs,
     )["mm_kwargs"]
-    mm_kwargs = MultiModalKwargs.batch([mm_kwargs] * 2)
-    return mm_kwargs
+    items = [
+        item for modality in supported_mm_limits.keys()
+        for item in mm_kwargs.get_items(modality)
+    ]
+    return group_mm_kwargs_by_modality(items)
 
 
 def get_model_id_to_test(
@@ -214,13 +218,14 @@ def test_model_tensor_schema(model_arch: str, model_id: str,
                 mm_registry = llm_engine.input_preprocessor.mm_registry
 
             processor = mm_registry.create_processor(model_config)
-            mm_kwargs = create_batched_mm_kwargs(model_config, processor)
-            print({k: v.shape for k, v in mm_kwargs.items()})
+            mm_kwargs_group = create_batched_mm_kwargs(model_config, processor)
 
-            def validate_model_input(model):
-                for modality in ("audio", "image", "video"):
+            for modality, _, mm_kwargs in mm_kwargs_group:
+
+                def validate_model_input(model):
+                    # for modality in ("audio", "image", "video"):
                     method_name = f"_parse_and_validate_{modality}_input"
                     if hasattr(model, method_name):
                         getattr(model, method_name)(**mm_kwargs)
 
-            vllm_model.apply_model(validate_model_input)
+                vllm_model.apply_model(validate_model_input)
