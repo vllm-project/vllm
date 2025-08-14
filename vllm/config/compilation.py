@@ -208,7 +208,7 @@ class CompilationConfig:
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
-    cudagraph_delayed_capture_sizes: bool = False
+    use_cudagraph_delayed_capture: bool = False
     """During the initial instantiation of the model, CUDA graph sizes 
     will not be captured. Instead, the capture of these graphs will occur
     dynamically as the model executes. This flag facilitates a faster

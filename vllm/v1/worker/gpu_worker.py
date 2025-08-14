@@ -315,7 +315,7 @@ class Worker(WorkerBase):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
         if (not self.model_config.enforce_eager and not self.vllm_config.
-                compilation_config.cudagraph_delayed_capture_sizes):
+                compilation_config.use_cudagraph_delayed_capture):
             self.model_runner.capture_model()
 
         # Warm up sampler and preallocate memory buffer for logits and other
@@ -395,7 +395,7 @@ class Worker(WorkerBase):
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
 
-        if (self.vllm_config.compilation_config.cudagraph_delayed_capture_sizes
+        if (self.vllm_config.compilation_config.use_cudagraph_delayed_capture
                 and not self.model_config.enforce_eager
                 and len(self.incomplete_cudagraph_capture) > 0):
             self._delayed_cudagraph_capture(
