@@ -568,3 +568,5 @@ class BeamSearchParams(
     temperature: float = 0.0
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
+    stop: Optional[Union[str, list[str]]] = None
+    stop_token_ids: Optional[list[int]] = None
