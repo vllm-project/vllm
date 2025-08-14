@@ -7,4 +7,4 @@ ray
 triton==3.1.0
 setuptools>=77.0.3
 setuptools-scm>=8
-vllm-hpu-extension @ git+https://github.com/HabanaAI/vllm-hpu-extension.git@b6d48ef
+vllm-hpu-extension @ git+https://github.com/HabanaAI/vllm-hpu-extension.git@6b0db3f
