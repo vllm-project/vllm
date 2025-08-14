@@ -867,8 +867,8 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
                 if not transform.weight.has_partition(partition_id):
                     continue
 
-                #transform_partition = self.input_partition
-                transform_partition = transform.get_partition(partition_id)
+                transform_partition = self.input_partition
+                #transform_partition = transform.get_partition(partition_id)
                 xs[partition_id] = (xs[partition_id].to(transform_partition.dtype) @ transform_partition).to(xs[partition_id].dtype) / math.sqrt(transform_partition.size(0))
 
             assert bias is None
@@ -879,8 +879,8 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
                     continue
 
                 # TODO: inverse is hard coded right now
-                #transform_partition = self.output_partitions[partition_id]
-                transform_partition = transform.get_partition(partition_id)
+                transform_partition = self.output_partitions[partition_id]
+                #transform_partition = transform.get_partition(partition_id)
                 xs[partition_id] = (xs[partition_id].to(transform_partition.dtype) @ transform_partition.T).to(xs[partition_id].dtype) / math.sqrt(transform_partition.size(0))
 
         return torch.hstack(xs)

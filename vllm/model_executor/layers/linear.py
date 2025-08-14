@@ -33,7 +33,7 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
-    "CompressedTensorsUnquantizedLinearMethod",
+    #"CompressedTensorsUnquantizedLinearMethod",
     "CompressedTensorsLinearMethod",
     "BitBLASLinearMethod",
     "GPTQBitBLASLinearMethod",

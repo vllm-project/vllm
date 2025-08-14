@@ -428,19 +428,16 @@ class PartitionedLinearWeightParameter(ModelWeightParameter):
     # Cannot support this, since it doesn't know if we're column parallel or row parallel
     # cannot call the weight loader passed by module, since that weight loader assumes
     # that the weight is fused, not separate tensors
-    # def weight_loader(self, param: BasevLLMParameter,
-    #                      loaded_weight: torch.Tensor,
-    #                      loaded_shard_id: Optional[int | str] = None):
-    #     key = self._shard_id_as_int(loaded_shard_id)
-    #     partition = self.partitions[key]
+    def weight_loader(self, param: BasevLLMParameter,
+                         loaded_weight: torch.Tensor,
+                         loaded_shard_id: Optional[int | str] = None):
+        key = self._shard_id_as_int(loaded_shard_id)
+        partition = self.partitions[key]
 
-    #     shard_size = self.data.shape[self.input_dim]
-    #     loaded_weight = loaded_weight.narrow(self.input_dim,
-    #                                          tp_rank * shard_size, shard_size)
-
-
-    #     print(f"loading {partition.data.shape} {loaded_weight.shape} {loaded_shard_id}")
-    #     partition.weight_loader(partition, loaded_weight)
+        print(f"loading {partition.data.shape} {loaded_weight.shape} {loaded_shard_id}")
+        #partition.weight_loader(partition, loaded_weight)
+        assert partition.data.shape == loaded_weight.shape
+        partition.data.copy_(loaded_weight)
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         assert len(self.partitions) == 1 and 0 in self.partitions
