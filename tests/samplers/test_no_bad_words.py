@@ -7,16 +7,9 @@ Run `pytest tests/samplers/test_no_bad_words.py`.
 """
 from typing import Optional
 
-import pytest
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
-
-
-@pytest.fixture(autouse=True)
-def v1(monkeypatch):
-    """Only run on vLLM v1."""
-    monkeypatch.setenv('VLLM_USE_V1', '1')
 
 
 def _generate(
