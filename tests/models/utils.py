@@ -261,7 +261,7 @@ def build_model_context(
     model_config_kwargs: Optional[dict[str, Any]] = None,
     mm_processor_kwargs: Optional[dict[str, Any]] = None,
     limit_mm_per_prompt: Optional[dict[str, int]] = None,
-    disable_mm_preprocessor_cache: bool = True,
+    mm_processor_cache_gb: int = 0,
 ):
     """Creates an InputContext for a given model.
 
@@ -291,7 +291,7 @@ def build_model_context(
         seed=0,
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt=limit_mm_per_prompt,
-        disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
+        mm_processor_cache_gb=mm_processor_cache_gb,
         hf_overrides=model_info.hf_overrides,
         **model_config_kwargs,
     )
@@ -345,19 +345,38 @@ class EmbedModelInfo(NamedTuple):
     matryoshka_dimensions: Optional[list[int]] = None
     architecture: str = ""
     dtype: str = "auto"
+    default_pooling_type: str = ""
     enable_test: bool = True
+
+
+class CLSPoolingEmbedModelInfo(EmbedModelInfo):
+    default_pooling_type: str = "CLS"
+
+
+class LASTPoolingEmbedModelInfo(EmbedModelInfo):
+    default_pooling_type: str = "LAST"
 
 
 class RerankModelInfo(NamedTuple):
     name: str
     architecture: str = ""
     dtype: str = "auto"
+    default_pooling_type: str = ""
     enable_test: bool = True
+
+
+class CLSPoolingRerankModelInfo(RerankModelInfo):
+    default_pooling_type: str = "CLS"
+
+
+class LASTPoolingRerankModelInfo(RerankModelInfo):
+    default_pooling_type: str = "LAST"
 
 
 def dummy_hf_overrides(
     hf_config: PretrainedConfig,
-    model_arch: str,
+    *,
+    model_arch: str = "",
     exist_overrides: Optional[dict[str, Any]] = None,
 ) -> PretrainedConfig:
     """

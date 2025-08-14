@@ -523,13 +523,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_kv_heads = self.kv_cache_spec.num_kv_heads
         head_dim = self.kv_cache_spec.head_size
 
+        # Check if any layer uses sinks (requires TRTLLM attention)
+        has_sinks = self.global_hyperparameters.has_sinks
+
         # currently prefill trtllm attention does not support fp8 kv cache
-        prefill_use_trtllm = use_trtllm_attention(
+        prefill_use_trtllm = not cache_dtype.startswith("fp8") \
+                                and use_trtllm_attention(
                                 num_prefill_tokens, max_seq_len, cache_dtype,
-                                num_qo_heads, num_kv_heads, head_dim)
+                                num_qo_heads, num_kv_heads, head_dim, has_sinks)
         decode_use_trtllm = use_trtllm_attention(
                                 num_decode_tokens, max_seq_len, cache_dtype,
-                                num_qo_heads, num_kv_heads, head_dim)
+                                num_qo_heads, num_kv_heads, head_dim, has_sinks)
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -641,9 +645,9 @@ class FlashInferImpl(AttentionImpl):
                     f"heads in the layer. Expected {num_heads}, but got "
                     f"{sinks.shape[0]}."
                 )
+            # Cast sinks to float32 if needed (FlashInfer requirement)
             if sinks.dtype != torch.float32:
-                raise ValueError("Sinks must be of type float32, but got "
-                                 f"{sinks.dtype}.")
+                sinks = sinks.to(torch.float32)
             self.sinks = sinks
 
     def forward(

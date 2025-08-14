@@ -4,9 +4,53 @@ from typing import Callable, Optional
 
 import torch
 
-from vllm.utils import direct_register_custom_op
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
+
+logger = init_logger(__name__)
 
 OCP_MX_BLOCK_SIZE = 32
+
+
+def _swizzle_mxfp4(quant_tensor, scale, num_warps):
+    """ weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel
+    """
+    import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
+    from triton_kernels.numerics import InFlexData
+    from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
+    from triton_kernels.tensor_details import layout
+    from triton_kernels.tensor_details.layout import StridedLayout
+    if (current_platform.is_cuda()
+            and current_platform.is_device_capability(90)
+            and not is_torch_equal_or_newer("2.8.1")):
+        logger.warning_once(
+            "Mxfp4 on hopper is running on torch < 2.8.1, "
+            "this cause swizling to be disabled, which may "
+            "cause performance degradation. Please upgrade to torch nightly")
+        value_layout, value_layout_opts = StridedLayout, dict()
+        scale_layout, scale_layout_opts = StridedLayout, dict()
+    else:
+        value_layout, value_layout_opts = \
+            layout.make_default_matmul_mxfp4_w_layout(mx_axis=1)
+        scale_layout, scale_layout_opts = (
+            layout.make_default_matmul_mxfp4_w_scale_layout(
+                mx_axis=1, num_warps=num_warps))
+    if current_platform.is_cuda() and \
+        current_platform.is_device_capability(100):
+        constraints = {
+            "is_persistent": True,
+            "epilogue_subtile": 1,
+        }
+        opt_flags.update_opt_flags_constraints(constraints)
+    # transpose the tensor so that the quantization axis is on dim1
+    quant_tensor = quant_tensor.transpose(-2, -1)
+    scale = scale.transpose(-2, -1)
+    quant_tensor = convert_layout(wrap_torch_tensor(quant_tensor, dtype=FP4),
+                                  value_layout, **value_layout_opts)
+    scale = convert_layout(wrap_torch_tensor(scale), scale_layout,
+                           **scale_layout_opts)
+    return quant_tensor, InFlexData(), scale
 
 
 def _can_support_mxfp4(use_grouped_topk: bool = False,
@@ -24,7 +68,7 @@ def _can_support_mxfp4(use_grouped_topk: bool = False,
     return not (use_grouped_topk or topk_group or num_expert_group
                 or expert_map or custom_routing_function
                 or e_score_correction_bias or apply_router_weight_on_input
-                or scoring_func != "softmax" or activation != "silu"
+                or scoring_func != "softmax" or activation != "swiglu_oai"
                 or expert_load_view or logical_to_physical_map
                 or logical_replica_count)
 

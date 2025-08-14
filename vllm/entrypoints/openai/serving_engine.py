@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import base64
 import io
 import json
 import sys
@@ -12,6 +11,7 @@ from http import HTTPStatus
 from typing import (Annotated, Any, Callable, ClassVar, Generic, Optional,
                     TypeVar, Union, cast, overload)
 
+import pybase64
 import torch
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -585,6 +585,8 @@ class OpenAIServing:
                       (EmbeddingChatRequest, EmbeddingCompletionRequest,
                        ScoreRequest, RerankRequest, ClassificationRequest)):
 
+            # Note: input length can be up to the entire model context length
+            # since these requests don't generate tokens.
             if token_num > self.max_model_len:
                 operations: dict[type[AnyRequest], str] = {
                     ScoreRequest: "score",
@@ -613,21 +615,24 @@ class OpenAIServing:
             max_tokens = request.max_completion_tokens or request.max_tokens
         else:
             max_tokens = getattr(request, "max_tokens", None)
-        if max_tokens is None:
-            if token_num >= self.max_model_len:
-                raise ValueError(
-                    f"This model's maximum context length is "
-                    f"{self.max_model_len} tokens. However, you requested "
-                    f"{token_num} tokens in the messages, "
-                    f"Please reduce the length of the messages.")
-        elif token_num + max_tokens > self.max_model_len:
+
+        # Note: input length can be up to model context length - 1 for
+        # completion-like requests.
+        if token_num >= self.max_model_len:
             raise ValueError(
                 f"This model's maximum context length is "
-                f"{self.max_model_len} tokens. However, you requested "
-                f"{max_tokens + token_num} tokens "
-                f"({token_num} in the messages, "
-                f"{max_tokens} in the completion). "
-                f"Please reduce the length of the messages or completion.")
+                f"{self.max_model_len} tokens. However, your request has "
+                f"{token_num} input tokens. Please reduce the length of "
+                "the input messages.")
+
+        if max_tokens is not None and \
+            token_num + max_tokens > self.max_model_len:
+            raise ValueError(
+                "'max_tokens' or 'max_completion_tokens' is too large: "
+                f"{max_tokens}. This model's maximum context length is "
+                f"{self.max_model_len} tokens and your request has "
+                f"{token_num} input tokens ({max_tokens} > {self.max_model_len}"
+                f" - {token_num}).")
 
         return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
@@ -1008,7 +1013,8 @@ class OpenAIServing:
     ) -> list[EmbedsPrompt]:
 
         def _load_and_validate_embed(embed: bytes) -> EmbedsPrompt:
-            tensor = torch.load(io.BytesIO(base64.b64decode(embed)),
+            tensor = torch.load(io.BytesIO(
+                pybase64.b64decode(embed, validate=True)),
                                 weights_only=True)
             assert isinstance(tensor, torch.Tensor) and tensor.dtype in (
                 torch.float32,
