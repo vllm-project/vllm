@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union
+from typing import Union
 
 import torch
 
@@ -28,7 +28,7 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: Union[ModelDType, torch.dtype],
         mamba_cache_dtype: MambaDType,
-        mamba_ssm_cache_dtype: Optional[MambaDType],
+        mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
         # TODO (tdoublep) requires kernel changes
         if mamba_cache_dtype == "float32" or mamba_ssm_cache_dtype == "float32":
@@ -42,15 +42,15 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: Union[ModelDType, torch.dtype],
         mamba_cache_dtype: MambaDType,
-        mamba_ssm_cache_dtype: Optional[MambaDType],
+        mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
         conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype,
                                                     model_dtype)
-        if mamba_ssm_cache_dtype is not None:
-            temporal_state_dtype = get_kv_cache_torch_dtype(
-                mamba_ssm_cache_dtype, model_dtype)
-        else:
+        if mamba_ssm_cache_dtype == "auto":
             temporal_state_dtype = conv_state_dtype
+        else:
+            temporal_state_dtype = mamba_ssm_cache_dtype
+
         return (conv_state_dtype, temporal_state_dtype)
 
 

@@ -422,8 +422,7 @@ class EngineArgs:
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
-    mamba_ssm_cache_dtype: Optional[
-        MambaDType] = CacheConfig.mamba_ssm_cache_dtype
+    mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
 
     additional_config: dict[str, Any] = \
         get_field(VllmConfig, "additional_config")
