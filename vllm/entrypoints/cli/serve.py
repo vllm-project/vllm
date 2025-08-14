@@ -225,7 +225,7 @@ def run_api_server_worker_proc(listen_address,
 
     # Set process title and add process-specific prefix to stdout and stderr.
     server_index = client_config.get("client_index", 0) if client_config else 0
-    process_name = set_process_title("APIServer", str(server_index))
+    set_process_title("APIServer", str(server_index))
     decorate_logs()
 
     # Try to run GPU processing on different devices for each API server
@@ -249,14 +249,15 @@ def run_api_server_worker_proc(listen_address,
                               available_device_count)
                 new_mm_device = f"{current_platform.device_name}:{device_idx}"
                 if new_mm_device != mm_device:
-                    logger.info("Multi-modal processor is mapped to device %s",
-                                process_name, new_mm_device)
+                    logger.info(
+                        "Multi-modal processor will be run on device %s",
+                        new_mm_device)
 
                     args.mm_processor_kwargs["device"] = new_mm_device
             elif not mm_device.endswith(":0"):
                 logger.warning(
-                    "You set a specific device %s for multi-modal processor "
-                    "which is not on rank 0. "
+                    "You assigned the multi-modal processor to a specific "
+                    "device %s which is not on rank 0. "
                     "This potentially leads to OOM during inference because "
                     "vLLM's memory profiling for input processing is only run "
                     "on rank 0.",

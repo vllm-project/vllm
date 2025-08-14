@@ -2044,12 +2044,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             time_before_processing = time.perf_counter()
             before_profile = MemorySnapshot(auto_measure=True)
 
-            for modality, max_items_per_batch in (
-                    mm_budget.max_items_per_batch_by_modality.items()):
+            for modality, max_items_per_prompt in (
+                    mm_budget.max_items_per_prompt_by_modality.items()):
                 self.mm_registry.get_decoder_dummy_data(
                     model_config=model_config,
                     seq_len=self.max_num_tokens,
-                    mm_counts={modality: max_items_per_batch},
+                    mm_counts={modality: max_items_per_prompt},
                 )
 
             gc.collect()
