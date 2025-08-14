@@ -41,7 +41,7 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    cu_seqlens=None,
                                    dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
-                                   state_dtype=torch.bfloat16,
+                                   state_dtype=None,
                                    out=None):
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
     batch, seqlen, nheads, headdim = x.shape
@@ -119,7 +119,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         if initial_states is not None else None,
         seq_idx=seq_idx,
         chunk_size=chunk_size,
-        out_dtype=state_dtype,
+        out_dtype=state_dtype if state_dtype is not None else C.dtype,
         is_cont_batched=cu_seqlens is not None)
     states, final_states = (rearrange(t, "... (p n) -> ... p n", n=dstate)
                             for t in [states, final_states])
@@ -191,7 +191,7 @@ def mamba_chunk_scan_combined(x,
                               out=None,
                               return_final_states=False,
                               return_varlen_states=False,
-                              state_dtype=torch.bfloat16):
+                              state_dtype=None):
     """
     Argument:
         x: (batch, seqlen, nheads, headdim)
