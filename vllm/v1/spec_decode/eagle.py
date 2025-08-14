@@ -17,6 +17,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.qwen2_5_vl_eagle3 import (
+    Eagle3Qwen2_5_VLForCausalLM)
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
@@ -140,7 +142,8 @@ class EagleProposer:
         last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method == "eagle3":
-            assert isinstance(self.model, Eagle3LlamaForCausalLM)
+            assert isinstance(self.model, \
+            (Eagle3LlamaForCausalLM,Eagle3Qwen2_5_VLForCausalLM))
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
@@ -589,6 +592,11 @@ class EagleProposer:
 
         return spec_common_attn_metadata, token_indices
 
+    def get_model_name(self, model: nn.Module) -> str:
+        if hasattr(model, 'module'):  # multi-GPU
+            model = model.module
+        return model.__class__.__name__
+
     def load_model(self, target_model: nn.Module) -> None:
         draft_model_config = \
             self.vllm_config.speculative_config.draft_model_config
@@ -608,8 +616,13 @@ class EagleProposer:
 
         if supports_multimodal(target_model):
             # handle multimodality
-            self.model.config.image_token_index = (
-                target_model.config.image_token_index)
+            if (self.get_model_name(target_model) ==
+                    "Qwen2_5_VLForConditionalGeneration"):
+                self.model.config.image_token_index = (
+                    target_model.config.image_token_id)
+            else:
+                self.model.config.image_token_index = (
+                    target_model.config.image_token_index)
             target_language_model = target_model.get_language_model()
         else:
             target_language_model = target_model
