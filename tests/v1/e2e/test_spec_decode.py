@@ -264,6 +264,8 @@ def test_full_vs_piecewise_cudagraph(
         m.setenv("VLLM_GPU_MEMORY_UTILIZATION", "0.8")
         if current_platform.is_rocm():
             m.setenv("VLLM_ROCM_USE_AITER", "1")
+        else:
+            m.setenv("VLLM_FLASH_ATTN_VERSION", "3")
 
         method, model_name, spec_model_name, tp_size = model_setup
 
