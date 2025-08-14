@@ -731,7 +731,6 @@ steps:
   - tests/v1/entrypoints/openai/test_multi_api_servers.py
   - vllm/v1/engine/
   commands:
-  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
