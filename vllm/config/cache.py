@@ -101,7 +101,7 @@ class CacheConfig:
     mamba_ssm_cache_dtype: Optional[MambaDType] = None
     """The data type to use for the Mamba cache (ssm state only, conv state will
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
-    will be inferred from the model config. If unset, ssm state data dtype is
+    will be inferred from the model config. If unset, ssm state data type is
     controlled by mamba_cache_dtype."""
 
     # Will be set after profiling.
