@@ -419,6 +419,9 @@ Some models are supported only via the [Transformers backend](#transformers). Th
 !!! note
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
+!!! note
+    Some mBART models' config files do not have an `architecture` defined. Therefore, you need to use `--hf-overrides '{"architectures": ["MBartForConditionalGeneration"]}'` to explicitly specify the use of the `MBartForConditionalGeneration` architecture.
+
 ### Pooling Models
 
 See [this page](./pooling_models.md) for more information on how to use pooling models.

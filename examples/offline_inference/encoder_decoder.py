@@ -19,7 +19,7 @@ from vllm.inputs import (
 )
 
 
-class ModelConfig(NamedTuple):
+class ModelRequestData(NamedTuple):
     """
     Holds the configuration for a specific model, including its
     HuggingFace ID and the prompts to use for the demo.
@@ -31,7 +31,7 @@ class ModelConfig(NamedTuple):
     hf_overrides: Optional[dict] = None
 
 
-def get_bart_config() -> ModelConfig:
+def get_bart_config() -> ModelRequestData:
     """
     Returns the configuration for facebook/bart-large-cnn.
     This uses the exact test cases from the original script.
@@ -46,14 +46,14 @@ def get_bart_config() -> ModelConfig:
         "A decoder prompt",
         "Another decoder prompt",
     ]
-    return ModelConfig(
+    return ModelRequestData(
         model_id="facebook/bart-large-cnn",
         encoder_prompts=encoder_prompts,
         decoder_prompts=decoder_prompts,
     )
 
 
-def get_mbart_config() -> ModelConfig:
+def get_mbart_config() -> ModelRequestData:
     """
     Returns the configuration for facebook/mbart-large-en-ro.
     This uses prompts suitable for an English-to-Romanian translation task.
@@ -64,7 +64,7 @@ def get_mbart_config() -> ModelConfig:
     ]
     decoder_prompts = ["", ""]
     hf_overrides = {"architectures": ["MBartForConditionalGeneration"]}
-    return ModelConfig(
+    return ModelRequestData(
         model_id="facebook/mbart-large-en-ro",
         encoder_prompts=encoder_prompts,
         decoder_prompts=decoder_prompts,
