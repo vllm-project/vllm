@@ -486,9 +486,10 @@ class InputBatch:
         num_tokens_i1 = self.num_tokens[i1]
         num_tokens_i2 = self.num_tokens[i2]
         max_tokens = max(num_tokens_i1, num_tokens_i2)
-        
+
         tmp = self.token_ids_cpu[i1, :max_tokens].copy()
-        self.token_ids_cpu[i1, :max_tokens] = self.token_ids_cpu[i2, :max_tokens]
+        self.token_ids_cpu[i1, :max_tokens] = self.token_ids_cpu[
+            i2, :max_tokens]
         self.token_ids_cpu[i2, :max_tokens] = tmp
 
         swap_dict_values(self.generators, i1, i2)
