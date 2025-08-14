@@ -22,7 +22,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 # yapf: disable
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig, FusedMoEParallelConfig, FusedMoEQuantConfig, biased_moe_quant_config)
+    FusedMoEConfig, FusedMoEParallelConfig, FusedMoEQuantConfig,
+    biased_moe_quant_config)
 # yapf: enable
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat, FusedMoEModularKernel,
@@ -179,11 +180,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
             # Note : We may want to use FP8 dispatch even otherwise just to
             # reduce datamovement
-            use_fp8_dispatch = (quant_config is not None and
-                                quant_config.quant_dtype
-                                == current_platform.fp8_dtype()
-                                and quant_config.block_shape
-                                == DEEPEP_QUANT_BLOCK_SHAPE)
+            use_fp8_dispatch = (
+                quant_config.quant_dtype == current_platform.fp8_dtype()
+                and quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE)
 
             prepare_finalize = DeepEPLLPrepareAndFinalize(
                 handle,
@@ -197,7 +196,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def maybe_make_prepare_finalize(
             self) -> Optional[FusedMoEPrepareAndFinalize]:
         if self.moe.moe_parallel_config.use_all2all_kernels:
-            return FusedMoEMethodBase._maybe_make_prepare_finalize(self.moe, self.moe_quant_config)
+            return FusedMoEMethodBase._maybe_make_prepare_finalize(
+                self.moe, self.moe_quant_config)
         else:
             return None
 
