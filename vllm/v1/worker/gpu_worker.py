@@ -411,8 +411,7 @@ class Worker(WorkerBase):
                     hidden_states=last_hidden_states)
 
         # Warmup kernels used during model execution
-        kernel_warmup(self.get_model(),
-                      max_tokens=self.scheduler_config.max_num_batched_tokens)
+        kernel_warmup(self)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

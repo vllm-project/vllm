@@ -162,6 +162,12 @@ def test_eagle_correctness(
     mm_enabled: bool,
     attn_backend: str,
 ):
+    if attn_backend == "TREE_ATTN":
+        # TODO: Fix this flaky test
+        pytest.skip(
+            "TREE_ATTN is flaky in the test disable for now until it can be "
+            "reolved (see https://github.com/vllm-project/vllm/issues/22922)")
+
     # Generate test prompts inside the function instead of using fixture
     test_prompts = get_test_prompts(mm_enabled)
     '''
