@@ -1,25 +1,58 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import random
-from typing import Any
+import sys
+from multiprocessing import Process
+from typing import Any, Optional
 
 import openai
 import pytest
 import pytest_asyncio
 
-from tests.utils import RemoteOpenAIServer, RemoteOpenAIServerWithEntrypoint
+from tests.utils import RemoteOpenAIServer
 from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
                                                      MAX_TOKENS, MODEL_NAME,
                                                      TEMP_GREEDY, prompts)
 from vllm.test_utils import DUMMY_LOGITPROC_FQCN
 
-# Inject this code into python interpreter -c flag to launch vllm server with
-# patched entrypoint
-CMD_STR = ("import importlib.metadata; from vllm.test_utils import "
-           "entry_points as fake_entry_points; importlib.metadata."
-           "entry_points = fake_entry_points; from vllm.entrypoints.cli "
-           "import main; main.main()")
+
+class RemoteOpenAIServerWithEntrypoint(RemoteOpenAIServer):
+    """Launch test server, inject logitproc entrypoint"""
+
+    def _start_server(self, model: str, vllm_serve_args: list[str],
+                      env_dict: Optional[dict[str, str]]) -> None:
+
+        def _child_process() -> None:
+            # Patch `entry_points` to inject logitproc entrypoint
+            import importlib.metadata
+
+            from vllm.test_utils import entry_points as fake_entry_points
+            importlib.metadata.entry_points = fake_entry_points
+            from vllm.entrypoints.cli import main
+
+            # fork is required for workers to see entrypoint patch
+            os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = "fork"
+            if env_dict is not None:
+                os.environ.update(env_dict)
+
+            # Emulate `vllm serve <model> <CLI args>`
+            sys.argv = ["vllm", "serve", model] + vllm_serve_args
+            main.main()
+
+        self.proc = Process(target=_child_process)
+        self.proc.start()
+
+    def _poll(self) -> Optional[int]:
+        return self.proc.exitcode
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.proc.terminate()
+        self.proc.join(8)
+        if self.proc.is_alive():
+            # force kill if needed
+            self.proc.kill()
 
 
 @pytest.fixture(scope="module")
@@ -52,46 +85,10 @@ def server(default_server_args, request, monkeypatch):
                                 request.param) as remote_server:
             yield remote_server
     else:
-        # Patch in dummy logit processor entrypoint
+        # Launch server
         with RemoteOpenAIServerWithEntrypoint(
                 MODEL_NAME, default_server_args) as remote_server:
             yield remote_server
-
-        # import os
-        # processid = os.fork()
-
-        # # processid > 0 represents the parent process
-        # if processid > 0:
-        #     print("\nParent Process:")
-        #     print("Process ID:", os.getpid())
-        #     print("Child's process ID:", processid)
-        #     while True:
-        #         pass
-
-        # # processid = 0 represents the created child process
-        # else:
-        #     print("\nChild Process:")
-        #     print("Process ID:", os.getpid())
-        #     print("Parent's process ID:", os.getppid())
-
-        #     import importlib.metadata
-
-        #     from vllm.test_utils import entry_points as fake_entry_points
-        #     importlib.metadata.entry_points = fake_entry_points
-        #     import sys
-
-        #     from vllm.entrypoints.cli import main
-        #     sys.argv = ["vllm", "serve"] + default_server_args
-        #     main.main()
-
-        # # # Patch in dummy logit processor entrypoint
-        # # with RemoteOpenAIServer(
-        # #         MODEL_NAME,
-        # #         default_server_args,
-        # #         multiproc_method="spawn",
-        # #         cmd_str=CMD_STR,
-        # # ) as remote_server:
-        # #     yield remote_server
 
 
 @pytest_asyncio.fixture

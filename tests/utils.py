@@ -5,6 +5,7 @@ import asyncio
 import copy
 import functools
 import importlib
+import importlib.metadata
 import os
 import signal
 import subprocess
@@ -34,9 +35,12 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
+from vllm.test_utils import entry_points as fake_entry_points
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (FlexibleArgumentParser, GB_bytes,
                         cuda_device_count_stateless, get_open_port)
+
+importlib.metadata.entry_points = fake_entry_points
 
 if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
@@ -75,6 +79,23 @@ VLLM_PATH = Path(__file__).parent.parent
 
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
+
+    def _start_server(self, model: str, vllm_serve_args: list[str],
+                      env_dict: Optional[dict[str, str]]) -> None:
+        """Subclasses override this method to customize server process launch
+        """
+        env = os.environ.copy()
+        # the current process might initialize cuda,
+        # to be safe, we should use spawn method
+        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+        if env_dict is not None:
+            env.update(env_dict)
+        self.proc = subprocess.Popen(
+            ["vllm", "serve", model, *vllm_serve_args],
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
 
     def __init__(self,
                  model: str,
@@ -128,18 +149,7 @@ class RemoteOpenAIServer:
             model_loader = get_model_loader(load_config)
             model_loader.download_model(model_config)
 
-        env = os.environ.copy()
-        # the current process might initialize cuda,
-        # to be safe, we should use spawn method
-        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
-        if env_dict is not None:
-            env.update(env_dict)
-        self.proc = subprocess.Popen(
-            ["vllm", "serve", model, *vllm_serve_args],
-            env=env,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-        )
+        self._start_server(model, vllm_serve_args, env_dict)
         max_wait_seconds = max_wait_seconds or 240
         self._wait_for_server(url=self.url_for("health"),
                               timeout=max_wait_seconds)
@@ -156,6 +166,7 @@ class RemoteOpenAIServer:
             self.proc.kill()
 
     def _poll(self) -> Optional[int]:
+        """Subclasses override this method to customize process polling"""
         return self.proc.poll()
 
     def _wait_for_server(self, *, url: str, timeout: float):
@@ -206,107 +217,6 @@ class RemoteOpenAIServer:
                                   api_key=self.DUMMY_API_KEY,
                                   max_retries=0,
                                   **kwargs)
-
-
-class RemoteOpenAIServerWithEntrypoint(RemoteOpenAIServer):
-
-    def _child_process(
-        self,
-        model: str,
-        vllm_serve_args: list[str],
-        env_dict: Optional[dict[str, str]],
-    ) -> None:
-        import importlib.metadata
-
-        from vllm.test_utils import entry_points as fake_entry_points
-        importlib.metadata.entry_points = fake_entry_points
-        import sys
-
-        from vllm.entrypoints.cli import main
-
-        # fork is required for patched entrypoint
-        os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = "fork"
-        if env_dict is not None:
-            os.environ.update(env_dict)
-
-        sys.argv = ["vllm", "serve", model] + vllm_serve_args
-        main.main()
-
-    def __init__(self,
-                 model: str,
-                 vllm_serve_args: list[str],
-                 *,
-                 env_dict: Optional[dict[str, str]] = None,
-                 seed: Optional[int] = 0,
-                 auto_port: bool = True,
-                 max_wait_seconds: Optional[float] = None) -> None:
-        if auto_port:
-            if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
-                raise ValueError("You have manually specified the port "
-                                 "when `auto_port=True`.")
-
-            # No need for a port if using unix sockets
-            if "--uds" not in vllm_serve_args:
-                # Don't mutate the input args
-                vllm_serve_args = vllm_serve_args + [
-                    "--port", str(get_open_port())
-                ]
-        if seed is not None:
-            if "--seed" in vllm_serve_args:
-                raise ValueError("You have manually specified the seed "
-                                 f"when `seed={seed}`.")
-
-            vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
-
-        parser = FlexibleArgumentParser(
-            description="vLLM's remote OpenAI server.")
-        subparsers = parser.add_subparsers(required=False, dest="subparser")
-        parser = ServeSubcommand().subparser_init(subparsers)
-        args = parser.parse_args(["--model", model, *vllm_serve_args])
-        self.uds = args.uds
-        if args.uds:
-            self.host = None
-            self.port = None
-        else:
-            self.host = str(args.host or 'localhost')
-            self.port = int(args.port)
-
-        self.show_hidden_metrics = \
-            args.show_hidden_metrics_for_version is not None
-
-        # download the model before starting the server to avoid timeout
-        is_local = os.path.isdir(model)
-        if not is_local:
-            engine_args = AsyncEngineArgs.from_cli_args(args)
-            model_config = engine_args.create_model_config()
-            load_config = engine_args.create_load_config()
-
-            model_loader = get_model_loader(load_config)
-            model_loader.download_model(model_config)
-
-        from multiprocessing import Process
-
-        self.proc = Process(target=self._child_process,
-                            args=(
-                                model,
-                                vllm_serve_args,
-                                env_dict,
-                            ))
-        self.proc.start()
-
-        max_wait_seconds = max_wait_seconds or 240
-        self._wait_for_server(url=self.url_for("health"),
-                              timeout=max_wait_seconds)
-
-    def _poll(self) -> Optional[int]:
-        return self.proc.exitcode
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.proc.terminate()
-        self.proc.join(8)
-        if self.proc.is_alive():
-            # force kill if needed
-            self.proc.kill()
 
 
 def _test_completion(
