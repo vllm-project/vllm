@@ -19,10 +19,11 @@ from vllm.model_executor.layers.quantization.qqq import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
     MARLIN_SUPPORTED_GROUP_SIZES, marlin_make_empty_g_idx,
-    marlin_make_workspace_new, marlin_permute_scales,
+    marlin_make_workspace_new, marlin_permute_bias, marlin_permute_scales,
     query_marlin_supported_quant_types)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    FP4_MARLIN_SUPPORTED_GROUP_SIZES, rand_marlin_weight_fp4_like)
+    FP4_MARLIN_SUPPORTED_GROUP_SIZES, rand_marlin_weight_mxfp4_like,
+    rand_marlin_weight_nvfp4_like)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     marlin_quant_fp8_torch)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
@@ -39,7 +40,7 @@ from vllm.scalar_type import scalar_types
 ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
 USE_ATOMIC_ADD_OPTS = [False, True]
-USE_FP32_REDUCE_OPTS = [False, True]
+USE_FP32_REDUCE_OPTS = [True]
 
 MARLIN_K_CHUNKS = [128]
 MARLIN_N_CHUNKS = [64, 256]
@@ -202,17 +203,10 @@ def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
 @pytest.mark.parametrize("is_k_full", K_FULL_OPTS)
 @pytest.mark.parametrize("use_atomic_add", USE_ATOMIC_ADD_OPTS)
 @pytest.mark.parametrize("use_fp32_reduce", USE_FP32_REDUCE_OPTS)
-def test_gptq_marlin_gemm(
-    k_chunk,
-    n_chunk,
-    quant_type,
-    group_size,
-    mnk_factors,
-    act_order,
-    is_k_full,
-    use_atomic_add,
-    use_fp32_reduce,
-):
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_gptq_marlin_gemm(k_chunk, n_chunk, quant_type, group_size,
+                          mnk_factors, act_order, is_k_full, use_atomic_add,
+                          use_fp32_reduce, dtype):
     m_factor, n_factor, k_factor = mnk_factors
     has_zp = quant_type in [scalar_types.uint4, scalar_types.uint8]
 
@@ -231,14 +225,23 @@ def test_gptq_marlin_gemm(
     if size_k % group_size != 0:
         return
 
-    a_input = rand_data((size_m, size_k))
-    b_weight = rand_data((size_k, size_n))
+    a_input = rand_data((size_m, size_k), dtype)
+    b_weight = rand_data((size_k, size_n), dtype)
 
     if quant_type == scalar_types.float4_e2m1f:
-        if group_size != 16 or act_order:
+        if group_size not in [16, 32] or act_order:
             return
-        w_ref, marlin_q_w, marlin_s, marlin_s2 = rand_marlin_weight_fp4_like(
-            b_weight.T, group_size)
+        if group_size == 32 and dtype == torch.float16:
+            return
+
+        if group_size == 16:
+            w_ref, marlin_q_w, marlin_s, marlin_s2 = \
+                rand_marlin_weight_nvfp4_like(b_weight.T, group_size)
+        else:
+            w_ref, marlin_q_w, marlin_s = \
+                rand_marlin_weight_mxfp4_like(b_weight.T, group_size)
+            marlin_s2 = None
+
         g_idx = None
         sort_indices = None
         marlin_zp = None
@@ -272,8 +275,8 @@ def test_gptq_marlin_gemm(
     workspace = marlin_make_workspace_new(w_ref.device)
 
     opcheck(torch.ops._C.gptq_marlin_gemm,
-            (a_input, None, marlin_q_w, marlin_s, marlin_s2, marlin_zp, g_idx,
-             sort_indices, workspace, quant_type.id, a_input.shape[0],
+            (a_input, None, marlin_q_w, None, marlin_s, marlin_s2, marlin_zp,
+             g_idx, sort_indices, workspace, quant_type.id, a_input.shape[0],
              b_weight.shape[1], a_input.shape[1], is_k_full, use_atomic_add,
              use_fp32_reduce, False),
             test_utils=DEFAULT_OPCHECK_TEST_UTILS)
@@ -282,6 +285,7 @@ def test_gptq_marlin_gemm(
         a_input,
         None,
         marlin_q_w,
+        None,
         marlin_s,
         marlin_s2,
         marlin_zp,
@@ -418,6 +422,7 @@ def test_hqq_marlin_gemm(
         a_input,
         None,
         marlin_w_q,
+        None,
         marlin_s,
         None,
         marlin_zp,
@@ -531,6 +536,7 @@ def test_marlin_gemm_subset_input():
         a_input,
         None,
         marlin_q_w,
+        None,
         marlin_s,
         None,
         marlin_zp,
@@ -547,6 +553,53 @@ def test_marlin_gemm_subset_input():
         is_zp_float=False,
     )
     output_ref = torch.matmul(a_input, w_ref)
+
+    torch.cuda.synchronize()
+
+    max_diff = compute_max_diff(output, output_ref)
+
+    assert max_diff < 0.04
+
+
+@pytest.mark.parametrize("size_m", [1, 256])
+def test_marlin_gemm_with_bias(size_m):
+    quant_type = scalar_types.uint4b8
+    group_size = 128
+
+    size_k, size_n = 1024, 2048
+    a_input = rand_data((size_m, size_k))
+    b_weight = rand_data((size_k, size_n))
+    b_bias = rand_data((size_n, )) * 10
+
+    marlin_bias = marlin_permute_bias(b_bias)
+
+    w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
+        b_weight, quant_type, group_size, False)
+
+    marlin_zp = marlin_make_empty_g_idx(marlin_s.device)
+    workspace = marlin_make_workspace_new(a_input.device)
+
+    output = ops.gptq_marlin_gemm(
+        a_input,
+        None,
+        marlin_q_w,
+        marlin_bias,
+        marlin_s,
+        None,
+        marlin_zp,
+        g_idx,
+        sort_indices,
+        workspace,
+        quant_type,
+        a_input.shape[0],
+        b_weight.shape[1],
+        a_input.shape[1],
+        is_k_full=True,
+        use_atomic_add=False,
+        use_fp32_reduce=True,
+        is_zp_float=False,
+    )
+    output_ref = torch.matmul(a_input, w_ref) + b_bias.view(1, -1)
 
     torch.cuda.synchronize()
 

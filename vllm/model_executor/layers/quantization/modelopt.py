@@ -1330,6 +1330,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
+                None,
+                None,
                 layer.w13_weight_scale,
                 layer.w2_weight_scale,
                 router_logits,
