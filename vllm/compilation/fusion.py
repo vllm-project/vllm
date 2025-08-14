@@ -21,6 +21,7 @@ from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
+FP4_DTYPE = torch.uint8
 
 
 def empty_bf16(*args, **kwargs):
@@ -29,6 +30,10 @@ def empty_bf16(*args, **kwargs):
 
 def empty_fp32(*args, **kwargs):
     return torch.empty(*args, **kwargs, dtype=torch.float32, device="cuda")
+
+
+def empty_i32(*args, **kwargs):
+    return torch.empty(*args, **kwargs, dtype=torch.int32, device="cuda")
 
 
 RMS_OP = torch.ops._C.rms_norm.default
@@ -48,24 +53,29 @@ class QuantKey(NamedTuple):
 
     """
     dtype: torch.dtype
-    static: bool
-    group_shape: GroupShape
-    symmetric: bool = True
+    static: Optional[bool] = None
+    group_shape: Optional[GroupShape] = None
+    symmetric: Optional[bool] = None
 
     def __str__(self):
-        group_shape = ('per_tensor'
-                       if self.group_shape == GroupShape.PER_TENSOR else
-                       ('per_token' if self.group_shape == GroupShape.PER_TOKEN
-                        else str(self.group_shape)))
+        if self.dtype == FP8_DTYPE:
+            group_shape = (
+                'per_tensor' if self.group_shape == GroupShape.PER_TENSOR else
+                ('per_token' if self.group_shape == GroupShape.PER_TOKEN else
+                 str(self.group_shape)))
 
-        return (f"QuantKey({'static' if self.static else 'dynamic'},"
-                f"{fx.graph.dtype_abbrs[self.dtype]},{group_shape},"
-                f"{'a' if not self.symmetric else ''}symmetric)")
+            return (f"QuantKey({'static' if self.static else 'dynamic'},"
+                    f"{fx.graph.dtype_abbrs[self.dtype]},{group_shape},"
+                    f"{'a' if not self.symmetric else ''}symmetric)")
+        if self.dtype == FP4_DTYPE:
+            return ("QuantKey("
+                    f"{fx.graph.dtype_abbrs[self.dtype]})")
 
 
 kFp8StaticTensorSym = QuantKey(FP8_DTYPE, True, GroupShape.PER_TENSOR, True)
 kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, False, GroupShape.PER_TENSOR, True)
 kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, False, GroupShape.PER_TOKEN, True)
+kNvFp4Quant = QuantKey(FP4_DTYPE)
 
 QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8StaticTensorSym:
@@ -74,6 +84,7 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
     torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
     kFp8DynamicTokenSym:
     torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
+    kNvFp4Quant: torch.ops._C.scaled_fp4_quant.default,  # noqa: E501
 }
 
 
