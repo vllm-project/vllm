@@ -162,6 +162,10 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
+        self.prev_prompt: bool = False
+        self.last_prompt_latency: float = 0.0
+        self.prev_time: float = 0.0
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -330,7 +334,8 @@ class Scheduler(SchedulerInterface):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
-            while self.waiting and token_budget > 0:
+            while self._passed_delay(
+                    time.time()) and self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
@@ -591,6 +596,8 @@ class Scheduler(SchedulerInterface):
             self.kv_event_publisher.publish(batch)
 
         self._update_after_schedule(scheduler_output)
+        if len(scheduler_output.scheduled_new_reqs) > 0:
+            self.prev_prompt = True
         return scheduler_output
 
     def _update_after_schedule(
@@ -1084,6 +1091,20 @@ class Scheduler(SchedulerInterface):
     def shutdown(self) -> None:
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+
+    def _passed_delay(self, now: float) -> bool:
+        if self.prev_prompt:
+            self.last_prompt_latency = now - self.prev_time
+        self.prev_time, self.prev_prompt = now, False
+        # Delay scheduling prompts to let waiting queue fill up
+        if self.scheduler_config.delay_factor > 0 and self.waiting:
+            earliest_arrival_time = min([e.arrival_time for e in self.waiting])
+            passed_delay = ((now - earliest_arrival_time)
+                            > (self.scheduler_config.delay_factor *
+                               self.last_prompt_latency) or not self.running)
+        else:
+            passed_delay = True
+        return passed_delay
 
     ########################################################################
     # KV Connector Related Methods

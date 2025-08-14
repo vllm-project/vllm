@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from typing import Optional
 from unittest.mock import Mock
 
@@ -810,6 +811,27 @@ def _step_until_done(
             if eco.finish_reason is None:
                 all_done = False
         all_finished = all_done
+
+
+def test_scheduler_delay_factor():
+    # Setup Scheduler.
+    scheduler = create_scheduler(delay_factor=2, )
+    requests = create_requests(num_requests=2, num_tokens=1)
+
+    scheduler.add_request(request=requests[0])
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1
+    assert output.scheduled_new_reqs[0].req_id == "0"
+    time.sleep(1.0)
+
+    scheduler.add_request(request=requests[1])
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 0
+    time.sleep(1.0)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1
+    assert output.scheduled_new_reqs[0].req_id == "1"
 
 
 def test_kv_connector_basic():
