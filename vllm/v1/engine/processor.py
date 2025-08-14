@@ -18,9 +18,9 @@ from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
+from vllm.utils import length_from_prompt_token_ids_or_prompt_embeds
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MultiModalInputCacheClient
-from vllm.v1.request import length_from_prompt_token_ids_or_prompt_embeds
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
 from vllm.v1.structured_output.backend_outlines import (

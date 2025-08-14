@@ -10,7 +10,8 @@ import torch
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.utils import is_list_of
+from vllm.utils import (is_list_of,
+                        length_from_prompt_token_ids_or_prompt_embeds)
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
 from vllm.v1.structured_output.request import StructuredOutputRequest
@@ -18,32 +19,6 @@ from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
-
-
-def length_from_prompt_token_ids_or_prompt_embeds(
-    prompt_token_ids: Optional[list[int]],
-    prompt_embeds: Optional[torch.Tensor],
-) -> int:
-    """Calculate the request length (in number of tokens) give either 
-    prompt_token_ids or prompt_embeds.
-    """
-    prompt_token_len = None if prompt_token_ids is None else len(
-        prompt_token_ids)
-    prompt_embeds_len = \
-        None if prompt_embeds is None else len(prompt_embeds)
-
-    if prompt_token_len is None:
-        if prompt_embeds_len is None:
-            raise ValueError(
-                "Neither prompt_token_ids nor prompt_embeds were defined.")
-        return prompt_embeds_len
-    else:
-        if prompt_embeds_len != prompt_token_len:
-            raise ValueError(
-                "Prompt token ids and prompt embeds had different lengths"
-                f" prompt_token_ids={prompt_token_len}"
-                f" prompt_embeds={prompt_embeds_len}")
-        return prompt_token_len
 
 
 class Request:

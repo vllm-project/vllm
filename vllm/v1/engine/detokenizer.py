@@ -13,8 +13,8 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
+from vllm.utils import length_from_prompt_token_ids_or_prompt_embeds
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.request import length_from_prompt_token_ids_or_prompt_embeds
 
 logger = init_logger(__name__)
 

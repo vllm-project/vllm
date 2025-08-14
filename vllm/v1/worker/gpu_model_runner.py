@@ -48,7 +48,9 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, check_use_alibi, get_dtype_size,
-                        is_pin_memory_available, round_up, supports_dynamo)
+                        is_pin_memory_available,
+                        length_from_prompt_token_ids_or_prompt_embeds,
+                        round_up, supports_dynamo)
 from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
@@ -62,7 +64,6 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
-from vllm.v1.request import length_from_prompt_token_ids_or_prompt_embeds
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler

@@ -13,13 +13,13 @@ from vllm.outputs import (CompletionOutput, PoolingOutput,
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
+from vllm.utils import length_from_prompt_token_ids_or_prompt_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
                                    RequestStateStats)
-from vllm.v1.request import length_from_prompt_token_ids_or_prompt_embeds
 
 
 class RequestOutputCollector:
