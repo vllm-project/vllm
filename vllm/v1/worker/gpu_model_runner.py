@@ -1481,6 +1481,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)
         num_input_tokens += num_pad
 
+        if self.uses_mrope:
+            positions = self.mrope_positions[:, :num_input_tokens]
+        else:
+            positions = self.positions[:num_input_tokens]
+
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
         if self.is_multimodal_model:
@@ -1505,9 +1510,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Update mrope positions if using MRoPE
                 if positions_scheduled is not None:
                     if self.uses_mrope:
-                        self.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
-                        self.mrope_positions_cpu[:, :num_scheduled_tokens].copy_(positions_scheduled.cpu())
-                        self.mrope_positions_np[:, :num_scheduled_tokens] = self.mrope_positions_cpu[:, :num_scheduled_tokens].numpy()
+                        positions = positions_scheduled[:, :num_scheduled_tokens]
+                        # self.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
+                        # self.mrope_positions_cpu[:, :num_scheduled_tokens].copy_(positions_scheduled.cpu())
+                        # self.mrope_positions_np[:, :num_scheduled_tokens] = self.mrope_positions_cpu[:, :num_scheduled_tokens].numpy()
 
                         # ekhvedchenia: What request we should update?
                         # ekhvedchenia: For now let's update all existing but that is probably incorrect
@@ -1515,16 +1521,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             req = self.requests[req_id]
                             req.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
                             req.mrope_position_delta = mrope_position_delta
-                            print(f"Updating positions in req")
-                            print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
-                            print(f"{req.mrope_position_delta=}")
-                            print(f"{req.mrope_positions.shape=}")
-                            print(req.mrope_positions[0].tolist())
-                            print(req.mrope_positions[1].tolist())
-                            print(req.mrope_positions[2].tolist())
+                            # print(f"Updating positions in req")
+                            # print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
+                            # print(f"{req.mrope_position_delta=}")
+                            # print(f"{req.mrope_positions.shape=}")
+                            # print(req.mrope_positions[0].tolist())
+                            # print(req.mrope_positions[1].tolist())
+                            # print(req.mrope_positions[2].tolist())
 
                     else:
-                        self.positions[:num_scheduled_tokens].copy(positions_scheduled)
+                        positions = positions_scheduled[:num_scheduled_tokens]
+                        # self.positions[:num_scheduled_tokens].copy(positions_scheduled)
             else:
                 inputs_embeds_scheduled = self.model.get_input_embeddings(
                     input_ids=self.input_ids[:num_scheduled_tokens],
@@ -1546,10 +1553,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
             model_mm_kwargs = {}
-        if self.uses_mrope:
-            positions = self.mrope_positions[:, :num_input_tokens]
-        else:
-            positions = self.positions[:num_input_tokens]
 
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
