@@ -347,10 +347,6 @@ def allocate_gpu_mm_processors(
     Returns:
         The device to allocate for each multi-modal processor.
     """
-    # In API server scale-out, allocate_gpu_mm_processors is called twice.
-    # The first call happens in vllm.entrypoints.cli.serve and corresponds
-    # to len(rest) == 0, resulting in each server targeting a specific device.
-    # The second call happens in arg_utils.py and corresponds to len(rest) = 1
     device_type, *rest = mm_processor_device.rsplit(":", 1)
     if len(rest) == 0:
         # Try to run each processor on a different GPU, preferably those
