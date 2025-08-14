@@ -36,6 +36,7 @@ from unittest.mock import patch
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
+from typing_extensions import deprecated
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
@@ -196,11 +197,10 @@ class GroupCoordinator:
     #   3     |   1  |  3   |     1      |       3
     local_rank: int  # local rank used to assign devices
     rank_in_group: int  # rank inside the group
-    cpu_group: Optional[ProcessGroup]  # group for CPU communication
-    device_group: Optional[ProcessGroup]  # group for device communication
-    use_device_communicator: bool  # whether to use device communicator
-    device_communicator: Optional[
-        DeviceCommunicatorBase]  # device communicator
+    cpu_group: ProcessGroup  # group for CPU communication
+    device_group: ProcessGroup  # group for device communication
+    # device communicator (if use_device_communicator=True)
+    device_communicator: Optional[DeviceCommunicatorBase]
     mq_broadcaster: Optional[Any]  # shared memory broadcaster
 
     def __init__(
@@ -208,7 +208,7 @@ class GroupCoordinator:
         group_ranks: list[list[int]],
         local_rank: int,
         torch_distributed_backend: Union[str, Backend],
-        use_device_communicator: bool,
+        use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
         group_name: Optional[str] = None,
     ):
@@ -218,8 +218,9 @@ class GroupCoordinator:
 
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
-        self.device_group = None
-        self.cpu_group = None
+
+        self_device_group = None
+        self_cpu_group = None
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
@@ -231,11 +232,14 @@ class GroupCoordinator:
                 self.ranks = ranks
                 self.world_size = len(ranks)
                 self.rank_in_group = ranks.index(self.rank)
-                self.device_group = device_group
-                self.cpu_group = cpu_group
+                self_device_group = device_group
+                self_cpu_group = cpu_group
 
-        assert self.cpu_group is not None
-        assert self.device_group is not None
+        assert self_cpu_group is not None
+        assert self_device_group is not None
+
+        self.cpu_group = self_cpu_group
+        self.device_group = self_device_group
 
         from vllm.platforms import current_platform
 
@@ -250,7 +254,6 @@ class GroupCoordinator:
             self.device = torch.device("cpu")
 
         self.use_device_communicator = use_device_communicator
-
         self.device_communicator = None
         if use_device_communicator and self.world_size > 1:
             device_comm_cls = resolve_obj_by_qualname(
@@ -816,12 +819,12 @@ class GroupCoordinator:
         return self.device_communicator.recv(size, dtype, src)
 
     def destroy(self):
-        if self.device_group is not None:
+        if hasattr(self, "device_group"):
             torch.distributed.destroy_process_group(self.device_group)
-            self.device_group = None
-        if self.cpu_group is not None:
+            del self.device_group
+        if hasattr(self, "cpu_group"):
             torch.distributed.destroy_process_group(self.cpu_group)
-            self.cpu_group = None
+            del self.cpu_group
         if self.device_communicator is not None:
             self.device_communicator.destroy()
         if self.mq_broadcaster is not None:
@@ -894,8 +897,12 @@ def get_tp_group() -> GroupCoordinator:
     return _TP
 
 
-# kept for backward compatibility
-get_tensor_model_parallel_group = get_tp_group
+@deprecated("`get_tensor_model_parallel_group` has been replaced with "
+            "`get_tp_group` and may be removed after v0.12. Please use "
+            "`get_tp_group` instead.")
+def get_tensor_model_parallel_group():
+    return get_tp_group()
+
 
 _PP: Optional[GroupCoordinator] = None
 
@@ -921,8 +928,11 @@ def get_pp_group() -> GroupCoordinator:
     return _PP
 
 
-# kept for backward compatibility
-get_pipeline_model_parallel_group = get_pp_group
+@deprecated("`get_pipeline_model_parallel_group` has been replaced with "
+            "`get_pp_group` and may be removed in v0.12. Please use "
+            "`get_pp_group` instead.")
+def get_pipeline_model_parallel_group():
+    return get_pp_group()
 
 
 @contextmanager

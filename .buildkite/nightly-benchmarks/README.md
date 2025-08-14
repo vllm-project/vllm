@@ -7,7 +7,7 @@ This directory contains two sets of benchmark for vllm.
 - Performance benchmark: benchmark vllm's performance under various workload, for **developers** to gain clarity on whether their PR improves/degrades vllm's performance
 - Nightly benchmark: compare vllm's performance against alternatives (tgi, trt-llm and lmdeploy), for **the public** to know when to choose vllm.
 
-See [vLLM performance dashboard](https://perf.vllm.ai) for the latest performance benchmark results and [vLLM GitHub README](https://github.com/vllm-project/vllm/blob/main/README.md) for latest nightly benchmark results.
+See [vLLM performance dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm) for the latest performance benchmark results and [vLLM GitHub README](https://github.com/vllm-project/vllm/blob/main/README.md) for latest nightly benchmark results.
 
 ## Performance benchmark quick overview
 
@@ -138,28 +138,20 @@ The raw benchmarking results (in the format of json files) are in the `Artifacts
 
 The `compare-json-results.py` helps to compare benchmark results JSON files converted using `convert-results-json-to-markdown.py`.
 When run, benchmark script generates results under `benchmark/results` folder, along with the `benchmark_results.md` and `benchmark_results.json`.
-`compare-json-results.py` compares two `benchmark_results.json` files and provides performance ratio e.g. for Output Tput, Median TTFT and Median TPOT.
+`compare-json-results.py` compares two `benchmark_results.json` files and provides performance ratio e.g. for Output Tput, Median TTFT and Median TPOT.  
+If only one benchmark_results.json is passed, `compare-json-results.py` compares different TP and PP configurations in the benchmark_results.json instead.
 
-Here is an example using the script to compare result_a and result_b without detail test name.
-`python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json --ignore_test_name`
-
-|    | results_a/benchmark_results.json | results_b/benchmark_results.json | perf_ratio        |
-|----|----------------------------------------|----------------------------------------|----------|
-| 0  | 142.633982                             | 156.526018                             | 1.097396 |
-| 1  | 241.620334                             | 294.018783                             | 1.216863 |
-| 2  | 218.298905                             | 262.664916                             | 1.203235 |
-| 3  | 242.743860                             | 299.816190                             | 1.235113 |
-
-Here is an example using the script to compare result_a and result_b with detail test name.
+Here is an example using the script to compare result_a and result_b with Model, Dataset name, input/output lenght, max concurrency and qps.
 `python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json`
 
-|   | results_a/benchmark_results.json_name | results_a/benchmark_results.json | results_b/benchmark_results.json_name | results_b/benchmark_results.json | perf_ratio        |
-|---|---------------------------------------------|----------------------------------------|---------------------------------------------|----------------------------------------|----------|
-| 0 | serving_llama8B_tp1_sharegpt_qps_1          | 142.633982                             | serving_llama8B_tp1_sharegpt_qps_1          | 156.526018                             | 1.097396 |
-| 1 | serving_llama8B_tp1_sharegpt_qps_16         | 241.620334                             | serving_llama8B_tp1_sharegpt_qps_16         | 294.018783                             | 1.216863 |
-| 2 | serving_llama8B_tp1_sharegpt_qps_4          | 218.298905                             | serving_llama8B_tp1_sharegpt_qps_4          | 262.664916                             | 1.203235 |
-| 3 | serving_llama8B_tp1_sharegpt_qps_inf        | 242.743860                             | serving_llama8B_tp1_sharegpt_qps_inf        | 299.816190                             | 1.235113 |
-| 4 | serving_llama8B_tp2_random_1024_128_qps_1   | 96.613390                              | serving_llama8B_tp4_random_1024_128_qps_1   | 108.404853                             | 1.122048 |
+|   | Model | Dataset Name | Input Len | Output Len | # of max concurrency | qps  | results_a/benchmark_results.json | results_b/benchmark_results.json | perf_ratio        |
+|----|---------------------------------------|--------|-----|-----|------|-----|-----------|----------|----------|
+| 0  | meta-llama/Meta-Llama-3.1-8B-Instruct | random | 128 | 128 | 1000 | 1 | 142.633982                             | 156.526018                             | 1.097396 |
+| 1  | meta-llama/Meta-Llama-3.1-8B-Instruct | random | 128 | 128 | 1000 | inf| 241.620334                             | 294.018783                             | 1.216863 |
+
+A comparison diagram will be generated below the table.
+Here is an example to compare between 96c/results_gnr_96c_091_tp2pp3 and 128c/results_gnr_128c_091_tp2pp3
+<img width="1886" height="828" alt="image" src="https://github.com/user-attachments/assets/c02a43ef-25d0-4fd6-90e5-2169a28682dd" />
 
 ## Nightly test details
 
@@ -168,9 +160,9 @@ See [nightly-descriptions.md](nightly-descriptions.md) for the detailed descript
 ### Workflow
 
 - The [nightly-pipeline.yaml](nightly-pipeline.yaml) specifies the docker containers for different LLM serving engines.
-- Inside each container, we run [run-nightly-suite.sh](run-nightly-suite.sh), which will probe the serving engine of the current container.
-- The `run-nightly-suite.sh` will redirect the request to `tests/run-[llm serving engine name]-nightly.sh`, which parses the workload described in [nightly-tests.json](tests/nightly-tests.json) and performs the benchmark.
-- At last, we run [scripts/plot-nightly-results.py](scripts/plot-nightly-results.py) to collect and plot the final benchmarking results, and update the results to buildkite.
+- Inside each container, we run [scripts/run-nightly-benchmarks.sh](scripts/run-nightly-benchmarks.sh), which will probe the serving engine of the current container.
+- The `scripts/run-nightly-benchmarks.sh` will parse the workload described in [nightly-tests.json](tests/nightly-tests.json) and launch the right benchmark for the specified serving engine via `scripts/launch-server.sh`.
+- At last, we run [scripts/summary-nightly-results.py](scripts/summary-nightly-results.py) to collect and plot the final benchmarking results, and update the results to buildkite.
 
 ### Nightly tests
 
@@ -180,6 +172,6 @@ In [nightly-tests.json](tests/nightly-tests.json), we include the command line a
 
 The docker containers for benchmarking are specified in `nightly-pipeline.yaml`.
 
-WARNING: the docker versions are HARD-CODED and SHOULD BE ALIGNED WITH `nightly-descriptions.md`. The docker versions need to be hard-coded as there are several version-specific bug fixes inside `tests/run-[llm serving engine name]-nightly.sh`.
+WARNING: the docker versions are HARD-CODED and SHOULD BE ALIGNED WITH `nightly-descriptions.md`. The docker versions need to be hard-coded as there are several version-specific bug fixes inside `scripts/run-nightly-benchmarks.sh` and `scripts/launch-server.sh`.
 
 WARNING: populating `trt-llm` to latest version is not easy, as it requires updating several protobuf files in [tensorrt-demo](https://github.com/neuralmagic/tensorrt-demo.git).

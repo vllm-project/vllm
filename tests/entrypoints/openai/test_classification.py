@@ -121,8 +121,7 @@ def test_invalid_truncate_prompt_tokens_error(server: RemoteOpenAIServer,
 
     error = classification_response.json()
     assert classification_response.status_code == 400
-    assert error["object"] == "error"
-    assert "truncate_prompt_tokens" in error["message"]
+    assert "truncate_prompt_tokens" in error["error"]["message"]
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
@@ -137,7 +136,7 @@ def test_empty_input_error(server: RemoteOpenAIServer, model_name: str):
 
     error = classification_response.json()
     assert classification_response.status_code == 400
-    assert error["object"] == "error"
+    assert "error" in error
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
@@ -212,3 +211,18 @@ async def test_activation(server: RemoteOpenAIServer, model_name: str):
     assert torch.allclose(
         F.softmax(wo_activation, dim=-1), w_activation, atol=1e-2
     ), "w_activation should be close to activation(wo_activation)."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_pooling(server: RemoteOpenAIServer, model_name: str):
+    # pooling api uses ALL pooling, which does not support chunked prefill.
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "input": "test",
+            "encoding_format": "float"
+        },
+    )
+    assert response.json()["error"]["type"] == "BadRequestError"
