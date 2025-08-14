@@ -457,7 +457,7 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
     return vision_embeddings
 
 
-def get_load_balance_assignment(sizes: list[list[int]], num_gpus: int = 2):
+def get_load_balance_assignment(sizes: list[int], num_gpus: int = 2):
     """
     Generate load balancing assignment and metadata 
     for distributing data across GPUs.
