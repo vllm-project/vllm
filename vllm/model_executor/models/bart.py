@@ -1234,16 +1234,13 @@ class MBartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
         },
     )
 
-    def __init__(self,
-                 config,
-                 lora_config=None,
-                 vllm_config: Optional[VllmConfig] = None,
-                 prefix: str = ""):
-
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        lora_config = vllm_config.lora_config
+        assert config.tie_word_embeddings
         self.config = config
-        self.model = MBartModel(config,
-                                vllm_config=vllm_config,
+        self.model = MBartModel(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
 
         self.unpadded_vocab_size = config.vocab_size
