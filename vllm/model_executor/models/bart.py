@@ -1225,7 +1225,7 @@ class MBartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            "model.": "", 
+            "model.": "",
         },
         orig_to_new_substr={
             "beta": "bias",
@@ -1249,7 +1249,7 @@ class MBartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-        
+
         embed_scale = math.sqrt(
             config.d_model) if config.scale_embedding else 1.0
 
@@ -1259,6 +1259,7 @@ class MBartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1289,7 +1290,7 @@ class MBartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
         weights_tuple_list = [
             item for item in weights if item[0] != "final_logits_bias"
         ]
-        
+
         shared_embedding_weight = None
         for name, loaded_weight in weights_tuple_list:
             if ('shared.weight' in name
@@ -1315,9 +1316,8 @@ class MBartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
             self.model.encoder.embed_tokens.weight = self.lm_head.weight
             self.model.decoder.embed_tokens.weight = self.lm_head.weight
             loaded_params.update({
-                'model.encoder.embed_tokens.weight', 
-                'lm_head.weight',
+                'model.encoder.embed_tokens.weight', 'lm_head.weight',
                 'model.decoder.embed_tokens.weight'
             })
-            
+
         return loaded_params
