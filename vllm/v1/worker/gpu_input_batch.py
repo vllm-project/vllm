@@ -511,6 +511,11 @@ class InputBatch:
                     self.allowed_token_ids_mask_cpu_tensor[i1]
         self.block_table.swap_row(i1, i2)
 
+    def trim_lists(self) -> None:
+        """Trim lists to the batch size"""
+        del self._req_ids[self.num_reqs:]
+        del self.req_output_token_ids[self.num_reqs:]
+
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
 
@@ -608,9 +613,7 @@ class InputBatch:
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
-        # Trim lists to the batch size.
-        del self._req_ids[self.num_reqs:]
-        del self.req_output_token_ids[self.num_reqs:]
+        self.trim_lists()
 
     def refresh_sampling_metadata(self):
         self.sampling_metadata = self.make_sampling_metadata()

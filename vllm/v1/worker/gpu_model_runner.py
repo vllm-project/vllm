@@ -618,6 +618,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 req_state = self.requests[req_id]
                 self.input_batch.add_request(req_state, req_index=adx)
 
+            self.input_batch.trim_lists()
+
             # Refresh sampling metadata with added/removed pooling requests
             self.input_batch.refresh_sampling_metadata()
         else:
