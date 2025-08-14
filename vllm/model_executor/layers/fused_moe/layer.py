@@ -475,12 +475,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         else:
-            return self.fused_experts(
+            # add w1_bias/w2_bias to kwargs if they exist
+            kwargs = dict(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
-                w1_bias=layer.w13_bias if self.has_bias else None,
-                w2_bias=layer.w2_bias if self.has_bias else None,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
@@ -489,6 +488,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
             )
+            if isinstance(self.fused_experts,
+                          FusedMoEModularKernel) and self.has_bias:
+                raise ValueError(
+                    "FusedMoEModularKernel does not support bias.")
+            if self.has_bias:
+                kwargs.update({
+                    "w1_bias": getattr(layer, "w13_bias", None),
+                    "w2_bias": getattr(layer, "w2_bias", None),
+                })
+
+            return self.fused_experts(**kwargs)
 
     def forward_cpu(
         self,
@@ -672,7 +682,8 @@ def determine_expert_map(
     return (local_num_experts, expert_map)
 
 
-class FusedMoE(torch.nn.Module):
+@CustomOp.register("fused_moe")
+class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
 
     This layer contains both MergedColumnParallel weights (gate_up_proj /

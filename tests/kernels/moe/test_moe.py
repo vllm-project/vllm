@@ -38,7 +38,7 @@ from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
-NUM_EXPERTS = [8, 64]
+NUM_EXPERTS = [8, 64, 192]
 EP_SIZE = [1, 4]
 TOP_KS = [2, 6]
 
