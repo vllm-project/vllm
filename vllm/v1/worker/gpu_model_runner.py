@@ -76,7 +76,7 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import (
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from ..sample.logits_processor import LogitsProcessorManager
-from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
+from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache, freeze_gc,
                     gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
@@ -2552,28 +2552,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         start_time = time.perf_counter()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
-        @contextmanager
-        def freeze_gc():
-            # Optimize garbage collection during CUDA graph capture.
-            # Clean up, then freeze all remaining objects from being included
-            # in future collections.
-            # gc.collect()
-            should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
-            if should_freeze:
-                gc.freeze()
-            try:
-                yield
-            finally:
-                if should_freeze:
-                    gc.unfreeze()
-
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
-        with freeze_gc(), graph_capture(device=self.device):
+        gc_collect = (
+            not specific_token_num) if specific_token_num is not None else True
+        with freeze_gc(gc_collect), graph_capture(device=self.device):
             full_cg = self.full_cuda_graph
             # Only rank 0 should print progress bar during capture
-            compilation_cases = [specific_token_num] if specific_token_num else reversed(self.cudagraph_batch_sizes)
+            compilation_cases = [
+                specific_token_num
+            ] if specific_token_num else reversed(self.cudagraph_batch_sizes)
 
             if is_global_first_rank() and specific_token_num is None:
                 compilation_cases = tqdm(
