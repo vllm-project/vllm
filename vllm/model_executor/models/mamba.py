@@ -269,7 +269,7 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
 
         return MambaStateDtypeCalculator.mamba1_state_dtype(
             vllm_config.model_config.dtype,
-            vllm_config.cache_config.cache_dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 

@@ -739,7 +739,7 @@ class MambaMixer2(MambaBase, CustomOp):
         assert self.cache_config is not None
         return MambaStateDtypeCalculator.mamba2_state_dtype(
             self.model_config.dtype,
-            self.cache_config.cache_dtype,
+            self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
 

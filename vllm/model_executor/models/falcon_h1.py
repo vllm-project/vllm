@@ -534,7 +534,7 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
         return MambaStateDtypeCalculator.mamba2_state_dtype(
             vllm_config.model_config.dtype,
-            vllm_config.cache_config.cache_dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 

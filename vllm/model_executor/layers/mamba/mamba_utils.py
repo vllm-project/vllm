@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Optional, Union
+
 import torch
 
+from vllm.config import MambaDType, ModelDType
 from vllm.distributed import divide
 from vllm.utils import get_kv_cache_torch_dtype
 
@@ -11,37 +14,44 @@ class MambaStateDtypeCalculator:
     @classmethod
     def linear_attention_state_dtype(
         cls,
-        model_dtype,
-        cache_dtype,
-        mamba_ssm_cache_dtype,
+        model_dtype: Union[ModelDType, torch.dtype],
+        mamba_cache_dtype: MambaDType,
+        mamba_ssm_cache_dtype: Optional[MambaDType],
     ) -> tuple[torch.dtype, ...]:
-        state_dtype = get_kv_cache_torch_dtype(mamba_ssm_cache_dtype,
-                                               model_dtype)
+        # TODO (tdoublep) requires testing
+        if mamba_cache_dtype == "float32":
+            raise ValueError("fp32 state for minimax is not yet supported")
+        state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
         return (state_dtype, )
 
     @classmethod
     def mamba1_state_dtype(
         cls,
-        model_dtype,
-        cache_dtype,
-        mamba_ssm_cache_dtype,
+        model_dtype: Union[ModelDType, torch.dtype],
+        mamba_cache_dtype: MambaDType,
+        mamba_ssm_cache_dtype: Optional[MambaDType],
     ) -> tuple[torch.dtype, ...]:
         # TODO (tdoublep) requires kernel changes
-        if mamba_ssm_cache_dtype == "float32":
+        if mamba_cache_dtype == "float32" or mamba_ssm_cache_dtype == "float32":
             raise ValueError("fp32 state for mamba1 is not yet supported")
-        state_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
-        return (state_dtype, state_dtype)
+        else:
+            return MambaStateDtypeCalculator.mamba2_state_dtype(
+                model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype)
 
     @classmethod
     def mamba2_state_dtype(
         cls,
-        model_dtype,
-        cache_dtype,
-        mamba_ssm_cache_dtype,
+        model_dtype: Union[ModelDType, torch.dtype],
+        mamba_cache_dtype: MambaDType,
+        mamba_ssm_cache_dtype: Optional[MambaDType],
     ) -> tuple[torch.dtype, ...]:
-        conv_state_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
-        temporal_state_dtype = get_kv_cache_torch_dtype(
-            mamba_ssm_cache_dtype, model_dtype)
+        conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype,
+                                                    model_dtype)
+        if mamba_ssm_cache_dtype is not None:
+            temporal_state_dtype = get_kv_cache_torch_dtype(
+                mamba_ssm_cache_dtype, model_dtype)
+        else:
+            temporal_state_dtype = conv_state_dtype
         return (conv_state_dtype, temporal_state_dtype)
 
 
