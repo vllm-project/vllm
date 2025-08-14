@@ -973,7 +973,7 @@ class MBartDecoderLayer(BartDecoderLayer):
 
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.final_layer_norm(hidden_states)  # 改动
+        hidden_states = self.final_layer_norm(hidden_states)
         fc1_out, _ = self.fc1(hidden_states)
         hidden_states = self.activation_fn(fc1_out)
 
@@ -1061,7 +1061,7 @@ class MBartEncoder(nn.Module):
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states=hidden_states)
 
-        hidden_states = self.layer_norm(hidden_states)  # 改动
+        hidden_states = self.layer_norm(hidden_states)
         return hidden_states
 
 
@@ -1330,8 +1330,9 @@ class MBartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
         model_params_dict = dict(self.model.named_parameters())
         top_params_dict = dict(self.named_parameters())
 
-        weights_tuple_list = list(weights)
-        weights_tuple_list.pop(0)  # 改动，pop 'final_logits_bias'
+        weights_tuple_list = [
+            item for item in weights if item[0] != "final_logits_bias"
+        ]
 
         shared_embedding_weight = None
         shared_embedding_shard_id = None
