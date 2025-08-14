@@ -221,14 +221,6 @@ class Case:
     w_dtype: str
 
 
-debug_prints: set[str] = set()
-def describe_tensor(t, name: str) -> str:
-    if t is None:
-        return f"   - {name}: None"
-    else:
-        return f"   - {name}: {t.shape} {t.dtype}"
-
-
 @pytest.mark.parametrize(
     ", ".join(f.name for f in fields(Case)),
     [
@@ -242,9 +234,6 @@ def describe_tensor(t, name: str) -> str:
 @pytest.mark.parametrize("num_token", [2])
 @pytest.mark.parametrize("tp", [1, 2, 4, 8])
 def test_equiv(num_token, a_dtype, w_dtype, tp):
-
-    # Testing for matmul_ogs !!
-
     M = num_token
     E = ModelConfig.num_experts
     K = ModelConfig.hidden_size
@@ -255,19 +244,6 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
         x_tri, w1_tri, w2_tri, exp_data_tri, w1_bias_tri,\
         w2_bias_tri, pc1, pc2 = init_compute_data(
         M, K, N, E, a_dtype, w_dtype, num_warps=8)
-
-    
-    desc = (f"triton_kernel_moe_forward Data: \n"
-            f"{describe_tensor(x_tri, "HS")}\n"
-            f"{describe_tensor(w1_tri, "w1")}\n"
-            f"{describe_tensor(w2_tri, "w2")}\n"
-            f"{describe_tensor(w1_bias_tri, "w1_bias")}\n"
-            f"{describe_tensor(w2_bias_tri, "w2_bias")}\n"
-            )
-
-    if desc not in debug_prints:
-        print (desc)
-        debug_prints.add(desc)
 
     out_triton_monolithic = triton_kernel_moe_forward(
         hidden_states=x_tri,
@@ -345,9 +321,6 @@ def batched_moe(a: torch.Tensor, w1, w2, gating_output: torch.Tensor,
 @pytest.mark.parametrize("num_token", [64])
 @pytest.mark.parametrize("ep", [1, 2, 4, 8])
 def test_triton_kernel_batched_moe(num_token, a_dtype, w_dtype, ep):
-
-    ## Testing for BatchedOAITritonExpert
-
     M = num_token
     E = ModelConfig.num_experts // ep
     K = ModelConfig.hidden_size
@@ -358,19 +331,6 @@ def test_triton_kernel_batched_moe(num_token, a_dtype, w_dtype, ep):
         x_tri, w1_tri, w2_tri, exp_data_tri, w1_bias_tri, \
             w2_bias_tri, pc1, pc2 = init_compute_data(
         M, K, N, E, a_dtype, w_dtype, num_warps=4)
-
-    desc = (f"batched_moe Data: \n"
-            f"{describe_tensor(x_tri, "HS")}\n"
-            f"{describe_tensor(w1_tri, "w1")}\n"
-            f"{describe_tensor(w2_tri, "w2")}\n"
-            f"{describe_tensor(w1_bias_tri, "w1_bias")}\n"
-            f"{describe_tensor(w2_bias_tri, "w2_bias")}\n"
-            )
-
-    if desc not in debug_prints:
-        print (desc)
-        debug_prints.add(desc)
-
 
     out_tri = batched_moe(a=x_tri,
                           w1=w1_tri,

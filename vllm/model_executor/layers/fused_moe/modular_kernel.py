@@ -737,7 +737,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
-        print("preparing ...")
         (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
          _expert_topk_weights) = self.prepare_finalize.prepare(
              a1,
@@ -751,7 +750,6 @@ class FusedMoEModularKernel(torch.nn.Module):
              self.fused_experts.quant_config,
              extra_prepare_args,
          )
-        print("prepare done ...")
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
@@ -760,7 +758,6 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         fused_out = None
 
-        print("moe'ing ...")
         if a1q.numel() == 0:
             # This happens when none of the tokens from the all2all reach this
             # EP rank. Also, note that this is only relevant for CUDAGraph
@@ -790,14 +787,11 @@ class FusedMoEModularKernel(torch.nn.Module):
                 expert_tokens_meta=expert_tokens_meta,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 extra_expert_args=extra_expert_args)
-        print("moe done ... ")
 
-        print("finalizing ...")
         self.prepare_finalize.finalize(
             output, fused_out, topk_weights, topk_ids,
             apply_router_weight_on_input,
             self.fused_experts.finalize_weight_and_reduce_impl(),
             extra_finalize_args)
-        print("finalize done ...")
 
         return output

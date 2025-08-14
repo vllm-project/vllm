@@ -1849,7 +1849,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
     ):
-
         # Check constraints.
         if self.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), (

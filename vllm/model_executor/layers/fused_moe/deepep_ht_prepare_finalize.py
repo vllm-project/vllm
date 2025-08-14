@@ -174,7 +174,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  rank_topk_ids=topk_ids,
                  rank_topk_weights=topk_weights,
                  num_experts=num_experts)
-
             # Quantize after dispatch.
             expert_x_scale = None
             if expert_x.numel() != 0:
