@@ -343,7 +343,6 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         return MambaStateDtypeCalculator.linear_attention_state_dtype(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
-            self.cache_config.mamba_ssm_cache_dtype,
         )
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -1436,7 +1435,6 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         return MambaStateDtypeCalculator.linear_attention_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
-            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 
     @classmethod

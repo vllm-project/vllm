@@ -16,7 +16,6 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: Union[ModelDType, torch.dtype],
         mamba_cache_dtype: MambaDType,
-        mamba_ssm_cache_dtype: Optional[MambaDType],
     ) -> tuple[torch.dtype, ...]:
         # TODO (tdoublep) requires testing
         if mamba_cache_dtype == "float32":
