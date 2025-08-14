@@ -7,10 +7,13 @@ import pytest
 import torch._dynamo
 
 from tests.compile.backend import TestBackend
+from tests.kernels.quantization.nvfp4_utils import dequantize_nvfp4_to_dtype
 from tests.models.utils import check_outputs_equal
 from vllm import LLM, SamplingParams
+from vllm._custom_ops import scaled_fp4_quant
 from vllm.attention import Attention
-from vllm.compilation.fusion import QUANT_OPS, QuantKey, kFp8StaticTensorSym
+from vllm.compilation.fusion import (QUANT_OPS, QuantKey, kFp8StaticTensorSym,
+                                     kNvFp4Quant)
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.noop_elimination import NoOpEliminationPass
@@ -27,6 +30,7 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FP8_DTYPE = current_platform.fp8_dtype()
+FP4_DTYPE = torch.uint8
 
 # globals needed for string-import custom Dynamo backend field
 backend: Optional[TestBackend] = None
@@ -151,13 +155,14 @@ class TestAttentionStaticQuantPatternModel(torch.nn.Module):
     """Test model for AttentionStaticQuantPattern fusion."""
 
     def __init__(self, num_qo_heads: int, num_kv_heads: int, head_size: int,
-                 kv_cache_dtype: torch.dtype, device: torch.device,
-                 vllm_config: VllmConfig):
+                 kv_cache_dtype: torch.dtype, quant_dtype: torch.dtype,
+                 device: torch.device, vllm_config: VllmConfig):
         super().__init__()
         self.num_qo_heads = num_qo_heads
         self.num_kv_heads = num_kv_heads
         self.head_size = head_size
         self.kv_cache_dtype = kv_cache_dtype
+        self.quant_dtype = quant_dtype
         self.device = device
         self.vllm_config = vllm_config
 
@@ -172,7 +177,9 @@ class TestAttentionStaticQuantPatternModel(torch.nn.Module):
 
         self.quant_fp8 = QuantFP8(static=True,
                                   group_shape=GroupShape.PER_TENSOR)
-        self.quant_fp8_scale = torch.tensor([1.0], dtype=torch.float32)
+
+        self.fp8_quant_scale = torch.tensor([1.0], dtype=torch.float32)
+        self.nvfp4_o_sf_scale = torch.tensor([500], dtype=torch.float32)
 
     def build_attn_metadata(self, batch_size: int):
         """Initialize attention metadata."""
@@ -248,8 +255,13 @@ class TestAttentionStaticQuantPatternModel(torch.nn.Module):
         """Forward pass that creates the pattern to be fused."""
         attn_output = self.attn(q, k, v)
         attn_output = attn_output.view(-1, self.num_qo_heads * self.head_size)
-        output, _ = self.quant_fp8(attn_output, self.quant_fp8_scale)
-        return output
+        if self.quant_dtype == FP8_DTYPE:
+            output, _ = self.quant_fp8(attn_output, self.fp8_quant_scale)
+            output_block_scale = None
+        elif self.quant_dtype == FP4_DTYPE:
+            output, output_block_scale = scaled_fp4_quant(
+                attn_output, self.nvfp4_o_sf_scale)
+        return output, output_block_scale
 
 
 @pytest.mark.parametrize("num_heads", [(64, 8), (40, 8)])
@@ -258,7 +270,8 @@ class TestAttentionStaticQuantPatternModel(torch.nn.Module):
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize(
     "model_quant_dtype",
-    [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", FP8_DTYPE)])
+    [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", FP8_DTYPE),
+     ("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4", FP4_DTYPE)])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
 @pytest.mark.skipif(not current_platform.is_device_capability((10, 0)),
@@ -283,6 +296,8 @@ def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
     quant_op = None
     if quant_dtype == FP8_DTYPE:
         quant_op = QUANT_OPS[kFp8StaticTensorSym]
+    elif quant_dtype == FP4_DTYPE:
+        quant_op = QUANT_OPS[kNvFp4Quant]
     else:
         raise ValueError(f"Unsupported quant_dtype: {quant_dtype}")
 
@@ -326,7 +341,7 @@ def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
     with set_current_vllm_config(vllm_config_unfused), set_forward_context(
             attn_metadata=None, vllm_config=vllm_config_unfused):
         model_unfused = TestAttentionStaticQuantPatternModel(
-            num_qo_heads, num_kv_heads, head_size, dtype, device,
+            num_qo_heads, num_kv_heads, head_size, dtype, quant_dtype, device,
             vllm_config_unfused)
         model_unfused = model_unfused.to(device)
 
@@ -344,8 +359,8 @@ def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
     with set_current_vllm_config(vllm_config), set_forward_context(
             attn_metadata=None, vllm_config=vllm_config):
         model_fused = TestAttentionStaticQuantPatternModel(
-            num_qo_heads, num_kv_heads, head_size, FP8_DTYPE, device,
-            vllm_config)
+            num_qo_heads, num_kv_heads, head_size, FP8_DTYPE, quant_dtype,
+            device, vllm_config)
         model_fused = model_fused.to(device)
 
         forward_ctx = get_forward_context()
@@ -379,7 +394,27 @@ def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
         "Attention should have output_scale after fusion"
 
     # Check that results are closed
-    torch.testing.assert_close(result_unfused.to(dtype),
-                               result_fused.to(dtype),
-                               atol=1e-2,
-                               rtol=1e-2)
+    if quant_dtype == FP8_DTYPE:
+        result_unfused = result_unfused[0].to(dtype)
+        result_fused = result_fused[0].to(dtype)
+        atol, rtol = 1e-2, 1e-2
+    elif quant_dtype == FP4_DTYPE:
+        o_sf_scale = model_unfused.nvfp4_o_sf_scale.item()
+
+        result_unfused, result_unfused_block_scale = result_unfused
+        result_unfused = dequantize_nvfp4_to_dtype(result_unfused,
+                                                   result_unfused_block_scale,
+                                                   o_sf_scale, dtype, device)
+        result_unfused = result_unfused.reshape(-1, num_qo_heads, head_size)
+
+        result_fused, result_fused_block_scale = result_fused
+        result_fused = dequantize_nvfp4_to_dtype(result_fused,
+                                                 result_fused_block_scale,
+                                                 o_sf_scale, dtype, device)
+        result_fused = result_fused.reshape(-1, num_qo_heads, head_size)
+        atol, rtol = 3e-1, 4e-1
+
+    torch.testing.assert_close(result_unfused,
+                               result_fused,
+                               atol=atol,
+                               rtol=rtol)

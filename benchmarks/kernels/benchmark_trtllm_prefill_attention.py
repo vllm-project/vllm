@@ -9,8 +9,11 @@ from typing import Optional
 import flashinfer
 import torch
 
+from vllm.utils import round_up
+
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 FP8_DTYPE = torch.float8_e4m3fn
+FP4_DTYPE = torch.uint8
 
 
 def to_float8(x, dtype=torch.float8_e4m3fn):
@@ -152,8 +155,22 @@ def benchmark_prefill(
         return sum(times) / len(times), torch.std(torch.tensor(times))
 
     o_scale = 1.0
+    o_sf_scale = None
     output_baseline = torch.empty(ref_query.shape, dtype=dtype)
-    output_trtllm = torch.empty(query.shape, dtype=o_quant_dtype)
+    if o_quant_dtype == FP4_DTYPE:
+        o_sf_scale = 500.0
+        output_trtllm = flashinfer.utils.FP4Tensor(
+            torch.empty(query.shape[:-1] + (query.shape[-1] // 2,), dtype=torch.uint8),
+            torch.empty(
+                (
+                    round_up(query.shape[0], 128),
+                    round_up(query.shape[1] * query.shape[2] // 16, 4),
+                ),
+                dtype=torch.float8_e4m3fn,
+            ),
+        )
+    else:
+        output_trtllm = torch.empty(query.shape, dtype=o_quant_dtype)
 
     def baseline_prefill():
         return wrapper.run(ref_query, ref_kv_cache, out=output_baseline)
@@ -172,25 +189,12 @@ def benchmark_prefill(
             batch_size=batch_size,
             cum_seq_lens_q=q_indptr,
             cum_seq_lens_kv=kv_indptr,
+            o_sf_scale=o_sf_scale,
             out=output_trtllm,
         )
 
     baseline_mean, baseline_std = time_fn(baseline_prefill)
-    if o_quant_dtype == FP8_DTYPE:
-        _, o_scale = to_float8(output_baseline)
     trtllm_mean, trtllm_std = time_fn(trtllm_prefill)
-
-    # if o_quant_dtype == FP8_DTYPE:
-    #     output_trtllm = output_trtllm.to(dtype) * o_scale
-
-    # if q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP8_DTYPE:
-    #     rtol, atol = 5e-2, 7e-2
-    # else:
-    #     rtol, atol = 1e-2, 1e-2
-
-    # torch.testing.assert_close(
-    #     output_baseline, output_trtllm, atol=atol, rtol=rtol), \
-    #     f"{torch.max(torch.abs(output_baseline - output_trtllm))}"
 
     # Calculate percentage speedup (positive means TRT is faster)
     speedup_percent = (baseline_mean - trtllm_mean) / baseline_mean
@@ -264,6 +268,7 @@ if __name__ == "__main__":
         # (q_quant_dtype, kv_quant_dtype, o_quant_dtype)
         (None, None, None),
         (FP8_DTYPE, FP8_DTYPE, FP8_DTYPE),
+        (FP8_DTYPE, FP8_DTYPE, FP4_DTYPE),
     ]
 
     for quant_dtype in quant_dtypes:
