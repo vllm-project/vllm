@@ -201,7 +201,7 @@ class DummyLogitsProcessor(LogitsProcessor):
 
 
 class EntryPoint:
-    """Fake entrypoint class"""
+    """Dummy entrypoint class for logitsprocs testing"""
 
     def __init__(self):
         self.name = DUMMY_LOGITPROC_ENTRYPOINT
@@ -211,5 +211,15 @@ class EntryPoint:
         return DummyLogitsProcessor
 
 
-entry_points = lambda group: [EntryPoint()
-                              ] if group == LOGITSPROCS_GROUP else []
+class EntryPoints(list):
+    """Dummy EntryPoints class for logitsprocs testing"""
+
+    def __init__(self, group: str):
+        # Emulate list-like functionality
+        eps = [EntryPoint()] if group == LOGITSPROCS_GROUP else []
+        super().__init__(eps)
+        # Extra attributes
+        self.names = [ep.name for ep in eps]
+
+
+entry_points = lambda group: EntryPoints(group)
