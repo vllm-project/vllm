@@ -315,6 +315,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Encoder-decoder]
     "BartModel": _HfExamplesInfo("facebook/bart-base"),
     "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),
+    "MBartForConditionalGeneration": _HfExamplesInfo("facebook/mbart-large-en-ro",  # noqa: E501
+                                                    hf_overrides={"architectures": ["MBartForConditionalGeneration"]}),  # noqa: E501
 }
 
 _EMBEDDING_EXAMPLE_MODELS = {
