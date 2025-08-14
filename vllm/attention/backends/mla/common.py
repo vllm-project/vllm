@@ -82,10 +82,10 @@ spda_o = scaled_dot_product_attention(
     torch.cat([q_nope, q_pe], dim=-1),
     torch.cat([k_nope, k_pe.unsqueeze(1).expand(-1, N, -1)], dim=-1),
     v
-) 
+)
 return spda_o @ W_O
 
-NOTE: in the actual code, 
+NOTE: in the actual code,
     `kv_b_proj` is [W_UK; W_UV] concatenated per head
     `q_b_proj` is [W_UQ; W_QR] concatenated per head
     `out_proj` is W_O
@@ -120,20 +120,20 @@ return o.view(-1, N * V) @ self.num_heads @ W_O
 
 ## Chunked Prefill
 
-For chunked prefill we want to use the compute friendly algorithm. We are 
-assuming sufficiently large Sq / Skv ratio, in the future may want to switch to 
+For chunked prefill we want to use the compute friendly algorithm. We are
+assuming sufficiently large Sq / Skv ratio, in the future may want to switch to
 the data-movement friendly approach if the chunk (i.e. `Sq`) is small.
 
 However, the compute-friendly approach can potentially run out of memory if Skv
 is large due to: `k_nope = (kv_c @ W_UK).view(Skv, N, P)`
 
-To mitigate this, we chunk the computation of attention with respect to the 
-current context (i.e. `cache_kv_c` and `cache_k_pe`) so that we can used a 
+To mitigate this, we chunk the computation of attention with respect to the
+current context (i.e. `cache_kv_c` and `cache_k_pe`) so that we can used a
 fixed workspace size.
 
 The chunked prefill approach is as follows:
 
-MCC        Max chunk of context to process per iter, computed dynamically, 
+MCC        Max chunk of context to process per iter, computed dynamically,
            used to bound the memory usage
 
 q_c        = h_t @ W_DQ
@@ -155,7 +155,7 @@ curr_o, curr_lse = scaled_dot_product_attention(
     new_v,
     casual=True,
     return_softmax_lse=True
-) 
+)
 
 // Compute attention with the already existing context
 for chunk_idx in range(cdiv(C, MCC)):
@@ -432,9 +432,9 @@ class MLACommonState(AttentionState, Generic[T]):
 
 @dataclass
 class MLACommonMetadata(AttentionMetadata):
-    """Metadata for MLACommon. 
-    
-    NOTE: Please read the comment at the top of the file before trying to 
+    """Metadata for MLACommon.
+
+    NOTE: Please read the comment at the top of the file before trying to
     understand this class
 
     NOTE: Any python object stored here is not updated when it is
@@ -718,7 +718,7 @@ class MLACommonMetadata(AttentionMetadata):
 
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
     """
-    NOTE: Please read the comment at the top of the file before trying to 
+    NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
     BLOCK_TABLE_EXTENDER: list[list[int]] = []
@@ -984,7 +984,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
 
 class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     """
-    NOTE: Please read the comment at the top of the file before trying to 
+    NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
 
@@ -1319,12 +1319,13 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if output is not None:
             raise NotImplementedError(
                 "output is not yet supported for MLAImplBase")
 
-        if output_scale is not None:
+        if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
                 " for MLAImplBase")

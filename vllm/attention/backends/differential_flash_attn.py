@@ -635,11 +635,11 @@ class DifferentialFlashAttentionMetadataBuilder(
 class DifferentialFlashAttentionImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
-    |<--------------- num_prefill_tokens ----------------->|	
+    |<--------------- num_prefill_tokens ----------------->|
     |<--prefill_0-->|<--prefill_1-->|...|<--prefill_N-1--->|
 
-    Otherwise, the layout is as follows:	
-    |<----------------- num_decode_tokens ------------------>|	
+    Otherwise, the layout is as follows:
+    |<----------------- num_decode_tokens ------------------>|
     |<--decode_0-->|..........|<--decode_M-1-->|<--padding-->|
 
     Generation tokens can contain padding when cuda-graph is used.
@@ -874,6 +874,7 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
         attn_metadata: DifferentialFlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 

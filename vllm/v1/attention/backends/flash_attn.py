@@ -214,7 +214,7 @@ class FlashAttentionMetadataBuilder(
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> FlashAttentionMetadata:
         """
-        fast_build disables AOT scheduling, used when there will be few 
+        fast_build disables AOT scheduling, used when there will be few
         iterations i.e. spec-decode
         """
         num_reqs = common_attn_metadata.num_reqs
@@ -431,6 +431,7 @@ class FlashAttentionImpl(AttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -448,7 +449,7 @@ class FlashAttentionImpl(AttentionImpl):
         """
         assert output is not None, "Output tensor must be provided."
 
-        if output_scale is not None:
+        if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
                 " for FlashAttentionImpl")

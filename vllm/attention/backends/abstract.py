@@ -290,6 +290,7 @@ class AttentionImpl(ABC, Generic[T]):
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -322,6 +323,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 

@@ -999,9 +999,10 @@ class FlashInferImpl(AttentionImpl):
         attn_metadata: FlashInferMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        if output_scale is not None:
+        if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
                 " for FlashInferImpl")
