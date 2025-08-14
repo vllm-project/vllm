@@ -1,6 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import torch
+
 from vllm.distributed import divide
+from vllm.utils import get_kv_cache_torch_dtype
+
+class MambaStateDtypeCalculator:
+
+    @classmethod
+    def mamba2_state_dtype(
+        cls,
+        model_dtype,
+        cache_dtype,
+        mamba_ssm_cache_dtype,
+    ) -> tuple[torch.dtype, torch.dtype]:
+
+        print("model_dtype: ", model_dtype)
+        print("cache_dtype: ", cache_dtype)
+        print("mamba_ssm_cache_dtype: ", mamba_ssm_cache_dtype)
+
+        conv_state_dtype = get_kv_cache_torch_dtype(
+            cache_dtype, model_dtype)
+
+        temporal_state_dtype = get_kv_cache_torch_dtype(
+                mamba_ssm_cache_dtype, model_dtype)
+
+        return (conv_state_dtype, temporal_state_dtype)
 
 
 class MambaStateShapeCalculator:

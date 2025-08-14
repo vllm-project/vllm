@@ -8,7 +8,7 @@ from torch import nn
 
 from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, CacheConfig, ModelConfig
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
@@ -21,7 +21,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
                                                               update_metadata)
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateShapeCalculator)
+    MambaStateShapeCalculator, MambaStateDtypeCalculator)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
@@ -231,6 +231,8 @@ class MambaMixer2(MambaBase, CustomOp):
                  rms_norm_eps: float = 1e-5,
                  activation: str = "silu",
                  use_rms_norm: bool = True,
+                 model_config: Optional[ModelConfig] = None,
+                 cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
         super().__init__()
@@ -415,6 +417,8 @@ class MambaMixer2(MambaBase, CustomOp):
             # The inner tuple is (conv_state, ssm_state)
             self.kv_cache = [(torch.tensor([]), torch.tensor([]))]
 
+        self.model_config = model_config
+        self.cache_config = cache_config
         self.prefix = prefix
 
     def forward_native(
@@ -604,9 +608,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 dim=0,
             )
 
-        mamba_ssm_cache_dtype = (getattr(mamba_cache_params,
-                                         "mamba_ssm_cache_dtype", None)
-                                 if mamba_cache_params is not None else None)
+        print("ssm_state.dtype: ", ssm_state.dtype)
 
         # Process prefill requests
         if has_prefill:
@@ -672,7 +674,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
                                                 self.head_dim),
-                mamba_ssm_cache_dtype=mamba_ssm_cache_dtype)
+                mamba_ssm_cache_dtype=ssm_state.dtype)
 
             # update ssm states
             # - varlen state is a (num_prefills, nheads, headdim, dstate) tensor
@@ -733,6 +735,14 @@ class MambaMixer2(MambaBase, CustomOp):
 
         # 5. Final linear projection
         output[:num_actual_tokens], _ = self.out_proj(hidden_states)
+
+    def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
+        print("dtype: ", self.model_config.dtype)
+        return MambaStateDtypeCalculator.mamba2_state_dtype(
+            self.model_config.dtype,
+            self.cache_config.cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
+        )
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
         return MambaStateShapeCalculator.mamba2_state_shape(
