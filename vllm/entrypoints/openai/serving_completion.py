@@ -441,7 +441,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                 finish_reason=finish_reason,
                                 stop_reason=stop_reason,
                                 prompt_token_ids=prompt_token_ids_to_return,
-                                token_ids=(list(delta_token_ids) if
+                                token_ids=(list(output.token_ids) if
                                            request.return_token_ids else None),
                             )
                         ],
@@ -565,7 +565,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     prompt_logprobs=final_res.prompt_logprobs,
                     prompt_token_ids=(prompt_token_ids
                                       if request.return_token_ids else None),
-                    token_ids=(list(token_ids)
+                    token_ids=(list(output.token_ids)
                                if request.return_token_ids else None),
                 )
                 choices.append(choice_data)

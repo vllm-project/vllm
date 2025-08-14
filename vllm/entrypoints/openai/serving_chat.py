@@ -1269,7 +1269,7 @@ class OpenAIServingChat(OpenAIServing):
                 finish_reason="tool_calls" if auto_tools_called else
                 output.finish_reason if output.finish_reason else "stop",
                 stop_reason=output.stop_reason,
-                token_ids=(list(token_ids)
+                token_ids=(list(output.token_ids)
                            if request.return_token_ids else None),
             )
 
