@@ -2630,8 +2630,8 @@ class MemoryProfilingResult:
     def __repr__(self) -> str:
         summary = f"Memory profiling takes {self.profile_time:.2f} seconds."
 
-        detail = list[str]()
-        for title, value in [
+        detail = [
+            f"{title}: {value / GiB_bytes:.2f}GiB" for title, value in [
                 "Total non KV cache memory",
                 self.non_kv_cache_memory,
                 "torch peak memory increase",
@@ -2642,9 +2642,8 @@ class MemoryProfilingResult:
                 self.weights_memory,
                 "input processing memory",
                 self.processing_memory,
-        ]:
-            if value > 0:
-                detail.append(f"{title}: {value / GiB_bytes:.2f}GiB")
+            ]
+        ]
 
         return f"{summary} {'; '.join(detail)}."
 
