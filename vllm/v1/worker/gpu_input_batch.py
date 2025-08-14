@@ -254,35 +254,35 @@ class InputBatch:
         # while performing state updates to the batch.
         return cast(list[str], self._req_ids)
 
-    def _get_next_add_index(self) -> int:
-        if (req_index := self.batch_update_builder.pop_removed()) is not None:
-            # Fill the empty index.
-            return req_index
-        # Append to end
-        return self.num_reqs
-
     def _register_add_request(self, request: "CachedRequestState") -> int:
         """Track add-request operations for logits processors.
         Not applicable to pooling models.
         """
-        req_index = self._get_next_add_index()
-        assert req_index < self.max_num_reqs
+
         # Detailed added request metadata is only required for non-pooling
         # models, to support logitsprocs
         assert request.sampling_params
+
+        # Fill the next empty index if there is one.
+        if (new_req_index := self.batch_update_builder.pop_removed()) is None:
+            # Append to end otherwise.
+            new_req_index = self.num_reqs
+
+        assert new_req_index < self.max_num_reqs
         self.batch_update_builder.added.append(
-            (req_index, request.sampling_params, request.prompt_token_ids,
+            (new_req_index, request.sampling_params, request.prompt_token_ids,
              request.output_token_ids))
-        return req_index
+        return new_req_index
 
     def add_request(
         self,
         request: "CachedRequestState",
-        req_index: Optional[int] = None,
     ) -> int:
-        if req_index is None:
-            # New request index bookkeeping for autoregressive models
+        if not self.is_pooling_model:
+            # New request index bookkeeping for autoregressive models.
             req_index = self._register_add_request(request)
+        else:
+            req_index = self.num_reqs
 
         req_id = request.req_id
         if req_index == len(self._req_ids):
@@ -419,7 +419,7 @@ class InputBatch:
             return None
         if not self.is_pooling_model:
             # Autoregressive models require bookkeeping of removed requests to
-            # support logitsprocs
+            # support logitsprocs.
             self.batch_update_builder.removed_append(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
@@ -511,11 +511,6 @@ class InputBatch:
                     self.allowed_token_ids_mask_cpu_tensor[i1]
         self.block_table.swap_row(i1, i2)
 
-    def trim_lists(self) -> None:
-        """Trim lists to the batch size"""
-        del self._req_ids[self.num_reqs:]
-        del self.req_output_token_ids[self.num_reqs:]
-
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
 
@@ -529,11 +524,18 @@ class InputBatch:
           swaps: list of (from,to) swap tuples for moved requests
           empty_req_indices: indices not filled by condensation
         """
+        num_reqs = self.num_reqs
+
+        if self.is_pooling_model:
+            # Will be contiguous in pooling case, just trim the lists.
+            del self._req_ids[num_reqs:]
+            del self.req_output_token_ids[num_reqs:]
+            return
+
         if not (empty_req_indices := self.batch_update_builder.removed):
             # All removed requests were replaced by added requests, or else no
             # requests were removed at all. No condense() needed
             return
-        num_reqs = self.num_reqs
         if num_reqs == 0:
             # The batched states are empty.
             self._req_ids.clear()
@@ -613,25 +615,26 @@ class InputBatch:
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
-        self.trim_lists()
-
-    def refresh_sampling_metadata(self):
-        self.sampling_metadata = self.make_sampling_metadata()
+        # Trim lists to the batch size.
+        del self._req_ids[num_reqs:]
+        del self.req_output_token_ids[num_reqs:]
 
     def refresh_metadata(self):
-        """Apply batch updates, reset input batch at end of step
-        Applies only to autoregressive models.
-        
-        * Apply batch add/remove/permute to logits procs' states
-        * If batch state is modified, update sampling metadata
-        """
+        """Apply any batch updates to sampling metadata."""
+
+        if self.is_pooling_model:
+            # Batch changes every step for pooling models.
+            self.sampling_metadata = self.make_sampling_metadata()
+            return
+
         # For non-pooling models - generate and apply logitsprocs update;
-        # reset batch update tracking
+        # reset batch update tracking.
+        # Update sampling metadata if batch state is changed.
         batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
         for logit_proc in self.logitsprocs.all:
             logit_proc.update_state(batch_update)
         if batch_update:
-            self.refresh_sampling_metadata()
+            self.sampling_metadata = self.make_sampling_metadata()
 
     def make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
