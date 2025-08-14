@@ -100,6 +100,7 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                scalar_t const* __restrict__ weight,
                                float const rms, float const scale,
                                int32_t const hidden_size,
+                               scalar_t* __restrict__ residual_out = nullptr,
                                scalar_t* __restrict__ residual = nullptr) {
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
   ;
@@ -108,7 +109,7 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
     float x = static_cast<float>(input[token_offset + i]);
     if constexpr (has_residual) {
       x += static_cast<float>(residual[token_offset + i]);
-      residual[token_offset + i] = static_cast<scalar_t>(x);
+      residual_out[token_offset + i] = static_cast<scalar_t>(x);
     }
     // Norm
     x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
@@ -268,6 +269,7 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                scalar_t const* __restrict__ weight,
                                float const rms, float const scale,
                                int32_t const hidden_size,
+                               scalar_t* __restrict__ residual_out = nullptr,
                                scalar_t* __restrict__ residual = nullptr) {
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
   ;
@@ -279,8 +281,11 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
       reinterpret_cast<vec4_t<scalar_t> const*>(weight);
   q8x4_t<scalar_out_t>* vec_output =
       reinterpret_cast<q8x4_t<scalar_out_t>*>(&output[token_offset]);
+  vec4_t<scalar_t>* vec_residual_out = nullptr;
   vec4_t<scalar_t>* vec_residual = nullptr;
   if constexpr (has_residual) {
+    vec_residual_out =
+        reinterpret_cast<vec4_t<scalar_t>*>(&residual_out[token_offset]);
     vec_residual = reinterpret_cast<vec4_t<scalar_t>*>(&residual[token_offset]);
   }
 
@@ -311,7 +316,7 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
       for (int j = 0; j < VEC_SIZE; ++j) {
         r.val[j] = static_cast<scalar_t>(x.val[j]);
       }
-      vec_residual[i] = r;
+      vec_residual_out[i] = r;
     }
 
     q8x4_t<scalar_out_t> out;
