@@ -30,7 +30,7 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs, VideoItem)
@@ -44,6 +44,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
+from vllm.utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -112,8 +113,9 @@ class KeyeImagePixelInputs(TensorSchema):
         - g: Grid dimensions (3 for t, h, w)
     """
     type: Literal["pixel_values"]
-    pixel_values: Annotated[torch.Tensor,
-                            TensorShape("b", "np", 3, "ps", "ps")]
+    pixel_values: Annotated[
+        torch.Tensor,
+        TensorShape("b", "np", 3, "ps", "ps", dynamic_dims={"np"})]
     image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
@@ -145,8 +147,9 @@ class KeyeVideoPixelInputs(TensorSchema):
         - g: Grid dimensions (3 for t, h, w)
     """
     type: Literal["pixel_values_videos"]
-    pixel_values_videos: Annotated[torch.Tensor,
-                                   TensorShape("b", "np", 3, "ps", "ps")]
+    pixel_values_videos: Annotated[
+        torch.Tensor,
+        TensorShape("b", "np", 3, "ps", "ps", dynamic_dims={"np"})]
     video_grid_thw: Annotated[torch.Tensor, TensorShape("nv", 3)]
 
 
@@ -1295,7 +1298,7 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
             return None
         return quant_config
 
-    def _validate_and_reshape_mm_tensor(self, mm_input: object,
+    def _validate_and_reshape_mm_tensor(self, mm_input: NestedTensors,
                                         name: str) -> torch.Tensor:
         if not isinstance(mm_input, (torch.Tensor, list)):
             raise ValueError(f"Incorrect type of {name}. "
@@ -1310,8 +1313,11 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
                                  f"Got ndim: {mm_input.ndim} "
                                  f"(shape={mm_input.shape})")
             return torch.concat(list(mm_input))
-        else:
-            return torch.concat(mm_input)
+        elif is_list_of(mm_input, torch.Tensor):
+            if all(p.dim() == 4 for p in mm_input) or all(p.dim() == 2
+                                                          for p in mm_input):
+                return mm_input
+        return torch.concat(list(mm_input))
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[KeyeImageInputs]:

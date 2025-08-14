@@ -12,7 +12,8 @@ from PIL import Image
 from vllm.config import ModelConfig
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
 from vllm.inputs import InputProcessingContext
-from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
+from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
+                             MultiModalKwargs)
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
@@ -130,7 +131,7 @@ def test_model_tensor_schema(model_arch: str, model_id: str,
         pytest.skip(f"Skipping {model_arch} due to {ARCH_TO_SKIP[model_arch]}")
     if model_id in REPO_ID_TO_SKIP:
         pytest.skip(
-            f"Skipping {model_id} due to {REPO_ID_TO_SKIP[model_arch]}")
+            f"Skipping {model_id} due to {REPO_ID_TO_SKIP[model_id]}")
 
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
@@ -192,6 +193,7 @@ def test_model_tensor_schema(model_arch: str, model_id: str,
         if model_info.v0_only:
             m.setenv("VLLM_USE_V1", "0")
 
+        # TODO(Isotr0py): Can we avoid initializing engine?
         with (
                 set_default_torch_num_threads(1),
                 vllm_runner(
@@ -220,12 +222,14 @@ def test_model_tensor_schema(model_arch: str, model_id: str,
             processor = mm_registry.create_processor(model_config)
             mm_kwargs_group = create_batched_mm_kwargs(model_config, processor)
 
+            def validate_model_input(model, modality: str,
+                                     mm_kwargs: MultiModalKwargs):
+                method_name = f"_parse_and_validate_{modality}_input"
+                if hasattr(model, method_name):
+                    getattr(model, method_name)(**mm_kwargs)
+
             for modality, _, mm_kwargs in mm_kwargs_group:
-
-                def validate_model_input(model):
-                    # for modality in ("audio", "image", "video"):
-                    method_name = f"_parse_and_validate_{modality}_input"
-                    if hasattr(model, method_name):
-                        getattr(model, method_name)(**mm_kwargs)
-
-                vllm_model.apply_model(validate_model_input)
+                valid_func = partial(validate_model_input,
+                                     modality=modality,
+                                     mm_kwargs=mm_kwargs)
+                vllm_model.apply_model(valid_func)
