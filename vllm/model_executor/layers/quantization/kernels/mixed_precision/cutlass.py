@@ -116,11 +116,14 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
+        # dummy channel scales
+        self.w_ch_s = torch.ones((c.partition_weight_shape[1],), dtype=torch.float32, device='cuda')
+        
     def apply_weights(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        assert bias is None, "bias not supported by Machete"
+        assert bias is None, "bias not supported by CUTLASS W4A8"
         c = self.config
         w_q, w_s, w_zp, _ = self._get_weight_params(layer)
 
@@ -140,10 +143,12 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         output = ops.cutlass_w4a8_mm(a=x_2d,
                                      b_q=w_q,
                                      b_type=c.weight_type, # not actually used?
-                                     b_group_scales=w_s)
+                                     b_group_scales=w_s,
+                                     a_token_scales=act_scales.to(torch.float32),
+                                     b_channel_scales=self.w_ch_s)
 
         # simulate per-row fp8 quant, apply in fp32
-        output = ((output.to(torch.float32)) * (act_scales.to(torch.float32).unsqueeze(1))).to(torch.bfloat16)
+        # output = ((output.to(torch.float32)) * (act_scales.to(torch.float32).unsqueeze(1))).to(torch.bfloat16)
 
         if bias is not None:
             output.add_(bias)  # In-place add
