@@ -31,7 +31,6 @@ HYBRID_MODELS = [
     "hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
-    "nvidia/Nemotron-H-8B-Base-8K",
 ]
 
 HF_UNSUPPORTED_MODELS = [
@@ -42,8 +41,7 @@ HF_UNSUPPORTED_MODELS = [
     "yujiepan/mamba2-codestral-v0.1-tiny-random",
     # transformers 4.55 is still producing garbage for this model
     # TODO(tdoublep): follow-up on transformers side
-    "ibm-granite/granite-4.0-tiny-preview",
-    "nvidia/Nemotron-H-8B-Base-8K",
+    "ibm-granite/granite-4.0-tiny-preview"
 ]
 
 V1_SUPPORTED_MODELS = [
@@ -54,7 +52,6 @@ V1_SUPPORTED_MODELS = [
     "hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
-    "nvidia/Nemotron-H-8B-Base-8K",
 ]
 
 # Avoid OOM
@@ -92,9 +89,7 @@ def test_models(
         else:
             hf_outputs = None
 
-    with vllm_runner(model,
-                     max_num_seqs=MAX_NUM_SEQS,
-                     mamba_ssm_cache_dtype="auto") as vllm_model:
+    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
         vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
@@ -106,8 +101,7 @@ def test_models(
                 m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
-                             enable_prefix_caching=False,
-                             mamba_ssm_cache_dtype="auto") as vllm_model:
+                             enable_prefix_caching=False) as vllm_model:
                 vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                     example_prompts, max_tokens, num_logprobs)
     else:
@@ -405,6 +399,68 @@ def test_full_cuda_graph(
         with vllm_runner(model,
                          max_num_seqs=MAX_NUM_SEQS,
                          compilation_config={'full_cuda_graph': True},
+                         enable_prefix_caching=False) as vllm_model:
+            vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens, num_logprobs)
+
+    if hf_outputs is not None:
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=vllm_v0_outputs,
+            name_0="hf",
+            name_1="vllm-v0",
+        )
+
+    ref_outputs = hf_outputs if hf_outputs is not None else vllm_v0_outputs
+    check_logprobs_close(
+        outputs_0_lst=ref_outputs,
+        outputs_1_lst=vllm_v1_outputs,
+        name_0="hf" if hf_outputs is not None else "vllm-v0",
+        name_1="vllm-v1",
+    )
+
+
+@pytest.mark.parametrize("model", ["Zyphra/Zamba2-1.2B-instruct"])
+@pytest.mark.parametrize("max_tokens", [64])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_fp32_state(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    monkeypatch,
+    model: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
+
+    try:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+        model_info.check_available_online(on_fail="skip")
+        model_info.check_transformers_version(on_fail="skip")
+    except ValueError:
+        pass
+
+    with hf_runner(model) as hf_model:
+        if model not in HF_UNSUPPORTED_MODELS:
+            hf_outputs = hf_model.generate_greedy_logprobs_limit(
+                example_prompts, max_tokens, num_logprobs)
+        else:
+            hf_outputs = None
+
+    with vllm_runner(model,
+                     max_num_seqs=MAX_NUM_SEQS,
+                     mamba_ssm_cache_dtype="float32") as vllm_model:
+        vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        if model in HYBRID_MODELS:
+            # required due to reorder_batch behaviour
+            m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
+        with vllm_runner(model,
+                         max_num_seqs=MAX_NUM_SEQS,
+                         mamba_ssm_cache_dtype="float32",
                          enable_prefix_caching=False) as vllm_model:
             vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, num_logprobs)
