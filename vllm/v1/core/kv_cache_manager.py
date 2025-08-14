@@ -345,7 +345,7 @@ class KVCacheManager:
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
-        We free the blocks in reverse order so that he tail blocks are evicted 
+        We free the blocks in reverse order so that the tail blocks are evicted
         first when caching is enabled.
 
         Args:
