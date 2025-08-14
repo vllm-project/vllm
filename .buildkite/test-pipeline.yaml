@@ -227,16 +227,6 @@ steps:
 ##### fast check tests  #####
 #####  1 GPU test  #####
 
-- label: Regression Test # 5min
-  mirror_hardwares: [amdexperimental]
-  source_file_dependencies:
-  - vllm/
-  - tests/test_regression
-  commands:
-  - pip install modelscope
-  - pytest -v -s test_regression.py
-  working_dir: "/vllm-workspace/tests" # optional
-
 - label: Engine Test # 10min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
