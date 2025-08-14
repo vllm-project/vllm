@@ -3,6 +3,9 @@
 from typing import Callable, Optional
 
 import torch
+from compressed_tensors.quantization import (QuantizationArgs,
+                                             QuantizationStrategy,
+                                             QuantizationType)
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
@@ -19,7 +22,27 @@ from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm, has_flashinfer
 
 logger = init_logger(__name__)
 
-__all__ = ["CompressedTensorsW4A4Fp4"]
+__all__ = ["is_fp4a4_nvfp4", "CompressedTensorsW4A4Fp4"]
+
+
+def is_fp4a4_nvfp4(weight_quant: QuantizationArgs,
+                   input_quant: Optional[QuantizationArgs]):
+    if input_quant is None:
+        return False
+
+    is_tensor_group_quant = (
+        weight_quant.strategy == QuantizationStrategy.TENSOR_GROUP.value
+        and input_quant.strategy == QuantizationStrategy.TENSOR_GROUP.value)
+    is_symmetric = weight_quant.symmetric and input_quant.symmetric
+
+    is_group_size_16 = (weight_quant.group_size == 16
+                        and input_quant.group_size == 16)
+    is_float_type = (weight_quant.type == QuantizationType.FLOAT
+                     and input_quant.type == QuantizationType.FLOAT.value)
+    is_4_bits = weight_quant.num_bits == 4 and input_quant.num_bits == 4
+
+    return (is_tensor_group_quant and is_float_type and is_4_bits
+            and is_group_size_16 and is_symmetric)
 
 
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):

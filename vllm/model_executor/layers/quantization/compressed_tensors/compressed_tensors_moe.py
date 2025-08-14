@@ -3,11 +3,12 @@
 
 import enum
 from enum import Enum
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
 from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import (ActivationOrdering,
+                                             QuantizationArgs,
                                              QuantizationStrategy)
 
 import vllm.envs as envs
@@ -40,6 +41,10 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+        CompressedTensorsConfig)
+
 logger = init_logger(__name__)
 
 
@@ -61,13 +66,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
     @staticmethod
     def get_moe_method(
         quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
-        layer: torch.nn.Module,
+        layer: FusedMoE,
+        layer_name: str,
     ) -> "CompressedTensorsMoEMethod":
-        # TODO: @dsikka: refactor this to use schemes as other kernels
-        # are supported + check if the layer is being ignored.
-        weight_quant = quant_config.target_scheme_map["Linear"].get("weights")
-        input_quant = quant_config.target_scheme_map["Linear"].get(
-            "input_activations")
+        input_quant, weight_quant = _get_moe_quant(quant_config)
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
             # group_size=None means channelwise
@@ -388,10 +390,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
         self.quant_config = quant_config
-        self.weight_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "weights")
-        self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "input_activations")
+        self.input_quant, self.weight_quant = _get_moe_quant(quant_config)
         self.topk_indices_dtype = None
 
         per_tensor = (self.weight_quant.strategy == QuantizationStrategy.TENSOR
@@ -658,14 +657,14 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
                 use_fp8_w8a8=True,
-                block_shape=self.quant_config.weight_block_size,
+                block_shape=self.weight_quant.block_structure,
                 per_act_token_quant=(
                     self.input_quant.strategy == QuantizationStrategy.TOKEN),
             )
         else:
             return TritonExperts(
                 use_fp8_w8a8=True,
-                block_shape=self.quant_config.weight_block_size,
+                block_shape=self.weight_quant.block_structure,
                 per_act_token_quant=(
                     self.input_quant.strategy == QuantizationStrategy.TOKEN),
             )
@@ -838,10 +837,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
         self.quant_config = quant_config
-        self.weight_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "weights")
-        self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "input_activations")
+        self.input_quant, self.weight_quant = _get_moe_quant(quant_config)
 
         per_channel = (
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL
@@ -979,9 +975,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
         self.quant_config = quant_config
-        # TODO: @dsikka: refactor this to use schemes as other kernels
-        # are supported + check if the layer is being ignored.
-        config = self.quant_config.target_scheme_map["Linear"].get("weights")
+        _, config = _get_moe_quant(quant_config)
+
         self.num_bits = config.num_bits
         self.packed_factor = 32 // config.num_bits
         self.strategy = config.strategy
@@ -990,7 +985,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         assert config.symmetric, (
             "Only symmetric quantization is supported for MoE")
 
-        if not (self.quant_config.quant_format
+        if not (self.quant_config.quant_config.format
                 == CompressionFormat.pack_quantized.value
                 and self.num_bits in WNA16_SUPPORTED_BITS):
             raise ValueError("For Fused MoE layers, only ",
@@ -1283,9 +1278,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
         self.quant_config = quant_config
-        # TODO: @dsikka: refactor this to use schemes as other kernels
-        # are supported + check if the layer is being ignored.
-        config = self.quant_config.target_scheme_map["Linear"].get("weights")
+        _, config = _get_moe_quant(quant_config)
+
         self.num_bits = config.num_bits
         self.packed_factor = 32 // config.num_bits
         self.strategy = config.strategy
@@ -1297,7 +1291,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         assert config.symmetric, (
             "Only symmetric quantization is supported for MoE")
 
-        if not (self.quant_config.quant_format
+        if not (self.quant_config.quant_config.format
                 == CompressionFormat.pack_quantized.value
                 and self.num_bits in WNA16_SUPPORTED_BITS):
             raise ValueError("For Fused MoE layers, only ",
@@ -1495,3 +1489,25 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             w1_zp=None,
             w2_zp=None,
             block_shape=[0, self.group_size])
+
+
+def _get_moe_quant(
+    config: "CompressedTensorsConfig"
+) -> tuple[QuantizationArgs, QuantizationArgs]:
+    """
+    Returns the quantization which is used for all `Linear` layers of a model,
+    if it exists. This is a gross generalization to assist with selecting
+    MoE kernels and should be removed in the future.
+
+    :param config: Compressed Tensors config
+    :return: input and weight quantization of Linear layers if it exists,
+        otherwise raise a ValueError
+    """
+    # TODO: @dsikka: refactor this to use schemes as other kernels
+    # are supported + check if the layer is being ignored.
+    for scheme in config.quant_config.config_groups.values():
+        if scheme.targets == "Linear":
+            return (scheme.input_activations, scheme.weights)
+
+    raise ValueError(
+        "Could not find a `Linear` quantization scheme for use in MoE method")

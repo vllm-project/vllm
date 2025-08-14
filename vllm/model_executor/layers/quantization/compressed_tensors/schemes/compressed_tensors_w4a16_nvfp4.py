@@ -3,6 +3,9 @@
 from typing import Callable, Optional
 
 import torch
+from compressed_tensors.quantization import (QuantizationArgs,
+                                             QuantizationStrategy,
+                                             QuantizationType)
 from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -13,7 +16,23 @@ from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
 
-__all__ = ["CompressedTensorsW4A16Fp4"]
+__all__ = ["is_fp4a16_nvfp4", "CompressedTensorsW4A16Fp4"]
+
+
+def is_fp4a16_nvfp4(weight_quant: QuantizationArgs,
+                    input_quant: Optional[QuantizationArgs]):
+
+    is_weight_only = weight_quant is not None and input_quant is None
+    is_tensor_group_quant = (
+        weight_quant.strategy == QuantizationStrategy.TENSOR_GROUP.value)
+    is_symmetric = weight_quant.symmetric
+
+    is_group_size_16 = weight_quant.group_size == 16
+    is_float_type = weight_quant.type == QuantizationType.FLOAT
+    is_4_bits = weight_quant.num_bits == 4
+
+    return (is_weight_only and is_tensor_group_quant and is_float_type
+            and is_4_bits and is_group_size_16 and is_symmetric)
 
 
 class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
