@@ -679,6 +679,8 @@ class TransformersMoEBase(TransformersBase):
     def fused_moe(self):
 
         def reduce_results(module, _, output):
+            """Forward hook that performs all-reduce on a nn.Module's
+            output if tensor parallel or expert parallel is enabled."""
             if (experts := module.experts).tp_size > 1 or experts.ep_size > 1:
                 return experts.maybe_all_reduce_tensor_model_parallel(output)
 
