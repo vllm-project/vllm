@@ -183,15 +183,16 @@ llm = LLM(model="Qwen/Qwen2-Audio-7B-Instruct",
           mm_processor_kwargs={"device": "cuda"})
 ```
 
-!!! important
-    The speed-up from GPU processing varies from model to model.
-    In some cases, GPU processing may even become detrimental because of resource contention with
-    the forward pass of the model.
-    Make sure you perform benchmarking before enabling this!
-
 !!! note
-    Additional memory needs to be reserved for GPU multi-modal processing,
-    so there is less memory left for your model and KV caching.
+    vLLM will try to allocate visible GPUs that are not used by the core engine
+    for multi-modal processing. If this is not possible, then the same GPU
+    will be used for multi-modal processing and model forward pass, resulting
+    in resource contention (both I/O and memory capacity).
+
+!!! important
+    The performance improvement from GPU processing varies from model to model.
+    In some cases, GPU processing may even become detrimental because of resource contention.
+    Make sure to perform benchmarking before enabling this!
 
 ## Multi-Modal Caching
 
