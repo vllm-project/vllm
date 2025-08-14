@@ -49,10 +49,10 @@ def _resize_data(_data: Union[Image.Image, np.ndarray],
         return _data.resize((W, H))
     elif isinstance(_data, np.ndarray) and _data.ndim == 1:
         return _data[:int(len(_data) * size_factor)]
-    elif _data.ndim >= 3:
-        T, H, W = _data.shape[-3:]
+    elif _data.ndim >= 4:
+        T, H, W, C = _data.shape[-4:]
         T, H, W = map(lambda x: max(int(x * size_factor), 1), (T, H, W))
-        return _data[..., :T, :H, :W]
+        return _data[..., :T, :H, :W, :C]
     raise AssertionError("This line should be unreachable.")
 
 
