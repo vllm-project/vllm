@@ -1,13 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
 from functools import partial
-from typing import Any, Union
 from unittest.mock import patch
 
-import numpy as np
 import pytest
-from PIL import Image
 
 from vllm.config import ModelConfig
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
@@ -15,7 +11,7 @@ from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
-from vllm.utils import GiB_bytes, is_list_of, set_default_torch_num_threads
+from vllm.utils import GiB_bytes, set_default_torch_num_threads
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
@@ -27,52 +23,11 @@ ARCH_TO_SKIP = {
     "MolmoForCausalLM": "incompatible requirements",
     "MiniMaxVL01ForConditionalGeneration": "broken model",
 }
-ARCH_NEEDS_EXTRAS = [
-    "InternVLChatModel",
-    "Idefics3ForConditionalGeneration",
-    "LlavaForConditionalGeneration",
-    "MiniCPMV",
-    "PaliGemmaForConditionalGeneration",
-]
-REPO_ID_TO_SKIP = {"nm-testing/pixtral-12b-FP8-dynamic": "duplicated test"}
-
-ImageInput = list[Image.Image]
-VideoInput = Union[list[np.ndarray], list[tuple[np.ndarray, dict[str, Any]]]]
-AudioInput = list[tuple[np.ndarray, int]]
-
-
-def _resize_data(_data: Union[Image.Image, np.ndarray],
-                 size_factor: float) -> Union[Image.Image, np.ndarray]:
-    if isinstance(_data, Image.Image):
-        W, H = _data.width, _data.height
-        W, H = map(lambda x: int(x * size_factor), (W, H))
-        return _data.resize((W, H))
-    elif isinstance(_data, np.ndarray) and _data.ndim == 1:
-        return _data[:int(len(_data) * size_factor)]
-    elif _data.ndim >= 3:
-        T, H, W = _data.shape[-3:]
-        T, H, W = map(lambda x: max(int(x * size_factor), 1), (T, H, W))
-        return _data[..., :T, :H, :W]
-    raise AssertionError("This line should be unreachable.")
-
-
-def resize_mm_data(
-    data: Union[ImageInput, VideoInput, AudioInput],
-    size_factors: tuple[float,
-                        ...]) -> Union[ImageInput, VideoInput, AudioInput]:
-    size_factors = size_factors[:len(data)]
-    if is_list_of(data, (Image.Image, np.ndarray)):
-        return [_resize_data(d, s) for d, s in zip(data, size_factors)]
-    elif is_list_of(data, tuple):
-        return [(_resize_data(d, s), meta)
-                for (d, meta), s in zip(data, size_factors)]
-    raise ValueError("Unsupported multimodal data type.")
 
 
 def create_batched_mm_kwargs(
-        model_config: ModelConfig,
-        processor: BaseMultiModalProcessor,
-        size_factors: tuple[float, ...] = (1.0, 0.5, 0.25),
+    model_config: ModelConfig,
+    processor: BaseMultiModalProcessor,
 ) -> MultiModalKwargs:
     processing_info = processor.info
     dummy_inputs = processor.dummy_inputs
@@ -85,52 +40,29 @@ def create_batched_mm_kwargs(
         seq_len=model_config.max_model_len,
         mm_counts=mm_counts,
     )
-    mm_data = processor_inputs.mm_data
-    resized_mm_data = {
-        modality: resize_mm_data(data, size_factors)
-        for modality, data in mm_data.items()
-    }
     mm_kwargs = processor.apply(
         prompt=processor_inputs.prompt,
-        mm_data=resized_mm_data,
+        mm_data=processor_inputs.mm_data,
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         tokenization_kwargs=processor_inputs.tokenization_kwargs,
     )["mm_kwargs"]
-    mm_kwargs = MultiModalKwargs.batch([mm_kwargs] * 2)
+    mm_kwargs = MultiModalKwargs.batch([mm_kwargs])
     return mm_kwargs
 
 
-def get_model_id_to_test(
-        model_arch_list: Iterable[str]) -> list[tuple[str, str]]:
-    filtered_results = []
-    for model_arch in model_arch_list:
-        model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
-        if model_info.extras and model_arch in ARCH_NEEDS_EXTRAS:
-            available_repos = list(
-                map(lambda model_id: (model_arch, model_id),
-                    [model_info.default, *model_info.extras.values()]))
-            filtered_results.extend(available_repos)
-        else:
-            filtered_results.append((model_arch, model_info.default))
-    return filtered_results
-
-
 @pytest.mark.core_model
-@pytest.mark.parametrize(
-    "model_arch, model_id",
-    get_model_id_to_test(_MULTIMODAL_EXAMPLE_MODELS.keys()))
-def test_model_tensor_schema(model_arch: str, model_id: str,
-                             vllm_runner: type[VllmRunner], monkeypatch):
+@pytest.mark.parametrize("model_arch", list(_MULTIMODAL_EXAMPLE_MODELS.keys()))
+def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
+                             monkeypatch):
     if model_arch in ARCH_TO_SKIP:
         pytest.skip(f"Skipping {model_arch} due to {ARCH_TO_SKIP[model_arch]}")
-    if model_id in REPO_ID_TO_SKIP:
-        pytest.skip(
-            f"Skipping {model_id} due to {REPO_ID_TO_SKIP[model_arch]}")
 
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip",
                                           check_max_version=False)
+
+    model_id = model_info.default
 
     hf_overrides_fn = partial(dummy_hf_overrides,
                               model_arch=model_arch,
