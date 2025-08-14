@@ -75,6 +75,8 @@ class InputBatch:
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
+        hidden_size: int,
+        dtype: torch.dtype,
         block_sizes: list[int],  # The block_size of each kv cache group
         is_spec_decode: bool = False,
     ):
@@ -85,6 +87,8 @@ class InputBatch:
         self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
+        self.dtype = dtype
 
         self._req_ids: list[Optional[str]] = []
         self.req_id_to_index: dict[str, int] = {}
@@ -100,6 +104,15 @@ class InputBatch:
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
+        self.prompt_embeds_cpu_tensor = torch.zeros(
+            (max_num_reqs, max_model_len, hidden_size),
+            device="cpu",
+            dtype=dtype,
+            pin_memory=False)
+        self.is_prompt_embeds = torch.zeros((max_num_reqs, max_model_len),
+                                            device="cpu",
+                                            dtype=bool,
+                                            pin_memory=False)
         self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
@@ -291,13 +304,20 @@ class InputBatch:
             request.prompt_token_ids, request.prompt_embeds)
         # TODO: copy the prompt embeds
         self.num_prompt_tokens[req_index] = num_prompt_tokens
-        self.token_ids_cpu[
-            req_index, :num_prompt_tokens] = request.prompt_token_ids
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
+        if request.prompt_token_ids is not None:
+            self.token_ids_cpu[
+                req_index, :num_prompt_tokens] = request.prompt_token_ids
+        if request.prompt_embeds is not None:
+            self.prompt_embeds_cpu_tensor[req_index, :num_prompt_tokens].copy_(
+                request.prompt_embeds)
+            self.is_prompt_embeds[req_index, :num_prompt_tokens] = True
+        else:
+            self.is_prompt_embeds[req_index, :num_prompt_tokens] = False
         self.token_ids_cpu[req_index,
                            start_idx:end_idx] = request.output_token_ids
-        # Number of token ids in token_ids_cpu.
+        # Number of token ids in prompt (token_ids_cpu or prompt_embeds).
         # NOTE(woosuk): This may include spec decode tokens.
         self.num_tokens[req_index] = request.num_tokens
         # Number of tokens without spec decode tokens.
