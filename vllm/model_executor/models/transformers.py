@@ -688,6 +688,12 @@ class TransformersMoEBase(TransformersBase):
         renormalize: bool = getattr(self.hf_text_config, "norm_topk_prob",
                                     top_k > 1)
 
+        # Grouped topk kwargs. If either config is set, enable grouped topk
+        # and let FusedMoE handle any errors from misconfiguration
+        num_expert_group = getattr(text_config, "n_group", None)
+        topk_group = getattr(text_config, "topk_group", None)
+        use_grouped_topk = num_expert_group or topk_group
+
         def reduce_results(module, _, output):
             """Forward hook that performs all-reduce on a nn.Module's
             output if tensor parallel or expert parallel is enabled."""
@@ -711,9 +717,9 @@ class TransformersMoEBase(TransformersBase):
                         intermediate_size=intermediate_size,
                         reduce_results=False,
                         renormalize=renormalize,
-                        # use_grouped_topk
-                        # num_expert_group
-                        # topk_group
+                        use_grouped_topk=use_grouped_topk,
+                        num_expert_group=num_expert_group,
+                        topk_group=topk_group,
                         quant_config=self.quant_config,
                         prefix=qual_name,
                         # custom_routing_function
