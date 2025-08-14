@@ -481,8 +481,6 @@ class Processor:
                 self.mm_registry,
             )
 
-            self.mm_registry.reset_processor_cache(model_config)
-
             baseline_snapshot = MemorySnapshot(device=new_device)
 
             # Only check init memory if we are sure that the EngineCore is not
