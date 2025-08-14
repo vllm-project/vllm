@@ -4,8 +4,6 @@
 import asyncio
 import logging
 import os
-import time
-from collections import deque
 
 import aiohttp
 from quart import Quart, Response, make_response, request
