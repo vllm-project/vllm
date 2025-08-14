@@ -3524,8 +3524,15 @@ class VllmConfig:
         if self.compilation_config.pass_config.enable_async_tp:
             self.compilation_config.pass_config.enable_sequence_parallelism = \
                 True
-        if self.compilation_config.pass_config.enable_sequence_parallelism:
+        if "+rms_norm" not in self.compilation_config.custom_ops and \
+           "-rms_norm" not in self.compilation_config.custom_ops:
             self.compilation_config.custom_ops.append("+rms_norm")
+        if "+silu_and_mul" not in self.compilation_config.custom_ops and \
+           "-silu_and_mul" not in self.compilation_config.custom_ops:
+            self.compilation_config.custom_ops.append("+silu_and_mul")
+        if "+quant_fp8" not in self.compilation_config.custom_ops and \
+           "-quant_fp8" not in self.compilation_config.custom_ops:
+            self.compilation_config.custom_ops.append("+quant_fp8")
         if envs.VLLM_USE_V1 and self.model_config is not None and \
             not self.model_config.enforce_eager:
             # By default, V1 uses piecewise CUDA graphs. If full_cuda_graph
