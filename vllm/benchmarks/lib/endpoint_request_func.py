@@ -46,6 +46,23 @@ class RequestFuncOutput:
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
+    # Total number of prefill / decoding steps
+    _total_steps: Optional[int] = None
+    
+    # Spec decoding metrics
+    draft_tokens: Optional[int] = None
+
+    def get_total_steps(self) -> int:
+        """
+        Total number of prefill / decode steps of the request.
+
+        If _total_steps is not set (i.e. spec decoding is off or 
+        there's no accepted tokens from spec decoding), 
+        steps count should be the same as output tokens count, 
+        as each step generates 1 token.
+        """
+        return (self._total_steps 
+            if self._total_steps is not None else self.output_tokens)
 
 
 async def async_request_openai_completions(
@@ -139,6 +156,9 @@ async def async_request_openai_completions(
                         elif usage := data.get("usage"):
                             output.output_tokens = usage.get(
                                 "completion_tokens")
+                            output._total_steps = usage.get("total_steps")
+                            output.draft_tokens = \
+                                usage.get("total_draft_tokens")
                 if first_chunk_received:
                     output.success = True
                 else:
