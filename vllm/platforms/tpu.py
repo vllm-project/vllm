@@ -189,6 +189,10 @@ class TpuPlatform(Platform):
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
         return True
 
+    @classmethod
+    def supports_fp8(cls) -> bool:
+        return True
+
 
 try:
     from tpu_commons.platforms import TpuPlatform as TpuCommonsPlatform

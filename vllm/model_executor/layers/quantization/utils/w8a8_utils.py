@@ -107,6 +107,8 @@ def requantize_with_max_scale(
         logical_widths: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
     # Max scale to be used for requanitzation.
     max_w_scale = weight_scale.max()
+    fp8_dtype: torch.dtype = current_platform.fp8_dtype()
+    fp8_info = torch.finfo(fp8_dtype)
 
     # QKV / MLP is fused in the on disk checkpoint if any of the
     # weight scales are still set to the default since we initialize
@@ -124,8 +126,9 @@ def requantize_with_max_scale(
             end = start + logical_width
             weight_dq = per_tensor_dequantize(weight[start:end, :],
                                               weight_scale[idx])
-            weight[start:end, :], _ = ops.scaled_fp8_quant(
-                weight_dq, max_w_scale)
+            weight_q = weight_dq.to(torch.float32) / max_w_scale
+            weight_q = torch.clamp(weight_q, fp8_info.min, fp8_info.max)
+            weight[start:end, :] = weight_q.to(fp8_dtype)
             start = end
 
     return max_w_scale, weight
@@ -317,9 +320,9 @@ class Fp8LinearOp:
         # as it breaks with dynamic shapes.
         if pad_output is None:
             config = get_current_vllm_config().compilation_config
-            pad_output = config.level < CompilationLevel.PIECEWISE and \
-                         not cutlass_fp8_supported and \
-                         not current_platform.is_rocm()
+            pad_output = config.level < CompilationLevel.PIECEWISE and not (
+                cutlass_fp8_supported or current_platform.is_rocm()
+                or current_platform.is_tpu())
 
         self.output_padding = 17 if pad_output else None
         self.act_quant_static = act_quant_static
@@ -362,6 +365,13 @@ class Fp8LinearOp:
 
         per_tensor_weights = (weight_scale.numel() == 1)
         per_tensor_activations = (x_scale.numel() == 1)
+
+        # TODO(kyuyeunk): instead of xla, utilize quantized matmul kernel
+        output = torch.matmul(qinput, weight).to(torch.float32)
+        output *= x_scale * weight_scale.t()
+        output = output.to(out_dtype)
+        return torch.narrow(output, 0, 0,
+                            input_2d.shape[0]).view(*output_shape)
 
         # TODO(luka) do this dispatch during init (after ScaledMM refactor)
         w8a8_scaled_mm_func = dispatch_w8a8_scaled_mm(
