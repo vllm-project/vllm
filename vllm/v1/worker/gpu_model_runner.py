@@ -134,6 +134,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.is_multimodal_model = model_config.is_multimodal_model
         self.is_pooling_model = model_config.pooler_config is not None
         self.is_encoder_only_model = False
+        self.enable_prompt_embeds = model_config.enable_prompt_embeds
         self.is_multimodal_raw_input_supported = (
             model_config.is_multimodal_raw_input_supported)
         self.max_model_len = model_config.max_model_len
@@ -286,6 +287,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=self.device)
+        self.inputs_embeds_cpu = torch.zeros(
+            (self.max_num_tokens, self.hidden_size),
+            dtype=self.dtype,
+            device="cpu")
+        self.is_inputs_embeds = torch.zeros(
+            (self.max_num_tokens, ),
+            dtype=bool,
+            device="cpu",
+        )
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
         # Keep in int64 to avoid overflow with long context
@@ -696,6 +706,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                            0,
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
+        prompt_embeds_cpu_tensor = \
+            self.input_batch.prompt_embeds_cpu_tensor.view(
+            -1, self.input_batch.prompt_embeds_cpu_tensor.shape[-1])
+        is_prompt_embeds = self.input_batch.is_prompt_embeds.flatten()
+        torch.index_select(
+            prompt_embeds_cpu_tensor,
+            0,
+            torch.from_numpy(token_indices),
+            out=self.inputs_embeds_cpu[:total_num_scheduled_tokens])
+        torch.index_select(
+            is_prompt_embeds,
+            0,
+            torch.from_numpy(token_indices),
+            out=self.is_inputs_embeds[:total_num_scheduled_tokens])
 
         self.input_batch.block_table.compute_slot_mapping(
             req_indices, positions_np)
@@ -713,6 +737,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Copy the tensors to the GPU.
         self.input_ids[:total_num_scheduled_tokens].copy_(
             self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        self.inputs_embeds[:total_num_scheduled_tokens].copy_(
+            self.inputs_embeds_cpu[:total_num_scheduled_tokens],
+            non_blocking=True)
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
@@ -1508,6 +1535,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             input_ids = None
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
             model_mm_kwargs = self._extract_mm_kwargs(scheduler_output)
+        elif (self.enable_prompt_embeds
+              and self.is_inputs_embeds[:num_scheduled_tokens].any()
+              and get_pp_group().is_first_rank):
+            # Get the input embeddings for the tokens that are not input embeds,
+            # then put them into the place.
+            is_token_ids = ~self.is_inputs_embeds[:num_scheduled_tokens]
+            if is_token_ids.any():
+                tokens_to_embeds = self.model.get_input_embeddings(
+                    input_ids=self.input_ids[:num_scheduled_tokens])
+                self.inputs_embeds[:num_scheduled_tokens][is_token_ids].copy_(
+                    tokens_to_embeds)
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            model_mm_kwargs = {}
+            input_ids = None
         else:
             # For text-only models, we use token ids as input.
             # While it is possible to use embeddings as input just like the
