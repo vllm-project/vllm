@@ -714,7 +714,7 @@ class EngineArgs:
             "--mm-processor-cache-gb",
             **multimodal_kwargs["mm_processor_cache_gb"])
         multimodal_group.add_argument("--disable-mm-preprocessor-cache",
-                                      type=bool,
+                                      action="store_true",
                                       deprecated=True)
         multimodal_group.add_argument(
             "--interleave-mm-strings",
