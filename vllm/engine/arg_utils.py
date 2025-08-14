@@ -714,9 +714,6 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--mm-processor-cache-gb",
             **multimodal_kwargs["mm_processor_cache_gb"])
-        multimodal_group.add_argument(
-            "--mm_processors-per-gpu",
-            **multimodal_kwargs["mm_processors_per_engine_gpu"])
         multimodal_group.add_argument("--disable-mm-preprocessor-cache",
                                       type=bool,
                                       deprecated=True)
@@ -932,6 +929,7 @@ class EngineArgs:
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
             mm_processor_cache_gb=self.mm_processor_cache_gb,
+            mm_processors_per_engine_gpu=self.mm_processors_per_engine_gpu,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
