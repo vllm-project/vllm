@@ -1283,7 +1283,8 @@ class MBartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
         return self.model(input_ids, positions, encoder_input_ids,
                           encoder_positions)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         weights_tuple_list = [
             item for item in weights if item[0] != "final_logits_bias"
         ]
