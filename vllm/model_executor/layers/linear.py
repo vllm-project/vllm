@@ -190,12 +190,13 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        weight_loader: Callable, **extra_weight_attrs):
-        weight = ModelWeightParameter(data=torch.empty(sum(output_partition_sizes),
-                                       input_size_per_partition,
-                                       dtype=params_dtype),
-                           input_dim=1,
-                           output_dim=0,
-                           weight_loader=weight_loader)
+        weight = ModelWeightParameter(data=torch.empty(
+            sum(output_partition_sizes),
+            input_size_per_partition,
+            dtype=params_dtype),
+                                      input_dim=1,
+                                      output_dim=0,
+                                      weight_loader=weight_loader)
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
         # weight = Parameter(torch.empty(sum(output_partition_sizes),
@@ -355,7 +356,6 @@ class ReplicatedLinear(LinearBase):
         # (such scales for AutoFp8).
         # Special case for GGUF
 
-
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
         if is_gguf_weight_type:
@@ -434,7 +434,6 @@ class MergedReplicatedLinear(ReplicatedLinear):
                       loaded_shard_id: Optional[int] = None):
         assert loaded_shard_id is not None
         assert loaded_shard_id < len(self.output_sizes)
-
 
         if isinstance(param, BlockQuantScaleParameter):
             from vllm.model_executor.layers.quantization.fp8 import (
@@ -548,7 +547,6 @@ class ColumnParallelLinear(LinearBase):
         self.tp_rank = get_tensor_model_parallel_rank()
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-
 
         output_dim = getattr(param, "output_dim", None)
 
@@ -680,8 +678,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[int] = None):
-        
-
 
         # Special case for GGUF
         # initialize GGUF param after we know the quantize type

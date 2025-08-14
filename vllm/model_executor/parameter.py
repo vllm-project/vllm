@@ -453,9 +453,9 @@ class PartitionedLinearWeightParameter(ModelWeightParameter):
         partition_id = self._shard_id_as_int(partition_id)
         partition = self.partitions[partition_id]
 
-        shard_offset = 0
+        shard_size = partition.data.size(0) // self.tp_size #self.output_partition_sizes[partition_id] // self.tp_size  # TODO: use divide()
+        shard_offset = self.tp_rank * shard_size
         # TODO: might be the same as kwargs
-        shard_size = partition.data.size(0) #self.output_partition_sizes[partition_id] // self.tp_size  # TODO: use divide()
         
         # param_data = partition.data
         # assert param_data.shape == loaded_weight.shape
@@ -469,19 +469,11 @@ class PartitionedLinearWeightParameter(ModelWeightParameter):
         partition_id = self._shard_id_as_int(partition_id)
         partition = self.partitions[partition_id]
 
-        shard_offset = 0
-        shard_size = partition.data.size(0)#kwargs["shard_size"]  # comes from mapping
+        shard_size = partition.data.size(0) // self.tp_size#kwargs["shard_size"]  # comes from mapping
+        shard_offset = self.tp_rank * shard_size
         print(("load_qkv_weight", partition_id, shard_size))
         shard_id = "q"
         num_heads = kwargs.get("num_heads")
-
-        param_data = partition.data
-        tp_rank = get_tensor_model_parallel_rank()
-        shard_id = tp_rank if shard_id == "q" else tp_rank // num_heads
-        print(param_data.shape)
-        print(loaded_weight.shape)
-        print(param_data.narrow(self.output_dim, shard_offset, shard_size).shape)
-        print(loaded_weight.narrow(self.output_dim, shard_id * shard_size, shard_size).shape)
 
         # assert param_data.shape == loaded_weight.shape
         # param_data.copy_(loaded_weight)

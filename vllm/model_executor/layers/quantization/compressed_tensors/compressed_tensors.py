@@ -18,6 +18,7 @@ from compressed_tensors.transform import (TransformArgs, TransformBase,
                                           apply_transform_weight)
 from pydantic import BaseModel
 
+from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -745,11 +746,11 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
             if isinstance(layer, LinearBase):
                 assert hasattr(layer, "weight")
                 if args.location == TransformLocation.INPUT:
-                    weight_shape = (input_size_per_partition,
+                    weight_shape = (input_size_per_partition // get_tensor_model_parallel_world_size(),
                                     input_size_per_partition)
 
                 elif args.location == TransformLocation.OUTPUT:
-                    weight_shape = (output_shape, output_shape)
+                    weight_shape = (output_shape // get_tensor_model_parallel_world_size(), output_shape)
 
                 else:
                     raise ValueError()
