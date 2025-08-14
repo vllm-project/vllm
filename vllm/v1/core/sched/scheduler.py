@@ -480,6 +480,10 @@ class Scheduler(SchedulerInterface):
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
+                    if new_cross_blocks is not None:
+                        # We need to free the cross-attention blocks we
+                        # already allocated for this request.
+                        self.kv_cache_manager.free(request)
                     break
 
                 # KVTransfer: the connector uses this info to determine
