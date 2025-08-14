@@ -90,26 +90,28 @@ class XPUPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 64
 
-        # FIXME: Temporarily forcing eager mode
-        # remove after t.compile support stabilizes.
-        if (envs.VLLM_USE_V1 and model_config is not None
-                and not vllm_config.model_config.enforce_eager):
-            from vllm.config import CompilationLevel
-            vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION  # noqa: E501
+        from vllm.config import CompilationLevel
+        vllm_config.compilation_config.cudagraph_capture_sizes = []
+
+        compilation_config = vllm_config.compilation_config
+        if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE:
+            compilation_config.level = CompilationLevel.DYNAMO_ONCE
+            compilation_config.backend = "inductor"
+
+            if compilation_config.use_inductor:
+                compilation_config.custom_ops = ["none"]
+
+        if vllm_config.lora_config is not None:
+            compilation_config.level = CompilationLevel.NO_COMPILATION
 
         # Instances created using VllmConfig() typically have model_config as
         # None by default. The modification involves adding a check to prevent
         # potential null exceptions check and update model config.
-        if model_config is not None:
-            if model_config.dtype == torch.bfloat16:
-                bf16_supported = cls.device_support_bf16()
-                if not bf16_supported:
-                    model_config.dtype = torch.float16
-            if not model_config.enforce_eager:
-                logger.warning(
-                    "CUDA graph is not supported on XPU, fallback to the eager "
-                    "mode.")
-                model_config.enforce_eager = True
+        if model_config is not None and not model_config.enforce_eager:
+            logger.warning(
+                "CUDA graph is not supported on XPU, fallback to the eager "
+                "mode.")
+            model_config.enforce_eager = True
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
