@@ -93,6 +93,10 @@ class CacheConfig:
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
 
+    mamba_ssm_cache_dtype: str = "auto"
+    """The data type to use for the Mamba SSM cache. If set to 'auto', the
+    data type will be inferred from the model config."""
+
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for GPU memory."""
