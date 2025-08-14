@@ -147,6 +147,28 @@ async def test_fetch_image_local_files(image_url: str):
             connector.fetch_image(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}")
 
+@pytest.mark.asyncio
+async def test_fetch_image_local_files_with_space_in_name():
+    image_url = IMAGE_URLS[0]
+    connector = MediaConnector()
+
+    with TemporaryDirectory() as temp_dir:
+        local_connector = MediaConnector(allowed_local_media_path=temp_dir)
+
+        origin_image = connector.fetch_image(image_url)
+        origin_image.save(os.path.join(temp_dir, os.path.basename(image_url).replace("-", " ", 1)),
+                          quality=100,
+                          icc_profile=origin_image.info.get('icc_profile'))
+
+        try:
+            image_async = await local_connector.fetch_image_async(
+                f"file://{temp_dir}/{os.path.basename(image_url)}")
+            image_sync = local_connector.fetch_image(
+                f"file://{temp_dir}/{os.path.basename(image_url)}")
+        except FileNotFoundError as e:
+            pytest.fail("Failed to fetch image with space in name: {0}".format(e))
+        # Check that the images are equal
+        assert not ImageChops.difference(image_sync, image_async).getbbox()
 
 @pytest.mark.asyncio
 async def test_fetch_image_error_conversion():
