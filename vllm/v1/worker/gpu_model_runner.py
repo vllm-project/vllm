@@ -2585,8 +2585,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes 5~20 seconds.
-        logger.info("Graph capturing finished in %.3f secs, took %.2f GiB",
-                    elapsed_time, cuda_graph_size / (1 << 30))
+        if not specific_token_num:
+            logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
+                        elapsed_time, cuda_graph_size / (1 << 30))
+        else:
+            logger.info("""Graph capturing for %d input tokens
+                        finished in %.3f secs, took %.2f MiB""",
+                        specific_token_num, elapsed_time, 
+                        cuda_graph_size / (1024 ** 2))
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
