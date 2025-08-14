@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import time
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any, Optional, Union
 
@@ -431,14 +431,16 @@ class AsyncLLM(EngineClient):
 
         self.output_handler = asyncio.create_task(output_handler())
 
-    async def abort(self, request_id: str) -> None:
+    async def abort(self, request_id: Union[str, Iterable[str]]) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
-        request_ids = self.output_processor.abort_requests((request_id, ))
-        await self.engine_core.abort_requests_async(request_ids)
+        request_ids = (request_id, ) if isinstance(request_id,
+                                                   str) else request_id
+        all_request_ids = self.output_processor.abort_requests(request_ids)
+        await self.engine_core.abort_requests_async(all_request_ids)
 
         if self.log_requests:
-            logger.info("Aborted request %s.", request_id)
+            logger.info("Aborted request(s) %s.", ",".join(request_ids))
 
     async def encode(
         self,
