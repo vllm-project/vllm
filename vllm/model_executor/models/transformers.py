@@ -678,6 +678,14 @@ class TransformersMoEBase(TransformersBase):
 
     def fused_moe(self):
 
+        # TODO: replace with self.text_config.num_experts,
+        num_experts = self.model_config.get_num_experts()
+        top_k = 8  # TODO: set this properly
+        hidden_size = self.text_config.hidden_size
+        intermediate_size = 768  # TODO: set this properly
+        renormalize: bool = getattr(self.hf_text_config, "norm_topk_prob",
+                                    top_k > 1)
+
         def reduce_results(module, _, output):
             """Forward hook that performs all-reduce on a nn.Module's
             output if tensor parallel or expert parallel is enabled."""
@@ -695,13 +703,12 @@ class TransformersMoEBase(TransformersBase):
                         and isinstance(child_module, nn.ModuleList)):
                     # Replace experts module with FusedMoE
                     new_module = FusedMoE(
-                        # num_experts=self.text_config.num_experts,
-                        num_experts=self.model_config.get_num_experts(),
-                        top_k=8,  # TODO: set this properly
-                        hidden_size=self.text_config.hidden_size,
-                        intermediate_size=768,  # TODO: set this properly
+                        num_experts=num_experts,
+                        top_k=top_k,
+                        hidden_size=hidden_size,
+                        intermediate_size=intermediate_size,
                         reduce_results=False,
-                        # renormalize
+                        renormalize=renormalize,
                         # use_grouped_topk
                         # num_expert_group
                         # topk_group
