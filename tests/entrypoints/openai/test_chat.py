@@ -507,7 +507,6 @@ async def test_chat_with_enable_force_include_usage(client: openai.AsyncOpenAI,
         max_completion_tokens=10,
         extra_body=dict(min_tokens=10),
         temperature=0.0,
-        enforce_eager=True,
         stream=True,
         enable_force_include_usage=True,
     )

@@ -525,7 +525,6 @@ async def test_completion_with_enable_force_include_usage(
                                              prompt=prompt,
                                              max_tokens=5,
                                              temperature=0.0,
-                                             enforce_eager=True,
                                              stream=True,
                                              enable_force_include_usage=True)
     async for chunk in stream:
