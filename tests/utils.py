@@ -35,12 +35,9 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
-from vllm.test_utils import entry_points as fake_entry_points
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (FlexibleArgumentParser, GB_bytes,
                         cuda_device_count_stateless, get_open_port)
-
-importlib.metadata.entry_points = fake_entry_points
 
 if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
