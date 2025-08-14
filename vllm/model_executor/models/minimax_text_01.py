@@ -338,8 +338,6 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
     def mamba_type(self) -> str:
         return "linear_attention"
 
-    def get_state_dtypes(self) -> tuple[int, ...]
-
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
         return MambaStateShapeCalculator.linear_attention_state_shape(
             num_heads=self.num_heads,

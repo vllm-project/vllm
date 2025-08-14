@@ -31,6 +31,7 @@ HYBRID_MODELS = [
     "hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
+    "nvidia/Nemotron-H-8B-Base-8K",
 ]
 
 HF_UNSUPPORTED_MODELS = [
@@ -41,7 +42,8 @@ HF_UNSUPPORTED_MODELS = [
     "yujiepan/mamba2-codestral-v0.1-tiny-random",
     # transformers 4.55 is still producing garbage for this model
     # TODO(tdoublep): follow-up on transformers side
-    "ibm-granite/granite-4.0-tiny-preview"
+    "ibm-granite/granite-4.0-tiny-preview",
+    "nvidia/Nemotron-H-8B-Base-8K",
 ]
 
 V1_SUPPORTED_MODELS = [
@@ -52,6 +54,7 @@ V1_SUPPORTED_MODELS = [
     "hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
+    "nvidia/Nemotron-H-8B-Base-8K",
 ]
 
 # Avoid OOM
@@ -91,7 +94,6 @@ def test_models(
 
     with vllm_runner(model,
                      max_num_seqs=MAX_NUM_SEQS,
-                     gpu_memory_utilization=0.1,
                      mamba_ssm_cache_dtype="float32") as vllm_model:
         vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
@@ -104,7 +106,6 @@ def test_models(
                 m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
-                             gpu_memory_utilization=0.1,
                              enable_prefix_caching=False,
                              mamba_ssm_cache_dtype="float32") as vllm_model:
                 vllm_v1_outputs = vllm_model.generate_greedy_logprobs(

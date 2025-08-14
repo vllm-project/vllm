@@ -8,7 +8,7 @@ from torch import nn
 
 from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.config import get_current_vllm_config, CacheConfig, ModelConfig
+from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
@@ -21,7 +21,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
                                                               update_metadata)
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateShapeCalculator, MambaStateDtypeCalculator)
+    MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
@@ -608,8 +608,6 @@ class MambaMixer2(MambaBase, CustomOp):
                 dim=0,
             )
 
-        print("ssm_state.dtype: ", ssm_state.dtype)
-
         # Process prefill requests
         if has_prefill:
             # 2. Convolution sequence transformation
@@ -674,7 +672,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
                                                 self.head_dim),
-                mamba_ssm_cache_dtype=ssm_state.dtype)
+                state_dtype=ssm_state.dtype)
 
             # update ssm states
             # - varlen state is a (num_prefills, nheads, headdim, dstate) tensor
@@ -737,7 +735,6 @@ class MambaMixer2(MambaBase, CustomOp):
         output[:num_actual_tokens], _ = self.out_proj(hidden_states)
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
-        print("dtype: ", self.model_config.dtype)
         return MambaStateDtypeCalculator.mamba2_state_dtype(
             self.model_config.dtype,
             self.cache_config.cache_dtype,

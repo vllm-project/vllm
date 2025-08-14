@@ -6,8 +6,6 @@
 
 # ruff: noqa: E501
 
-from typing import Optional
-
 import torch
 from einops import rearrange
 from packaging import version
@@ -43,7 +41,7 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    cu_seqlens=None,
                                    dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
-                                   mamba_ssm_cache_dtype=None,
+                                   state_dtype=torch.bfloat16,
                                    out=None):
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
 
@@ -115,8 +113,6 @@ def _mamba_chunk_scan_combined_fwd(x,
     # - this will ensure that states will be updated with the rightmost flushed seq_idx
     #   of the previous chunk. This implies that the first chunk of states is either 0
     #   or equal to init_states of the first example.
-    print("mamba_ssm_cache_dtype: ", mamba_ssm_cache_dtype)
-    print("C.dtype: ", C.dtype)
     states, final_states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
         dA_cumsum[:, :, :, -1],
@@ -124,7 +120,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         if initial_states is not None else None,
         seq_idx=seq_idx,
         chunk_size=chunk_size,
-        out_dtype=mamba_ssm_cache_dtype,
+        out_dtype=state_dtype,
         is_cont_batched=cu_seqlens is not None)
     states, final_states = (rearrange(t, "... (p n) -> ... p n", n=dstate)
                             for t in [states, final_states])
@@ -177,27 +173,26 @@ def _mamba_chunk_scan_combined_fwd(x,
         return out_x, dt, dA_cumsum, states, final_states, varlen_states
 
 
-def mamba_chunk_scan_combined(
-        x,
-        dt,
-        A,
-        B,
-        C,
-        chunk_size,
-        D=None,
-        z=None,
-        dt_bias=None,
-        initial_states=None,
-        seq_idx=None,
-        chunk_indices=None,
-        chunk_offsets=None,
-        cu_seqlens=None,
-        dt_softplus=False,
-        dt_limit=(0.0, float("inf")),
-        out=None,
-        return_final_states=False,
-        return_varlen_states=False,
-        mamba_ssm_cache_dtype: Optional[torch.dtype] = None):
+def mamba_chunk_scan_combined(x,
+                              dt,
+                              A,
+                              B,
+                              C,
+                              chunk_size,
+                              D=None,
+                              z=None,
+                              dt_bias=None,
+                              initial_states=None,
+                              seq_idx=None,
+                              chunk_indices=None,
+                              chunk_offsets=None,
+                              cu_seqlens=None,
+                              dt_softplus=False,
+                              dt_limit=(0.0, float("inf")),
+                              out=None,
+                              return_final_states=False,
+                              return_varlen_states=False,
+                              state_dtype=torch.bfloat16):
     """
     Argument:
         x: (batch, seqlen, nheads, headdim)
@@ -214,7 +209,7 @@ def mamba_chunk_scan_combined(
         cu_seqlens: (num_sequences + 1) or None, only used if return_varlen_states is True
         dt_softplus: Whether to apply softplus to dt
         out: Preallocated output tensor
-        mamba_ssm_cache_dtype: The data type to use for the Mamba SSM cache. If set to 'auto', the data type will be inferred from the model config
+        state_dtype: The data type of the ssm state
     """
 
     if not return_varlen_states:
@@ -239,7 +234,7 @@ def mamba_chunk_scan_combined(
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
         out=out,
-        mamba_ssm_cache_dtype=mamba_ssm_cache_dtype)
+        state_dtype=state_dtype)
     if not return_varlen_states:
         if not return_final_states:
             return
