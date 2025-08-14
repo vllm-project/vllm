@@ -2589,10 +2589,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                         elapsed_time, cuda_graph_size / (1 << 30))
         else:
-            logger.info("""Graph capturing for %d input tokens
+            logger.info(
+                """Graph capturing for %d input tokens
                         finished in %.3f secs, took %.2f MiB""",
-                        specific_token_num, elapsed_time, 
-                        cuda_graph_size / (1024 ** 2))
+                specific_token_num, elapsed_time, cuda_graph_size / (1024**2))
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
