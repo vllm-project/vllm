@@ -1,8 +1,8 @@
-# vllm/model_executor/models/siglip_so400m.py
-
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
+import io
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Optional
@@ -10,16 +10,17 @@ from typing import Any, Optional
 import torch
 from PIL import Image
 from torch import nn
-from transformers import (PretrainedConfig, SiglipConfig, SiglipImageProcessor,
+from transformers import (PretrainedConfig, SiglipImageProcessor,
                           SiglipProcessor, SiglipTextConfig, SiglipTokenizer,
                           SiglipVisionConfig)
 
-from vllm.attention import Attention
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.pooler import (AllPool, PoolerHead,
+                                               PoolerIdentity, SimplePooler)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -59,6 +60,16 @@ class SiglipSo400mProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Optional[Mapping[str, int]]:
+        image_size = self.get_image_size()
+        patch_size = self.get_patch_size()
+        num_patches = (image_size // patch_size)**2
+        return {"image": num_patches}
+
     def get_image_size(self) -> int:
         hf_config = self.get_hf_config()
         if hasattr(hf_config, "vision_config"):
@@ -82,7 +93,7 @@ class SiglipSo400mDummyInputsBuilder(
         BaseDummyInputsBuilder[SiglipSo400mProcessingInfo]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        return "a photo of a cat"
+        return ""
 
     def get_dummy_mm_data(
         self,
@@ -168,22 +179,43 @@ class SiglipSo400mMultiModalProcessor(
               return_mm_hashes: bool = False) -> MultiModalInputs:
         tokenizer: SiglipTokenizer = self.info.get_hf_processor().tokenizer
         text_inputs = tokenizer(prompt, padding=True, return_tensors="pt")
-        images = mm_data.get("image", [])
+
+        images = mm_data.get("image")
+        if images and not isinstance(images, list):
+            images = [images]
+
         if images:
             image_inputs = self._process_image(images)
             text_inputs.update(image_inputs)
-        num_images = len(images)
+
+        mm_hashes = {}
+        if return_mm_hashes and images:
+            image_hashes = []
+            for img in images:
+                with io.BytesIO() as buf:
+                    img.save(buf, format='PNG')
+                    image_bytes = buf.getvalue()
+                hasher = hashlib.sha256()
+                hasher.update(image_bytes)
+                image_hashes.append(hasher.hexdigest())
+            mm_hashes["image"] = image_hashes
+
+        num_images = len(images) if images else 0
         mm_placeholders = {
             "image":
             [PlaceholderRange(offset=0, length=0) for _ in range(num_images)]
         }
+
+        final_prompt_token_ids = text_inputs["input_ids"][0].tolist()
+
         return MultiModalInputs(type="multimodal",
                                 prompt="",
-                                prompt_token_ids=[],
+                                prompt_token_ids=final_prompt_token_ids,
                                 mm_kwargs=MultiModalKwargs.from_hf_inputs(
                                     text_inputs,
                                     self._get_mm_fields_config(None, {})),
-                                mm_placeholders=mm_placeholders)
+                                mm_placeholders=mm_placeholders,
+                                mm_hashes=mm_hashes)
 
 
 class SiglipMLP(nn.Module):
@@ -242,20 +274,43 @@ class SiglipAttention(nn.Module):
                                           bias=True,
                                           quant_config=quant_config,
                                           prefix=f"{prefix}.out_proj")
-        scaling = self.head_dim**-0.5
-        self.attn = Attention(self.num_heads_per_partition,
-                              self.head_dim,
-                              scaling,
-                              prefix=prefix)
+        self.scale = self.head_dim**-0.5
 
     def forward(self,
                 hidden_states: torch.Tensor,
                 attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        q, _ = self.q_proj(hidden_states)
-        k, _ = self.k_proj(hidden_states)
-        v, _ = self.v_proj(hidden_states)
-        out, _ = self.attn(q, k, v, attention_mask)
-        attn_output, _ = self.out_proj(out)
+
+        q_trans, _ = self.q_proj(hidden_states)
+        k_trans, _ = self.k_proj(hidden_states)
+        v_trans, _ = self.v_proj(hidden_states)
+
+        # 1. Reshape Q, K, V for multi-head attention
+        batch_size, seq_len, _ = q_trans.shape
+        q_trans = q_trans.view(batch_size, seq_len,
+                               self.num_heads_per_partition,
+                               self.head_dim).transpose(1, 2)
+        k_trans = k_trans.view(batch_size, seq_len,
+                               self.num_heads_per_partition,
+                               self.head_dim).transpose(1, 2)
+        v_trans = v_trans.view(batch_size, seq_len,
+                               self.num_heads_per_partition,
+                               self.head_dim).transpose(1, 2)
+
+        # 2. Scaled Dot-Product Attention
+        attn_weights = torch.matmul(q_trans, k_trans.transpose(
+            -2, -1)) * self.scale
+
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
+
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1)
+        attn_output = torch.matmul(attn_weights, v_trans)
+
+        # 3. Reshape and project output
+        attn_output = attn_output.transpose(1, 2).contiguous().view(
+            batch_size, seq_len, self.embed_dim)
+        attn_output, _ = self.out_proj(attn_output)
+
         return attn_output
 
 
@@ -306,11 +361,17 @@ class SiglipNavitVisionEmbeddings(nn.Module):
             stride=self.patch_size,
             padding="valid",
         )
-        self.position_embedding = nn.Embedding(self.num_positions,
-                                               self.embed_dim)
+        self.position_embedding = VocabParallelEmbedding(
+            self.num_positions, self.embed_dim)
 
     def forward(self, pixel_values: torch.FloatTensor,
                 patch_attention_mask: torch.BoolTensor) -> torch.Tensor:
+        if pixel_values.dim() == 5:
+            pixel_values = pixel_values.squeeze(1)
+
+        if patch_attention_mask.dim() == 3:
+            patch_attention_mask = patch_attention_mask.squeeze(1)
+
         batch_size, _, max_im_h, max_im_w = pixel_values.shape
         target_dtype = self.patch_embedding.weight.dtype
         patch_embeds = self.patch_embedding(
@@ -328,6 +389,7 @@ class SiglipNavitVisionEmbeddings(nn.Module):
                                   fill_value=0,
                                   device=device,
                                   dtype=torch.long)
+
         for batch_idx, p_attn_mask_flat in enumerate(patch_attention_mask):
             p_attn_mask = p_attn_mask_flat.view(max_nb_patches_h,
                                                 max_nb_patches_w)
@@ -386,28 +448,31 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
                                           key_padding_mask=key_padding_mask)
         residual = pooled_output
         pooled_output = self.layernorm(pooled_output)
-        pooled_output = self.mlp(pooled_output)
-        pooled_output = residual + pooled_output
-        return pooled_output[:, 0]
+        mlp_output, _ = self.mlp(pooled_output)
+        pooled_output = residual + mlp_output
+        final_output = pooled_output[:, 0]
+        return final_output
 
 
 class SiglipVisionTower(nn.Module):
 
     def __init__(self,
                  config: SiglipVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "vision_model"):
         super().__init__()
+        self.config = config
         self.embeddings = SiglipNavitVisionEmbeddings(config)
         self.encoder_layers = nn.ModuleList([
             SiglipEncoderLayer(config,
                                quant_config,
-                               prefix=f"vision_model.encoder.layers.{i}")
+                               prefix=f"{prefix}.encoder.layers.{i}")
             for i in range(config.num_hidden_layers)
         ])
         self.post_layernorm = nn.LayerNorm(config.hidden_size,
                                            eps=config.layer_norm_eps)
         self.head = SiglipMultiheadAttentionPoolingHead(
-            config, quant_config, prefix="vision_model.head")
+            config, quant_config, prefix=f"{prefix}.head")
 
     def forward(self, pixel_values: torch.Tensor,
                 patch_attention_mask: torch.Tensor) -> torch.Tensor:
@@ -433,36 +498,45 @@ class SiglipTextEmbeddings(nn.Module):
             persistent=False)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
         seq_length = input_ids.shape[1]
         position_ids = self.position_ids[:, :seq_length].to(input_ids.device)
         token_embeds = self.token_embedding(input_ids)
         position_embeds = self.position_embedding(position_ids)
-        return token_embeds + position_embeds
+        embeddings = token_embeds + position_embeds
+        return embeddings
 
 
 class SiglipTextTower(nn.Module):
 
     def __init__(self,
                  config: SiglipTextConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "text_model"):
         super().__init__()
+        self.config = config
         self.embeddings = SiglipTextEmbeddings(config)
         self.encoder_layers = nn.ModuleList([
             SiglipEncoderLayer(config,
                                quant_config,
-                               prefix=f"text_model.encoder.layers.{i}")
+                               prefix=f"{prefix}.encoder.layers.{i}")
             for i in range(config.num_hidden_layers)
         ])
         self.final_layer_norm = nn.LayerNorm(config.hidden_size,
                                              eps=config.layer_norm_eps)
+        projection_size = getattr(config, 'projection_size',
+                                  config.hidden_size)
         self.head = ColumnParallelLinear(config.hidden_size,
-                                         config.projection_size,
+                                         projection_size,
                                          bias=True,
                                          quant_config=quant_config,
-                                         prefix="text_model.head")
+                                         prefix=f"{prefix}.head")
 
     def forward(self, input_ids: torch.Tensor,
                 attention_mask: torch.Tensor) -> torch.Tensor:
+        if attention_mask.dim() == 1:
+            attention_mask = attention_mask.unsqueeze(0)
         x = self.embeddings(input_ids)
         extended_attention_mask = attention_mask[:, None, None, :]
         extended_attention_mask = extended_attention_mask.to(dtype=x.dtype)
@@ -471,7 +545,7 @@ class SiglipTextTower(nn.Module):
         for layer in self.encoder_layers:
             x = layer(x, attention_mask=extended_attention_mask)
         x = self.final_layer_norm(x)
-        eos_indices = attention_mask.sum(dim=1) - 1
+        eos_indices = torch.clamp(attention_mask.sum(dim=1) - 1, min=0)
         pooled_output = x[torch.arange(x.shape[0], device=x.device),
                           eos_indices]
         pooled_output, _ = self.head(pooled_output)
@@ -485,81 +559,106 @@ class SiglipTextTower(nn.Module):
 )
 class SiglipSo400mModel(nn.Module, SupportsMultiModal):
     is_pooling_model = True
-    config_class = SiglipConfig
+    supported_tasks = ["encode", "embed"]
 
-    def __init__(
-        self,
-        config: Optional[SiglipConfig] = None,
-        vllm_config: Optional[VllmConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        self.config = config
+        siglip_s0400_vision_config = config.vision_config
+        siglip_s0400_text_config = config.text_config
+        quant_config = vllm_config.quant_config
 
-        if vllm_config:
-            hf_config = vllm_config.model_config.hf_config
-            if quant_config is None:
-                quant_config = vllm_config.quant_config
-        elif config:
-            hf_config = config
-        else:
-            raise ValueError(
-                "Either 'config' or 'vllm_config' must be provided.")
-
-        if isinstance(hf_config, SiglipVisionConfig):
-            vision_config = hf_config
-            text_config_dict = vision_config.to_dict()
-
-            # 最终修正: 在创建 TextConfig 时，直接把 projection_size 传进去
-            text_config = SiglipTextConfig.from_dict(
-                text_config_dict, projection_size=vision_config.hidden_size)
-
-            hf_config = SiglipConfig(vision_config=vision_config,
-                                     text_config=text_config)
-
-        self.vision_tower = SiglipVisionTower(hf_config.vision_config,
+        self.vision_tower = SiglipVisionTower(siglip_s0400_vision_config,
                                               quant_config)
-        self.text_tower = SiglipTextTower(hf_config.text_config, quant_config)
+        self.text_tower = SiglipTextTower(siglip_s0400_text_config,
+                                          quant_config)
+        self.pooler = SimplePooler(AllPool(), PoolerHead(PoolerIdentity()))
+        self.pad_token_id = self.config.text_config.pad_token_id
+        self.weight_cache: dict[str, torch.Tensor] = {}
+        self.is_post_warmup = False
 
-    # ... (forward 和 load_weights 方法保持不变) ...
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        attention_mask = (input_ids != self.pad_token_id).long()
+        text_embeds = self.text_tower(input_ids, attention_mask)
+        text_embeds = text_embeds / torch.linalg.vector_norm(
+            text_embeds, ord=2, dim=-1, keepdim=True)
+        return text_embeds
+
     def forward(
         self,
-        input_ids: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        pixel_values: Optional[torch.Tensor] = None,
-        patch_attention_mask: Optional[torch.Tensor] = None,
-        **kwargs,
-    ) -> dict[str, torch.Tensor]:
-        image_embeds = None
+        inputs_embeds: torch.Tensor,
+        **kwargs: object,
+    ) -> torch.Tensor:
+
+        if self.is_post_warmup and self.weight_cache:
+            self.load_weights(self.weight_cache.items())
+            self.weight_cache = {}
+
+        if not self.is_post_warmup:
+            self.is_post_warmup = True
+
+        pixel_values = kwargs.get("pixel_values")
+        patch_attention_mask = kwargs.get("patch_attention_mask")
+
         if pixel_values is not None:
-            assert patch_attention_mask is not None
             image_embeds = self.vision_tower(pixel_values,
                                              patch_attention_mask)
             image_embeds = image_embeds / torch.linalg.vector_norm(
                 image_embeds, ord=2, dim=-1, keepdim=True)
-        text_embeds = None
-        if input_ids is not None:
-            assert attention_mask is not None
-            text_embeds = self.text_tower(input_ids, attention_mask)
-            text_embeds = text_embeds / torch.linalg.vector_norm(
-                text_embeds, ord=2, dim=-1, keepdim=True)
-        return {"image_embeds": image_embeds, "text_embeds": text_embeds}
+            final_embedding = image_embeds
+        else:
+            final_embedding = inputs_embeds
+
+        return final_embedding.unsqueeze(1)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        hf_weights = dict(weights)
+        if not self.weight_cache:
+            self.weight_cache = hf_weights.copy()
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in weights:
+        direct_mapping = [
+            "vision_model.head.attention.in_proj_weight",
+            "vision_model.head.attention.in_proj_bias",
+            "vision_model.head.attention.out_proj.weight",
+            "vision_model.head.attention.out_proj.bias",
+            "vision_model.head.probe",
+        ]
+        for hf_name in direct_mapping:
+            if hf_name in hf_weights:
+                loaded_weight = hf_weights.pop(hf_name)
+                vllm_name = hf_name.replace("vision_model.", "vision_tower.",
+                                            1)
+                param = params_dict.get(vllm_name)
+                if param is not None:
+                    param.data.copy_(loaded_weight)
+                else:
+                    print(
+                        f"Warning: Special weight '{hf_name}' found but "
+                        f"corresponding param '{vllm_name}' not in vLLM model."
+                    )
+
+        # Load the rest of the weights
+        for name, loaded_weight in hf_weights.items():
             if name.startswith("logit_"):
                 continue
             if name.startswith("vision_model."):
-                vllm_name = name.replace("vision_model.encoder.layers.",
-                                         "vision_tower.encoder_layers.")
-                vllm_name = vllm_name.replace("vision_model.", "vision_tower.")
-                param = params_dict.get(vllm_name)
-                if param is not None:
-                    default_weight_loader(param, loaded_weight)
-            if name.startswith("text_model."):
-                vllm_name = name.replace("text_model.encoder.layers.",
-                                         "text_tower.encoder_layers.")
-                vllm_name = vllm_name.replace("text_model.", "text_tower.")
-                param = params_dict.get(vllm_name)
-                if param is not None:
-                    default_weight_loader(param, loaded_weight)
+                vllm_name = name.replace("vision_model.", "vision_tower.", 1)
+            elif name.startswith("text_model."):
+                vllm_name = name.replace("text_model.", "text_tower.", 1)
+                vllm_name = vllm_name.replace("encoder.layers",
+                                              "encoder_layers")
+            else:
+                vllm_name = name
+            param = params_dict.get(vllm_name)
+            if param is not None:
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
