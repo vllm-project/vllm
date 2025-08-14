@@ -713,6 +713,12 @@ def cancel_task_threadsafe(task: Task):
         loop.call_soon_threadsafe(task.cancel)
 
 
+def close_sockets(sockets: Sequence[Union[zmq.Socket, zmq.asyncio.Socket]]):
+    for sock in sockets:
+        if sock is not None:
+            sock.close(linger=0)
+
+
 def make_async(
     func: Callable[P, T],
     executor: Optional[concurrent.futures.Executor] = None
