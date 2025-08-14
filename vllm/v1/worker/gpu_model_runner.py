@@ -2031,7 +2031,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         model_config = self.model_config
         mm_config = model_config.multimodal_config
 
-        if mm_config and mm_config.is_mm_processing_gpu:
+        if mm_config and (mm_config.is_mm_processing_gpu and
+                          (usage_mult :=
+                           mm_config.mm_processors_per_engine_gpu) > 0):
             self.mm_registry.reset_processor_cache(model_config)
 
             mm_budget = self.mm_budget
@@ -2059,8 +2061,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             after_profile = MemorySnapshot(auto_measure=True)
 
             diff_profile = after_profile - before_profile
-            self.processor_memory_usage = diff_profile.torch_peak * (
-                mm_config.mm_processors_per_gpu)
+            self.processor_memory_usage = diff_profile.torch_peak * usage_mult
 
             logger.info("Input processing took %.4f GiB and %.6f seconds",
                         self.processor_memory_usage / GiB_bytes,

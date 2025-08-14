@@ -3,7 +3,6 @@
 
 import argparse
 import signal
-from collections import Counter
 from copy import deepcopy
 from typing import Any, Optional
 
@@ -19,7 +18,6 @@ from vllm.entrypoints.openai.cli_args import (make_arg_parser,
 from vllm.entrypoints.utils import (VLLM_SUBCMD_PARSER_EPILOG,
                                     show_filtered_argument_or_group_from_help)
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, decorate_logs, get_tcp_uri,
                         set_process_title)
@@ -135,42 +133,23 @@ def run_headless(args: argparse.Namespace):
         engine_manager.close()
 
 
-def _available_device_count() -> int:
-    return current_platform.device_count()  # type: ignore
-
-
-def _estimate_engine_device_count(args: argparse.Namespace) -> int:
-    tp_size = args.tensor_parallel_size or 1
-    pp_size = args.pipeline_parallel_size or 1
-
-    dp_size = args.data_parallel_size or 1
-    if args.data_parallel_size_local:
-        dp_size = min(dp_size, args.data_parallel_size_local)
-
-    # This is a conservative estimate since it assumes single node
-    return min(tp_size * pp_size * dp_size, _available_device_count())
-
-
 def run_multi_api_server(args: argparse.Namespace):
 
     assert not args.headless
     num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
-    orig_mm_processor_cache_gb: int = args.mm_processor_cache_gb
+    # No need to set api_process_rank for EngineCore processes
+    args.api_process_count = args.api_server_count
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
-
-        # Not compatible with API server scale-out
-        args.mm_processor_cache_gb = 0
 
     listen_address, sock = setup_server(args)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
-    model_config = vllm_config.model_config
 
     if num_api_servers > 1:
         if not envs.VLLM_USE_V1:
@@ -179,10 +158,6 @@ def run_multi_api_server(args: argparse.Namespace):
         if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
             raise ValueError("VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used "
                              "with api_server_count > 1")
-
-        if model_config.is_multimodal_model and orig_mm_processor_cache_gb > 0:
-            logger.warning("Multi-modal processor cache is disabled because "
-                           "it is not compatible with `api_server_count > 1`.")
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats
@@ -194,54 +169,8 @@ def run_multi_api_server(args: argparse.Namespace):
     assert external_dp_lb or hybrid_dp_lb or dp_rank == 0
 
     args_per_server = [deepcopy(args) for _ in range(num_api_servers)]
-
-    if mm_processor_kwargs := args.mm_processor_kwargs:
-        mm_device: str = mm_processor_kwargs.get("device", "cpu")
-        if mm_device != "cpu":
-            engine_device_count = _estimate_engine_device_count(args)
-            available_device_count = _available_device_count()
-
-            engine_gpu_idxs = list(range(engine_device_count))
-
-            device_type, *rest = mm_device.rsplit(":", 1)
-            if len(rest) == 0:
-                # Try to run processing on GPUs that are not used by the engine
-                processor_gpu_idxs = [
-                    (engine_device_count + server_idx) % available_device_count
-                    for server_idx in range(num_api_servers)
-                ]
-                for server_idx, device_idx in enumerate(processor_gpu_idxs):
-                    device = f"{device_type}:{device_idx}"
-                    args_per_server[server_idx].mm_processor_kwargs["device"] \
-                        = device
-
-                    logger.info(
-                        "Multi-modal processor in APIServer_%s will be run on "
-                        "device %s", server_idx, device)
-            else:
-                (device_idx, ) = map(int, rest)
-                processor_gpu_idxs = [device_idx] * num_api_servers
-
-            processor_engine_gpu_idxs = [
-                gpu_idx for gpu_idx in processor_gpu_idxs
-                if gpu_idx in engine_gpu_idxs
-            ]
-            mm_processors_per_gpu = max(
-                Counter(processor_engine_gpu_idxs).values(),
-                default=1,
-            )
-
-            # NOTE: vllm_config is used to initialize EngineCore while
-            # args_per_server is used to initialize API processes
-            vllm_config.model_config.set_mm_processors_per_gpu(
-                mm_processors_per_gpu)
-            for server_idx in range(num_api_servers):
-                args_per_server[server_idx].mm_processors_per_gpu \
-                    = mm_processors_per_gpu
-
-            logger.info(
-                "Each GPU is shared by at most %d multi-modal processors",
-                mm_processors_per_gpu)
+    for server_idx in range(num_api_servers):
+        args_per_server[server_idx].api_process_rank = server_idx
 
     api_server_manager: Optional[APIServerProcessManager] = None
 

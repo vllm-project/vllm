@@ -422,9 +422,10 @@ class ModelConfig:
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
     Set to `0` to disable this cache completely (not recommended)."""
-    mm_processors_per_gpu: int = 1
+    mm_processors_per_engine_gpu: int = 0
     """
-    [Internal] The maximum number of multi-modal processors that use each GPU.
+    [Internal] The maximum number of multi-modal processors that use each GPU
+    in vLLM engine.
 
     This is needed to determine the peak memory of multi-modal processing
     in the case of API server scale-out.
@@ -854,11 +855,23 @@ class ModelConfig:
         if mm_config := self.multimodal_config:
             mm_config.mm_processor_cache_gb = value
 
-    def set_mm_processors_per_gpu(self, value: int) -> None:
-        self.mm_processors_per_gpu = value
+    def set_mm_processor_kwargs(self, value: dict[str, Any]) -> None:
+        if self.mm_processor_kwargs is None:
+            self.mm_processor_kwargs = {}
+
+        self.mm_processor_kwargs.update(value)
 
         if mm_config := self.multimodal_config:
-            mm_config.mm_processors_per_gpu = value
+            if mm_config.mm_processor_kwargs is None:
+                mm_config.mm_processor_kwargs = {}
+
+            mm_config.mm_processor_kwargs.update(value)
+
+    def set_mm_processors_per_engine_gpu(self, value: int) -> None:
+        self.mm_processors_per_engine_gpu = value
+
+        if mm_config := self.multimodal_config:
+            mm_config.mm_processors_per_engine_gpu = value
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -2519,9 +2532,10 @@ class MultiModalConfig:
     Set to `0` to disable this cache completely (not recommended).
     """
 
-    mm_processors_per_gpu: int = 1
+    mm_processors_per_engine_gpu: int = -1
     """
-    [Internal] The maximum number of multi-modal processors that use each GPU.
+    [Internal] The maximum number of multi-modal processors that use each GPU
+    in vLLM engine. A value of `-1` means not set.
 
     This is needed to determine the peak memory of multi-modal processing
     in the case of API server scale-out.

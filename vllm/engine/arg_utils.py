@@ -302,6 +302,8 @@ class EngineArgs:
     data_parallel_rpc_port: Optional[int] = None
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
+    api_process_count: int = ParallelConfig.api_process_count
+    api_process_rank: int = ParallelConfig.api_process_rank
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_eplb: bool = ParallelConfig.enable_eplb
     num_redundant_experts: int = ParallelConfig.num_redundant_experts
@@ -350,7 +352,8 @@ class EngineArgs:
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: int = MultiModalConfig.mm_processor_cache_gb
-    mm_processors_per_gpu: int = MultiModalConfig.mm_processors_per_gpu
+    mm_processors_per_engine_gpu: int = \
+        MultiModalConfig.mm_processors_per_engine_gpu
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -713,7 +716,7 @@ class EngineArgs:
             **multimodal_kwargs["mm_processor_cache_gb"])
         multimodal_group.add_argument(
             "--mm_processors-per-gpu",
-            **multimodal_kwargs["mm_processors_per_gpu"])
+            **multimodal_kwargs["mm_processors_per_engine_gpu"])
         multimodal_group.add_argument("--disable-mm-preprocessor-cache",
                                       type=bool,
                                       deprecated=True)
@@ -858,7 +861,10 @@ class EngineArgs:
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
-        engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
+        engine_args = cls(**{
+            attr: getattr(args, attr)
+            for attr in attrs if hasattr(args, attr)
+        })
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
@@ -1219,6 +1225,8 @@ class EngineArgs:
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
+            api_process_count=self.api_process_count,
+            api_process_rank=self.api_process_rank,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.num_redundant_experts,
@@ -1238,16 +1246,40 @@ class EngineArgs:
         )
 
         if model_config.is_multimodal_model:
-            dp_supports_mm_processor_cache = (self.data_parallel_size == 1
-                                              or data_parallel_external_lb)
-            if (not dp_supports_mm_processor_cache
+            supports_mm_processor_cache = self.api_process_count == 1 and (
+                self.data_parallel_size == 1 or data_parallel_external_lb)
+            if (not supports_mm_processor_cache
                     and model_config.mm_processor_cache_gb > 0):
                 logger.warning(
                     "Multi-modal processor cache is disabled because "
-                    "it is not compatible with data parallelism when "
                     "there does not exist a one-to-one correspondance "
                     "between API and engine core processes.")
                 model_config.set_mm_processor_cache_gb(0)
+
+            if mm_processor_kwargs := self.mm_processor_kwargs:
+                from vllm.multimodal.utils import allocate_gpu_mm_processors
+
+                mm_processor_device: str = mm_processor_kwargs.get(
+                    "device", "cpu")
+                if mm_processor_device != "cpu":
+                    (
+                        gpu_allocation,
+                        mm_processors_per_engine_gpu,
+                    ) = allocate_gpu_mm_processors(
+                        mm_processor_device,
+                        self.api_process_count,
+                        world_size=parallel_config.world_size_across_dp,
+                    )
+
+                    new_device = gpu_allocation[self.api_process_rank]
+                    logger.info(
+                        "Multi-modal processor will be run on device %s",
+                        new_device)
+
+                    model_config.set_mm_processor_kwargs(
+                        {"device": new_device})
+                    model_config.set_mm_processors_per_engine_gpu(
+                        mm_processors_per_engine_gpu)
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,

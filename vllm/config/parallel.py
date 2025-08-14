@@ -71,6 +71,12 @@ class ParallelConfig:
     between local data parallel ranks, but an external LB balances
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
+
+    api_process_count: int = 1
+    """[Internal] The number of API processes initialized."""
+    api_process_rank: int = 0
+    """[Internal] The rank of this API process."""
+
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False

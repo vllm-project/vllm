@@ -3,6 +3,7 @@
 
 import asyncio
 import atexit
+from collections import Counter
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
@@ -21,6 +22,7 @@ from vllm.connections import HTTPConnection, global_http_connection
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather)
+from vllm.platforms import current_platform
 
 from .audio import AudioMediaIO
 from .base import MediaIO
@@ -331,6 +333,67 @@ def encode_video_base64(frames: npt.NDArray) -> str:
     image_io = ImageMediaIO()
     video_io = VideoMediaIO(image_io)
     return video_io.encode_base64(frames)
+
+
+def allocate_gpu_mm_processors(
+    mm_processor_device: str,
+    mm_processor_count: int,
+    *,
+    world_size: int,
+) -> tuple[list[str], int]:
+    """
+    Given `--mm_processor_kwargs.device` and the number of multi-modal
+    processors, return the GPU allocation information.
+     
+    Returns:
+        A tuple `(mm_processor_gpus, mm_processors_per_engine_gpu)`, where:
+            - `gpu_allocation` is the device to allocate for each
+              multi-modal processor.
+            - `mm_processors_per_engine_gpu` is the number of
+              multi-modal processors allocated to each GPU that is used
+              by vLLM engine.
+    """
+    available_device_count = current_platform.device_count()  # type: ignore
+    engine_device_count = min(world_size, available_device_count)
+
+    engine_gpu_idxs = list(range(engine_device_count))
+
+    # In API server scale-out, allocate_gpu_mm_processors is called twice.
+    # The first call happens in vllm.entrypoints.cli.serve and corresponds
+    # to len(rest) == 0, resulting in each server targeting a specific device.
+    # The second call happens in arg_utils.py and corresponds to len(rest) = 1
+    device_type, *rest = mm_processor_device.rsplit(":", 1)
+    if len(rest) == 0:
+        # Try to run each processor on a different GPU, preferably those
+        # that are not used by vLLM engine
+        remaining_count = max(0, available_device_count - engine_device_count)
+        if remaining_count > 0:
+            processor_gpu_idxs = [
+                engine_device_count + server_idx % remaining_count
+                for server_idx in range(mm_processor_count)
+            ]
+        else:
+            processor_gpu_idxs = [
+                server_idx % available_device_count
+                for server_idx in range(mm_processor_count)
+            ]
+    else:
+        # Already targeted a specific GPU
+        (device_idx, ) = map(int, rest)
+        processor_gpu_idxs = [device_idx] * mm_processor_count
+
+    gpu_allocation = [
+        f"{device_type}:{gpu_idx}" for gpu_idx in processor_gpu_idxs
+    ]
+
+    processor_engine_gpu_idxs = (gpu_idx for gpu_idx in processor_gpu_idxs
+                                 if gpu_idx in engine_gpu_idxs)
+    mm_processors_per_engine_gpu = max(
+        Counter(processor_engine_gpu_idxs).values(),
+        default=0,
+    )
+
+    return gpu_allocation, mm_processors_per_engine_gpu
 
 
 def argsort_mm_positions(
