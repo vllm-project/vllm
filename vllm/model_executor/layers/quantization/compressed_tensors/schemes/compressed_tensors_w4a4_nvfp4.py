@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
+from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm, has_flashinfer
 
 logger = init_logger(__name__)
 
@@ -24,6 +25,13 @@ __all__ = ["CompressedTensorsW4A4Fp4"]
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
 
     def __init__(self):
+        if envs.VLLM_USE_TRTLLM_FP4_GEMM:
+            assert has_flashinfer(), "TRTLLM FP4 GEMM requires FlashInfer"
+            self.backend = "flashinfer-trtllm"
+        elif has_flashinfer():
+            self.backend = "flashinfer-cutlass"
+        else:
+            self.backend = "cutlass"
         self.group_size = 16
 
     @classmethod
@@ -108,16 +116,36 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             layer.weight_global_scale.max().to(torch.float32),
             requires_grad=False)
 
-        swizzled_weight_scale = self.swizzle_blockscale(layer.weight_scale)
-        layer.weight_scale_swizzled = Parameter(swizzled_weight_scale,
-                                                requires_grad=False)
+        if self.backend == "flashinfer-trtllm":
+            # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
+            # FlashInfer provides nvfp4_quantize to quantize + shuffle the
+            # layout but we use our own quantization so we have to call
+            # shuffles ourselves.
+            from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
 
-        # required by cutlass kernel; need Parameter, not ModelWeightParameter
-        layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
+            weight = layer.weight_packed.data
+            weight_scale = layer.weight_scale.data
 
-        layer.alpha = Parameter(layer.input_global_scale *
-                                layer.weight_global_scale,
-                                requires_grad=False)
+            epilogue_tile_m = 128
+            weight = shuffle_matrix_a(weight.view(torch.uint8),
+                                      epilogue_tile_m)
+            weight_scale = (shuffle_matrix_sf_a(weight_scale.view(
+                torch.uint8), epilogue_tile_m).reshape(
+                    weight_scale.shape).view(torch.float8_e4m3fn))
+
+            layer.weight_scale_swizzled = Parameter(weight_scale,
+                                                    requires_grad=False)
+            layer.weight_packed = Parameter(weight, requires_grad=False)
+        else:
+            swizzled_weight_scale = self.swizzle_blockscale(layer.weight_scale)
+            layer.weight_scale_swizzled = Parameter(swizzled_weight_scale,
+                                                    requires_grad=False)
+            layer.weight_packed = Parameter(layer.weight_packed.data,
+                                            requires_grad=False)
+
+        layer.alpha = Parameter(
+            1 / (layer.input_global_scale * layer.weight_global_scale),
+            requires_grad=False)
 
     def apply_weights(self,
                       layer: torch.nn.Module,
@@ -128,7 +156,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             out = run_nvfp4_emulations(
                 x=x,
                 input_global_scale=layer.input_global_scale,
-                weight=layer.weight,
+                weight=layer.weight_packed,
                 weight_scale_swizzled=layer.weight_scale_swizzled,
                 weight_global_scale=layer.weight_global_scale)
             if bias is not None:
@@ -136,14 +164,20 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             return out
 
         output_dtype = x.dtype
-        output_shape = [x.shape[0], layer.weight.shape[0]]
+        output_shape = [x.shape[0], layer.weight_packed.shape[0]]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
         x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
 
-        out = cutlass_scaled_fp4_mm(x_fp4, layer.weight, x_blockscale,
-                                    layer.weight_scale_swizzled,
-                                    1 / layer.alpha, output_dtype)
+        mm_args = (x_fp4, layer.weight_packed, x_blockscale,
+                   layer.weight_scale_swizzled, layer.alpha, output_dtype)
+        if self.backend == "flashinfer-trtllm":
+            out = flashinfer_scaled_fp4_mm(*mm_args, backend="trtllm")
+        elif self.backend == "flashinfer-cutlass":
+            out = flashinfer_scaled_fp4_mm(*mm_args, backend="cutlass")
+        else:
+            out = cutlass_scaled_fp4_mm(*mm_args)
+
         if bias is not None:
             out = out + bias
         return out.view(*output_shape)
