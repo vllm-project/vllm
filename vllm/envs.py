@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
+    VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MM_INPUT_CACHE_GIB: int = 4
@@ -121,6 +122,7 @@ if TYPE_CHECKING:
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
+    VLLM_MXFP4_USE_MARLIN: Optional[bool] = None
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
@@ -158,6 +160,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
+    VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -178,6 +181,12 @@ def maybe_convert_int(value: Optional[str]) -> Optional[int]:
     if value is None:
         return None
     return int(value)
+
+
+def maybe_convert_bool(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    return bool(int(value))
 
 
 def get_vllm_port() -> Optional[int]:
@@ -554,6 +563,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
 
+    # Max number of workers for the thread pool handling
+    # media bytes loading. Set to 1 to disable parallel processing.
+    # Default is 8
+    "VLLM_MEDIA_LOADING_THREAD_COUNT":
+    lambda: int(os.getenv("VLLM_MEDIA_LOADING_THREAD_COUNT", "8")),
+
     # Maximum filesize in MB for a single audio file when processing
     # speech-to-text requests. Files larger than this will be rejected.
     # Default is 25 MB
@@ -898,6 +913,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MARLIN_USE_ATOMIC_ADD":
     lambda: os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1",
 
+    # Whether to use marlin kernel in mxfp4 quantization method
+    "VLLM_MXFP4_USE_MARLIN":
+    lambda: maybe_convert_bool(os.environ.get("VLLM_MXFP4_USE_MARLIN", None)),
+
     # Whether to turn on the outlines cache for V0
     # This cache is unbounded and on disk, so it's not safe to use in
     # an environment with potentially malicious users.
@@ -1120,6 +1139,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #    never removed from memory until the server terminates.
     "VLLM_ENABLE_RESPONSES_API_STORE":
     lambda: bool(int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))),
+
+    # Allows vllm to find tuned config under customized folder
+    "VLLM_TUNED_CONFIG_FOLDER":
+    lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
+
 }
 
 # --8<-- [end:env-vars-definition]
