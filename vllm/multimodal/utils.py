@@ -457,7 +457,7 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
     return vision_embeddings
 
 
-def get_load_balance_assignment(sizes, num_gpus=2):
+def get_load_balance_assignment(sizes: list[list[int]], num_gpus: int = 2):
     """
     Generate load balancing assignment and metadata 
     for distributing data across GPUs.
@@ -480,9 +480,6 @@ def get_load_balance_assignment(sizes, num_gpus=2):
     """
     import torch
 
-    # Convert to list for efficient indexing and iteration
-    if isinstance(sizes, torch.Tensor):
-        sizes = sizes.tolist()
     n_samples = len(sizes)
 
     # Handle edge cases
@@ -491,7 +488,7 @@ def get_load_balance_assignment(sizes, num_gpus=2):
         return [], [0] * num_gpus, empty_assignment, [0] * num_gpus
 
     # Use greedy algorithm - balance by total size, not sample count
-    gpu_assignments = [[] for _ in range(num_gpus)]
+    gpu_assignments = [list[int]() for _ in range(num_gpus)]
     gpu_loads = [0] * num_gpus  # This tracks total SIZE, not sample count
 
     # Sort indices by size (largest first for better load balancing)
@@ -506,8 +503,8 @@ def get_load_balance_assignment(sizes, num_gpus=2):
         gpu_loads[min_gpu] += sizes[idx]  # Add the SIZE, not just count
 
     # Create shuffle indices and counts
-    shuffle_indices = []
-    gpu_sample_counts = []
+    shuffle_indices = list[int]()
+    gpu_sample_counts = list[int]()
     for gpu_id in range(num_gpus):
         shuffle_indices.extend(gpu_assignments[gpu_id])
         gpu_sample_counts.append(len(gpu_assignments[gpu_id]))

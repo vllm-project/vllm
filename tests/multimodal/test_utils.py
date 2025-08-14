@@ -496,21 +496,6 @@ def test_get_load_balance_assignment_cases(sizes, num_gpus,
         assert torch.all(image_is_in_rank[0])
 
 
-def test_get_load_balance_assignment_torch_tensor_input():
-    """Test get_load_balance_assignment with torch.Tensor input."""
-    sizes_tensor = torch.tensor([100, 200, 300])
-    sizes_list = [100, 200, 300]
-
-    result_tensor = get_load_balance_assignment(sizes_tensor, num_gpus=2)
-    result_list = get_load_balance_assignment(sizes_list, num_gpus=2)
-
-    # Results should be identical
-    assert result_tensor[0] == result_list[0]  # shuffle_indices
-    assert result_tensor[1] == result_list[1]  # gpu_sample_counts
-    assert torch.equal(result_tensor[2], result_list[2])  # image_is_in_rank
-    assert result_tensor[3] == result_list[3]  # grouped_sizes_per_gpu
-
-
 def test_get_load_balance_assignment_consistency():
     """Test that assignment matrix is consistent with shuffle indices."""
     sizes = [100, 200, 300, 400, 500]
