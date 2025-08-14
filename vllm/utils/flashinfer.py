@@ -11,7 +11,7 @@ import functools
 import importlib
 import importlib.util
 import os
-from typing import Any, Callable, NoReturn, Optional
+from typing import Any, Callable, NoReturn
 
 import requests
 import torch
@@ -148,24 +148,55 @@ def has_nvidia_artifactory() -> bool:
         return False
 
 
+def support_trtllm_attention(
+    num_qo_heads: int,
+    num_kv_heads: int,
+) -> bool:
+    """
+    Return ``True`` if the attention satisfies the minimum requirement
+    of TRT-LLM kernel
+    """
+    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
+    # and check if the dimensions are supported
+    return (current_platform.is_device_capability(100)
+            and has_nvidia_artifactory() and num_qo_heads % num_kv_heads == 0)
+
+
 def use_trtllm_attention(
+    num_qo_heads: int,
+    num_kv_heads: int,
     num_tokens: int,
     max_seq_len: int,
     kv_cache_dtype: str,
-    num_qo_heads: Optional[int],
-    num_kv_heads: Optional[int],
-    attn_head_size: Optional[int],
     has_sinks: bool = False,
+    enable_fusion: bool = False,
 ) -> bool:
-    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
-    if not (current_platform.is_device_capability(100)
-            and has_nvidia_artifactory()):
+    """
+    Return ``True`` if TRTLLM attention is usable
+    """
+    if not support_trtllm_attention(num_qo_heads, num_kv_heads):
         return False
 
-    # Check if the dimensions are supported by TRTLLM decode attention
-    if (attn_head_size is None or num_qo_heads is None or num_kv_heads is None
-            or num_qo_heads % num_kv_heads != 0):
-        return False
+    if kv_cache_dtype.startswith("fp8"):
+        if enable_fusion:
+            logger.info_once("Using TRTLLM attention (FP8 kv cache required).")
+            return True
+        else:
+            # Remove this when TRTLLM attn kernel supports FP8 kv cache
+            # without attn+quant fusion.
+            raise ValueError("Flashinfer TRTLLM attention does not support "
+                             "FP8 kv cache without attn+quant fusion. "
+                             "Suggested the following configs: "
+                             "(1) set kv_cache_dtype to 'auto', or "
+                             "(2) turn on enable_attn_fusion, or "
+                             "(3) disable Flashinfer backend")
+    elif kv_cache_dtype == "auto" and enable_fusion:
+        raise ValueError("Flashinfer TRTLLM attention does not support "
+                         "auto kv cache dtype with attn+quant fusion. "
+                         "Suggested the following configs: "
+                         "(1) set kv_cache_dtype to 'fp8', or "
+                         "(2) turn off enable_attn_fusion, or "
+                         "(3) disable Flashinfer backend")
 
     # If sinks are being used, we must use TRTLLM attention as it's
     # the only backend that supports them
@@ -274,6 +305,7 @@ __all__ = [
     "has_flashinfer_moe",
     "has_flashinfer_cutlass_fused_moe",
     "has_nvidia_artifactory",
+    "support_trtllm_attention",
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
 ]
