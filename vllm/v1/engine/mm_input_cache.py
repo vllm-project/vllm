@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Optional
+from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
-from vllm.multimodal import MultiModalKwargs, MultiModalRegistry
+from vllm.multimodal import MultiModalRegistry
 from vllm.multimodal.cache import MultiModalCache, MultiModalCacheItemMetadata
-from vllm.utils import is_list_of
+from vllm.multimodal.inputs import MultiModalKwargsItem, NestedTensors
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -17,23 +17,23 @@ if TYPE_CHECKING:
 # -- P0:
 #  - BaseMultiModalProcessor calls MultiModalHasher to get the `mm_hash` of
 #    each input multi-modal item (e.g. image),
-#  - BaseMultiModalProcessor processes the input items into `mm_inputs`,
+#  - BaseMultiModalProcessor processes the input items into `mm_kwargs`,
 #    which are MultiModalKwargsItem instances that each correspond to an
 #    input multi-modal item.
-#  - MultiModalInputCacheClient accepts the `mm_inputs` and corresponding
+#  - MultiModalInputCacheClient accepts the `mm_kwargs` and corresponding
 #    `mm_hash` for each item. It stores the `mm_hash` as keys and the size
-#    of `mm_inputs`, but not the `mm_inputs` themselves, to avoid taking
+#    of `mm_kwargs`, but not the `mm_kwargs` themselves, to avoid taking
 #    up additional memory in P0.
 #  - The `mm_hash` is always sent to P1.
-#  - The corresponding `mm_inputs` are only sent to P1 if they are not cached
+#  - The corresponding `mm_kwargs` are only sent to P1 if they are not cached
 #    in MultiModalInputCacheServer.
 #
 # -- P1:
-#  - If the `mm_hash` is cached (i.e. `mm_inputs` are not sent from P0),
-#    MultiModalInputCacheServer retrieves the corresponding `mm_inputs`.
-#  - If the `mm_hash` is not cached (i.e. `mm_inputs` are sent from P0),
-#    MultiModalInputCacheServer stores `mm_inputs` under the key `mm_hash`.
-#  - Either way, the `mm_hash` and corresponding `mm_inputs` are sent to
+#  - If the `mm_hash` is cached (i.e. `mm_kwargs` are not sent from P0),
+#    MultiModalInputCacheServer retrieves the corresponding `mm_kwargs`.
+#  - If the `mm_hash` is not cached (i.e. `mm_kwargs` are sent from P0),
+#    MultiModalInputCacheServer stores `mm_kwargs` under the key `mm_hash`.
+#  - Either way, the `mm_hash` and corresponding `mm_kwargs` are sent to
 #    the engine for model execution.
 #
 # Both Client and Server must perform cache update and eviction based on the
@@ -58,26 +58,24 @@ class MultiModalInputCacheClient:
 
     def get_and_update(
         self,
-        mm_inputs: Sequence[MultiModalKwargs],
+        mm_kwargs: list[MultiModalKwargsItem],
         mm_hashes: list[str],
-    ) -> Sequence[Optional[MultiModalKwargs]]:
-        assert len(mm_inputs) == len(mm_hashes)
-
+    ) -> list[MultiModalKwargsItem]:
         if not self.enabled:
-            assert is_list_of(mm_inputs, MultiModalKwargs)
-            return mm_inputs
+            return mm_kwargs
 
-        full_mm_inputs = list[Optional[MultiModalKwargs]]()
-        for mm_input, mm_hash in zip(mm_inputs, mm_hashes):
+        assert len(mm_kwargs) == len(mm_hashes)
+
+        out_mm_items = list[MultiModalKwargsItem]()
+        for mm_item, mm_hash in zip(mm_kwargs, mm_hashes):
             if self.mm_cache.get(mm_hash) is not None:
-                mm_input = None
+                out_mm_items.append(mm_item.without_data())
             else:
                 self.mm_cache[mm_hash] = \
-                    MultiModalCacheItemMetadata.wraps(mm_input)
+                    MultiModalCacheItemMetadata.wraps(mm_item.require_data())
+                out_mm_items.append(mm_item)
 
-            full_mm_inputs.append(mm_input)
-
-        return full_mm_inputs
+        return out_mm_items
 
     def reset(self) -> None:
         self.mm_cache.clear()
@@ -93,30 +91,28 @@ class MultiModalInputCacheServer:
         self.enabled = mm_registry.enable_mm_input_cache(model_config)
         self.mm_cache = MultiModalCache.get_lru_cache(
             model_config.get_mm_input_cache_gb(),
-            MultiModalKwargs,
+            Mapping[str, NestedTensors],
         )
 
     def get_and_update(
         self,
-        mm_inputs: Sequence[Optional[MultiModalKwargs]],
+        mm_kwargs: list[MultiModalKwargsItem],
         mm_hashes: list[str],
-    ) -> Sequence[MultiModalKwargs]:
-        assert len(mm_inputs) == len(mm_hashes)
-
+    ) -> list[MultiModalKwargsItem]:
         if not self.enabled:
-            assert is_list_of(mm_inputs, MultiModalKwargs)
-            return mm_inputs
+            return mm_kwargs
 
-        full_mm_inputs = list[MultiModalKwargs]()
-        for mm_input, mm_hash in zip(mm_inputs, mm_hashes):
-            if mm_input is None:
-                mm_input = self.mm_cache[mm_hash]
+        assert len(mm_kwargs) == len(mm_hashes)
+
+        out_mm_items = list[MultiModalKwargsItem]()
+        for mm_item, mm_hash in zip(mm_kwargs, mm_hashes):
+            if (mm_data := mm_item.get_data()) is None:
+                out_mm_items.append(mm_item.with_data(self.mm_cache[mm_hash]))
             else:
-                self.mm_cache[mm_hash] = mm_input
+                self.mm_cache[mm_hash] = mm_data
+                out_mm_items.append(mm_item)
 
-            full_mm_inputs.append(mm_input)
-
-        return full_mm_inputs
+        return out_mm_items
 
     def reset(self) -> None:
         self.mm_cache.clear()
