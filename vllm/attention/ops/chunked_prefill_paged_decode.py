@@ -63,9 +63,9 @@ def kernel_paged_attention_2d(
         filter_by_query_len: tl.constexpr,  # bool
         query_start_len_ptr,  # [num_seqs+1]
         USE_FP8: tl.constexpr,
+        USE_SINKS: tl.constexpr,  # bool
         FP8_MIN: tl.constexpr = float8_info.min,
         FP8_MAX: tl.constexpr = float8_info.max,
-        USE_SINKS: tl.constexpr,  # bool
 ):
     seq_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
