@@ -30,12 +30,36 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
             "cause performance degradation. Please upgrade to torch nightly")
         value_layout, value_layout_opts = StridedLayout, dict()
         scale_layout, scale_layout_opts = StridedLayout, dict()
+
+    elif current_platform.is_rocm():
+        from triton_kernels.target_info import is_hip
+        from triton_kernels.tensor_details.layout import (
+            BlackwellMXScaleLayout, HopperMXScaleLayout, HopperMXValueLayout,
+            GFX950MXScaleLayout)
+        value_layout = StridedLayout
+        scale_layout = StridedLayout
+        if not is_hip():
+            if torch.cuda.get_device_capability()[0] == 9:
+                value_layout = HopperMXValueLayout
+                scale_layout = HopperMXScaleLayout
+            if torch.cuda.get_device_capability()[0] == 10:
+                scale_layout = BlackwellMXScaleLayout
+        else:
+            import os
+            use_scale_preshuffling = os.environ.get(
+                "TRITON_HIP_PRESHUFFLE_SCALES", "0") == "1"
+            if use_scale_preshuffling:
+                scale_layout = GFX950MXScaleLayout
     else:
-        value_layout, value_layout_opts = \
-            layout.make_default_matmul_mxfp4_w_layout(mx_axis=1)
+        """ weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel
+        """
+        value_layout, value_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
+            mx_axis=1)
         scale_layout, scale_layout_opts = (
             layout.make_default_matmul_mxfp4_w_scale_layout(
                 mx_axis=1, num_warps=num_warps))
+
+
     if current_platform.is_cuda() and \
         current_platform.is_device_capability(100):
         constraints = {
@@ -46,10 +70,16 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
     # transpose the tensor so that the quantization axis is on dim1
     quant_tensor = quant_tensor.transpose(-2, -1)
     scale = scale.transpose(-2, -1)
-    quant_tensor = convert_layout(wrap_torch_tensor(quant_tensor, dtype=FP4),
-                                  value_layout, **value_layout_opts)
-    scale = convert_layout(wrap_torch_tensor(scale), scale_layout,
-                           **scale_layout_opts)
+    if current_platform.is_rocm():
+        quant_tensor = convert_layout(
+            wrap_torch_tensor(quant_tensor, dtype=FP4), value_layout)
+        scale = convert_layout(wrap_torch_tensor(scale), scale_layout)
+    else:
+        quant_tensor = convert_layout(
+            wrap_torch_tensor(quant_tensor, dtype=FP4), value_layout,
+            **value_layout_opts)
+        scale = convert_layout(wrap_torch_tensor(scale), scale_layout,
+                               **scale_layout_opts)
     return quant_tensor, InFlexData(), scale
 
 

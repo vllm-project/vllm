@@ -69,6 +69,8 @@ RUN git clone ${TRITON_REPO}
 RUN cd triton \
     && git checkout ${TRITON_BRANCH} \
     && python3 setup.py bdist_wheel --dist-dir=python/dist
+RUN pip install build && cd triton/python/triton_kernels \
+    && python3 -m build --wheel && cp dist/*.whl /app/triton/python/dist
 RUN mkdir -p /app/install && cp /app/triton/python/dist/*.whl /app/install
 
 FROM base AS build_amdsmi
