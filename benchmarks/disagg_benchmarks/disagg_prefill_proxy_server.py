@@ -10,6 +10,8 @@ from collections import deque
 import aiohttp
 from quart import Quart, Response, make_response, request
 
+from request_queue import RequestQueue
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,7 +34,7 @@ app = Quart(__name__)
 class RateLimiter:
     def __init__(self, rate_limit):
         self.rate_limit = rate_limit  # Requests per second
-        self.tokens = rate_limit  # Available tokens
+        self.num_available_tokens = rate_limit  # Available tokens
         self.last_refill = time.monotonic()  # Last token refill time
         self.lock = asyncio.Lock()  # Synchronization lock
 
@@ -43,53 +45,19 @@ class RateLimiter:
                 current_time = time.monotonic()
                 elapsed = current_time - self.last_refill
 
-                # Refill tokens if more than 1 second has passed
+                # Refill num_available_tokens if more than 1 second has passed
                 if elapsed > 1.0:
-                    self.tokens = self.rate_limit
+                    self.num_available_tokens = self.rate_limit
                     self.last_refill = current_time
 
-                # Check if tokens are available
-                if self.tokens > 0:
-                    self.tokens -= 1
+                # Check if num_available_tokens are available
+                if self.num_available_tokens > 0:
+                    self.num_available_tokens -= 1
                     return True
 
-                # Calculate wait time if no tokens available
+                # Calculate wait time if no num_available_tokens available
                 wait_time = 1.0 - elapsed
             await asyncio.sleep(wait_time)
-
-
-# Request queue manager with concurrency control
-class RequestQueue:
-    def __init__(self, max_concurrent, max_queue_size):
-        # Maximum concurrent requests
-        self.max_concurrent = max_concurrent
-        self.max_queue_size = max_queue_size  # Maximum queue size
-        # Concurrency control
-        self.semaphore = asyncio.Semaphore(max_concurrent)
-        self.queue = deque()  # Request queue
-        self.queue_size = 0  # Current queue size
-        self.lock = asyncio.Lock()  # Sync queue Lock
-
-    async def enqueue(self, task):
-        """Add a request task to the queue"""
-        async with self.lock:
-            if self.queue_size >= self.max_queue_size:
-                logger.warning("Request queue full, rejecting request")
-                return False
-
-            self.queue.append(task)
-            self.queue_size += 1
-            return True
-
-    async def process(self):
-        """Process queued requests using semaphore for concurrency control"""
-        while True:
-            if self.queue:
-                async with self.semaphore, self.lock:
-                    task = self.queue.popleft()
-                    self.queue_size -= 1
-                    await task
-            await asyncio.sleep(0.01)  # Yield control to event loop
 
 
 # Initialize rate limiter and request queue
@@ -142,7 +110,7 @@ async def process_request():
         prefill_request["max_tokens"] = 1
 
         # Execute prefill stage
-        async for _ in forward_request(PRE_SERVICE_URL, prefill_request):
+        async for _ in forward_request(PREFILL_SERVICE_URL, prefill_request):
             continue
 
         # Execute decode stage and stream response
@@ -151,10 +119,7 @@ async def process_request():
         response.timeout = None  # Disable timeout for streaming response
         return response
 
-    except Exception as e:
-        # Handle internal server errors
-        import traceback
-
+    except Exception:
         logger.exception("Error processing request")
         return Response(
             response=b'{"error": "Internal server error"}',
