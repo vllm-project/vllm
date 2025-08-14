@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
-from urllib.parse import ParseResult, urlparse
+from urllib.parse import ParseResult, unquote, urlparse
 
 import numpy as np
 import numpy.typing as npt
@@ -108,7 +108,7 @@ class MediaConnector:
             raise RuntimeError("Cannot load local files without "
                                "`--allowed-local-media-path`.")
 
-        filepath = Path(url_spec.path)
+        filepath = Path(unquote(url_spec.path))
         if allowed_local_media_path not in filepath.resolve().parents:
             raise ValueError(
                 f"The file path {filepath} must be a subpath "
