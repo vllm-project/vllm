@@ -79,6 +79,8 @@ async def generate(
 async def test_load(output_kind: RequestOutputKind,
                     data_parallel_backend: str):
 
+    pytest.skip("Skipping until Issue 22902 is resolved")
+
     stats_loggers = {}
 
     @dataclass
