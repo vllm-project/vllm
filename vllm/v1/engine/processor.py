@@ -440,11 +440,6 @@ class Processor:
             if orig_device == "cpu":
                 return
 
-            # Peak memory usage (required for this profiling)
-            # is only tracked for CUDA
-            if not current_platform.is_cuda_alike():
-                return
-
             parallel_config = self.parallel_config
             device_count = current_platform.device_count()  # type: ignore
 
@@ -465,6 +460,11 @@ class Processor:
             ]
 
             model_config.update_mm_processor_kwargs({"device": new_device})
+
+            # Peak memory usage (required for this profiling)
+            # is only tracked for CUDA
+            if not current_platform.is_cuda_alike():
+                return
 
             # Only run profiling on the first Processor for each device,
             # then multiply the usage by the number of processors for that
