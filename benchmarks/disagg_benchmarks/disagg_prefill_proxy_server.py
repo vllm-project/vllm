@@ -10,6 +10,7 @@ from collections import deque
 import aiohttp
 from quart import Quart, Response, make_response, request
 
+from rate_limiter import RateLimiter
 from request_queue import RequestQueue
 
 # Configure logging
@@ -28,37 +29,6 @@ PREFILL_SERVICE_URL = "http://localhost:8100/v1/completions"
 DECODE_SERVICE_URL = "http://localhost:8200/v1/completions"
 # run this need pip install quart
 app = Quart(__name__)
-
-
-# Token bucket rate limiter implementation
-class RateLimiter:
-    def __init__(self, rate_limit):
-        self.rate_limit = rate_limit  # Requests per second
-        self.num_available_tokens = rate_limit  # Available tokens
-        self.last_refill = time.monotonic()  # Last token refill time
-        self.lock = asyncio.Lock()  # Synchronization lock
-
-    async def acquire(self):
-        """Acquire a token from the rate limiter"""
-        while True:
-            async with self.lock:
-                current_time = time.monotonic()
-                elapsed = current_time - self.last_refill
-
-                # Refill num_available_tokens if more than 1 second has passed
-                if elapsed > 1.0:
-                    self.num_available_tokens = self.rate_limit
-                    self.last_refill = current_time
-
-                # Check if num_available_tokens are available
-                if self.num_available_tokens > 0:
-                    self.num_available_tokens -= 1
-                    return True
-
-                # Calculate wait time if no num_available_tokens available
-                wait_time = 1.0 - elapsed
-            await asyncio.sleep(wait_time)
-
 
 # Initialize rate limiter and request queue
 rate_limiter = RateLimiter(RATE_LIMIT)
