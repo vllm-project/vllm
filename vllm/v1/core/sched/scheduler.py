@@ -1151,8 +1151,8 @@ class Scheduler(SchedulerInterface):
             scheduler the request during the next step.
         """
 
-        assert self.connector is not None
-        self.connector.update_connector_output(kv_connector_output)
+        if self.connector is not None:
+            self.connector.update_connector_output(kv_connector_output)
 
         # KV Connector:: update recv and send status from last step.
         for req_id in (kv_connector_output.finished_recving or ()):

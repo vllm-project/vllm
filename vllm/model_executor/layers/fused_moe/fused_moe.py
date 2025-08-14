@@ -40,7 +40,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
-from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
+from vllm.utils.deep_gemm import is_blackwell_deep_gemm_e8m0_used
 
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
@@ -701,20 +701,32 @@ def get_moe_configs(
     block_shape = [block_n, block_k] if block_n and block_k else None
     json_file_name = get_config_file_name(E, N, dtype, block_shape)
 
-    config_file_path = os.path.join(
+    config_file_paths = []
+
+    # note that we prioritize user defined config
+    user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
+    if user_defined_config_folder is not None:
+        user_defined_config_file_path = os.path.join(
+            user_defined_config_folder, json_file_name)
+        config_file_paths.append(user_defined_config_file_path)
+
+    default_config_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
-    if os.path.exists(config_file_path):
-        with open(config_file_path) as f:
-            logger.info("Using configuration from %s for MoE layer.",
-                        config_file_path)
-            # If a configuration has been found, return it
-            return {int(key): val for key, val in json.load(f).items()}
+    config_file_paths.append(default_config_file_path)
+
+    for config_file_path in config_file_paths:
+        if os.path.exists(config_file_path):
+            with open(config_file_path) as f:
+                logger.info("Using configuration from %s for MoE layer.",
+                            config_file_path)
+                # If a configuration has been found, return it
+                return {int(key): val for key, val in json.load(f).items()}
 
     # If no optimized configuration is available, we will use the default
     # configuration
     logger.warning(
         ("Using default MoE config. Performance might be sub-optimal! "
-         "Config file not found at %s"), config_file_path)
+         "Config file not found at %s"), config_file_paths)
     return None
 
 
@@ -1387,8 +1399,8 @@ def fused_experts(hidden_states: torch.Tensor,
     # E8M0 scale, which means we requantize the weight and input to the specific
     # scale. Fallen back to cutlass or triton for some cases would cause
     # accuracy issue.
-    should_use_deep_gemm = is_blackwell_deep_gemm_used() or _valid_deep_gemm(
-        hidden_states, w1, w2)
+    should_use_deep_gemm = is_blackwell_deep_gemm_e8m0_used(
+    ) or _valid_deep_gemm(hidden_states, w1, w2)
     if (allow_deep_gemm and use_fp8_w8a8 and should_use_deep_gemm):
         assert apply_router_weight_on_input is False
         assert is_act_and_mul, (
