@@ -711,7 +711,7 @@ def run_dp_sharded_mrope_vision_model_empty_input_worker(
 
     # Create empty inputs
     pixel_values = torch.empty((0, 768))
-    grid_thw_list = []
+    grid_thw_list: list[list[int]] = []
 
     vision_model = SimpleMRopeVisionModel()
 
