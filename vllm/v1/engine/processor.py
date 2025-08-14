@@ -487,6 +487,7 @@ class Processor:
 
             # Only run this check if we are sure that the EngineCore is not
             # running profiling on the same GPU
+            # TODO: world_size_across_dp is too conservative for multi-node
             new_device_index = torch.device(new_device).index or 0
             if new_device_index < parallel_config.world_size_across_dp:
                 logger.warning(
