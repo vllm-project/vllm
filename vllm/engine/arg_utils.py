@@ -1252,6 +1252,24 @@ class EngineArgs:
             disable_log_stats=self.disable_log_stats,
         )
 
+        # Make sure the draft model's max_model_len is not less than
+        # the deployment's max_model_len.
+        # In V1 there is no way to disable requests when the sequence length
+        # exceeds the draft model's max_model_len, which can lead to crashes.
+        effective_max_model_len = self.max_model_len
+        if effective_max_model_len is None:
+            effective_max_model_len = model_config.max_model_len
+        if use_v1 and speculative_config is not None and \
+            speculative_config.draft_model_config is not None and \
+                speculative_config.draft_model_config.max_model_len \
+                    < effective_max_model_len:
+            raise ValueError(
+                "The draft model config's max_model_len "
+                f"({speculative_config.draft_model_config.max_model_len}) "
+                "is less than the deployment's max_model_len "
+                f"({effective_max_model_len})."
+                "--max-model-len should be decreased to match.")
+
         # make sure num_lookahead_slots is set appropriately depending on
         # whether speculative decoding is enabled
         num_lookahead_slots = self.num_lookahead_slots
