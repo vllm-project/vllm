@@ -240,7 +240,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     export PATH=$PATH:/usr/lib64/llvm15/bin && \
     uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl /numbawheels/*.whl && \
     sed -i -e 's/.*torch.*//g' /src/pyproject.toml /src/requirements/*.txt && \
-    uv pip install pandas pythran nanobind pybind11 /hf_wheels/*.whl && \
+    sed -i -e 's/.*sentencepiece.*//g' /src/pyproject.toml /src/requirements/*.txt && \
+    uv pip install sentencepiece==0.2.0 pandas pythran nanobind pybind11 /hf_wheels/*.whl && \
     make -C /numactl install && \
     # sentencepiece.pc is in some pkgconfig inside uv cache
     export PKG_CONFIG_PATH=$(find / -type d -name "pkgconfig" 2>/dev/null | tr '\n' ':') && \
