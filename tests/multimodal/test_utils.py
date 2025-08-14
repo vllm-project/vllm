@@ -410,7 +410,7 @@ def test_allocate_gpu_mm_processors(case):
                 ("image", 2),
             ],
         ),
-        ## Interleaved, internally sunorted
+        ## Interleaved, internally unsorted
         dict(
             mm_positions={
                 "image": [
