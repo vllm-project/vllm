@@ -86,7 +86,7 @@ class RemoteOpenAIServer:
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
         if env_dict is not None:
             env.update(env_dict)
-        self.proc = subprocess.Popen(
+        self.proc: subprocess.Popen = subprocess.Popen(
             ["vllm", "serve", model, *vllm_serve_args],
             env=env,
             stdout=sys.stdout,

@@ -41,7 +41,8 @@ class RemoteOpenAIServerWithEntrypoint(RemoteOpenAIServer):
             sys.argv = ["vllm", "serve", model] + vllm_serve_args
             main.main()
 
-        self.proc = Process(target=_child_process)
+        self.proc: Process = Process(
+            target=_child_process)  # type: ignore[assignment]
         self.proc.start()
 
     def _poll(self) -> Optional[int]:
