@@ -21,9 +21,6 @@ def server():
         "--tool-call-parser",
         "hermes",
         "--enforce-eager",
-        # For debugging
-        "--gpu-memory-utilization",
-        "0.7",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
