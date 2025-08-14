@@ -91,6 +91,7 @@ def triton_linear(input, weight):
         input,
         weight,
         out,
+        B,
         OUT,
         IN,
         input.stride(0),
