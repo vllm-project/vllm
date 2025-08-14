@@ -876,7 +876,7 @@ def run_dp_sharded_mrope_vision_model_uneven_load_worker(
 @pytest.mark.parametrize("spatial_merge_size", [2, 4])
 def test_simple_mrope_vision_model_spatial_merge(spatial_merge_size: int):
     """Test SimpleMRopeVisionModel with different spatial merge sizes."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = current_platform.device_type
 
     grid_thw_list = [[1, 4, 4], [1, 6, 6]]  # Two images
     pixel_values_list = []
