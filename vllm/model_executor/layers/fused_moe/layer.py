@@ -653,6 +653,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         forward_native = forward_tpu
     elif current_platform.is_cpu():
         forward_native = forward_cpu
+    elif current_platform.is_xpu():
+        forward_native = forward_xpu
     else:
         forward_native = forward_cuda
 
