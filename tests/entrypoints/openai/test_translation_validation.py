@@ -4,14 +4,13 @@
 import io
 # imports for guided decoding tests
 import json
-from unittest.mock import patch
 
+import httpx
 import librosa
 import numpy as np
 import pytest
 import pytest_asyncio
 import soundfile as sf
-from openai._base_client import AsyncAPIClient
 
 from vllm.assets.audio import AudioAsset
 
@@ -86,7 +85,7 @@ async def test_audio_prompt(foscolo, client):
 
 
 @pytest.mark.asyncio
-async def test_streaming_response(foscolo, client):
+async def test_streaming_response(foscolo, client, server):
     translation = ""
     res_no_stream = await client.audio.translations.create(
         model=MODEL_NAME,
@@ -94,56 +93,74 @@ async def test_streaming_response(foscolo, client):
         response_format="json",
         extra_body=dict(language="it"),
         temperature=0.0)
-    # Unfortunately this only works when the openai client is patched
-    # to use streaming mode, not exposed in the translation api.
-    original_post = AsyncAPIClient.post
-
-    async def post_with_stream(*args, **kwargs):
-        kwargs['stream'] = True
-        return await original_post(*args, **kwargs)
-
-    with patch.object(AsyncAPIClient, "post", new=post_with_stream):
-        res = await client.audio.translations.create(model=MODEL_NAME,
-                                                     file=foscolo,
-                                                     temperature=0.0,
-                                                     extra_body=dict(
-                                                         stream=True,
-                                                         language="it"))
-        # Reconstruct from chunks and validate
-        async for chunk in res:
-            # just a chunk
-            text = chunk.choices[0]['delta']['content']
-            translation += text
+    # Stream via HTTPX since OpenAI translation client doesn't expose streaming
+    url = server.url_for("v1/audio/translations")
+    headers = {"Authorization": f"Bearer {server.DUMMY_API_KEY}"}
+    data = {
+        "model": MODEL_NAME,
+        "language": "it",
+        "stream": True,
+        "temperature": 0.0,
+    }
+    foscolo.seek(0)
+    async with httpx.AsyncClient() as http_client:
+        files = {"file": foscolo}
+        async with http_client.stream("POST",
+                                      url,
+                                      headers=headers,
+                                      data=data,
+                                      files=files) as response:
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                if line.startswith("data: "):
+                    line = line[len("data: "):]
+                if line.strip() == "[DONE]":
+                    break
+                chunk = json.loads(line)
+                text = chunk["choices"][0].get("delta", {}).get("content")
+                translation += text or ""
 
     assert translation == res_no_stream.text
 
 
 @pytest.mark.asyncio
-async def test_stream_options(foscolo, client):
-    original_post = AsyncAPIClient.post
-
-    async def post_with_stream(*args, **kwargs):
-        kwargs['stream'] = True
-        return await original_post(*args, **kwargs)
-
-    with patch.object(AsyncAPIClient, "post", new=post_with_stream):
-        res = await client.audio.translations.create(
-            model=MODEL_NAME,
-            file=foscolo,
-            temperature=0.0,
-            extra_body=dict(language="it",
-                            stream=True,
-                            stream_include_usage=True,
-                            stream_continuous_usage_stats=True))
-        final = False
-        continuous = True
-        async for chunk in res:
-            if not len(chunk.choices):
-                # final usage sent
-                final = True
-            else:
-                continuous = continuous and hasattr(chunk, 'usage')
-        assert final and continuous
+async def test_stream_options(foscolo, client, server):
+    url = server.url_for("v1/audio/translations")
+    headers = {"Authorization": f"Bearer {server.DUMMY_API_KEY}"}
+    data = {
+        "model": MODEL_NAME,
+        "language": "it",
+        "stream": True,
+        "stream_include_usage": True,
+        "stream_continuous_usage_stats": True,
+        "temperature": 0.0,
+    }
+    foscolo.seek(0)
+    final = False
+    continuous = True
+    async with httpx.AsyncClient() as http_client:
+        files = {"file": foscolo}
+        async with http_client.stream("POST",
+                                      url,
+                                      headers=headers,
+                                      data=data,
+                                      files=files) as response:
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                if line.startswith("data: "):
+                    line = line[len("data: "):]
+                if line.strip() == "[DONE]":
+                    break
+                chunk = json.loads(line)
+                choices = chunk.get("choices", [])
+                if not choices:
+                    # final usage sent
+                    final = True
+                else:
+                    continuous = continuous and ("usage" in chunk)
+    assert final and continuous
 
 
 @pytest.mark.asyncio
