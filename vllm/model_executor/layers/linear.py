@@ -3,7 +3,7 @@
 
 import itertools
 from abc import abstractmethod
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal, Optional, Union, Callable
 
 import torch
 import torch.nn as nn
@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 # yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
-                                           BlockQuantScaleParameter,
+                                           BlockQuantScaleParameter, ModelWeightParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            PerTensorScaleParameter,
@@ -33,6 +33,7 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
+    "CompressedTensorsUnquantizedLinearMethod",
     "CompressedTensorsLinearMethod",
     "BitBLASLinearMethod",
     "GPTQBitBLASLinearMethod",
@@ -155,7 +156,7 @@ class LinearMethodBase(QuantizeMethodBase):
                        input_size_per_partition: int,
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
-                       **extra_weight_attrs):
+                       weight_loader: Callable, **extra_weight_attrs):
         """Create weights for a linear layer. 
            The weights will be set as attributes of the layer.
 
@@ -188,14 +189,22 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        input_size_per_partition: int,
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
-                       **extra_weight_attrs):
-        weight = Parameter(torch.empty(sum(output_partition_sizes),
+                       weight_loader: Callable, **extra_weight_attrs):
+        weight = ModelWeightParameter(data=torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
                                        dtype=params_dtype),
-                           requires_grad=False)
-        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+                           input_dim=1,
+                           output_dim=0,
+                           weight_loader=weight_loader)
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
+        # weight = Parameter(torch.empty(sum(output_partition_sizes),
+        #                                input_size_per_partition,
+        #                                dtype=params_dtype),
+        #                    requires_grad=False)
+        # set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0, "weight_loader": weight_loader})
+        # layer.register_parameter("weight", weight)
+        # set_weight_attrs(weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if current_platform.is_cpu() and envs.VLLM_CPU_SGL_KERNEL:
@@ -218,12 +227,17 @@ class UnquantizedLinearMethod(LinearMethodBase):
                     " bfloat16 weight, IC and OC are divisible by 32.")
                 layer.use_cpu_sgl = False
 
+        # torch.nn.functional.linear only accepts Parameter, not ModelWeightParameter
+        #layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
+        self.my_data = layer.weight.data
+
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+        #return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+        return dispatch_unquantized_gemm()(layer, x, self.my_data, bias)
 
 
 class LinearBase(torch.nn.Module):

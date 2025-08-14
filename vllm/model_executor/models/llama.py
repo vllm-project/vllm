@@ -468,6 +468,14 @@ class LlamaModel(nn.Module):
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
+        # for param in params_dict.values():
+        #     if hasattr(param, "partitions"):
+        #         for partition in param.partitions.values():
+        #             assert not torch.all(partition.data == 0)
+                
+        #     else:
+        #         assert not torch.all(param.data == 0)
+
         return loaded_params
 
 
