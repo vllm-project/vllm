@@ -98,15 +98,6 @@ steps:
   - pytest -v -s basic_correctness/test_cpu_offload.py
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
 
-- label: Chunked Prefill Test
-  mirror_hardwares: [amdexperimental]
-  source_file_dependencies:
-  - vllm/
-  - tests/basic_correctness/test_chunked_prefill
-  commands:
-  - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py
-  - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
-
 - label: Core Test # 10min
   mirror_hardwares: [amdexperimental]
   fast_check: true
@@ -303,15 +294,6 @@ steps:
     - python3 offline_inference/basic/embed.py
     - python3 offline_inference/basic/score.py
     - VLLM_USE_V1=0 python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
-
-- label: Prefix Caching Test # 9min
-  mirror_hardwares: [amdexperimental]
-  source_file_dependencies:
-  - vllm/
-  - tests/prefix_caching
-  commands:
-    - pytest -v -s prefix_caching
-
 
 - label: Platform Tests (CUDA)
   mirror_hardwares: [amdexperimental]
