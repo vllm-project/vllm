@@ -3500,8 +3500,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Add cross slot mapping for cross-attention
         if is_cross_attention:
-            common_metadata.cross_slot_mapping = torch.tensor(
-                cross_slot_mapping, dtype=torch.int64, device=self.device)
+            common_metadata.slot_mapping = torch.tensor(cross_slot_mapping,
+                                                        dtype=torch.int64,
+                                                        device=self.device)
 
         # Use the first attention metadata builder
         builder = self.attn_groups[0][0].metadata_builder

@@ -139,9 +139,6 @@ class FlashAttentionMetadata:
     max_num_splits: int = 0
 
     causal: bool = True
-    # Begin encoder attn & enc/dec cross-attn fields...
-
-    cross_slot_mapping: Optional[torch.Tensor] = None
 
 
 def _get_sliding_window_configs(
@@ -362,8 +359,6 @@ class FlashAttentionMetadataBuilder(
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
             causal=causal,
-            # Encoder/cross-attention fields
-            cross_slot_mapping=common_attn_metadata.cross_slot_mapping,
         )
         return attn_metadata
 
@@ -497,10 +492,7 @@ class FlashAttentionImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            if attn_type == AttentionType.ENCODER_DECODER:
-                updated_slot_mapping = attn_metadata.cross_slot_mapping
-            else:
-                updated_slot_mapping = attn_metadata.slot_mapping
+            updated_slot_mapping = attn_metadata.slot_mapping
 
             reshape_and_cache_flash(
                 key,

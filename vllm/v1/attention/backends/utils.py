@@ -64,10 +64,6 @@ class CommonAttentionMetadata:
 
     causal: bool = True
 
-    # Encoder/cross-attention specific fields (optional)
-    cross_slot_mapping: Optional[torch.Tensor] = None
-    """Slot mapping for cross-attention KV cache"""
-
 
 @dataclass
 class UbatchSlice:
