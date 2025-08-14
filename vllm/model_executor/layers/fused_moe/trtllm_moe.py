@@ -55,7 +55,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # TODO(varun) : workspace1 is could be used as the output tensor. This
         # is error-prone. Allow the `workspace_shapes` to return None workspaces
         workspace1 = (M, K)
-        workspace2 = (1)  # (1) as we cant return None.
+        workspace2 = (1, 1)  # (1, 1) as we cant return None.
         output = (M, K)
         return (workspace1, workspace2, output, a.dtype)
 
@@ -186,7 +186,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "do_finalize":
             True,
             "output":
-            None,
+            output,
         }
 
         trtllm_fp4_block_scale_routed_moe(**kwargs)

@@ -490,39 +490,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             "output": output,
         }
 
-        trtllm_gen_output = trtllm_fp4_block_scale_routed_moe(**kwargs)[0]
-
-        #trtllm_gen_output = trtllm_fp4_block_scale_routed_moe(
-        #    packed_tensor,
-        #    None,  # routing_bias
-        #    x_quant,
-        #    x_scale,
-        #    layer.w13_weight,  # uint8 (e2m1 x 2)
-        #    layer.w13_weight_scale,  # uint8 (e4m3 x 2)
-        #    layer.w13_bias,  # fp32 per expert per channel
-        #    layer.gemm1_alpha,  # fp32 per expert
-        #    layer.gemm1_beta,  # fp32 per expert
-        #    layer.gemm1_clamp_limit,  # fp32 per expert
-        #    layer.w2_weight,  # uint8 (e2m1 x 2)
-        #    layer.w2_weight_scale,  # ue8m0
-        #    layer.w2_bias,  # fp32 per expert per channel
-        #    None,  # output1_scale_scalar
-        #    None,  # output1_scale_gate_scalar
-        #    None,  # output2_scale_scalar
-        #    self.num_experts,
-        #    top_k,
-        #    None,  # n_group
-        #    None,  # topk_group
-        #    self.intermediate_size,  # padded to multiple of 256
-        #    0,  # local_expert_offset
-        #    self.num_experts,  # local num experts
-        #    None,
-        #    8, # self._get_tile_tokens_dim(hidden_states, topk),
-        #    1,  # routing_method_type, renormalize
-        #    True,  # do finalize
-        #    output,
-        #)[0]
-        return trtllm_gen_output
+        trtllm_fp4_block_scale_routed_moe(**kwargs)
+        return output
 
     def _route_and_experts(
             self,
@@ -615,6 +584,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
         if False:
+            # TODO(varun) : remove before landing
             return self._route_and_experts_example(
                 layer, x, router_logits, top_k, renormalize, use_grouped_topk,
                 topk_group, num_expert_group, global_num_experts, expert_map,
