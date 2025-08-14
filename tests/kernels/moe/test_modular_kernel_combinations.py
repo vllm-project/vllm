@@ -130,7 +130,7 @@ def run(config: Config, verbose: bool):
 Ms = [32, 64]
 # hidden sizes, making this too large will cause fp4 tests to fail.
 # Also needs to be a multiple of 1024 for deep_gemm.
-Ks = [3072]
+Ks = [2048]
 Ns = [2048]
 TOPKs = [4, 1]
 Es = [32]
