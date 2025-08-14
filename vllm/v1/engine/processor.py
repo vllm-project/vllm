@@ -447,15 +447,11 @@ class Processor:
                 engine_device_count=parallel_config.world_size_across_dp,
             )
 
-            new_device = gpu_allocation[parallel_config.api_process_rank]
+            api_process_rank = parallel_config.api_process_rank
+            new_device = gpu_allocation[api_process_rank]
+
             logger.info("Multi-modal processor will be run on device %s",
                         new_device)
-
-            new_device_ranks = [
-                rank for rank in range(parallel_config.api_process_count)
-                if gpu_allocation[rank] == new_device
-            ]
-
             model_config.update_mm_processor_kwargs({"device": new_device})
 
             # Peak memory usage (required for this profiling)
@@ -468,7 +464,7 @@ class Processor:
             # device.
             # Compared to running profiling on every Processor in parallel,
             # this avoids non-deterministic peak memory usage calculation.
-            if parallel_config.api_process_rank != new_device_ranks[0]:
+            if api_process_rank != gpu_allocation.index(new_device):
                 return
 
             scheduler_config = self.scheduler_config
@@ -486,7 +482,7 @@ class Processor:
             new_device_index = torch.device(new_device).index or 0
             if new_device_index < parallel_config.world_size_across_dp:
                 logger.warning(
-                    "Both EngineCore and multi-modal processing are using "
+                    "Both EngineCore and multi-modal processor are using "
                     "the same GPU (%s). This may result in inaccurate memory "
                     "profiling, and resource contention during inference.",
                     new_device,
@@ -503,7 +499,8 @@ class Processor:
                         mm_counts={modality: max_items_per_prompt},
                     )
 
-            memory_usage = diff.torch_peak_increase * len(new_device_ranks)
+            usage_mult = gpu_allocation.count(new_device)
+            memory_usage = diff.torch_peak_increase * usage_mult
             logger.info(
                 "Multi-modal processing took %.4f GiB and %.6f seconds on %s",
                 memory_usage / GiB_bytes,
@@ -512,5 +509,5 @@ class Processor:
             )
             if memory_usage > diff.before_profile.free_memory:
                 raise ValueError(f"Not enough memory in {new_device} "
-                                 f"for multi-modal processing. "
+                                 f"for multi-modal processor. "
                                  f"Try reducing `api_server_count`.")
