@@ -1106,7 +1106,10 @@ class NixlConnectorWorker:
                     if time.perf_counter() - _xfer_stime > self.xfer_timeout:
                         logger.warning("Transfer %d for request %s timed out",
                                        handle, req_id)
-                    in_progress = True
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                        Failed = True
+                    else:
+                        in_progress = True
                 else:
                     logger.error(
                         "Transfer %d for request %s failed with state: %s",
@@ -1242,6 +1245,7 @@ class NixlConnectorWorker:
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
+        handle = None
         try:
             # Prepare transfer with Nixl.
             handle = self.nixl_wrapper.make_prepped_xfer(
@@ -1260,7 +1264,8 @@ class NixlConnectorWorker:
             self._recving_transfers[request_id].append(
                 (handle, time.perf_counter()))
         except Exception as e:
-            self.nixl_wrapper.release_xfer_handle(handle)
+            if handle is not None:
+                self.nixl_wrapper.release_xfer_handle(handle)
             logger.error("Failed to start NIXL xfer for request %s: %s",
                          request_id, e)
             self.failure_request.add(request_id)

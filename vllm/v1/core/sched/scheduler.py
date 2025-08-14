@@ -1169,7 +1169,9 @@ class Scheduler(SchedulerInterface):
         for req_id in (kv_connector_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
-        for req_id in (model_runner_output.failure_request or ()):
+        for req_id in (kv_connector_output.failure_request or ()):
             logger.debug("Failed KV transfer for request %s", req_id)
-            self._free_blocks(self.requests[req_id])
-            self.failure_request.add(req_id)
+            request = self.requests.get(req_id)
+            if request is None:
+                self._free_blocks(self.requests[req_id])
+                self.failure_request.add(req_id)
