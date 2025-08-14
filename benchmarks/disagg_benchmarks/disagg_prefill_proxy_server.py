@@ -155,8 +155,7 @@ async def process_request():
         # Handle internal server errors
         import traceback
 
-        logger.error("Error processing request: %s", str(e))
-        logger.error(traceback.format_exc())
+        logger.exception("Error processing request")
         return Response(
             response=b'{"error": "Internal server error"}',
             status=500,
