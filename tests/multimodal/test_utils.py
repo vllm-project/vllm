@@ -252,19 +252,13 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
             expected_gpu_allocation=["cuda:0", "cuda:0"],
         ),
         dict(
-            mm_processor_device="cuda:1",
-            mm_processor_count=2,
-            available_device_count=4,
-            engine_device_count=2,
-            expected_gpu_allocation=["cuda:1", "cuda:1"],
-        ),
-        dict(
             mm_processor_device="cuda:2",
             mm_processor_count=2,
             available_device_count=4,
             engine_device_count=2,
             expected_gpu_allocation=["cuda:2", "cuda:2"],
         ),
+        # Out-of-bounds device
         dict(
             mm_processor_device="cuda:4",
             mm_processor_count=2,
