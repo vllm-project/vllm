@@ -440,6 +440,8 @@ class Processor:
             if orig_device == "cpu":
                 return
 
+            # Allocate the GPU for each processor to avoid using the same
+            # GPUs as EngineCore
             parallel_config = self.parallel_config
             device_count = current_platform.device_count()  # type: ignore
 
