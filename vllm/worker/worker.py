@@ -422,12 +422,15 @@ class Worker(LocalOrDistributedWorkerBase):
             cuda_graph_memory_bytes = self.model_runner.capture_model(
                 self.gpu_cache)
 
-        if self.cache_config.kv_cache_memory is None:
-            # When kv_cache_memory is None, we rely on `memory_profiling`
-            # to estimate the KV cache memory, which does not consider
+        if (self.cache_config.kv_cache_memory is None 
+            and hasattr(self, "peak_activation_memory")):
+            # Suggests optimal kv cache memory size if we rely on
+            # memory_profiling to guess the kv cache memory size which
+            # provides peak_activation_memory and a few other memory
+            # consumption. `memory_profiling` does not consider
             # CUDAGraph memory size and may not utilize all gpu memory.
             # Users may want fine-grained control to specify kv cache
-            # memory bytes.
+            # memory size.
             GiB = lambda b: round(b / GiB_bytes, 2)
             non_kv_cache_memory = (self.model_runner.model_memory_usage +
                                    self.peak_activation_memory +
