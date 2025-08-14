@@ -226,21 +226,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Quantization ops
 #ifndef USE_ROCM
-  // Quantized GEMM for AQLM.
-  ops.def(
-      "aqlm_gemm(Tensor input, Tensor codes, Tensor codebooks, "
-      "Tensor scales, int[] codebook_partition_sizes, Tensor? bias) "
-      "-> Tensor",
-      {stride_tag});
-  ops.impl("aqlm_gemm", torch::kCUDA, &aqlm_gemm);
-
-  // Decompression method for AQLM.
-  ops.def(
-      "aqlm_dequant(Tensor codes, Tensor codebooks, "
-      "int[] codebook_partition_sizes) -> Tensor",
-      {stride_tag});
-  ops.impl("aqlm_dequant", torch::kCUDA, &aqlm_dequant);
-
   // Quantized GEMM for AWQ.
   ops.def(
       "awq_gemm(Tensor _in_feats, Tensor _kernel, Tensor _scaling_factors, "

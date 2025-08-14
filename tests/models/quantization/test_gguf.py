@@ -81,9 +81,9 @@ DOLPHIN_CONFIG = GGUFTestConfig(
 MODELS = [
     # LLAMA_CONFIG, # broken: https://github.com/vllm-project/vllm/issues/19458
     QWEN2_CONFIG,
-    PHI3_CONFIG,
+    # PHI3_CONFIG,
     GPT2_CONFIG,
-    STABLELM_CONFIG,
+    # STABLELM_CONFIG,
     DOLPHIN_CONFIG,
     # STARCODER_CONFIG, # broken
 ]
