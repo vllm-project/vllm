@@ -50,7 +50,7 @@ async def forward_request(url, data):
     ):
         try:
             async with session.post(
-                    url=url, json=data, headers=headers
+                url=url, json=data, headers=headers
             ) as response:
                 if response.status == 200:
                     # Stream response chunks
@@ -60,9 +60,9 @@ async def forward_request(url, data):
                     # Handle backend service errors
                     error_text = await response.text()
                     logger.error("Backend service error: %s - %s",
-                                 response.status,
-                                 error_text,
-                                 )
+                        response.status,
+                        error_text,
+                        )
                     yield b'{"error": "Backend service error"}'
         except aiohttp.ClientError as e:
             # Handle connection errors
