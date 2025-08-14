@@ -311,12 +311,14 @@ def cutlass_w4a8_create_bench_fn(
     w_q = ops.cutlass_encode_and_reorder_int4b(w_q)
     # expects fp8 scales
     w_s = ops.cutlass_pack_scale_fp8(bt.w_g_s.to(torch.float8_e4m3fn))
-    # TODO: per-tok/per-chan scales in epilogue
+
     return lambda: ops.cutlass_w4a8_mm(
         a=bt.a,
         b_q=w_q,
         b_type=bt.wtype,
-        b_group_scales=w_s
+        b_group_scales=w_s,
+        b_channel_scales=bt.w_ch_s,
+        a_token_scales=bt.w_tok_s,
     )
 
 # impl

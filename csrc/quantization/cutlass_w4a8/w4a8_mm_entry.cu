@@ -29,7 +29,7 @@
 #include "cutlass/util/mixed_dtype_utils.hpp"
 
 #include "cutlass_extensions/common.hpp"
-#include "mixed_dtype_utils.hpp"
+#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 
 namespace vllm::cutlass_w4a8 {
 
@@ -118,10 +118,17 @@ using KernelSchedule =
 using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecializedCooperative;
 using EpilogueTileType = cutlass::epilogue::collective::EpilogueTileAuto;
 
+// per-tok per-chan scaling, float scales
+using ElementSChannel = float;
+using ChTokScalesEpilogue =
+    typename vllm::c3x::ScaledEpilogue<ElementAccumulator, ElementD,
+                                        TileShape>;
+using EVTCompute = typename ChTokScalesEpilogue::EVTCompute;
+
 using CollectiveEpilogue =
     typename cutlass::epilogue::collective::CollectiveBuilder<
-        cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, TileShape,
-        ClusterShape, EpilogueTileType, ElementAccumulator, ElementAccumulator,
+        ArchTag, OperatorClass, TileShape, ClusterShape, EpilogueTileType,
+        ElementAccumulator, ElementSChannel,
         // Transpose layout of D here since we use explicit swap + transpose
         // the void type for C tells the builder to allocate 0 smem for the C
         // matrix. We can enable this if beta == 0 by changing ElementC to void
@@ -129,8 +136,9 @@ using CollectiveEpilogue =
         ElementC, typename cutlass::layout::LayoutTranspose<LayoutC>::type,
         AlignmentC, ElementD,
         typename cutlass::layout::LayoutTranspose<LayoutD>::type, AlignmentD,
-        EpilogueSchedule  // This is the only epi supporting the required swap +
+        EpilogueSchedule,  // This is the only epi supporting the required swap +
                           // transpose.
+        EVTCompute
         >::CollectiveOp;
 
 // =========================================================== MIXED INPUT WITH
@@ -176,25 +184,6 @@ LayoutB_Reordered layout_B_reordered;
 cutlass::DeviceAllocation<ElementC> block_C;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
-/// Testbed utility types
-/////////////////////////////////////////////////////////////////////////////////////////////////
-
-// Command line options parsing
-struct Options : MixedDtypeOptions {
-  bool shuffle = true;
-
-  // Parses the command line
-  void parse(int argc, char const** args) {
-    cutlass::CommandLine cmd(argc, args);
-    cmd.get_cmd_line_argument("shuffle", shuffle);
-
-    this->MixedDtypeOptions::parse(argc, args);
-
-    mode = 1;  // override the mode value to always be scale only mode
-  }
-};
-
-/////////////////////////////////////////////////////////////////////////////////////////////////
 /// GEMM setup and evaluation
 /////////////////////////////////////////////////////////////////////////////////////////////////
 torch::Tensor mm(torch::Tensor const& A,
@@ -205,26 +194,25 @@ torch::Tensor mm(torch::Tensor const& A,
                  std::optional<int64_t> maybe_group_size,
                  std::optional<torch::Tensor> const& maybe_channel_scales,
                  std::optional<torch::Tensor> const& maybe_token_scales) {
-  Options options;
-  // try mnk = 5120x4096x6144
-  auto a_size = A.sizes();
-  auto b_size = B.sizes();
-  options.m = a_size[0];
-  options.k = a_size[1];
-  options.n = b_size[1];
+  int m = A.size(0);
+  int k = A.size(1);
+  int n = B.size(1);
+  int g = 128;
+  float alpha = 1.0f;
+  float beta = 0.0f;
 
   // Allocate output
   using ElementOutput = typename GemmShuffled::EpilogueOutputOp::ElementOutput;
   auto device = A.device();
   torch::Tensor D =
-      torch::zeros({options.m, options.n},
+      torch::zeros({m, n},
                    torch::TensorOptions()
-                       .dtype(equivalent_scalar_type_v<ElementOutput>)
+                       .dtype(equivalent_scalar_type_v<ElementD>)
                        .device(device));
 
   // run logic, pass in S_ptr so we can pass in scales
   auto B_ptr = static_cast<QuantType const*>(B.const_data_ptr());
-  auto shape_B = cute::make_shape(options.n, options.k, 1);
+  auto shape_B = cute::make_shape(n, k, 1);
   LayoutB_Reordered layout_B_reordered_local = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
   // Instantiate CUTLASS kernel depending on templates
   GemmShuffled gemm;
@@ -234,32 +222,41 @@ torch::Tensor mm(torch::Tensor const& A,
   /// Populates a Gemm::Arguments structure from the given commandline options
   /// Swap the A and B tensors, as well as problem shapes here.
   using Args = typename GemmShuffled::Arguments;
-  auto D_ptr = static_cast<ElementOutput*>(D.data_ptr());
+  using MainloopArguments = typename GemmKernelShuffled::MainloopArguments;
+  using EpilogueArguments = typename GemmKernelShuffled::EpilogueArguments;
+
+  auto D_ptr = static_cast<ElementD*>(D.data_ptr());
   auto A_ptr = static_cast<MmaType const*>(A.const_data_ptr());
   auto S_ptr = static_cast<cutlass::Array<ElementScale, 8> const*>(
       group_scales.const_data_ptr());
   // currently uses all the input (A, B, scales)
   // init strides here
-  int const scale_k = cutlass::ceil_div(options.k, options.g);
+  int const scale_k = cutlass::ceil_div(k, g);
   stride_A = cutlass::make_cute_packed_stride(
-      StrideA{}, cute::make_shape(options.m, options.k, options.l));
+      StrideA{}, cute::make_shape(m, k, 1));
   // Reverse stride here due to swap and transpose
   stride_C = cutlass::make_cute_packed_stride(
-      StrideC{}, cute::make_shape(options.n, options.m, options.l));
+      StrideC{}, cute::make_shape(n, m, 1));
   // Reverse stride here due to swap and transpose
   stride_D = cutlass::make_cute_packed_stride(
-      StrideD{}, cute::make_shape(options.n, options.m, options.l));
+      StrideD{}, cute::make_shape(n, m, 1));
   stride_S = cutlass::make_cute_packed_stride(
-      StrideS{}, cute::make_shape(options.n, scale_k, options.l));
+      StrideS{}, cute::make_shape(n, scale_k, 1));
+
+  MainloopArguments mainloop_arguments{
+      B_ptr, layout_B_reordered_local, A_ptr, stride_A, S_ptr, stride_S, g};
+  EpilogueArguments epilogue_arguments{
+    ChTokScalesEpilogue::prepare_args(*maybe_channel_scales, *maybe_token_scales),
+    nullptr,
+    {},
+    D_ptr,
+    stride_D};
+
   auto arguments = Args{
       cutlass::gemm::GemmUniversalMode::kGemm,
-      {options.n, options.m, options.k, options.l},
-      {B_ptr, layout_B_reordered_local, A_ptr, stride_A, S_ptr, stride_S, options.g},
-      {{options.alpha, options.beta},
-       D_ptr,  // dont accumulate anything anyways since beta=0
-       stride_C,
-       D_ptr,
-       stride_D}};
+      {n, m, k, 1}, // shape
+      mainloop_arguments,
+      epilogue_arguments};
 
   // Using the arguments, query for extra workspace required for matrix
   // multiplication computation
@@ -274,7 +271,6 @@ torch::Tensor mm(torch::Tensor const& A,
   // Initialize CUTLASS kernel with arguments and workspace pointer
   CUTLASS_CHECK(gemm.initialize(arguments, workspace.get()));
 
-  // Correctness / Warmup iteration
   CUTLASS_CHECK(gemm.run());
 
   return D;

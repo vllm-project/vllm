@@ -146,9 +146,10 @@ def create_test_tensors(shape: tuple[int, int, int],
     a_ref = a.to(torch.float32)
     w_ref = w_ref.to(torch.float32)
 
-    # TODO: add when per-tok scales implemented in epilogue
-    w_tok_s = torch.ones((m, 1), device='cuda', dtype=torch.float32)
-    w_ch_s = torch.ones((1, n), device='cuda', dtype=torch.float32)
+    # for the practical use case we need per-tok scales for fp8 activations
+    # weights are already per-group quantized
+    w_tok_s = torch.randn((m,), device='cuda', dtype=torch.float32)
+    w_ch_s = torch.ones((n,), device='cuda', dtype=torch.float32)
 
     return Tensors(w_ref=w_ref,
                    a_ref=a_ref,
@@ -168,8 +169,8 @@ def mm_test_helper(types: TypeConfig,
     # https://github.com/NVIDIA/cutlass/blob/main/examples/55_hopper_mixed_dtype_gemm/55_hopper_int4_fp8_gemm.cu#L406
     output_ref = torch._scaled_mm(tensors.a_ref.to(types.act_type),
                                   tensors.w_ref.to(types.act_type).t().contiguous().t(), # col major
-                                  tensors.w_tok_s,
-                                  tensors.w_ch_s,
+                                  tensors.w_tok_s.unsqueeze(1),
+                                  tensors.w_ch_s.unsqueeze(0),
                                   out_dtype=types.output_type,
                                   use_fast_accum=True)
 
@@ -177,7 +178,9 @@ def mm_test_helper(types: TypeConfig,
         a=tensors.a,
         b_q=tensors.w_q,
         b_type=types.weight_type,
-        b_group_scales=tensors.w_g_s
+        b_group_scales=tensors.w_g_s,
+        b_channel_scales=tensors.w_ch_s,
+        a_token_scales=tensors.w_tok_s,
     )
 
     print(output)
