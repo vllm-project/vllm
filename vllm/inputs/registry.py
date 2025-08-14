@@ -146,7 +146,7 @@ class InputProcessingContext(InputContext):
         output: JSONTree,
     ) -> JSONTree:
         mm_config = self.model_config.get_multimodal_config()
-        is_mm_processing_gpu = mm_config.is_mm_processing_gpu
+        is_mm_processing_gpu = mm_config.mm_processing_device != "cpu"
 
         def _postprocess_one(x: object):
             if isinstance(x, torch.Tensor):

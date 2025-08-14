@@ -435,18 +435,13 @@ class Processor:
         if not mm_config:
             return
 
-        if mm_processor_kwargs := mm_config.mm_processor_kwargs:
-            orig_device = str(mm_processor_kwargs.get("device", "cpu"))
-            if orig_device == "cpu":
-                return
-
-            # Allocate the GPU for each processor to avoid using the same
-            # GPUs as EngineCore
+        if mm_config.mm_processing_device != "cpu":
+            # Try to avoid using the same GPU as EngineCore
             parallel_config = self.parallel_config
             device_count = current_platform.device_count()  # type: ignore
 
             gpu_allocation = allocate_gpu_mm_processors(
-                orig_device,
+                mm_config.mm_processing_device,
                 parallel_config.api_process_count,
                 available_device_count=device_count,
                 engine_device_count=parallel_config.world_size_across_dp,
