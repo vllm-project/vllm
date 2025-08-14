@@ -32,6 +32,10 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 logger = logging.getLogger(__name__)
 
 
+def wrap_data_with_event(data: str, event: str):
+    return f"event: {event}\ndata: {data}\n\n"
+
+
 class AnthropicServingMessages(OpenAIServingChat):
     """Handler for Anthropic Messages API requests"""
 
@@ -274,7 +278,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                             type="message_stop",
                         )
                         data = stop_message.model_dump_json(exclude_unset=True, exclude_none=True)
-                        yield f"data: {data}\n\n"
+                        yield wrap_data_with_event(data, "message_stop")
                         yield "data: [DONE]\n\n"
                     else:
                         origin_chunk = ChatCompletionStreamResponse.model_validate_json(data_str)
@@ -290,7 +294,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                             )
                             first_item = False
                             data = chunk.model_dump_json(exclude_unset=True)
-                            yield f"data: {data}\n\n"
+                            yield wrap_data_with_event(data, "message_start")
                             continue
 
                         # last chunk including usage info
@@ -301,7 +305,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     type="content_block_stop",
                                 )
                                 data = stop_chunk.model_dump_json(exclude_unset=True)
-                                yield f"data: {data}\n\n"
+                                yield wrap_data_with_event(data, "content_block_stop")
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
                                 delta=AnthropicDelta(
@@ -313,7 +317,11 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 )
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
-                            yield f"data: {data}\n\n"
+                            yield wrap_data_with_event(data, "message_delta")
+                            continue
+
+                        if origin_chunk.choices[0].finish_reason is not None:
+                            finish_reason = origin_chunk.choices[0].finish_reason
                             continue
 
                         # content
@@ -328,7 +336,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     )
                                 )
                                 data = chunk.model_dump_json(exclude_unset=True)
-                                yield f"data: {data}\n\n"
+                                yield wrap_data_with_event(data, "content_block_start")
                                 content_block_started = True
 
                             if origin_chunk.choices[0].delta.content == "":
@@ -342,7 +350,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 )
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
-                            yield f"data: {data}\n\n"
+                            yield wrap_data_with_event(data, "content_block_delta")
                             continue
 
                         # tool calls
@@ -355,7 +363,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         type="content_block_stop",
                                     )
                                     data = stop_chunk.model_dump_json(exclude_unset=True)
-                                    yield f"data: {data}\n\n"
+                                    yield wrap_data_with_event(data, "content_block_stop")
                                     content_block_started = False
                                     content_block_index += 1
 
@@ -370,7 +378,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     )
                                 )
                                 data = chunk.model_dump_json(exclude_unset=True)
-                                yield f"data: {data}\n\n"
+                                yield wrap_data_with_event(data, "content_block_start")
                                 content_block_started = True
 
                             else:
@@ -383,13 +391,8 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     )
                                 )
                                 data = chunk.model_dump_json(exclude_unset=True)
-                                yield f"data: {data}\n\n"
+                                yield wrap_data_with_event(data, "content_block_delta")
                             continue
-
-                        if origin_chunk.choices[0].finish_reason is not None:
-                            finish_reason = origin_chunk.choices[0].finish_reason
-                            continue
-
                 else:
                     error_response = AnthropicStreamEvent(
                         type="error",
@@ -399,7 +402,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                         )
                     )
                     data = error_response.model_dump_json(exclude_unset=True)
-                    yield f"data: {data}\n\n"
+                    yield wrap_data_with_event(data, "error")
                     yield "data: [DONE]\n\n"
 
         except Exception as e:
@@ -412,5 +415,5 @@ class AnthropicServingMessages(OpenAIServingChat):
                 )
             )
             data = error_response.model_dump_json(exclude_unset=True)
-            yield f"data: {data}\n\n"
+            yield wrap_data_with_event(data, "error")
             yield "data: [DONE]\n\n"

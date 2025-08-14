@@ -112,7 +112,7 @@ async def create_messages(request: AnthropicMessagesRequest,
                             status_code=generator.code)
 
     elif isinstance(generator, AnthropicMessagesResponse):
-        return JSONResponse(content=generator.model_dump(exclude_none=True, exclude_unset=True))
+        return JSONResponse(content=generator.model_dump(exclude_none=True))
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 

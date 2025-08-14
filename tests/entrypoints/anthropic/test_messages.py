@@ -28,8 +28,8 @@ async def client(server):
 
 
 @pytest.mark.asyncio
-async def test_simple_messages(client: anthropic.Anthropic):
-    resp = client.messages.create(
+async def test_simple_messages(client: anthropic.AsyncAnthropic):
+    resp = await client.messages.create(
         model="claude-3-7-sonnet-latest",
         max_tokens=8192,
         messages=[
@@ -46,8 +46,8 @@ async def test_simple_messages(client: anthropic.Anthropic):
 
 
 @pytest.mark.asyncio
-def test_system_message(client: anthropic.Anthropic):
-    resp = client.messages.create(
+def test_system_message(client: anthropic.AsyncAnthropic):
+    resp = await client.messages.create(
         model="claude-3-7-sonnet-latest",
         max_tokens=8192,
         system="you are a helpful assistant",
@@ -65,8 +65,8 @@ def test_system_message(client: anthropic.Anthropic):
 
 
 @pytest.mark.asyncio
-def test_anthropic_streaming(client: anthropic.Anthropic):
-    resp = client.messages.create(
+async def test_anthropic_streaming(client: anthropic.AsyncAnthropic):
+    resp = await client.messages.create(
         model="claude-3-7-sonnet-latest",
         max_tokens=8192,
         messages=[
@@ -77,16 +77,14 @@ def test_anthropic_streaming(client: anthropic.Anthropic):
         ],
         stream=True,
     )
-    assert resp.stop_reason == "end_turn"
-    assert resp.role == "assistant"
 
-    for chunk in resp:
+    async for chunk in resp:
         print(chunk.model_dump_json())
 
 
 @pytest.mark.asyncio
-def test_anthropic_tool_call(client: anthropic.Anthropic):
-    resp = client.messages.create(
+def test_anthropic_tool_call(client: anthropic.AsyncAnthropic):
+    resp = await client.messages.create(
         model="claude-3-7-sonnet-latest",
         max_tokens=8192,
         messages=[
@@ -120,8 +118,8 @@ def test_anthropic_tool_call(client: anthropic.Anthropic):
     print(f'Anthropic response: {resp.model_dump_json()}')
 
     @pytest.mark.asyncio
-    def test_anthropic_tool_call_streaming(client: anthropic.Anthropic):
-        resp = client.messages.create(
+    async def test_anthropic_tool_call_streaming(client: anthropic.AsyncAnthropic):
+        resp = await client.messages.create(
             model="claude-3-7-sonnet-latest",
             max_tokens=8192,
             messages=[
@@ -150,5 +148,5 @@ def test_anthropic_tool_call(client: anthropic.Anthropic):
             stream=True,
         )
 
-        for chunk in resp:
+        async for chunk in resp:
             print(chunk.model_dump_json())

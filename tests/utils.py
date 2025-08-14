@@ -301,7 +301,7 @@ class RemoteAnthropicServer:
         if "timeout" not in kwargs:
             kwargs["timeout"] = 600
         return anthropic.Anthropic(
-            base_url=self.url_for("v1"),
+            base_url=self.url_for(),
             api_key=self.DUMMY_API_KEY,
             max_retries=0,
             **kwargs,
@@ -311,7 +311,7 @@ class RemoteAnthropicServer:
         if "timeout" not in kwargs:
             kwargs["timeout"] = 600
         return anthropic.AsyncAnthropic(
-            base_url=self.url_for("v1"),
+            base_url=self.url_for(),
             api_key=self.DUMMY_API_KEY,
             max_retries=0,
             **kwargs
