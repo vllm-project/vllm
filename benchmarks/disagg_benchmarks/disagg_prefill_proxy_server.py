@@ -46,9 +46,7 @@ async def forward_request(url, data):
     # Use rate limiter as context manager
     async with rate_limiter, aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         try:
-            async with session.post(
-                url=url, json=data, headers=headers
-            ) as response:
+            async with session.post(url=url, json=data, headers=headers) as response:
                 if response.status == 200:
                     # Stream response chunks
                     async for chunk_bytes in response.content.iter_chunked(1024):
@@ -58,7 +56,7 @@ async def forward_request(url, data):
                     error_text = await response.text()
                     logger.error(
                         "Backend service error: %s - %s",
-                    response.status,
+                        response.status,
                         error_text,
                     )
                     yield b'{"error": "Backend service error"}'
