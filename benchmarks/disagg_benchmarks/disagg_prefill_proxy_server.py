@@ -56,8 +56,8 @@ async def forward_request(url, data):
                     else:
                         # Handle backend service errors
                         error_text = await response.text()
-                        logger.error("Backend service error: %s - %s", response.status,
-                                     error_text)
+                        logger.error("Backend service error: %s - %s",
+                                     response.status, error_text)
                         yield b'{"error": "Backend service error"}'
             except aiohttp.ClientError as e:
                 # Handle connection errors
