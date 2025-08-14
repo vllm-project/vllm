@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import os
 import time
 from collections import Counter as collectionsCounter
 from collections import deque
@@ -217,6 +218,8 @@ class LLMEngine:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        self.enable_async_mm_preprocess = (os.getenv(
+            "VLLM_ENABLE_ASYNC_MM_PREPROCESS", "0") == "1")
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.device_config = vllm_config.device_config
@@ -755,12 +758,23 @@ class LLMEngine:
             seq_len = prompt["prompt_embeds"].shape[0]
             prompt["prompt_token_ids"] = [0] * seq_len
 
-        processed_inputs = self.input_preprocessor.preprocess(
-            prompt,
-            tokenization_kwargs=tokenization_kwargs,
-            lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
-        )
+        is_multimodal = isinstance(prompt,
+                                   dict) and prompt.get("type") == "multimodal"
+        if self.enable_async_mm_preprocess and is_multimodal:
+            logger.debug("[DEBUG] BYPASSING PREPROCESSING FOR REQUEST: %s",
+                         request_id)
+            processed_inputs = prompt
+        else:
+            # Fallback for text-only or other non-preprocessed requests.
+            logger.debug(
+                "[DEBUG] PERFORMING STANDARD PREPROCESSING FOR REQUEST: %s",
+                request_id)
+            processed_inputs = self.input_preprocessor.preprocess(
+                prompt,
+                tokenization_kwargs=tokenization_kwargs,
+                lora_request=lora_request,
+                prompt_adapter_request=prompt_adapter_request,
+            )
 
         self._add_processed_request(
             request_id=request_id,

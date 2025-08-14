@@ -38,6 +38,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
+from vllm.engine.async_mm_preprocessor import AsyncMultiModalPreprocessor
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
@@ -104,6 +105,9 @@ from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
+
+if os.getenv("VLLM_ENABLE_ASYNC_MM_PREPROCESS", "0") == "1":
+    multiprocessing.set_start_method("spawn", force=True)
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
@@ -1179,6 +1183,11 @@ async def init_app_state(
         prompt_adapters=args.prompt_adapters,
     )
     await state.openai_serving_models.init_static_loras()
+    mm_preprocessor = None
+    if os.getenv("VLLM_ENABLE_ASYNC_MM_PREPROCESS", "0") == "1":
+        logger.info("Async multi-modal preprocessor is enabled.")
+        if vllm_config.model_config.is_multimodal_model:
+            mm_preprocessor = AsyncMultiModalPreprocessor(vllm_config)
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
@@ -1192,6 +1201,7 @@ async def init_app_state(
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+        mm_preprocessor=mm_preprocessor,
     ) if model_config.runner_type == "generate" else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
