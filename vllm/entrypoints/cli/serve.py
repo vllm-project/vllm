@@ -3,7 +3,9 @@
 
 import argparse
 import signal
-from typing import Optional
+from collections import Counter
+from copy import deepcopy
+from typing import Any, Optional
 
 import uvloop
 
@@ -133,13 +135,29 @@ def run_headless(args: argparse.Namespace):
         engine_manager.close()
 
 
+def _available_device_count() -> int:
+    return current_platform.device_count()  # type: ignore
+
+
+def _estimate_engine_device_count(args: argparse.Namespace) -> int:
+    tp_size = args.tensor_parallel_size or 1
+    pp_size = args.pipeline_parallel_size or 1
+
+    dp_size = args.data_parallel_size or 1
+    if args.data_parallel_size_local:
+        dp_size = min(dp_size, args.data_parallel_size_local)
+
+    # This is a conservative estimate since it assumes single node
+    return min(tp_size * pp_size * dp_size, _available_device_count())
+
+
 def run_multi_api_server(args: argparse.Namespace):
 
     assert not args.headless
-    num_api_servers = args.api_server_count
+    num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
-    orig_mm_processor_cache_gb = args.mm_processor_cache_gb
+    orig_mm_processor_cache_gb: int = args.mm_processor_cache_gb
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
@@ -175,6 +193,56 @@ def run_multi_api_server(args: argparse.Namespace):
     hybrid_dp_lb = parallel_config.data_parallel_hybrid_lb
     assert external_dp_lb or hybrid_dp_lb or dp_rank == 0
 
+    args_per_server = [deepcopy(args) for _ in range(num_api_servers)]
+
+    if mm_processor_kwargs := args.mm_processor_kwargs:
+        mm_device: str = mm_processor_kwargs.get("device", "cpu")
+        if mm_device != "cpu":
+            engine_device_count = _estimate_engine_device_count(args)
+            available_device_count = _available_device_count()
+
+            engine_gpu_idxs = list(range(engine_device_count))
+
+            device_type, *rest = mm_device.rsplit(":", 1)
+            if len(rest) == 0:
+                # Try to run processing on GPUs that are not used by the engine
+                processor_gpu_idxs = [
+                    (engine_device_count + server_idx) % available_device_count
+                    for server_idx in range(num_api_servers)
+                ]
+                for server_idx, device_idx in enumerate(processor_gpu_idxs):
+                    device = f"{device_type}:{device_idx}"
+                    args_per_server[server_idx].mm_processor_kwargs["device"] \
+                        = device
+
+                    logger.info(
+                        "Multi-modal processor in APIServer_%s will be run on "
+                        "device %s", server_idx, device)
+            else:
+                (device_idx, ) = map(int, rest)
+                processor_gpu_idxs = [device_idx] * num_api_servers
+
+            processor_engine_gpu_idxs = [
+                gpu_idx for gpu_idx in processor_gpu_idxs
+                if gpu_idx in engine_gpu_idxs
+            ]
+            mm_processors_per_gpu = max(
+                Counter(processor_engine_gpu_idxs).values(),
+                default=1,
+            )
+
+            # NOTE: vllm_config is used to initialize EngineCore while
+            # args_per_server is used to initialize API processes
+            vllm_config.model_config.set_mm_processors_per_gpu(
+                mm_processors_per_gpu)
+            for server_idx in range(num_api_servers):
+                args_per_server[server_idx].mm_processors_per_gpu \
+                    = mm_processors_per_gpu
+
+            logger.info(
+                "Each GPU is shared by at most %d multi-modal processors",
+                mm_processors_per_gpu)
+
     api_server_manager: Optional[APIServerProcessManager] = None
 
     with launch_core_engines(vllm_config, executor_class, log_stats,
@@ -182,12 +250,12 @@ def run_multi_api_server(args: argparse.Namespace):
                                                   coordinator, addresses):
 
         # Construct common args for the APIServerProcessManager up-front.
-        api_server_manager_kwargs = dict(
+        api_server_manager_kwargs = dict[str, Any](
             target_server_fn=run_api_server_worker_proc,
             listen_address=listen_address,
             sock=sock,
-            args=args,
             num_servers=num_api_servers,
+            args_per_server=args_per_server,
             input_addresses=addresses.inputs,
             output_addresses=addresses.outputs,
             stats_update_address=coordinator.get_stats_publish_address()
@@ -227,42 +295,6 @@ def run_api_server_worker_proc(listen_address,
     server_index = client_config.get("client_index", 0) if client_config else 0
     set_process_title("APIServer", str(server_index))
     decorate_logs()
-
-    # Try to run GPU processing on different devices for each API server
-    if mm_kwargs := args.mm_processor_kwargs:
-        mm_device: str = mm_kwargs.get("device", "cpu")
-        if mm_device != "cpu":
-            if mm_device == current_platform.device_type:
-                engine_device_count = max(
-                    args.tensor_parallel_size or 1,
-                    ((args.data_parallel_size or 1)
-                     if args.data_parallel_size_local == 0 else min(
-                         args.data_parallel_size or 1,
-                         args.data_parallel_size_local or 1,
-                     )),
-                )
-                available_device_count = \
-                    current_platform.device_count()  # type: ignore
-
-                # Try to run processing on GPUs that are not used by the engine
-                device_idx = ((engine_device_count + server_index) %
-                              available_device_count)
-                new_mm_device = f"{current_platform.device_name}:{device_idx}"
-                if new_mm_device != mm_device:
-                    logger.info(
-                        "Multi-modal processor will be run on device %s",
-                        new_mm_device)
-
-                    args.mm_processor_kwargs["device"] = new_mm_device
-            elif not mm_device.endswith(":0"):
-                logger.warning(
-                    "You assigned the multi-modal processor to a specific "
-                    "device %s which is not on rank 0. "
-                    "This potentially leads to OOM during inference because "
-                    "vLLM's memory profiling for input processing is only run "
-                    "on rank 0.",
-                    mm_device,
-                )
 
     uvloop.run(
         run_server_worker(listen_address, sock, args, client_config,

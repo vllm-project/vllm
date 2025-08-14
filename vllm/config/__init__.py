@@ -422,6 +422,13 @@ class ModelConfig:
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
     Set to `0` to disable this cache completely (not recommended)."""
+    mm_processors_per_gpu: int = 1
+    """
+    [Internal] The maximum number of multi-modal processors that use each GPU.
+
+    This is needed to determine the peak memory of multi-modal processing
+    in the case of API server scale-out.
+    """
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -842,10 +849,16 @@ class ModelConfig:
         return None
 
     def set_mm_processor_cache_gb(self, value: int) -> None:
-        mm_config = self.get_multimodal_config()
-
         self.mm_processor_cache_gb = value
-        mm_config.mm_processor_cache_gb = value
+
+        if mm_config := self.multimodal_config:
+            mm_config.mm_processor_cache_gb = value
+
+    def set_mm_processors_per_gpu(self, value: int) -> None:
+        self.mm_processors_per_gpu = value
+
+        if mm_config := self.multimodal_config:
+            mm_config.mm_processors_per_gpu = value
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -2504,6 +2517,14 @@ class MultiModalConfig:
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
     Set to `0` to disable this cache completely (not recommended).
+    """
+
+    mm_processors_per_gpu: int = 1
+    """
+    [Internal] The maximum number of multi-modal processors that use each GPU.
+
+    This is needed to determine the peak memory of multi-modal processing
+    in the case of API server scale-out.
     """
 
     interleave_mm_strings: bool = False

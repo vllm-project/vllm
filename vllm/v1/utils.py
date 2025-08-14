@@ -123,8 +123,8 @@ class APIServerProcessManager:
         target_server_fn: Callable,
         listen_address: str,
         sock: Any,
-        args: argparse.Namespace,
         num_servers: int,
+        args_per_server: list[argparse.Namespace],
         input_addresses: list[str],
         output_addresses: list[str],
         stats_update_address: Optional[str] = None,
@@ -141,29 +141,35 @@ class APIServerProcessManager:
             output_addresses: Output addresses for each API server
             stats_update_address: Optional stats update address 
         """
+        if len(args_per_server) != num_servers:
+            raise ValueError(f"Incorrect {len(args_per_server)=}")
+        if len(input_addresses) != num_servers:
+            raise ValueError(f"Incorrect {len(input_addresses)=}")
+        if len(output_addresses) != num_servers:
+            raise ValueError(f"Incorrect {len(output_addresses)=}")
+
         self.listen_address = listen_address
         self.sock = sock
-        self.args = args
 
         # Start API servers
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []
 
-        for i, in_addr, out_addr in zip(range(num_servers), input_addresses,
-                                        output_addresses):
+        for i in range(num_servers):
             client_config = {
-                "input_address": in_addr,
-                "output_address": out_addr,
+                "input_address": input_addresses[i],
+                "output_address": output_addresses[i],
                 "client_count": num_servers,
-                "client_index": i
+                "client_index": i,
             }
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
 
-            proc = spawn_context.Process(target=target_server_fn,
-                                         name=f"ApiServer_{i}",
-                                         args=(listen_address, sock, args,
-                                               client_config))
+            proc = spawn_context.Process(
+                target=target_server_fn,
+                name=f"ApiServer_{i}",
+                args=(listen_address, sock, args_per_server[i], client_config),
+            )
             self.processes.append(proc)
             proc.start()
 

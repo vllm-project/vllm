@@ -350,6 +350,7 @@ class EngineArgs:
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: int = MultiModalConfig.mm_processor_cache_gb
+    mm_processors_per_gpu: int = MultiModalConfig.mm_processors_per_gpu
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -710,6 +711,9 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--mm-processor-cache-gb",
             **multimodal_kwargs["mm_processor_cache_gb"])
+        multimodal_group.add_argument(
+            "--mm_processors-per-gpu",
+            **multimodal_kwargs["mm_processors_per_gpu"])
         multimodal_group.add_argument("--disable-mm-preprocessor-cache",
                                       type=bool,
                                       deprecated=True)
