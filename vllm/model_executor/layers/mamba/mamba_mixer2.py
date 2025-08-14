@@ -735,6 +735,8 @@ class MambaMixer2(MambaBase, CustomOp):
         output[:num_actual_tokens], _ = self.out_proj(hidden_states)
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
+        assert self.model_config is not None
+        assert self.cache_config is not None
         return MambaStateDtypeCalculator.mamba2_state_dtype(
             self.model_config.dtype,
             self.cache_config.cache_dtype,
