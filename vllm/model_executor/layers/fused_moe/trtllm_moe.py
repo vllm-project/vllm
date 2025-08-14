@@ -51,16 +51,16 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
-        self.topk = topk
-        self.num_experts = local_num_experts
-        self.intermediate_size = N // 2
-        # TODO(varun): dont do workspace allocation
-        workspace1 = (M, topk, max(N // 2, K))
-        workspace2 = (M, topk, max(N, K))
+        # The workspaces for this implementation are managed by flashinfer.
+        # TODO(varun) : workspace1 is could be used as the output tensor. This
+        # is error-prone. Allow the `workspace_shapes` to return None workspaces
+        workspace1 = (M, K)
+        workspace2 = (1)  # (1) as we cant return None.
         output = (M, K)
         return (workspace1, workspace2, output, a.dtype)
 
-    def _get_tile_tokens_dim(self, x: torch.Tensor, top_k: int):
+    def _get_tile_tokens_dim(self, x: torch.Tensor, top_k: int,
+                             local_num_experts: int):
         # Number of tokens in the input tensor.
         num_tokens = x.shape[0]
         # Factor to account for the imbalance of the experts.
@@ -73,7 +73,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         imbalance_factor = 1.3
         # Calculate the number of tokens per expert assuming perfect
         # distribution.
-        num_tokens_per_expert = (num_tokens * top_k) // self.num_experts
+        num_tokens_per_expert = (num_tokens * top_k) // local_num_experts
         # Apply the imbalance factor.
         num_tokens_per_expert = int(num_tokens_per_expert * imbalance_factor)
         # And pad the number to the next power of 2.
@@ -107,57 +107,86 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
     ):
-        topk = topk_weights.shape[-1]
-        required_keys = [
-            'gemm1_alpha', 'gemm1_beta', 'gemm1_clamp_limit', "w1_bias",
-            "w2_bias"
-        ]
-
-        gemm1_alpha, gemm1_beta, gemm1_clamp_limit, w1_bias, w2_bias = (
-            extract_required_args(extra_expert_args, required_keys))
-
+        topk = topk_ids.size(-1)
         local_num_experts = w1.size(0)
+        intermediate_size = w2.size(1)
         local_expert_offset = self.moe.ep_rank * local_num_experts
-
-        packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
-            torch.bfloat16).view(torch.int16)
 
         x_quant = hidden_states
         x_scale = a1q_scale
         if x_scale is not None:
             x_scale = x_scale.view(torch.float8_e4m3fn).reshape(-1)
 
+        # Extract extra args
+        required_keys = [
+            'gemm1_alpha', 'gemm1_beta', 'gemm1_clamp_limit', "w1_bias",
+            "w2_bias"
+        ]
+        gemm1_alpha, gemm1_beta, gemm1_clamp_limit, w1_bias, w2_bias = (
+            extract_required_args(extra_expert_args, required_keys))
+
+        packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
+            torch.bfloat16).view(torch.int16)
+
         assert w1_scale is not None
         assert w2_scale is not None
         kwargs = {
-            "topk_ids": packed_tensor,
-            "routing_bias": None,
-            "hidden_states": x_quant,
-            "hidden_states_scale": x_scale,
-            "gemm1_weights": w1,
-            "gemm1_weights_scale": w1_scale,
-            "gemm1_bias": w1_bias,
-            "gemm1_alpha": gemm1_alpha,
-            "gemm1_beta": gemm1_beta,
-            "gemm1_clamp_limit": gemm1_clamp_limit,
-            "gemm2_weights": w2,
-            "gemm2_weights_scale": w2_scale,
-            "gemm2_bias": w2_bias,
-            "output1_scale_scalar": None,
-            "output1_scale_gate_scalar": None,
-            "output2_scale_scalar": None,
-            "num_experts": global_num_experts,
-            "top_k": topk,
-            "n_group": None,
-            "topk_group": None,
-            "intermediate_size": self.intermediate_size,
-            "local_expert_offset": local_expert_offset,
-            "local_num_experts": local_num_experts,
-            "routed_scaling_factor": None,
-            "tile_tokens_dim": 8,  #self._get_tile_tokens_dim(x_quant, topk),
-            "routing_method_type": 1,
-            "do_finalize": True,
-            "output": None,
+            "topk_ids":
+            packed_tensor,
+            "routing_bias":
+            None,
+            "hidden_states":
+            x_quant,
+            "hidden_states_scale":
+            x_scale,
+            "gemm1_weights":
+            w1,
+            "gemm1_weights_scale":
+            w1_scale,
+            "gemm1_bias":
+            w1_bias,
+            "gemm1_alpha":
+            gemm1_alpha,
+            "gemm1_beta":
+            gemm1_beta,
+            "gemm1_clamp_limit":
+            gemm1_clamp_limit,
+            "gemm2_weights":
+            w2,
+            "gemm2_weights_scale":
+            w2_scale,
+            "gemm2_bias":
+            w2_bias,
+            "output1_scale_scalar":
+            None,
+            "output1_scale_gate_scalar":
+            None,
+            "output2_scale_scalar":
+            None,
+            "num_experts":
+            global_num_experts,
+            "top_k":
+            topk,
+            "n_group":
+            None,
+            "topk_group":
+            None,
+            "intermediate_size":
+            intermediate_size,
+            "local_expert_offset":
+            local_expert_offset,
+            "local_num_experts":
+            local_num_experts,
+            "routed_scaling_factor":
+            None,
+            "tile_tokens_dim":
+            self._get_tile_tokens_dim(x_quant, topk, local_num_experts),
+            "routing_method_type":
+            1,
+            "do_finalize":
+            True,
+            "output":
+            None,
         }
 
         trtllm_fp4_block_scale_routed_moe(**kwargs)
