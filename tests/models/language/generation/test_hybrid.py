@@ -49,7 +49,7 @@ V1_SUPPORTED_MODELS = [
     "ai21labs/Jamba-tiny-dev",
     "yujiepan/mamba2-codestral-v0.1-tiny-random",
     "Zyphra/Zamba2-1.2B-instruct",
-    "hmellor/tiny-random-BambaForCausalLM",
+    #"hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
 ]

@@ -115,6 +115,8 @@ def _mamba_chunk_scan_combined_fwd(x,
     # - this will ensure that states will be updated with the rightmost flushed seq_idx
     #   of the previous chunk. This implies that the first chunk of states is either 0
     #   or equal to init_states of the first example.
+    print("mamba_ssm_cache_dtype: ", mamba_ssm_cache_dtype)
+    print("C.dtype: ", C.dtype)
     states, final_states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
         dA_cumsum[:, :, :, -1],
@@ -122,7 +124,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         if initial_states is not None else None,
         seq_idx=seq_idx,
         chunk_size=chunk_size,
-        out_dtype=mamba_ssm_cache_dtype or C.dtype,
+        out_dtype=mamba_ssm_cache_dtype,
         is_cont_batched=cu_seqlens is not None)
     states, final_states = (rearrange(t, "... (p n) -> ... p n", n=dstate)
                             for t in [states, final_states])
