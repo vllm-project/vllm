@@ -739,7 +739,11 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
             "gate_up_proj": [
                 "gate_proj",
                 "up_proj",
-            ]
+            ],
+            "fused_qkv_a_proj": [
+                "q_a_proj",
+                "kv_a_proj_with_mqa"
+            ],
         }
 
         packed_modules_mapping_replacement = {

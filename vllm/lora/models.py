@@ -49,10 +49,8 @@ def get_lora_id():
 def is_moe_model(model: nn.Module) -> bool:
     """Checks if the model contains FusedMoE layers and warns the user."""
     if any(isinstance(module, FusedMoE) for module in model.modules()):
-        logger.warning_once(
-            "For MoE models, vLLM currently does not support fused MoE LoRA "
-            "inference. Please ensure that the loaded LoRA model does not "
-            "contain expert weights.")
+        logger.info_once(
+            "MoE model detected. Using fused MoE LoRA implementation.")
         return True
     return False
 
@@ -514,7 +512,7 @@ class LoRAModelManager(AdapterModelManager):
             new_module.set_mapping(self.punica_wrapper)
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
-        assert isinstance(module, BaseLayerWithLoRA)
+        assert isinstance(module, BaseLayerWithLoRA), f"Module {module_name} must be a BaseLayerWithLoRA instance, got {type(module)}"
         self.modules[module_name] = module
 
     def create_dummy_lora(
