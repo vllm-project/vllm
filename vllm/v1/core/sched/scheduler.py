@@ -741,7 +741,10 @@ class Scheduler(SchedulerInterface):
             if start_pos >= num_computed_tokens + num_new_tokens:
                 # The encoder input is not needed in this step.
                 break
-            if self.is_encoder_decoder and start_pos < num_computed_tokens:
+            if self.is_encoder_decoder and num_computed_tokens > 0:
+                assert start_pos == 0, (
+                    "Encoder input should be processed at the beginning of "
+                    "the sequence when encoder-decoder models are used.")
                 # Encoder input has already been computed
                 # The calculation here is a bit different. We don't turn encoder
                 # output into tokens that get processed by the decoder and
