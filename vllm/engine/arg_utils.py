@@ -421,7 +421,7 @@ class EngineArgs:
     override_attention_dtype: str = ModelConfig.override_attention_dtype
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
-    mamba_ssm_cache_dtype: str = CacheConfig.mamba_ssm_cache_dtype
+    mamba_ssm_cache_dtype: CacheDType = CacheConfig.mamba_ssm_cache_dtype
 
     additional_config: dict[str, Any] = \
         get_field(VllmConfig, "additional_config")
