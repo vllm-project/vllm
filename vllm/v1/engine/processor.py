@@ -485,7 +485,7 @@ class Processor:
 
             baseline_snapshot = MemorySnapshot(device=new_device)
 
-            # Only run this check if we are sure that the EngineCore is not
+            # Only check init memory if we are sure that the EngineCore is not
             # running profiling on the same GPU
             # TODO: world_size_across_dp is too conservative for multi-node
             new_device_index = torch.device(new_device).index or 0
