@@ -3,7 +3,6 @@
 
 import asyncio
 import atexit
-from collections import Counter
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
@@ -340,18 +339,13 @@ def allocate_gpu_mm_processors(
     *,
     available_device_count: int,
     engine_device_count: int,
-) -> tuple[list[str], int]:
+) -> list[str]:
     """
     Given `--mm_processor_kwargs.device` and the number of multi-modal
     processors, return the GPU allocation information.
-     
+
     Returns:
-        A tuple `(mm_processor_gpus, mm_processors_per_gpu)`, where:
-            - `gpu_allocation` is the device to allocate for each
-              multi-modal processor.
-            - `mm_processors_per_gpu` is the number of
-              multi-modal processors allocated to each GPU that is used
-              by vLLM engine.
+        The device to allocate for each multi-modal processor.
     """
     # In API server scale-out, allocate_gpu_mm_processors is called twice.
     # The first call happens in vllm.entrypoints.cli.serve and corresponds
@@ -377,15 +371,7 @@ def allocate_gpu_mm_processors(
         (device_idx, ) = map(int, rest)
         processor_gpu_idxs = [device_idx] * mm_processor_count
 
-    gpu_allocation = [
-        f"{device_type}:{gpu_idx}" for gpu_idx in processor_gpu_idxs
-    ]
-    mm_processors_per_gpu = max(
-        Counter(processor_gpu_idxs).values(),
-        default=0,
-    )
-
-    return gpu_allocation, mm_processors_per_gpu
+    return [f"{device_type}:{gpu_idx}" for gpu_idx in processor_gpu_idxs]
 
 
 def argsort_mm_positions(

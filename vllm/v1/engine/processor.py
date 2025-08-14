@@ -16,7 +16,9 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.processing import EncDecMultiModalProcessor
-from vllm.multimodal.utils import argsort_mm_positions
+from vllm.multimodal.utils import (allocate_gpu_mm_processors,
+                                   argsort_mm_positions)
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
@@ -47,6 +49,7 @@ class Processor:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.decoding_config = vllm_config.decoding_config
         self.tokenizer = tokenizer
@@ -429,49 +432,83 @@ class Processor:
         model_config = self.model_config
         mm_config = model_config.multimodal_config
 
-        processor_memory_usage = 0
+        if not mm_config:
+            return
 
-        if mm_config and (mm_processor_kwargs :=
-                          mm_config.mm_processor_kwargs):
-            mm_processor_device = torch.device(
-                mm_processor_kwargs.get("device", "cpu"))
-            device_mult = mm_config.mm_processors_per_gpu
+        if mm_processor_kwargs := mm_config.mm_processor_kwargs:
+            orig_device = str(mm_processor_kwargs.get("device", "cpu"))
+            if orig_device == "cpu":
+                return
 
-            if mm_processor_device != "cpu" and device_mult > 0:
-                scheduler_config = self.scheduler_config
-                mm_budget = MultiModalBudget(
-                    model_config,
-                    scheduler_config,
-                    self.mm_registry,
-                )
+            # Peak memory usage (required for this profiling)
+            # is only tracked for CUDA
+            if not current_platform.is_cuda_alike():
+                return
 
-                self.mm_registry.reset_processor_cache(model_config)
+            parallel_config = self.parallel_config
+            device_count = current_platform.device_count()  # type: ignore
 
-                baseline_snapshot = MemorySnapshot(device=mm_processor_device)
+            gpu_allocation = allocate_gpu_mm_processors(
+                orig_device,
+                parallel_config.api_process_count,
+                available_device_count=device_count,
+                engine_device_count=parallel_config.world_size_across_dp,
+            )
+
+            new_device = gpu_allocation[parallel_config.api_process_rank]
+            logger.info("Multi-modal processor will be run on device %s",
+                        new_device)
+
+            new_device_ranks = [
+                rank for rank in range(parallel_config.api_process_count)
+                if gpu_allocation[rank] == new_device
+            ]
+
+            model_config.set_mm_processor_kwargs({"device": new_device})
+
+            # Only run profiling on the first Processor for each device,
+            # then multiply the usage by the number of processors for that
+            # device.
+            # Compared to running profiling on every Processor in parallel,
+            # this avoids non-deterministic peak memory usage calculation.
+            if parallel_config.api_process_rank != new_device_ranks[0]:
+                return
+
+            scheduler_config = self.scheduler_config
+            mm_budget = MultiModalBudget(
+                model_config,
+                scheduler_config,
+                self.mm_registry,
+            )
+
+            self.mm_registry.reset_processor_cache(model_config)
+
+            baseline_snapshot = MemorySnapshot(device=new_device)
+
+            # Only run this check if we are sure that the EngineCore is not
+            # running profiling on the same GPU
+            new_device_index = torch.device(new_device).index or 0
+            if new_device_index < parallel_config.world_size_across_dp:
                 check_enough_init_memory(baseline_snapshot, self.cache_config)
 
-                with memory_profiling(baseline_snapshot) as diff:
-                    for modality, max_items_per_prompt in (
-                            mm_budget.max_items_per_prompt_by_modality.items()
-                    ):
-                        self.mm_registry.get_decoder_dummy_data(
-                            model_config=model_config,
-                            seq_len=scheduler_config.max_num_batched_tokens,
-                            mm_counts={modality: max_items_per_prompt},
-                        )
+            with memory_profiling(baseline_snapshot) as diff:
+                for modality, max_items_per_prompt in (
+                        mm_budget.max_items_per_prompt_by_modality.items()):
+                    self.mm_registry.get_decoder_dummy_data(
+                        model_config=model_config,
+                        seq_len=scheduler_config.max_num_batched_tokens,
+                        mm_counts={modality: max_items_per_prompt},
+                    )
 
-                processor_memory_usage = diff.torch_peak_increase * device_mult
-                logger.info(
-                    "Input processing took %.4f GiB and %.6f seconds on %s",
-                    processor_memory_usage / GiB_bytes,
-                    diff.profile_time,
-                    mm_processor_device,
-                )
-                if processor_memory_usage > diff.before_profile.free_memory:
-                    raise ValueError(
-                        f"No available memory in {mm_processor_device} "
-                        f"for multi-modal processing. "
-                        f"Try increasing `gpu_memory_utilization` "
-                        f"or reduce `api_server_count`.")
-
-        self.processor_memory_usage = processor_memory_usage
+            memory_usage = diff.torch_peak_increase * len(new_device_ranks)
+            logger.info(
+                "Input processing took %.4f GiB and %.6f seconds on %s",
+                memory_usage / GiB_bytes,
+                diff.profile_time,
+                new_device,
+            )
+            if memory_usage > diff.before_profile.free_memory:
+                raise ValueError(f"No available memory in {new_device} "
+                                 f"for multi-modal processing. "
+                                 f"Try increasing `gpu_memory_utilization` "
+                                 f"or reduce `api_server_count`.")

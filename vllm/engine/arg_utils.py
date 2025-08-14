@@ -352,7 +352,6 @@ class EngineArgs:
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: int = MultiModalConfig.mm_processor_cache_gb
-    mm_processors_per_gpu: int = MultiModalConfig.mm_processors_per_gpu
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -928,7 +927,6 @@ class EngineArgs:
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
             mm_processor_cache_gb=self.mm_processor_cache_gb,
-            mm_processors_per_gpu=self.mm_processors_per_gpu,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
@@ -1252,34 +1250,6 @@ class EngineArgs:
                     "there does not exist a one-to-one correspondance "
                     "between API and engine core processes.")
                 model_config.set_mm_processor_cache_gb(0)
-
-            if mm_processor_kwargs := self.mm_processor_kwargs:
-                from vllm.multimodal.utils import allocate_gpu_mm_processors
-
-                mm_processor_device: str = mm_processor_kwargs.get(
-                    "device", "cpu")
-                if mm_processor_device != "cpu":
-                    (
-                        gpu_allocation,
-                        mm_processors_per_gpu,
-                    ) = allocate_gpu_mm_processors(
-                        mm_processor_device,
-                        self.api_process_count,
-                        available_device_count=current_platform.device_count(
-                        ),  # type: ignore
-                        engine_device_count=parallel_config.
-                        world_size_across_dp,
-                    )
-
-                    new_device = gpu_allocation[self.api_process_rank]
-                    logger.info(
-                        "Multi-modal processor will be run on device %s",
-                        new_device)
-
-                    model_config.set_mm_processor_kwargs(
-                        {"device": new_device})
-                    model_config.set_mm_processors_per_gpu(
-                        mm_processors_per_gpu)
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,

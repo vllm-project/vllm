@@ -184,7 +184,6 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
             available_device_count=1,
             engine_device_count=1,
             expected_gpu_allocation=[],
-            expected_mm_processors_per_gpu=0,
         ),
         dict(
             mm_processor_device="cuda",
@@ -192,7 +191,6 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
             available_device_count=1,
             engine_device_count=1,
             expected_gpu_allocation=["cuda:0"],
-            expected_mm_processors_per_gpu=1,
         ),
         # Use Engine GPUs
         dict(
@@ -201,7 +199,6 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
             available_device_count=1,
             engine_device_count=1,
             expected_gpu_allocation=["cuda:0", "cuda:0"],
-            expected_mm_processors_per_gpu=2,
         ),
         dict(
             mm_processor_device="cuda",
@@ -209,7 +206,6 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
             available_device_count=1,
             engine_device_count=2,
             expected_gpu_allocation=["cuda:0", "cuda:0"],
-            expected_mm_processors_per_gpu=2,
         ),
         dict(
             mm_processor_device="cuda",
@@ -217,7 +213,6 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
             available_device_count=2,
             engine_device_count=2,
             expected_gpu_allocation=["cuda:0", "cuda:1"],
-            expected_mm_processors_per_gpu=1,
         ),
         dict(
             mm_processor_device="cuda",
@@ -225,7 +220,6 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
             available_device_count=2,
             engine_device_count=2,
             expected_gpu_allocation=["cuda:0", "cuda:1", "cuda:0"],
-            expected_mm_processors_per_gpu=2,
         ),
         # Use excess GPUs
         dict(
@@ -234,7 +228,6 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
             available_device_count=3,
             engine_device_count=2,
             expected_gpu_allocation=["cuda:2", "cuda:2"],
-            expected_mm_processors_per_gpu=2,
         ),
         dict(
             mm_processor_device="cuda",
@@ -242,7 +235,6 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
             available_device_count=4,
             engine_device_count=2,
             expected_gpu_allocation=["cuda:2", "cuda:3"],
-            expected_mm_processors_per_gpu=1,
         ),
         dict(
             mm_processor_device="cuda",
@@ -250,7 +242,6 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
             available_device_count=4,
             engine_device_count=2,
             expected_gpu_allocation=["cuda:2", "cuda:3", "cuda:2"],
-            expected_mm_processors_per_gpu=2,
         ),
     ],
 )
@@ -261,12 +252,8 @@ def test_allocate_gpu_mm_processors(case):
     available_device_count = case["available_device_count"]
     engine_device_count = case["engine_device_count"]
     expected_gpu_allocation = case["expected_gpu_allocation"]
-    expected_mm_processors_per_gpu = case["expected_mm_processors_per_gpu"]
 
-    (
-        gpu_allocation,
-        mm_processors_per_gpu,
-    ) = allocate_gpu_mm_processors(
+    gpu_allocation = allocate_gpu_mm_processors(
         mm_processor_device,
         mm_processor_count,
         available_device_count=available_device_count,
@@ -274,7 +261,6 @@ def test_allocate_gpu_mm_processors(case):
     )
 
     assert gpu_allocation == expected_gpu_allocation
-    assert mm_processors_per_gpu == expected_mm_processors_per_gpu
 
 
 # yapf: disable
