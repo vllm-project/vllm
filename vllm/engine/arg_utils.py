@@ -444,6 +444,8 @@ class EngineArgs:
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
+    video_pruning_rate: float = ModelConfig.video_pruning_rate
+
     async_scheduling: bool = SchedulerConfig.async_scheduling
     # DEPRECATED
     enable_prompt_adapter: bool = False
@@ -729,6 +731,11 @@ class EngineArgs:
             "--interleave-mm-strings",
             **multimodal_kwargs["interleave_mm_strings"])
 
+        multimodal_group.add_argument(
+            "--video-pruning-rate",
+            **multimodal_kwargs["video_pruning_rate"]
+        )
+
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
         lora_group = parser.add_argument_group(
@@ -941,6 +948,7 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
+            video_pruning_rate=self.video_pruning_rate,
         )
 
     def validate_tensorizer_args(self):
