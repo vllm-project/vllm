@@ -233,7 +233,6 @@ class Worker(WorkerBase):
         with memory_profiling(
                 self.init_snapshot,
                 weights_memory=int(self.model_runner.model_memory_usage),
-                processing_memory=self.model_runner.processor_memory_usage,
         ) as profile_result:
             self.model_runner.profile_run()
 

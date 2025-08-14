@@ -5,10 +5,13 @@ import time
 from collections.abc import Mapping
 from typing import Any, Literal, Optional, Union
 
+import torch
+
 from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
@@ -17,6 +20,7 @@ from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
+from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MultiModalInputCacheClient
 from vllm.v1.structured_output.backend_guidance import (
@@ -25,6 +29,9 @@ from vllm.v1.structured_output.backend_outlines import (
     validate_structured_output_request_outlines)
 from vllm.v1.structured_output.backend_xgrammar import (
     validate_xgrammar_grammar)
+from vllm.v1.worker.utils import MultiModalBudget, check_enough_init_memory
+
+logger = init_logger(__name__)
 
 
 class Processor:
@@ -40,6 +47,7 @@ class Processor:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        self.scheduler_config = vllm_config.scheduler_config
         self.decoding_config = vllm_config.decoding_config
         self.tokenizer = tokenizer
 
@@ -51,6 +59,8 @@ class Processor:
 
         self.mm_input_cache_client = MultiModalInputCacheClient(
             self.model_config, mm_registry)
+
+        self.profile_run()
 
     @property
     def mm_registry(self):
@@ -414,3 +424,54 @@ class Processor:
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
+
+    def profile_run(self) -> None:
+        model_config = self.model_config
+        mm_config = model_config.multimodal_config
+
+        processor_memory_usage = 0
+
+        if mm_config and (mm_processor_kwargs :=
+                          mm_config.mm_processor_kwargs):
+            mm_processor_device = torch.device(
+                mm_processor_kwargs.get("device", "cpu"))
+            device_mult = mm_config.mm_processors_per_gpu
+
+            if mm_processor_device != "cpu" and device_mult > 0:
+                scheduler_config = self.scheduler_config
+                mm_budget = MultiModalBudget(
+                    model_config,
+                    scheduler_config,
+                    self.mm_registry,
+                )
+
+                self.mm_registry.reset_processor_cache(model_config)
+
+                baseline_snapshot = MemorySnapshot(device=mm_processor_device)
+                check_enough_init_memory(baseline_snapshot, self.cache_config)
+
+                with memory_profiling(baseline_snapshot) as diff:
+                    for modality, max_items_per_prompt in (
+                            mm_budget.max_items_per_prompt_by_modality.items()
+                    ):
+                        self.mm_registry.get_decoder_dummy_data(
+                            model_config=model_config,
+                            seq_len=scheduler_config.max_num_batched_tokens,
+                            mm_counts={modality: max_items_per_prompt},
+                        )
+
+                processor_memory_usage = diff.torch_peak_increase * device_mult
+                logger.info(
+                    "Input processing took %.4f GiB and %.6f seconds on %s",
+                    processor_memory_usage / GiB_bytes,
+                    diff.profile_time,
+                    mm_processor_device,
+                )
+                if processor_memory_usage > diff.before_profile.free_memory:
+                    raise ValueError(
+                        f"No available memory in {mm_processor_device} "
+                        f"for multi-modal processing. "
+                        f"Try increasing `gpu_memory_utilization` "
+                        f"or reduce `api_server_count`.")
+
+        self.processor_memory_usage = processor_memory_usage

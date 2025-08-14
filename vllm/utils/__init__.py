@@ -2631,7 +2631,6 @@ class MemoryProfilingResult:
     torch_peak_increase: int = 0
     non_torch_increase: int = 0
     weights_memory: int = 0
-    processing_memory: int = 0
     before_create: MemorySnapshot = field(default_factory=MemorySnapshot)
     profile_time: float = 0.0
 
@@ -2642,32 +2641,20 @@ class MemoryProfilingResult:
         self.after_profile = MemorySnapshot(device=device, auto_measure=False)
 
     def __repr__(self) -> str:
-        summary = f"Memory profiling takes {self.profile_time:.2f} seconds."
-
-        detail = [
-            f"{title}: {value / GiB_bytes:.2f}GiB" for title, value in [
-                "Total non KV cache memory",
-                self.non_kv_cache_memory,
-                "torch peak memory increase",
-                self.torch_peak_increase,
-                "non-torch forward increase memory",
-                self.non_torch_increase,
-                "model weights memory",
-                self.weights_memory,
-                "input processing memory",
-                self.processing_memory,
-            ]
-        ]
-
-        return f"{summary} {'; '.join(detail)}."
+        return (f"Memory profiling takes {self.profile_time:.2f} seconds. "
+                f"Total non KV cache memory: "
+                f"{(self.non_kv_cache_memory / GiB_bytes):.2f}GiB; "
+                f"torch peak memory increase: "
+                f"{(self.torch_peak_increase / GiB_bytes):.2f}GiB; "
+                f"non-torch forward increase memory: "
+                f"{(self.non_torch_increase / GiB_bytes):.2f}GiB; "
+                f"weights memory: {(self.weights_memory / GiB_bytes):.2f}GiB.")
 
 
 @contextlib.contextmanager
 def memory_profiling(
     baseline_snapshot: MemorySnapshot,
-    *,
     weights_memory: int = 0,
-    processing_memory: int = 0,
 ) -> Generator[MemoryProfilingResult, None, None]:
     """Memory profiling context manager.
     baseline_snapshot: the memory snapshot before the current vLLM instance.
@@ -2723,8 +2710,6 @@ def memory_profiling(
         before_create=baseline_snapshot,
         # the part of memory used for holding the model weights
         weights_memory=weights_memory,
-        # the part of memory used for input processing
-        processing_memory=processing_memory,
     )
 
     result.before_profile.measure()
@@ -2743,8 +2728,7 @@ def memory_profiling(
     result.profile_time = diff_profile.timestamp
     result.non_kv_cache_memory = (result.non_torch_increase +
                                   result.torch_peak_increase +
-                                  result.weights_memory +
-                                  result.processing_memory)
+                                  result.weights_memory)
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501

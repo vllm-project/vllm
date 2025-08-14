@@ -29,8 +29,8 @@ class MultiModalBudget:
         scheduler_config: SchedulerConfig,
         mm_registry: MultiModalRegistry,
         *,
-        max_model_len: int,
-        max_num_reqs: int,
+        max_model_len: Optional[int] = None,
+        max_num_reqs: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -46,8 +46,8 @@ class MultiModalBudget:
 
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
-        self.max_model_len = max_model_len
-        self.max_num_reqs = max_num_reqs
+        self.max_model_len = max_model_len or model_config.max_model_len
+        self.max_num_reqs = max_num_reqs or scheduler_config.max_num_seqs
 
         self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config)
 

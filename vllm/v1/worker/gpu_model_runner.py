@@ -48,9 +48,8 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        GiB_bytes, LazyLoader, MemorySnapshot, check_use_alibi,
-                        get_dtype_size, is_pin_memory_available,
-                        memory_profiling, round_up, supports_dynamo)
+                        GiB_bytes, LazyLoader, check_use_alibi, get_dtype_size,
+                        is_pin_memory_available, round_up, supports_dynamo)
 from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
@@ -78,8 +77,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from ..sample.logits_processor import LogitsProcessorManager
 from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
-                    check_enough_init_memory, gather_mm_placeholders,
-                    initialize_kv_cache_for_kv_sharing,
+                    gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
 if TYPE_CHECKING:
@@ -332,10 +330,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.model_config,
             self.scheduler_config,
             self.mm_registry,
-            max_model_len=self.max_model_len,
-            max_num_reqs=self.max_num_reqs,
-        ) if self.supports_mm_inputs \
-            else None)
+        ) if self.supports_mm_inputs else None)
 
         self.reorder_batch_threshold: Optional[int] = None
 
@@ -2023,62 +2018,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.model.compile(
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
                 backend=backend)
-
-        # We don't call this from the worker because
-        # not all model runners support this
-        self.maybe_profile_processing()
-
-    def maybe_profile_processing(self) -> None:
-        model_config = self.model_config
-        mm_config = model_config.multimodal_config
-
-        processor_memory_usage = 0
-
-        if mm_config and (mm_processor_kwargs :=
-                          mm_config.mm_processor_kwargs):
-            mm_processor_device = torch.device(
-                mm_processor_kwargs.get("device", "cpu"))
-            device_mult = mm_config.mm_processors_per_gpu
-
-            if mm_processor_device != "cpu" and device_mult > 0:
-                mm_budget = self.mm_budget
-                assert mm_budget is not None
-
-                self.mm_registry.reset_processor_cache(model_config)
-
-                baseline_snapshot = MemorySnapshot(device=mm_processor_device)
-                if mm_processor_device != self.device:
-                    check_enough_init_memory(baseline_snapshot,
-                                             self.cache_config)
-
-                with memory_profiling(baseline_snapshot) as diff:
-                    for modality, max_items_per_prompt in (
-                            mm_budget.max_items_per_prompt_by_modality.items()
-                    ):
-                        self.mm_registry.get_decoder_dummy_data(
-                            model_config=model_config,
-                            seq_len=self.max_num_tokens,
-                            mm_counts={modality: max_items_per_prompt},
-                        )
-
-                processor_memory_usage = diff.torch_peak_increase * device_mult
-                logger.info(
-                    "Input processing took %.4f GiB and %.6f seconds on %s",
-                    processor_memory_usage / GiB_bytes,
-                    diff.profile_time,
-                    mm_processor_device,
-                )
-                if processor_memory_usage > diff.before_profile.free_memory:
-                    raise ValueError(
-                        f"No available memory in {mm_processor_device} "
-                        f"for multi-modal processing. "
-                        f"Try increasing `gpu_memory_utilization` "
-                        f"or reduce `api_server_count`.")
-
-                if mm_processor_device != self.device:
-                    processor_memory_usage = 0  # Not on the engine GPU
-
-        self.processor_memory_usage = processor_memory_usage
 
     def reload_weights(self) -> None:
         assert getattr(self, "model", None) is not None, \
