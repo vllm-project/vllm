@@ -3077,15 +3077,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             page_size_padded = (
                 self.vllm_config.cache_config.mamba_page_size_padded)
 
+            # Choose dtype only for NemotronH; others remain global dtype
+            is_nemotron_h = (
+                self.model_config.architecture == "NemotronHForCausalLM")
+            kv_cache_dtype_mamba = self.kv_cache_dtype
+            if is_nemotron_h:
+                from vllm.utils import get_kv_cache_torch_dtype
+                kv_cache_dtype_mamba = get_kv_cache_torch_dtype(
+                    self.vllm_config.cache_config.mamba_ssm_cache_dtype,
+                    self.dtype)
+
             # Set block_size to max_model_len, so that mamba model will always
             # have only one block in the KV cache.
             for layer_name, mamba_module in mamba_layers.items():
-                kv_cache_spec[layer_name] = MambaSpec(
-                    shapes=mamba_module.get_state_shape(),
-                    dtype=self.kv_cache_dtype,
-                    block_size=max_model_len,
-                    page_size_padded=page_size_padded,
-                    mamba_type=mamba_module.mamba_type)
+                kv_cache_spec[
+                    layer_name] = MambaSpec(  # todo (afrimi) what to do if i want apply it only for the ssm part? 
+                        shapes=mamba_module.get_state_shape(),
+                        dtype=kv_cache_dtype_mamba,
+                        block_size=max_model_len,
+                        page_size_padded=page_size_padded,
+                        mamba_type=mamba_module.mamba_type)
 
         return kv_cache_spec
 
