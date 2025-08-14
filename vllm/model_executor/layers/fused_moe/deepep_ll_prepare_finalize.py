@@ -78,9 +78,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         quant_config: FusedMoEQuantConfig,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
 
-        block_k = quant_config.block_shape[
-            1] if quant_config.block_shape is not None else None
         if self.use_fp8_dispatch:
+            block_k = quant_config.block_shape[
+                1] if quant_config.block_shape is not None else None
             if block_k == DEEPEP_QUANT_BLOCK_SIZE:
                 # DeepEP kernels did the quantization for us.
                 x, x_scales = x
@@ -120,6 +120,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.ReceiverType:
+
+        assert quant_config.is_per_tensor or quant_config.is_block_quantized
 
         hidden_size = a1.size(1)
         assert hidden_size in self.SUPPORTED_HIDDEN_SIZES, \
@@ -168,7 +170,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     ) -> mk.PrepareResultType:
         hook()
 
-        expert_x, expert_x_scale = self._do_quant(expert_x, a1.dtype, quant_config)
+        expert_x, expert_x_scale = self._do_quant(expert_x, a1.dtype,
+                                                  quant_config)
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None)
