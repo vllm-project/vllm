@@ -34,3 +34,12 @@ class RateLimiter:
                 # Calculate wait time if no num_available_tokens available
                 wait_time = 1.0 - elapsed
             await asyncio.sleep(wait_time)
+
+    async def __aenter__(self):
+        """Enter async context manager - acquire token"""
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        """Exit async context manager - no cleanup needed"""
+        pass

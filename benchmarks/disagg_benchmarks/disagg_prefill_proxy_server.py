@@ -41,30 +41,32 @@ async def startup():
 
 async def forward_request(url, data):
     """Forward request to backend service with rate limiting and error handling"""
-    # Apply rate limiting before making request
-    await rate_limiter.acquire()
-
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
-    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-        try:
-            async with session.post(url=url, json=data, headers=headers) as response:
-                if response.status == 200:
-                    # Stream response chunks
-                    async for chunk_bytes in response.content.iter_chunked(1024):
-                        yield chunk_bytes
-                else:
-                    # Handle backend service errors
-                    error_text = await response.text()
-                    logger.error("error: %s-%s", response.status, error_text)
-                    yield b'{"error": "Backend service error"}'
-        except aiohttp.ClientError as e:
-            # Handle connection errors
-            logger.error("Connection error to %s: %s", url, str(e))
-            yield b'{"error": "Service unavailable"}'
-        except asyncio.TimeoutError:
-            # Handle timeout errors
-            logger.error("Timeout connecting to %s", url)
-            yield b'{"error": "Service timeout"}'
+
+    # Use rate limiter as context manager
+    async with rate_limiter:
+        async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+            try:
+                async with session.post(url=url, json=data,
+                                        headers=headers) as response:
+                    if response.status == 200:
+                        # Stream response chunks
+                        async for chunk_bytes in response.content.iter_chunked(1024):
+                            yield chunk_bytes
+                    else:
+                        # Handle backend service errors
+                        error_text = await response.text()
+                        logger.error("Backend service error: %s - %s", response.status,
+                                     error_text)
+                        yield b'{"error": "Backend service error"}'
+            except aiohttp.ClientError as e:
+                # Handle connection errors
+                logger.error("Connection error to %s: %s", url, str(e))
+                yield b'{"error": "Service unavailable"}'
+            except asyncio.TimeoutError:
+                # Handle timeout errors
+                logger.error("Timeout connecting to %s", url)
+                yield b'{"error": "Service timeout"}'
 
 
 async def process_request():
