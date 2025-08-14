@@ -330,7 +330,6 @@ steps:
   - tests/conftest.py
   commands:
     - pytest -v -s samplers
-    - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
 
 - label: LoRA Test %N # 15min each
   mirror_hardwares: [amdexperimental]
