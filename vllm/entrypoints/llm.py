@@ -1711,6 +1711,8 @@ class LLM:
                 if output.finished:
                     outputs.append(output)
                     if use_tqdm:
+                        # TODO: update this to account for prompt_embeds, if the
+                        # prompt_token_ids are empty
                         if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput
                             n = len(output.outputs)

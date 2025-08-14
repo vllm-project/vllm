@@ -228,10 +228,15 @@ class RequestState:
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
 
+        # If prompt embeds were used, put placeholder prompt token ids
+        prompt_token_ids = self.prompt_token_ids
+        if prompt_token_ids is None and self.prompt_embeds is not None:
+            prompt_token_ids = [0] * len(self.prompt_embeds)
+
         return RequestOutput(
             request_id=request_id,
             prompt=self.prompt,
-            prompt_token_ids=self.prompt_token_ids,
+            prompt_token_ids=prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
