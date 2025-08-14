@@ -736,9 +736,6 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
             raise ValueError(layer.__mro__)
 
         self.weight = PartitionedLinearWeightParameter(
-            input_size_per_partition,
-            output_partition_sizes,
-            dtype=scheme.precision,
             weight_loader=weight_loader)
 
         #for partition_id, output_shape in enumerate(output_partition_sizes):
@@ -772,6 +769,7 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
                 )
 
             self.weight.add_partition(partition_id, registry[key])
+            print((layer.layer_name, hash(registry[key]), id(scheme), weight_shape))
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         if self.args.location == TransformLocation.INPUT:
@@ -830,25 +828,27 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
     def process_weights_after_loading(self, layer):
         super().process_weights_after_loading(layer)
 
-        # for input transforms, check that all partitions are identical
-        # this ensures that the input activation to fused modules is identical
-        for transform in self.input_transforms:
-            for parameter in transform.parameters(recurse=False):
-                assert isinstance(parameter, PartitionedLinearWeightParameter)
-                for partition in parameter.partitions.values():
-                    #assert partition.data is parameter.partitions[0].data, (torch.all(partition.data == parameter.partitions[0].data), partition.data, parameter.partitions[0].data, layer.layer_name)
-                    assert torch.all(partition.data == parameter.partitions[0].data)
+        if len(self.input_transforms) > 0:
+            # for input transforms, check that all partitions are identical
+            # this ensures that the input activation to fused modules is identical
+            for transform in self.input_transforms:
+                for parameter in transform.parameters(recurse=False):
+                    assert isinstance(parameter, PartitionedLinearWeightParameter)
+                    for partition in parameter.partitions.values():
+                        #assert partition.data is parameter.partitions[0].data, (torch.all(partition.data == parameter.partitions[0].data), partition.data, parameter.partitions[0].data, layer.layer_name)
+                        assert 0 in parameter.partitions, (layer.layer_name, parameter.partitions)
+                        assert torch.all(partition.data == parameter.partitions[0].data), (layer.layer_name, parameter.partitions)
 
-        self.input_partition = list(self.input_transforms[0].weight.partitions.values())[0].data
+            self.input_partition = list(self.input_transforms[0].weight.partitions.values())[0].data
 
-        self.output_partitions = [
-            partition.data
-            for partition in self.output_transforms[0].weight.partitions.values()
-        ]
+            self.output_partitions = {
+                key: partition.data
+                for key, partition in self.output_transforms[0].weight.partitions.items()
+            }
 
-        assert not torch.all(self.input_partition == 0)
-        for p in self.output_partitions:
-            assert not torch.all(p == 0)
+            assert not torch.all(self.input_partition == 0)
+            for p in self.output_partitions.values():
+                assert not torch.all(p == 0)
 
         self.my_data = layer.weight.data
 

@@ -33,7 +33,7 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
-    #"CompressedTensorsUnquantizedLinearMethod",
+    "CompressedTensorsUnquantizedLinearMethod",
     "CompressedTensorsLinearMethod",
     "BitBLASLinearMethod",
     "GPTQBitBLASLinearMethod",
@@ -1384,7 +1384,6 @@ class RowParallelLinear(LinearBase):
             assert loaded_weight.numel() == 1
             loaded_weight = loaded_weight.reshape(1)
 
-        print(type(param))
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(

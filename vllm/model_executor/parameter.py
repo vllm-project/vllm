@@ -389,16 +389,13 @@ class PartitionedLinearWeightParameter(ModelWeightParameter):
     tensors in order to allow for tensor memory sharing between layers.
     """
 
-    def __new__(cls, input_size_per_partition: int, output_partition_sizes: list[int], dtype: torch.dtype, **kwargs):
-        data_shape = (sum(output_partition_sizes), input_size_per_partition)
-        data = torch.empty(data_shape, dtype=dtype, device="meta")
+    def __new__(cls, **kwargs):
+        data = torch.empty(0, device="meta")
         instance = super().__new__(cls, data=data, **kwargs)
         instance._data = data
         return instance
     
-    def __init__(self, input_size_per_partition: int, output_partition_sizes: list[int], dtype: torch.dtype, **kwargs):
-        self.input_size_per_partition = input_size_per_partition
-        self.output_partition_sizes = output_partition_sizes
+    def __init__(self, **kwargs):
         self.partitions: dict[int, ModelWeightParameter] = {}
 
         kwargs.update({"input_dim": 1, "output_dim": 0})
@@ -428,16 +425,16 @@ class PartitionedLinearWeightParameter(ModelWeightParameter):
     # Cannot support this, since it doesn't know if we're column parallel or row parallel
     # cannot call the weight loader passed by module, since that weight loader assumes
     # that the weight is fused, not separate tensors
-    def weight_loader(self, param: BasevLLMParameter,
-                         loaded_weight: torch.Tensor,
-                         loaded_shard_id: Optional[int | str] = None):
-        key = self._shard_id_as_int(loaded_shard_id)
-        partition = self.partitions[key]
+    # def weight_loader(self, param: BasevLLMParameter,
+    #                      loaded_weight: torch.Tensor,
+    #                      loaded_shard_id: Optional[int | str] = None):
+    #     key = self._shard_id_as_int(loaded_shard_id)
+    #     partition = self.partitions[key]
 
-        print(f"loading {partition.data.shape} {loaded_weight.shape} {loaded_shard_id}")
-        #partition.weight_loader(partition, loaded_weight)
-        assert partition.data.shape == loaded_weight.shape
-        partition.data.copy_(loaded_weight)
+    #     print(f"loading {partition.data.shape} {loaded_weight.shape} {loaded_shard_id}")
+    #     #partition.weight_loader(partition, loaded_weight)
+    #     assert partition.data.shape == loaded_weight.shape
+    #     partition.data.copy_(loaded_weight)
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         assert len(self.partitions) == 1 and 0 in self.partitions
@@ -458,22 +455,37 @@ class PartitionedLinearWeightParameter(ModelWeightParameter):
 
         shard_offset = 0
         # TODO: might be the same as kwargs
-        shard_size = self.output_partition_sizes[partition_id] // self.tp_size
+        shard_size = partition.data.size(0) #self.output_partition_sizes[partition_id] // self.tp_size  # TODO: use divide()
         
-        print("load_merged_column_weight")
+        # param_data = partition.data
+        # assert param_data.shape == loaded_weight.shape
+        # param_data.copy_(loaded_weight)
+        print(f"load_merged_column_weight {partition_id} {shard_offset} {shard_size} {partition.data.shape}")
         _ColumnvLLMParameter.load_merged_column_weight(partition, loaded_weight, shard_offset=shard_offset, shard_size=shard_size)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         partition_id = kwargs.pop("shard_id")
+        print(partition_id)
         partition_id = self._shard_id_as_int(partition_id)
         partition = self.partitions[partition_id]
 
         shard_offset = 0
-        shard_size = kwargs["shard_size"]  # comes from mapping
+        shard_size = partition.data.size(0)#kwargs["shard_size"]  # comes from mapping
+        print(("load_qkv_weight", partition_id, shard_size))
         shard_id = "q"
         num_heads = kwargs.get("num_heads")
 
-        print("load_qkv_weight")
+        param_data = partition.data
+        tp_rank = get_tensor_model_parallel_rank()
+        shard_id = tp_rank if shard_id == "q" else tp_rank // num_heads
+        print(param_data.shape)
+        print(loaded_weight.shape)
+        print(param_data.narrow(self.output_dim, shard_offset, shard_size).shape)
+        print(loaded_weight.narrow(self.output_dim, shard_id * shard_size, shard_size).shape)
+
+        # assert param_data.shape == loaded_weight.shape
+        # param_data.copy_(loaded_weight)
+        #print("load_qkv_weight")
         _ColumnvLLMParameter.load_qkv_weight(
             partition,
             loaded_weight,
