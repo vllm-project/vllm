@@ -311,6 +311,8 @@ class MambaMixer(MambaBase, CustomOp):
         return contextualized_states
 
     def get_state_dtype(self) -> tuple[torch.dtype]:
+        assert self.model_config is not None
+        assert self.cache_config is not None
         return MambaStateDtypeCalculator.mamba1_state_dtype(
             self.model_config.dtype,
             self.cache_config.cache_dtype,

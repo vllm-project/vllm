@@ -22,8 +22,8 @@ else:
 logger = init_logger(__name__)
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
-CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc",
-                     "float32"]
+CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
+MambaDType = Literal["auto", "float32"]
 PrefixCachingHashAlgo = Literal["builtin", "sha256", "sha256_cbor_64bit"]
 
 
@@ -94,7 +94,7 @@ class CacheConfig:
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
 
-    mamba_ssm_cache_dtype: CacheDType = "auto"
+    mamba_ssm_cache_dtype: MambaDType = "auto"
     """The data type to use for the Mamba SSM cache. If set to 'auto', the
     data type will be inferred from the model config."""
 
