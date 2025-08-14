@@ -66,7 +66,7 @@ class Worker(WorkerBase):
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
         # executed cuda graph
-        self._token_compiled_cudagraphs: set[int] = set(
+        self.incomplete_cudagraph_capture: list[int] = list(
             self.compilation_config.cudagraph_capture_sizes)
 
         # Torch profiler. Enabled and configured through env vars:
@@ -314,8 +314,8 @@ class Worker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
-        if (not self.model_config.enforce_eager and
-                not self.vllm_config.compilation_config.delayed_cudagraphs):
+        if (not self.model_config.enforce_eager and not self.vllm_config.
+                compilation_config.cudagraph_delayed_capture_sizes):
             self.model_runner.capture_model()
 
         # Warm up sampler and preallocate memory buffer for logits and other
@@ -364,16 +364,18 @@ class Worker(WorkerBase):
         next_capture = None
 
         # Check if the scheduled token count is in our compiled CUDAgraphs list
-        if total_num_scheduled_tokens in self._token_compiled_cudagraphs:
+        # Priority to capture the token count that is in execution
+        if total_num_scheduled_tokens in self.incomplete_cudagraph_capture:
             # Update next_comp and
             # remove the entry from _token_compiled_cudagraphs
             next_capture = total_num_scheduled_tokens
-            self._token_compiled_cudagraphs.discard(total_num_scheduled_tokens)
+            self.incomplete_cudagraph_capture.remove(
+                total_num_scheduled_tokens)
 
         # Check if there are any entries left in _token_compiled_cudagraphs
-        elif len(self._token_compiled_cudagraphs) > 0:
+        else:
             # Update next_comp to the first item and remove it from the list
-            next_capture = self._token_compiled_cudagraphs.pop()
+            next_capture = self.incomplete_cudagraph_capture.pop(0)
 
         # If value in next_comp, call the model_runner to capture the model
         if next_capture:
@@ -393,8 +395,9 @@ class Worker(WorkerBase):
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
 
-        if (self.vllm_config.compilation_config.delayed_cudagraphs
-                and not self.model_config.enforce_eager):
+        if (self.vllm_config.compilation_config.cudagraph_delayed_capture_sizes
+                and not self.model_config.enforce_eager
+                and len(self.incomplete_cudagraph_capture) > 0):
             self._delayed_cudagraph_capture(
                 scheduler_output.total_num_scheduled_tokens)
 
