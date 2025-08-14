@@ -2888,6 +2888,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         target_shape = (num_blocks, *shape)
                         stride = torch.empty(target_shape).stride()
                         target_stride = (num_element_per_page, *stride[1:])
+                        assert storage_offset_bytes % dtype_size == 0
                         tensor = torch.as_strided(
                             raw_tensor.view(dtype),
                             size=target_shape,
