@@ -27,7 +27,8 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device, cancel_task_threadsafe, cdiv, deprecate_kwargs
+from vllm.utils import (Device, as_list, cancel_task_threadsafe, cdiv,
+                        deprecate_kwargs)
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -434,8 +435,8 @@ class AsyncLLM(EngineClient):
     async def abort(self, request_id: Union[str, Iterable[str]]) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
-        request_ids = (request_id, ) if isinstance(request_id,
-                                                   str) else request_id
+        request_ids = (request_id, ) if isinstance(
+            request_id, str) else as_list(request_id)
         all_request_ids = self.output_processor.abort_requests(request_ids)
         await self.engine_core.abort_requests_async(all_request_ids)
 
