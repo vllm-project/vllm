@@ -24,7 +24,8 @@ import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ConfigFormat, ConfigType, ConvertOption,
                          DecodingConfig, DetailedTraceModules, Device,
-                         DeviceConfig, DistributedExecutorBackend,
+                         DeviceConfig, DistributedExecutorBackend, 
+                         EPDDisaggConfig,
                          GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
                          LoRAConfig, ModelConfig, ModelDType, ModelImpl,
@@ -434,6 +435,11 @@ class EngineArgs:
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
+    instance_type: Literal["NoEPD", "encode", "prefill",
+                           "prefill+decode"] = EPDDisaggConfig.instance_type
+    connector_workers_num: int = EPDDisaggConfig.connector_workers_num
+    epd_rank: int = EPDDisaggConfig.epd_rank
+
     async_scheduling: bool = SchedulerConfig.async_scheduling
     # DEPRECATED
     enable_prompt_adapter: bool = False
@@ -819,6 +825,21 @@ class EngineArgs:
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
         scheduler_group.add_argument("--async-scheduling",
                                      **scheduler_kwargs["async_scheduling"])
+
+        # EPD disagg. arguments
+        epd_disagg_kwargs = get_kwargs(EPDDisaggConfig)
+        epd_disagg_group = parser.add_argument_group(
+            title="EPDDisaggConfig",
+            description=EPDDisaggConfig.__doc__,
+        )
+        epd_disagg_group.add_argument("--instance-type",
+                                      **epd_disagg_kwargs["instance_type"])
+        epd_disagg_group.add_argument(
+            "--connector-workers-num",
+            **epd_disagg_kwargs["connector_workers_num"])
+        epd_disagg_group.add_argument(
+            "--epd-rank",
+            **epd_disagg_kwargs["epd_rank"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1340,6 +1361,11 @@ class EngineArgs:
             collect_detailed_traces=self.collect_detailed_traces,
         )
 
+        epd_disagg_config = EPDDisaggConfig(
+            instance_type=self.instance_type,
+            connector_workers_num=self.connector_workers_num,
+            epd_rank = self.epd_rank)
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1354,6 +1380,7 @@ class EngineArgs:
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            epd_disagg_config=epd_disagg_config,
             additional_config=self.additional_config,
         )
 

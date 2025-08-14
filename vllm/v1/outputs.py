@@ -116,6 +116,12 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
 
+    # EPD transfered mm data
+    transfered_mm_data: Optional[list[tuple[str, int]]] = None
+
+    # EPD Injected mm data
+    injected_mm_data: Optional[list[tuple[str, int]]] = None
+
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               req_id_to_index={},
@@ -124,4 +130,6 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               logprobs=None,
                                               prompt_logprobs_dict={},
                                               pooler_output=[],
-                                              num_nans_in_logits=None)
+                                              num_nans_in_logits=None,
+                                              transfered_mm_data=None,
+                                              injected_mm_data=None)

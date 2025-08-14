@@ -5,6 +5,7 @@ import dataclasses
 import gc
 import itertools
 import time
+import threading
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -171,6 +172,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
+        self.encoder_cache_lock: threading.Lock = threading.Lock()
 
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
@@ -336,6 +338,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.reorder_batch_threshold: Optional[int] = None
 
+        # EPD disaggregation
+        self.epd_disagg_config = vllm_config.epd_disagg_config
+        if self.epd_disagg_config.instance_type == "NoEPD":
+            self.is_mm_encoder_exec_allowed = True
+        else:
+            self.is_mm_encoder_exec_allowed = (
+                self.epd_disagg_config.instance_type == "encode")
+
     def _init_model_kwargs(self, num_tokens: int):
         model_kwargs = dict[str, Any]()
         num_reqs = self.input_batch.num_reqs
@@ -417,9 +427,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         new/resumed/paused/finished request in the batch.
         """
         # Remove finished requests from the cached states.
-        for req_id in scheduler_output.finished_req_ids:
-            self.requests.pop(req_id, None)
-            self.encoder_cache.pop(req_id, None)
+        with self.encoder_cache_lock:
+            for req_id in scheduler_output.finished_req_ids:
+                self.requests.pop(req_id, None)
+                self.encoder_cache.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -430,12 +441,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_batch.remove_request(req_id)
 
         # Free the cached encoder outputs.
-        for req_id, input_id in scheduler_output.free_encoder_input_ids:
-            encoder_outputs = self.encoder_cache.get(req_id)
-            if encoder_outputs is not None:
-                encoder_outputs.pop(input_id, None)
-                if not encoder_outputs:
-                    self.encoder_cache.pop(req_id, None)
+        with self.encoder_cache_lock:
+            for req_id, input_id in scheduler_output.free_encoder_input_ids:
+                encoder_outputs = self.encoder_cache.get(req_id)
+                if encoder_outputs is not None:
+                    encoder_outputs.pop(input_id, None)
+                    if not encoder_outputs:
+                        self.encoder_cache.pop(req_id, None)
 
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
@@ -1140,7 +1152,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
-
+        assert self.is_mm_encoder_exec_allowed, \
+            "Encoder execution is not allowed on this instance"
         # Batch the multi-modal inputs.
         mm_inputs = list[MultiModalKwargs]()
         req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
@@ -1235,9 +1248,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_computed_tokens - start_pos + num_scheduled_tokens,
                     num_encoder_tokens)
                 assert start_idx < end_idx
-                assert req_id in self.encoder_cache
-                assert i in self.encoder_cache[req_id]
-                encoder_output = self.encoder_cache[req_id][i]
+                with self.encoder_cache_lock:
+                    assert req_id in self.encoder_cache
+                    assert i in self.encoder_cache[req_id]
+                    encoder_output = self.encoder_cache[req_id][i]
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
