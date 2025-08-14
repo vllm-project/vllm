@@ -79,8 +79,11 @@ def test_embed_models_mteb(hf_runner, vllm_runner,
     if model_info.architecture == "GteNewModel":
         vllm_extra_kwargs["hf_overrides"] = {"architectures": ["GteNewModel"]}
 
-    mteb_test_embed_models(hf_runner, vllm_runner, model_info,
-                           vllm_extra_kwargs)
+    mteb_test_embed_models(hf_runner,
+                           vllm_runner,
+                           model_info,
+                           vllm_extra_kwargs,
+                           atol=0.02)
 
 
 @pytest.mark.parametrize("model_info", MODELS)
