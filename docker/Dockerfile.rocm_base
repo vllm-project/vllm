@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=registry-sc-harbor.amd.com/framework/compute-rocm-rel-7.0:17_ubuntu22.04_py3.10_pytorch_lw_release-2.8_3b41cb56
+ARG BASE_IMAGE=registry-sc-harbor.amd.com/framework/compute-rocm-rel-7.0:24_ubuntu22.04_py3.10_pytorch_lw_release-2.8_77a67608
 # ARG HIPBLASLT_BRANCH="aa0bda7b"
 # ARG HIPBLAS_COMMON_BRANCH="9b80ba8e"
 # ARG LEGACY_HIPBLASLT_OPTION=
