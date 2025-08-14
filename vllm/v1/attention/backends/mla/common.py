@@ -242,8 +242,9 @@ def is_rocm_aiter_fp8bmm_enabled() -> bool:
 
 
 if is_rocm_aiter_fp8bmm_enabled():
-    from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501
-        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_triton_fp8_bmm)
+    from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501 # isort: skip
+        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant
+        as aiter_triton_fp8_bmm)
 
     def dynamic_per_batched_tensor_quant(
             x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn):
@@ -1042,29 +1043,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 W_K, dtype=current_platform.fp8_dtype())
             self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(
                 W_V, dtype=current_platform.fp8_dtype())
-            logger.info_once(
-                "[Aiter Triton] compiling fp8 BMM for batch sizes 1 to 128 "
-                f"W_K shape = {list(self.W_K.shape)} and "
-                f"W_V shape = {list(self.W_V.shape)}")
-            for m in range(1, 129):
-                x = torch.empty((self.W_K.shape[0], m, self.W_K.shape[2]),
-                                dtype=torch.bfloat16,
-                                device=self.W_K.device)
-                aiter_triton_fp8_bmm(x,
-                                     self.W_K,
-                                     self.W_K_scale,
-                                     group_size=128,
-                                     transpose_bm=True)
-
-                x = torch.empty((self.W_V.shape[0], m, self.W_V.shape[2]),
-                                dtype=torch.bfloat16,
-                                device=self.W_V.device)
-                aiter_triton_fp8_bmm(x,
-                                     self.W_V,
-                                     self.W_V_scale,
-                                     group_size=128,
-                                     transpose_bm=True)
-
         else:
             # Convert from (L, N, V) to (N, L, V)
             self.W_UV = W_UV.transpose(0, 1)
