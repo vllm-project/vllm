@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
@@ -33,6 +34,13 @@ class MultiModalBudget:
         max_num_reqs: Optional[int] = None,
     ) -> None:
         super().__init__()
+
+        if max_model_len:
+            msg = "`max_model_len` is redundant and will be removed in v0.12."
+            warnings.warn(DeprecationWarning(msg), stacklevel=2)
+        if max_num_reqs:
+            msg = "`max_num_reqs` is redundant and will be removed in v0.12."
+            warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         self.model_config = model_config
         self.scheduler_config = scheduler_config
