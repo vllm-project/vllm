@@ -341,8 +341,8 @@ def allocate_gpu_mm_processors(
     engine_device_count: int,
 ) -> list[str]:
     """
-    Given `--mm_processor_kwargs.device` and the number of multi-modal
-    processors, return the GPU allocation information.
+    Allocate each processor to a GPU that is not being used by EngineCore,
+    if possible.
 
     Returns:
         The device to allocate for each multi-modal processor.
