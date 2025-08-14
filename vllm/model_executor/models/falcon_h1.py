@@ -648,8 +648,6 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                     self.vllm_config)
                 self.mamba_cache = MambaCacheManager(
                     self.vllm_config,
-                    self.lm_head.weight.dtype if hasattr(
-                        self.lm_head, 'weight') else torch.bfloat16,
                     self.config.num_hidden_layers,
                     *mamba_state_shape,
                     *mamba_state_dtype,

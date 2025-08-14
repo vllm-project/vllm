@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
@@ -25,10 +24,7 @@ class MambaCacheParams:
 
 class MambaCacheManager(ConstantSizeCache):
 
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 dtype: torch.dtype,
-                 num_mamba_layers: int,
+    def __init__(self, vllm_config: VllmConfig, num_mamba_layers: int,
                  conv_state_shape: tuple[int, int],
                  temporal_state_shape: tuple[int, int],
                  conv_state_dtype: torch.dtype,

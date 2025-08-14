@@ -12,7 +12,7 @@ from transformers import BambaConfig
 from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, ModelConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context
@@ -550,7 +550,6 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                     self.get_mamba_state_dtype_from_config(
                     self.vllm_config)
                 self.mamba_cache = MambaCacheManager(self.vllm_config,
-                                                     self.lm_head.weight.dtype,
                                                      num_mamba_layers,
                                                      *mamba_state_shape,
                                                      *mamba_state_dtype)

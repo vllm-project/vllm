@@ -94,7 +94,7 @@ def test_models(
 
     with vllm_runner(model,
                      max_num_seqs=MAX_NUM_SEQS,
-                     mamba_ssm_cache_dtype="float32") as vllm_model:
+                     mamba_ssm_cache_dtype="auto") as vllm_model:
         vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
@@ -107,7 +107,7 @@ def test_models(
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
                              enable_prefix_caching=False,
-                             mamba_ssm_cache_dtype="float32") as vllm_model:
+                             mamba_ssm_cache_dtype="auto") as vllm_model:
                 vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                     example_prompts, max_tokens, num_logprobs)
     else:

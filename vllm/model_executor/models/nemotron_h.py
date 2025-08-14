@@ -594,7 +594,6 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                     self.get_mamba_state_dtype_from_config(
                     self.vllm_config)
                 self.mamba_cache = MambaCacheManager(self.vllm_config,
-                                                     self.lm_head.weight.dtype,
                                                      num_mamba_layers,
                                                      *mamba_state_shape,
                                                      *mamba_state_dtype)

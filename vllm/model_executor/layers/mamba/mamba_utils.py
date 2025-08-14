@@ -9,18 +9,39 @@ from vllm.utils import get_kv_cache_torch_dtype
 class MambaStateDtypeCalculator:
 
     @classmethod
+    def linear_attention_state_dtype(
+        cls,
+        model_dtype,
+        cache_dtype,
+        mamba_ssm_cache_dtype,
+    ) -> tuple[torch.dtype, ...]:
+        state_dtype = get_kv_cache_torch_dtype(mamba_ssm_cache_dtype,
+                                               model_dtype)
+        return (state_dtype, )
+
+    @classmethod
+    def mamba1_state_dtype(
+        cls,
+        model_dtype,
+        cache_dtype,
+        mamba_ssm_cache_dtype,
+    ) -> tuple[torch.dtype, ...]:
+        # TODO (tdoublep) requires kernel changes
+        if mamba_ssm_cache_dtype == "float32":
+            raise ValueError("fp32 state for mamba1 is not yet supported")
+        state_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+        return (state_dtype, state_dtype)
+
+    @classmethod
     def mamba2_state_dtype(
         cls,
         model_dtype,
         cache_dtype,
         mamba_ssm_cache_dtype,
-    ) -> tuple[torch.dtype, torch.dtype]:
-
+    ) -> tuple[torch.dtype, ...]:
         conv_state_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
-
         temporal_state_dtype = get_kv_cache_torch_dtype(
             mamba_ssm_cache_dtype, model_dtype)
-
         return (conv_state_dtype, temporal_state_dtype)
 
 

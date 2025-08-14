@@ -36,7 +36,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateShapeCalculator)
+    MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -337,6 +337,13 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
     @property
     def mamba_type(self) -> str:
         return "linear_attention"
+
+    def get_state_dtype(self) -> tuple[torch.dtype]:
+        return MambaStateDtypeCalculator.linear_attention_state_dtype(
+            self.model_config.dtype,
+            self.cache_config.cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
+        )
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
         return MambaStateShapeCalculator.linear_attention_state_shape(
@@ -1408,6 +1415,18 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
             load_basic_weight(name, loaded_weight, self)
         return loaded_params
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype]:
+
+        return MambaStateDtypeCalculator.linear_attention_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
 
     @classmethod
     def get_mamba_state_shape_from_config(
