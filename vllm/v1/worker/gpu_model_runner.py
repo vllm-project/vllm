@@ -1545,7 +1545,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 tokens_to_embeds = self.model.get_input_embeddings(
                     input_ids=self.input_ids[:num_scheduled_tokens])
                 self.inputs_embeds[:num_scheduled_tokens][is_token_ids].copy_(
-                    tokens_to_embeds)
+                    tokens_to_embeds[is_token_ids])
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
             model_mm_kwargs = {}
             input_ids = None
