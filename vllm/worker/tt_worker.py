@@ -505,6 +505,7 @@ def open_mesh_device(override_tt_config, trace_mode):
         "N150x4": (1, 4),
         "P150x4": (1, 4),
         "T3K": (1, 8),
+        "P150x8": (1, 8),
         "TG": (8, 4)
     }
     mesh_device_env = os.environ.get("MESH_DEVICE")
