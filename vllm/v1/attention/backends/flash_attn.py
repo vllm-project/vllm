@@ -141,12 +141,6 @@ class FlashAttentionMetadata:
     causal: bool = True
     # Begin encoder attn & enc/dec cross-attn fields...
 
-    # (batch_size + 1,). The cumulative sequence lengths of the encoder
-    # sequences in the batch, used to index into sequence. E.g., if the sequence
-    # length is [4, 6], it is [0, 4, 10].
-    encoder_seq_start_loc: Optional[torch.Tensor] = None
-    # Maximum sequence length among encoder sequences
-    max_encoder_seq_len: Optional[int] = None
     cross_slot_mapping: Optional[torch.Tensor] = None
 
 
@@ -242,13 +236,7 @@ class FlashAttentionMetadataBuilder(
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
-
-        if (common_attn_metadata.cross_slot_mapping is not None
-                and common_attn_metadata.max_encoder_seq_len is not None):
-            # ENCODER_DECODER cross-attention
-            max_seq_len = common_attn_metadata.max_encoder_seq_len
-        else:
-            max_seq_len = int(common_attn_metadata.seq_lens_cpu.max())
+        max_seq_len = int(common_attn_metadata.seq_lens_cpu.max())
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
@@ -375,7 +363,6 @@ class FlashAttentionMetadataBuilder(
             max_num_splits=max_num_splits,
             causal=causal,
             # Encoder/cross-attention fields
-            max_encoder_seq_len=common_attn_metadata.max_encoder_seq_len,
             cross_slot_mapping=common_attn_metadata.cross_slot_mapping,
         )
         return attn_metadata

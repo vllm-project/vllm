@@ -3498,9 +3498,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             encoder_seq_start_loc_tensor, num_encoder_tokens,
             common_attn_metadata, is_cross_attention)
 
-        # Set encoder fields
-        common_metadata.max_encoder_seq_len = self.max_encoder_len
-
         # Add cross slot mapping for cross-attention
         if is_cross_attention:
             common_metadata.cross_slot_mapping = torch.tensor(
