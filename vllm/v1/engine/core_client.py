@@ -326,6 +326,8 @@ class BackgroundResources:
     output_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
     input_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
     first_req_send_socket: Optional[zmq.asyncio.Socket] = None
+    first_req_rcv_socket: Optional[zmq.asyncio.Socket] = None
+    stats_update_socket: Optional[zmq.asyncio.Socket] = None
     output_queue_task: Optional[asyncio.Task] = None
     stats_update_task: Optional[asyncio.Task] = None
     shutdown_path: Optional[str] = None
@@ -347,7 +349,8 @@ class BackgroundResources:
             # Async case.
             loop = self.output_socket._get_loop()
             sockets = (self.output_socket, self.input_socket,
-                       self.first_req_send_socket)
+                       self.first_req_send_socket, self.first_req_rcv_socket,
+                       self.stats_update_socket)
 
             if not loop.is_closed():
                 tasks = (self.output_queue_task, self.stats_update_task)
@@ -998,6 +1001,8 @@ class DPAsyncMPClient(AsyncMPClient):
                                   linger=0) as first_req_rcv_socket):
                 assert isinstance(socket, zmq.asyncio.Socket)
                 assert isinstance(first_req_rcv_socket, zmq.asyncio.Socket)
+                self.resources.stats_update_socket = socket
+                self.resources.first_req_rcv_socket = first_req_rcv_socket
                 # Send subscription message.
                 await socket.send(b'\x01')
 
