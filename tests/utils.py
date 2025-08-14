@@ -5,7 +5,6 @@ import asyncio
 import copy
 import functools
 import importlib
-import importlib.metadata
 import os
 import signal
 import subprocess
