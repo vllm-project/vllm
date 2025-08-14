@@ -5,7 +5,7 @@ from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from enum import IntEnum
 from itertools import groupby
-from typing import Callable, Optional, TypeVar, Union
+from typing import Callable, Optional, TypeVar, Union, cast
 
 import torch
 import torch.nn as nn
@@ -77,13 +77,17 @@ class Pooler(nn.Module, ABC):
         return SimplePooler.from_config(resolved_config)
 
     @staticmethod
-    def for_embed(pooler_config: PoolerConfig):
+    def for_embed(
+        pooler_config: PoolerConfig,
+        *,
+        projector: Optional[nn.Module] = None,
+    ):
         resolved_config = ResolvedPoolingConfig.from_config(
             task="embed",
             pooler_config=pooler_config,
         )
 
-        return SimplePooler.from_config(resolved_config)
+        return SimplePooler.from_config(resolved_config, projector=projector)
 
     @staticmethod
     def for_classify(
@@ -454,11 +458,76 @@ class PoolerHead(nn.Module):
 
 class EmbeddingPoolerHead(PoolerHead):
 
-    def __init__(self) -> None:
+    def __init__(self, projector: Optional[nn.Module] = None) -> None:
         super().__init__(activation=PoolerNormalize())
+        self.projector = projector
+        self._projector_dim_checked = False
+
+    def _sync_projector_to_ref(self, ref_tensor: torch.Tensor) -> None:
+        """Ensure projector is on correct device with float32 dtype."""
+        if self.projector is None:
+            return
+
+        projector = cast(nn.Module, self.projector)
+        try:
+            proj_device = next(projector.parameters()).device
+            if proj_device != ref_tensor.device:
+                projector.to(device=ref_tensor.device, dtype=torch.float32)
+            # Ensure all parameters are float32
+            for param in projector.parameters():
+                param.data = param.data.to(torch.float32)
+        except StopIteration:
+            # Empty projector, skip device check
+            pass
+
+    def _validate_projector_dimensions(self, ref_tensor: torch.Tensor) -> None:
+        """Validate projector input dimensions match pooled output."""
+        if self.projector is None:
+            return
+
+        projector = cast(nn.Module, self.projector)
+        first_linear = None
+        for module in projector.modules():
+            if isinstance(module, nn.Linear):
+                first_linear = module
+                break
+
+        if first_linear is not None:
+            expected_dim = first_linear.in_features
+            actual_dim = ref_tensor.shape[-1]
+            if expected_dim != actual_dim:
+                raise ValueError(
+                    f"Dimension mismatch: Dense projector expects "
+                    f"input dim {expected_dim}, but pooled output "
+                    f"has dim {actual_dim}")
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
+
+        # Apply ST projector
+        if self.projector is not None:
+            projector = cast(nn.Module, self.projector)
+            ref = pooled_data[0] if isinstance(pooled_data,
+                                               list) else pooled_data
+
+            # Ensure projector is on correct device with float32 dtype
+            self._sync_projector_to_ref(ref)
+
+            # Check dimension compatibility on first run
+            if not self._projector_dim_checked:
+                self._validate_projector_dimensions(ref)
+                self._projector_dim_checked = True
+
+            # Apply projection with fp32 computation for stability
+            def _proj(x: torch.Tensor) -> torch.Tensor:
+                orig_dtype = x.dtype
+                y = projector(x.to(torch.float32))
+                return y.to(orig_dtype)
+
+            if isinstance(pooled_data, torch.Tensor):
+                pooled_data = _proj(pooled_data)
+            else:
+                pooled_data = [_proj(t) for t in pooled_data]
 
         pooling_params = get_pooling_params(pooling_metadata)
 
@@ -530,12 +599,13 @@ class SimplePooler(Pooler):
     def from_config(
         cls,
         pooler_config: ResolvedPoolingConfig,
+        projector: Optional[nn.Module] = None,
     ) -> "SimplePooler":
         pooling = PoolingMethod.from_pooling_type(pooler_config.pooling_type)
         if pooler_config.task == "embed":
-            head = EmbeddingPoolerHead()
+            head = EmbeddingPoolerHead(projector=projector)
         elif pooler_config.task == "encode":
-            head = RewardPoolerHead()
+            head = EmbeddingPoolerHead()  # no projector
         else:
             raise NotImplementedError(f"Unknown task: {pooler_config.task}")
         return cls(pooling, head)

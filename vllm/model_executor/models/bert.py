@@ -28,6 +28,7 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 
+from .adapters import _load_st_projector
 from .interfaces import (SupportsCrossEncoding, SupportsQuant,
                          default_pooling_type)
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
@@ -456,7 +457,7 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
 
         self.model = self._build_model(vllm_config=vllm_config,
                                        prefix=maybe_prefix(prefix, "model"))
-        self.pooler = self._build_pooler(pooler_config)
+        self.pooler = self._build_pooler(pooler_config, vllm_config)
 
     def forward(
         self,
@@ -488,10 +489,15 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
                          prefix=prefix,
                          embedding_class=BertEmbedding)
 
-    def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
+    def _build_pooler(self, pooler_config: PoolerConfig,
+                      vllm_config: VllmConfig) -> Pooler:
+        projector = _load_st_projector(vllm_config)
+
         return DispatchPooler({
-            "encode": Pooler.for_encode(pooler_config),
-            "embed": Pooler.for_embed(pooler_config),
+            "encode":
+            Pooler.for_encode(pooler_config),
+            "embed":
+            Pooler.for_embed(pooler_config, projector=projector),
         })
 
 

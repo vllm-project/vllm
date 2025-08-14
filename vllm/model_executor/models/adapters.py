@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Optional, TypeVar, cast
 import torch
 import torch.nn as nn
 
+from vllm.logger import init_logger
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
 
 from .interfaces_base import VllmModelForPooling, is_pooling_model
@@ -22,6 +23,142 @@ _GENERATE_SUFFIXES = [
     "ChatModel",
     "LMHeadModel",
 ]
+
+logger = init_logger(__name__)
+
+def _st_activation(name: Optional[str]) -> nn.Module:
+    """Get activation function for Sentence-Transformers Dense layers."""
+    m = (name or "").lower()
+    if m == "gelu":
+        return nn.GELU()
+    if m == "gelu_new":
+        return nn.GELU(approximate="tanh")
+    if m == "relu":
+        return nn.ReLU()
+    if m == "tanh":
+        return nn.Tanh()
+    if m == "sigmoid":
+        return nn.Sigmoid()
+    if m == "swish":
+        return nn.SiLU()
+    return nn.Identity()
+
+
+def _load_weights_to_linear(state_dict: dict, linear: nn.Linear) -> bool:
+    """Load weights from a state dict into a linear layer."""
+    weight = None
+    bias = None
+
+    for weight_key in ["linear.weight", "dense.weight", "weight"]:
+        if weight_key in state_dict:
+            weight = state_dict[weight_key]
+            break
+
+    for bias_key in ["linear.bias", "dense.bias", "bias"]:
+        if bias_key in state_dict:
+            bias = state_dict[bias_key]
+            break
+
+    if weight is None:
+        return False
+
+    try:
+        with torch.no_grad():
+            # Ensure weights are float32 for numerical stability
+            linear.weight.copy_(weight.to(torch.float32))
+            if linear.bias is not None and bias is not None:
+                linear.bias.copy_(bias.to(torch.float32))
+        return True
+    except RuntimeError as e:
+        logger.warning("Failed to load weights into linear layer: %s", e)
+        return False
+
+
+def _load_st_projector(vllm_config: "VllmConfig") -> Optional[nn.Module]:
+    """Load Sentence-Transformers Dense projection layers."""
+    from vllm.transformers_utils.config import get_hf_file_to_dict, get_hf_file_bytes
+
+    model_path = vllm_config.model_config.model
+    revision = vllm_config.model_config.revision
+
+    # Read modules.json
+    modules = get_hf_file_to_dict("modules.json", model_path, revision)
+
+    # Handle dict format (some ST variants)
+    if isinstance(modules, dict):
+        modules = modules.get("modules", [])
+    if not isinstance(modules, list):
+        return None
+
+    # Filter Dense modules
+    dense_entries = [
+        m for m in modules
+        if m.get("type") == "sentence_transformers.models.Dense"
+    ]
+    if not dense_entries:
+        return None
+
+    # Build projection layer sequence
+    layers = []
+    for entry in dense_entries:
+        folder = entry.get("path")
+        if not folder:
+            continue
+
+        # Read config
+        cfg = get_hf_file_to_dict(f"{folder}/config.json", model_path, revision)
+        if not cfg:
+            continue
+
+        in_features = cfg.get("in_features")
+        out_features = cfg.get("out_features")
+        if in_features is None or out_features is None:
+            continue
+
+        use_bias = cfg.get("bias", True)
+        activation = _st_activation(cfg.get("activation_function"))
+
+        # Create linear layer with float32 for numerical stability
+        linear = nn.Linear(in_features, out_features, bias=use_bias)
+
+        # Try to load weights - first safetensors, then pytorch_model.bin
+        weight_loaded = False
+        
+        # Try safetensors
+        try:
+            b = get_hf_file_bytes(f"{folder}/model.safetensors", model_path, revision)
+            if b is not None:
+                import io
+                from safetensors.torch import load as st_load
+                sd = st_load(b)
+                weight_loaded = _load_weights_to_linear(sd, linear)
+        except (IOError, ImportError, ValueError) as e:
+            logger.debug("Failed to load safetensors from %s: %s", folder, e)
+
+        # Try pytorch_model.bin if safetensors failed
+        if not weight_loaded:
+            try:
+                b = get_hf_file_bytes(f"{folder}/pytorch_model.bin", model_path, revision)
+                if b is not None:
+                    import io
+                    sd = torch.load(io.BytesIO(b), map_location="cpu")
+                    weight_loaded = _load_weights_to_linear(sd, linear)
+            except (IOError, torch.serialization.UnpicklingError, RuntimeError, ValueError) as e:
+                logger.debug("Failed to load pytorch_model.bin from %s: %s", folder, e)
+
+        if not weight_loaded:
+            logger.warning("Failed to load weights for Dense layer in %s", folder)
+
+        layers.append(linear)
+        layers.append(activation)
+
+    if not layers:
+        return None
+
+    # Ensure the entire module uses float32
+    projector = nn.Sequential(*layers)
+    projector = projector.to(dtype=torch.float32)
+    return projector
 
 
 def _get_pooling_model_name(orig_model_name: str, pooling_suffix: str) -> str:
@@ -123,11 +260,15 @@ def as_embedding_model(cls: _T) -> _T:
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
-            self.pooler = DispatchPooler(
-                {
-                    "encode": Pooler.for_encode(pooler_config),
-                    "embed": Pooler.for_embed(pooler_config),
-                }, )
+            # Load ST projector for embed task only
+            projector = _load_st_projector(vllm_config)
+
+            self.pooler = DispatchPooler({
+                "encode":
+                Pooler.for_encode(pooler_config),
+                "embed":
+                Pooler.for_embed(pooler_config, projector=projector),
+            })
 
     ModelForEmbedding.__name__ = \
         _get_pooling_model_name(cls.__name__, "ForEmbedding")

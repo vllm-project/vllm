@@ -925,3 +925,33 @@ def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> int:
             exc_info=e)
 
     return max_position_embeddings
+
+
+def get_hf_file_bytes(file_name: str,
+                      model: Union[str, Path],
+                      revision: Optional[str] = 'main') -> Optional[bytes]:
+    """Get file contents from HuggingFace repository as bytes."""
+    file_path = try_get_local_file(model=model,
+                                   file_name=file_name,
+                                   revision=revision)
+
+    if file_path is None:
+        try:
+            hf_hub_file = hf_hub_download(model,
+                                          file_name,
+                                          revision=revision,
+                                          token=_get_hf_token())
+            file_path = Path(hf_hub_file)
+        except (OSError, ValueError) as e:
+            logger.debug("Failed to download %s from HF: %s", file_name, e)
+            return None
+
+    if file_path is not None and file_path.is_file():
+        try:
+            with open(file_path, 'rb') as file:
+                return file.read()
+        except OSError as e:
+            logger.debug("Failed to read file %s: %s", file_path, e)
+            return None
+
+    return None
