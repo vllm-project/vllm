@@ -8,7 +8,7 @@ import openai
 import pytest
 import pytest_asyncio
 
-from tests.utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer, RemoteOpenAIServerWithEntrypoint
 from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
                                                      MAX_TOKENS, MODEL_NAME,
                                                      TEMP_GREEDY, prompts)
@@ -48,46 +48,50 @@ def server(default_server_args, request, monkeypatch):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
     if request.param:
         # Append FQCN argument
-        default_server_args = default_server_args + request.param
-        with RemoteOpenAIServer(MODEL_NAME,
-                                default_server_args) as remote_server:
+        with RemoteOpenAIServer(MODEL_NAME, default_server_args +
+                                request.param) as remote_server:
             yield remote_server
     else:
-        import os
-        processid = os.fork()
+        # Patch in dummy logit processor entrypoint
+        with RemoteOpenAIServerWithEntrypoint(
+                MODEL_NAME, default_server_args) as remote_server:
+            yield remote_server
 
-        # processid > 0 represents the parent process
-        if processid > 0:
-            print("\nParent Process:")
-            print("Process ID:", os.getpid())
-            print("Child's process ID:", processid)
-            while True:
-                pass
+        # import os
+        # processid = os.fork()
 
-        # processid = 0 represents the created child process
-        else:
-            print("\nChild Process:")
-            print("Process ID:", os.getpid())
-            print("Parent's process ID:", os.getppid())
+        # # processid > 0 represents the parent process
+        # if processid > 0:
+        #     print("\nParent Process:")
+        #     print("Process ID:", os.getpid())
+        #     print("Child's process ID:", processid)
+        #     while True:
+        #         pass
 
-            import importlib.metadata
+        # # processid = 0 represents the created child process
+        # else:
+        #     print("\nChild Process:")
+        #     print("Process ID:", os.getpid())
+        #     print("Parent's process ID:", os.getppid())
 
-            from vllm.test_utils import entry_points as fake_entry_points
-            importlib.metadata.entry_points = fake_entry_points
-            import sys
+        #     import importlib.metadata
 
-            from vllm.entrypoints.cli import main
-            sys.argv = ["vllm", "serve"] + default_server_args
-            main.main()
+        #     from vllm.test_utils import entry_points as fake_entry_points
+        #     importlib.metadata.entry_points = fake_entry_points
+        #     import sys
 
-        # # Patch in dummy logit processor entrypoint
-        # with RemoteOpenAIServer(
-        #         MODEL_NAME,
-        #         default_server_args,
-        #         multiproc_method="spawn",
-        #         cmd_str=CMD_STR,
-        # ) as remote_server:
-        #     yield remote_server
+        #     from vllm.entrypoints.cli import main
+        #     sys.argv = ["vllm", "serve"] + default_server_args
+        #     main.main()
+
+        # # # Patch in dummy logit processor entrypoint
+        # # with RemoteOpenAIServer(
+        # #         MODEL_NAME,
+        # #         default_server_args,
+        # #         multiproc_method="spawn",
+        # #         cmd_str=CMD_STR,
+        # # ) as remote_server:
+        # #     yield remote_server
 
 
 @pytest_asyncio.fixture

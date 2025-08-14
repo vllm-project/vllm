@@ -83,9 +83,7 @@ class RemoteOpenAIServer:
                  env_dict: Optional[dict[str, str]] = None,
                  seed: Optional[int] = 0,
                  auto_port: bool = True,
-                 max_wait_seconds: Optional[float] = None,
-                 fork_at_launch=True,
-                 worker_multiproc_method: str = "spawn") -> None:
+                 max_wait_seconds: Optional[float] = None) -> None:
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
                 raise ValueError("You have manually specified the port "
@@ -157,6 +155,9 @@ class RemoteOpenAIServer:
             # force kill if needed
             self.proc.kill()
 
+    def _poll(self) -> Optional[int]:
+        return self.proc.poll()
+
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check
         start = time.time()
@@ -171,7 +172,7 @@ class RemoteOpenAIServer:
                 # which means the server is not ready yet.
                 # the stack trace is not useful, so we suppress it
                 # by using `raise from None`.
-                result = self.proc.poll()
+                result = self._poll()
                 if result is not None and result != 0:
                     raise RuntimeError("Server exited unexpectedly.") from None
 
@@ -205,6 +206,107 @@ class RemoteOpenAIServer:
                                   api_key=self.DUMMY_API_KEY,
                                   max_retries=0,
                                   **kwargs)
+
+
+class RemoteOpenAIServerWithEntrypoint(RemoteOpenAIServer):
+
+    def _child_process(
+        self,
+        model: str,
+        vllm_serve_args: list[str],
+        env_dict: Optional[dict[str, str]],
+    ) -> None:
+        import importlib.metadata
+
+        from vllm.test_utils import entry_points as fake_entry_points
+        importlib.metadata.entry_points = fake_entry_points
+        import sys
+
+        from vllm.entrypoints.cli import main
+
+        # fork is required for patched entrypoint
+        os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = "fork"
+        if env_dict is not None:
+            os.environ.update(env_dict)
+
+        sys.argv = ["vllm", "serve", model] + vllm_serve_args
+        main.main()
+
+    def __init__(self,
+                 model: str,
+                 vllm_serve_args: list[str],
+                 *,
+                 env_dict: Optional[dict[str, str]] = None,
+                 seed: Optional[int] = 0,
+                 auto_port: bool = True,
+                 max_wait_seconds: Optional[float] = None) -> None:
+        if auto_port:
+            if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
+                raise ValueError("You have manually specified the port "
+                                 "when `auto_port=True`.")
+
+            # No need for a port if using unix sockets
+            if "--uds" not in vllm_serve_args:
+                # Don't mutate the input args
+                vllm_serve_args = vllm_serve_args + [
+                    "--port", str(get_open_port())
+                ]
+        if seed is not None:
+            if "--seed" in vllm_serve_args:
+                raise ValueError("You have manually specified the seed "
+                                 f"when `seed={seed}`.")
+
+            vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
+
+        parser = FlexibleArgumentParser(
+            description="vLLM's remote OpenAI server.")
+        subparsers = parser.add_subparsers(required=False, dest="subparser")
+        parser = ServeSubcommand().subparser_init(subparsers)
+        args = parser.parse_args(["--model", model, *vllm_serve_args])
+        self.uds = args.uds
+        if args.uds:
+            self.host = None
+            self.port = None
+        else:
+            self.host = str(args.host or 'localhost')
+            self.port = int(args.port)
+
+        self.show_hidden_metrics = \
+            args.show_hidden_metrics_for_version is not None
+
+        # download the model before starting the server to avoid timeout
+        is_local = os.path.isdir(model)
+        if not is_local:
+            engine_args = AsyncEngineArgs.from_cli_args(args)
+            model_config = engine_args.create_model_config()
+            load_config = engine_args.create_load_config()
+
+            model_loader = get_model_loader(load_config)
+            model_loader.download_model(model_config)
+
+        from multiprocessing import Process
+
+        self.proc = Process(target=self._child_process,
+                            args=(
+                                model,
+                                vllm_serve_args,
+                                env_dict,
+                            ))
+        self.proc.start()
+
+        max_wait_seconds = max_wait_seconds or 240
+        self._wait_for_server(url=self.url_for("health"),
+                              timeout=max_wait_seconds)
+
+    def _poll(self) -> Optional[int]:
+        return self.proc.exitcode
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.proc.terminate()
+        self.proc.join(8)
+        if self.proc.is_alive():
+            # force kill if needed
+            self.proc.kill()
 
 
 def _test_completion(
