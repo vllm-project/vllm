@@ -450,6 +450,8 @@ def get_load_balance_assignment(sizes, num_gpus=2):
     """
     Generate load balancing assignment and metadata 
     for distributing data across GPUs.
+    The load is determined by the total image sizes,
+    not the number of images.
     
     Args:
         sizes: List or tensor of flatten image sizes
@@ -465,10 +467,11 @@ def get_load_balance_assignment(sizes, num_gpus=2):
         grouped_sizes_per_gpu: 
             Total size assigned to each GPU
     """
+    import torch
+
     # Convert to list for efficient indexing and iteration
     if isinstance(sizes, torch.Tensor):
         sizes = sizes.tolist()
-
     n_samples = len(sizes)
 
     # Handle edge cases
@@ -476,59 +479,24 @@ def get_load_balance_assignment(sizes, num_gpus=2):
         empty_assignment = torch.zeros((num_gpus, 0), dtype=torch.bool)
         return [], [0] * num_gpus, empty_assignment, [0] * num_gpus
 
-    if n_samples < num_gpus:
-        shuffle_indices = list(range(n_samples))
-        gpu_sample_counts = [1] * n_samples + [0] * (num_gpus - n_samples)
-
-        # Create assignment matrix
-        image_is_in_rank = torch.zeros((num_gpus, n_samples), dtype=torch.bool)
-        grouped_sizes_per_gpu = []
-
-        for gpu_id in range(num_gpus):
-            if gpu_id < n_samples:
-                image_is_in_rank[gpu_id, gpu_id] = True
-                grouped_sizes_per_gpu.append(sizes[gpu_id])
-            else:
-                grouped_sizes_per_gpu.append(0)
-
-        return (shuffle_indices, gpu_sample_counts, image_is_in_rank,
-                grouped_sizes_per_gpu)
-
-    # Phase 1: Ensure minimum samples per GPU
-    # Sort indices by size (small to large for initial assignment)
-    small_to_large_indices = sorted(range(n_samples), key=lambda i: sizes[i])
-
+    # Use greedy algorithm - balance by total size, not sample count
     gpu_assignments = [[] for _ in range(num_gpus)]
-    gpu_loads = [0.0] * num_gpus
-    used_indices = set()
+    gpu_loads = [0] * num_gpus  # This tracks total SIZE, not sample count
 
-    # Assign 1 sample to each GPU (starting with smallest)
-    for gpu_id in range(num_gpus):
-        for idx in small_to_large_indices:
-            if idx not in used_indices:
-                gpu_assignments[gpu_id].append(idx)
-                gpu_loads[gpu_id] += sizes[idx]
-                used_indices.add(idx)
-                break
+    # Sort indices by size (largest first for better load balancing)
+    large_to_small_indices = sorted(range(n_samples),
+                                    key=lambda i: sizes[i],
+                                    reverse=True)
 
-    # Phase 2: Distribute remaining samples using greedy load balancing
-    # Sort remaining indices by size (large to small for better balancing)
-    remaining_indices = sorted(
-        (idx for idx in range(n_samples) if idx not in used_indices),
-        key=lambda i: sizes[i],
-        reverse=True,
-    )
-
-    for idx in remaining_indices:
-        # Find GPU with minimum current load
+    for idx in large_to_small_indices:
+        # Find GPU with minimum current load (by total size)
         min_gpu = min(range(num_gpus), key=lambda i: gpu_loads[i])
         gpu_assignments[min_gpu].append(idx)
-        gpu_loads[min_gpu] += sizes[idx]
+        gpu_loads[min_gpu] += sizes[idx]  # Add the SIZE, not just count
 
     # Create shuffle indices and counts
     shuffle_indices = []
     gpu_sample_counts = []
-
     for gpu_id in range(num_gpus):
         shuffle_indices.extend(gpu_assignments[gpu_id])
         gpu_sample_counts.append(len(gpu_assignments[gpu_id]))
@@ -543,12 +511,8 @@ def get_load_balance_assignment(sizes, num_gpus=2):
             image_is_in_rank[rank, rank_images] = True
             current_idx += count
 
-    # Calculate grouped sizes per GPU
-    grouped_sizes_per_gpu = []
-    for rank in range(num_gpus):
-        rank_images = image_is_in_rank[rank].nonzero().squeeze(-1)
-        total_size = sum(sizes[i] for i in rank_images.tolist())
-        grouped_sizes_per_gpu.append(total_size)
+    # The grouped_sizes_per_gpu is just the gpu_loads we already calculated
+    grouped_sizes_per_gpu = gpu_loads.copy()
 
     return (shuffle_indices, gpu_sample_counts, image_is_in_rank,
             grouped_sizes_per_gpu)
@@ -574,7 +538,7 @@ def run_dp_sharded_mrope_vision_model(
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank_local = get_tensor_model_parallel_rank()
 
-    patches_per_image = [math.prod(thw) for thw in grid_thw_list]
+    patches_per_image = [math.prod(grid_thw) for grid_thw in grid_thw_list]
     cum_patches_per_image = [0, *itertools.accumulate(patches_per_image)]
 
     # Get load balancing assignment with all metadata
@@ -620,8 +584,8 @@ def run_dp_sharded_mrope_vision_model(
     if current_len < max_len_per_rank:
         padding_size = max_len_per_rank - current_len
         padding = torch.empty((padding_size, image_embeds_local.shape[1]),
-                              device=image_embeds_local.device,
-                              dtype=image_embeds_local.dtype)
+                              dtype=image_embeds_local.dtype,
+                              device=image_embeds_local.device)
         image_embeds_local_padded = torch.cat([image_embeds_local, padding],
                                               dim=0)
     else:
