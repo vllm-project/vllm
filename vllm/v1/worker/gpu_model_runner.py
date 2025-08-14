@@ -2879,10 +2879,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     state_tensors = []
-                    storage_offset = 0
-                    for (shape, dtype) in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                        num_element_per_page = (kv_cache_spec.page_size_bytes //
-                                            get_dtype_size(dtype))
+                    storage_offset_bytes = 0
+                    for (shape, dtype) in zip(kv_cache_spec.shapes,
+                                              kv_cache_spec.dtypes):
+                        dtype_size = get_dtype_size(dtype)
+                        num_element_per_page = (
+                            kv_cache_spec.page_size_bytes // dtype_size)
                         target_shape = (num_blocks, *shape)
                         stride = torch.empty(target_shape).stride()
                         target_stride = (num_element_per_page, *stride[1:])
@@ -2890,10 +2892,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             raw_tensor.view(dtype),
                             size=target_shape,
                             stride=target_stride,
-                            storage_offset=storage_offset,
+                            storage_offset=storage_offset_bytes // dtype_size,
                         )
                         state_tensors.append(tensor)
-                        storage_offset += stride[0]
+                        storage_offset_bytes += stride[0] * dtype_size
 
                     kv_caches[layer_name] = state_tensors
                 else:
