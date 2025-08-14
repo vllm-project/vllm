@@ -44,10 +44,7 @@ async def forward_request(url, data):
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
 
     # Use rate limiter as context manager
-    async with (
-        rate_limiter,
-        aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session
-    ):
+    async with rate_limiter, aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         try:
             async with session.post(
                 url=url, json=data, headers=headers
@@ -59,10 +56,11 @@ async def forward_request(url, data):
                 else:
                     # Handle backend service errors
                     error_text = await response.text()
-                    logger.error("Backend service error: %s - %s",
-                        response.status,
+                    logger.error(
+                        "Backend service error: %s - %s",
+                    response.status,
                         error_text,
-                        )
+                    )
                     yield b'{"error": "Backend service error"}'
         except aiohttp.ClientError as e:
             # Handle connection errors
