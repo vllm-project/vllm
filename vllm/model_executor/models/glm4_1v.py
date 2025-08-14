@@ -453,25 +453,30 @@ class Glm4vPatchMerger(nn.Module):
         context_dim: int,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = d_model
         self.proj = ColumnParallelLinear(self.hidden_size,
                                          self.hidden_size,
                                          bias=bias,
-                                         gather_output=True)
+                                         gather_output=True,
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.proj")
         self.post_projection_norm = nn.LayerNorm(self.hidden_size)
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=self.hidden_size,
             output_sizes=[context_dim] * 2,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
             context_dim,
             self.hidden_size,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
         self.act_fn = SiluAndMul()
         self.extra_activation_func = nn.GELU()
@@ -661,6 +666,7 @@ class Glm4vVisionTransformer(nn.Module):
             context_dim=vision_config.intermediate_size,
             quant_config=quant_config,
             bias=False,
+            prefix=f"{prefix}.merger",
         )
         self.embeddings = Glm4vVisionEmbeddings(vision_config)
 
@@ -1227,10 +1233,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             "k_proj",
             "v_proj",
         ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "gate_up_proj": ["gate_up_proj"]
     }
 
     # To ensure correct weight loading and mapping.
@@ -1567,7 +1570,26 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
-            language_model="language_model",
+            language_model="language_model.model",
             connector="visual.merger.",
             tower_model="visual.",
         )
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    Glm4vMultiModalProcessor,
+    info=Glm4vProcessingInfo,
+    dummy_inputs=Glm4vDummyInputsBuilder,
+)
+class Glm4vMoeForConditionalGeneration(Glm4vForConditionalGeneration):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
