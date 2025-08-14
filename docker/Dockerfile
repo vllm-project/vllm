@@ -376,7 +376,7 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
     . /etc/environment
     export TORCH_CUDA_ARCH_LIST='7.5 8.0+PTX 9.0a'
-    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.31"
+    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.32"
 BASH
 
 # If we need to build FlashInfer wheel before its release:
