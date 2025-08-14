@@ -296,10 +296,6 @@ class LoRAModel(AdapterModel):
                 part_name = module.split(".")[-1]
                 if part_name not in expected_lora_modules:
                     unexpected_modules.append(module)
-            # loaded lora's target modules must be a subset of
-            # expected_lora_modules. It is not reliable. See
-            # https://github.com/vllm-project/vllm/pull/5909. But there's no
-            # other better mechanism.
             if unexpected_modules and not is_regex_target_modules(
                     peft_helper.target_modules, expected_lora_modules):
                 raise ValueError(
