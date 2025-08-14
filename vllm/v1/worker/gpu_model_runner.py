@@ -490,16 +490,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         audio_feature_lengths=audio_feature_lengths,
                         use_audio_in_video=use_audio_in_video,
                     )
-                # ekhvedchenia
-                req = self.requests[req_id]
-                print(f"Setting mrope for request")
-                print("prompt_token_ids", len(req.prompt_token_ids))
-                print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
-                print(f"{req.mrope_position_delta=}")
-                print(req.mrope_positions[0])
-                print(req.mrope_positions[1])
-                print(req.mrope_positions[1])
-
 
             req_ids_to_add.append(req_id)
 
@@ -1028,15 +1018,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     req.mrope_positions[:,src_start:src_end]
 
                 mrope_pos_ptr += prompt_part_len
-                # ekhvedchenia
-                print("_calc_mrope_positions (prompt_part_len > 0)")
-                print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
-                print(f"{req.mrope_position_delta=}")
-                print(f"{self.mrope_positions_cpu.shape=}")
-                print(f"{dst_start=} {dst_end=} {src_start=} {src_end=} {prompt_part_len=}")
-                print(self.mrope_positions_cpu[0])
-                print(self.mrope_positions_cpu[1])
-                print(self.mrope_positions_cpu[2])
 
             if completion_part_len > 0:
                 # compute completion's mrope_positions on-the-fly
@@ -1052,17 +1033,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
 
                 mrope_pos_ptr += completion_part_len
-
-                print("_calc_mrope_positions (completion_part_len > 0)")
-                print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
-                print(f"{dst_start=} {dst_end=} {prompt_part_len=} {num_computed_tokens=} {completion_part_len=}")
-                print(f"{req.mrope_position_delta=}")
-                print("req._mrope_position_delta", req._mrope_position_delta if hasattr(req, "_mrope_position_delta") else None)
-                print(f"{self.mrope_positions_np.shape=}")
-                print(self.mrope_positions_np[0])
-                print(self.mrope_positions_np[1])
-                print(self.mrope_positions_np[2])
-                # pprint(req)
 
 
     def _calc_spec_decode_metadata(
@@ -1534,14 +1504,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 
                 # Update mrope positions if using MRoPE
                 if positions_scheduled is not None:
-                    print(f"{num_scheduled_tokens=} {num_input_tokens=} {self.input_ids.shape=}")
-
                     if self.uses_mrope:
                         self.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
                         self.mrope_positions_cpu[:, :num_scheduled_tokens].copy_(positions_scheduled.cpu())
                         self.mrope_positions_np[:, :num_scheduled_tokens] = self.mrope_positions_cpu[:, :num_scheduled_tokens].numpy()
 
                         # ekhvedchenia: What request we should update?
+                        # ekhvedchenia: For now let's update all existing but that is probably incorrect
                         for i, req_id in enumerate(self.input_batch.req_ids):
                             req = self.requests[req_id]
                             req.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
@@ -1553,7 +1522,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             print(req.mrope_positions[0].tolist())
                             print(req.mrope_positions[1].tolist())
                             print(req.mrope_positions[2].tolist())
-                            # pprint(req)
 
                     else:
                         self.positions[:num_scheduled_tokens].copy(positions_scheduled)
