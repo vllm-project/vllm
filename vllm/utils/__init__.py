@@ -709,8 +709,28 @@ class AsyncMicrobatchTokenizer:
 
 
 def cancel_task_threadsafe(task: Task):
-    if task and not task.done() and not (loop := task.get_loop()).is_closed():
-        loop.call_soon_threadsafe(task.cancel)
+    if task and not task.done():
+        run_in_loop(task.get_loop(), task.cancel)
+
+
+def close_sockets(sockets: Sequence[Union[zmq.Socket, zmq.asyncio.Socket]]):
+    for sock in sockets:
+        if sock is not None:
+            sock.close(linger=0)
+
+
+def run_in_loop(loop: AbstractEventLoop, function: Callable, *args):
+    if in_loop(loop):
+        function(*args)
+    elif not loop.is_closed():
+        loop.call_soon_threadsafe(function, *args)
+
+
+def in_loop(event_loop: AbstractEventLoop) -> bool:
+    try:
+        return asyncio.get_running_loop() == event_loop
+    except RuntimeError:
+        return False
 
 
 def make_async(
@@ -1682,6 +1702,8 @@ class FlexibleArgumentParser(ArgumentParser):
         # Set the default "formatter_class" to SortedHelpFormatter
         if "formatter_class" not in kwargs:
             kwargs["formatter_class"] = SortedHelpFormatter
+        # Pop kwarg "add_json_tip" to control whether to add the JSON tip
+        self.add_json_tip = kwargs.pop("add_json_tip", True)
         super().__init__(*args, **kwargs)
 
     if sys.version_info < (3, 13):
@@ -1726,7 +1748,8 @@ class FlexibleArgumentParser(ArgumentParser):
     def format_help(self) -> str:
         # Add tip about JSON arguments to the epilog
         epilog = self.epilog or ""
-        if not epilog.startswith(FlexibleArgumentParser._json_tip):
+        if (self.add_json_tip
+                and not epilog.startswith(FlexibleArgumentParser._json_tip)):
             self.epilog = FlexibleArgumentParser._json_tip + epilog
         return super().format_help()
 
