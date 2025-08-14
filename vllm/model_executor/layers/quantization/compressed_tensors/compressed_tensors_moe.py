@@ -105,7 +105,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             detect_nvfp4_moe_support)
         _nvfp4 = detect_nvfp4_moe_support(self.__class__.__name__)
         self.cutlass_nvfp4_supported = _nvfp4.cutlass_supported
-        self.allow_flashinfer_cutlass = _nvfp4.allow_flashinfer_cutlass
+        self.allow_flashinfer = _nvfp4.allow_flashinfer
         self.use_marlin = _nvfp4.use_marlin
         self.group_size = 16
         self.fused_experts = None  # type: ignore[assignment]
@@ -212,7 +212,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                                              requires_grad=False)
 
         # reorder GEMM1 weights and block scales for FlashInfer CUTLASS kernel.
-        if self.allow_flashinfer_cutlass:
+        if self.allow_flashinfer:
             w, s = reorder_w1w3_to_w3w1(layer.w13_weight.data,
                                         layer.w13_weight_scale.data,
                                         dim=-2)
@@ -266,7 +266,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             (layer.w2_input_global_scale), requires_grad=False)
 
     def maybe_swap_experts_impl(self, moe_parallel_config):
-        if not self.allow_flashinfer_cutlass:
+        if not self.allow_flashinfer:
             return
         self.fused_experts = build_flashinfer_fp4_cutlass_moe_kernel(
             moe_parallel_config)
@@ -277,8 +277,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (  # noqa: E501
             select_nvfp4_gemm_impl)
 
-        return select_nvfp4_gemm_impl(self.allow_flashinfer_cutlass, moe,
-                                      logger)
+        return select_nvfp4_gemm_impl(self.allow_flashinfer, moe, logger)
 
     def apply(
         self,
@@ -325,6 +324,8 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
+                None,
+                None,
                 layer.w13_weight_scale,
                 layer.w2_weight_scale,
                 router_logits,
@@ -796,6 +797,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
+                None,
+                None,
                 layer.w13_weight_scale,
                 layer.w2_weight_scale,
                 router_logits,
@@ -1254,6 +1257,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             x,
             layer.w13_weight_packed,
             layer.w2_weight_packed,
+            None,
+            None,
             layer.w13_weight_scale,
             layer.w2_weight_scale,
             router_logits,

@@ -23,6 +23,15 @@ TEXTS_2 = [
     "The capital of Germany is Berlin.",
 ]
 
+
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 DTYPE = "half"
 
 

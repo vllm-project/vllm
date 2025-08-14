@@ -7,7 +7,7 @@ import pytest
 from vllm.config import PoolerConfig
 from vllm.platforms import current_platform
 
-from ...utils import check_embeddings_close
+from ...utils import check_embeddings_close, check_transformers_version
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +56,9 @@ def test_models(
     model,
     monkeypatch,
 ) -> None:
+    if model == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
+        check_transformers_version(model, max_transformers_version="4.53.2")
+
     if model == "BAAI/bge-multilingual-gemma2" and current_platform.is_rocm():
         # ROCm Triton FA does not currently support sliding window attention
         # switch to use ROCm CK FA backend

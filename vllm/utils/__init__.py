@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, TextIO, Tuple, TypeVar, Union, cast, overload)
+                    Optional, TextIO, TypeVar, Union, cast, overload)
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -658,7 +658,7 @@ def is_valid_ipv6_address(address: str) -> bool:
         return False
 
 
-def split_host_port(host_port: str) -> Tuple[str, int]:
+def split_host_port(host_port: str) -> tuple[str, int]:
     # ipv6
     if host_port.startswith('['):
         host, port = host_port.rsplit(']', 1)
@@ -1466,11 +1466,21 @@ class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
     _deprecated: set[Action] = set()
+    _json_tip: str = (
+        "When passing JSON CLI arguments, the following sets of arguments "
+        "are equivalent:\n"
+        '   --json-arg \'{"key1": "value1", "key2": {"key3": "value2"}}\'\n'
+        "   --json-arg.key1 value1 --json-arg.key2.key3 value2\n\n"
+        "Additionally, list elements can be passed individually using +:\n"
+        '   --json-arg \'{"key4": ["value3", "value4", "value5"]}\'\n'
+        "   --json-arg.key4+ value3 --json-arg.key4+=\'value4,value5\'\n\n")
 
     def __init__(self, *args, **kwargs):
-        # Set the default 'formatter_class' to SortedHelpFormatter
-        if 'formatter_class' not in kwargs:
-            kwargs['formatter_class'] = SortedHelpFormatter
+        # Set the default "formatter_class" to SortedHelpFormatter
+        if "formatter_class" not in kwargs:
+            kwargs["formatter_class"] = SortedHelpFormatter
+        # Pop kwarg "add_json_tip" to control whether to add the JSON tip
+        self.add_json_tip = kwargs.pop("add_json_tip", True)
         super().__init__(*args, **kwargs)
 
     if sys.version_info < (3, 13):
@@ -1511,6 +1521,14 @@ class FlexibleArgumentParser(ArgumentParser):
             group = self._FlexibleArgumentGroup(self, *args, **kwargs)
             self._action_groups.append(group)
             return group
+
+    def format_help(self) -> str:
+        # Add tip about JSON arguments to the epilog
+        epilog = self.epilog or ""
+        if (self.add_json_tip
+                and not epilog.startswith(FlexibleArgumentParser._json_tip)):
+            self.epilog = FlexibleArgumentParser._json_tip + epilog
+        return super().format_help()
 
     def parse_args(  # type: ignore[override]
         self,
@@ -3049,6 +3067,12 @@ def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
 
     return _has_module("deep_gemm")
+
+
+def has_triton_kernels() -> bool:
+    """Whether the optional `triton_kernels` package is available."""
+
+    return _has_module("triton_kernels")
 
 
 def set_process_title(name: str,
