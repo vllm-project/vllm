@@ -1268,7 +1268,10 @@ class EngineArgs:
                     ) = allocate_gpu_mm_processors(
                         mm_processor_device,
                         self.api_process_count,
-                        world_size=parallel_config.world_size_across_dp,
+                        available_device_count=current_platform.device_count(
+                        ),  # type: ignore
+                        engine_device_count=parallel_config.
+                        world_size_across_dp,
                     )
 
                     new_device = gpu_allocation[self.api_process_rank]
