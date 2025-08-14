@@ -19,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
@@ -404,7 +404,6 @@ class Scheduler(SchedulerInterface):
 
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
-                new_cross_blocks: Optional[KVCacheBlocks] = None
 
                 # KVTransfer: loading remote KV, do not allocate for new work.
                 if load_kv_async:
@@ -442,23 +441,6 @@ class Scheduler(SchedulerInterface):
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
-                        if self.is_encoder_decoder:
-                            # For encoder-decoder models, we allocate slots for
-                            # the cross-attention blocks based on the max
-                            # encoder length. This is a single static allocation
-                            # and does not grow with the number of decoder
-                            # tokens.
-                            max_encoder_len = MULTIMODAL_REGISTRY.\
-                                get_encdec_max_encoder_len(
-                                self.vllm_config.model_config)
-                            new_cross_blocks = (self.kv_cache_manager.
-                                                allocate_slots_for_cross_attn(
-                                                    request,
-                                                    max_encoder_len,
-                                                ))
-                            if new_cross_blocks is None:
-                                # The request cannot be scheduled.
-                                break
 
                 # Handles an edge case when P/D Disaggregation
                 # is used with Spec Decoding where an
@@ -469,6 +451,18 @@ class Scheduler(SchedulerInterface):
                                               == 0 else
                                               self.num_lookahead_tokens)
 
+                # Determine if we need to allocate cross-attention blocks.
+                if self.is_encoder_decoder and request.has_encoder_inputs:
+                    # NOTE(russellb): For Whisper, we know that the input is
+                    # always padded to the maximum length. If we support other
+                    # encoder-decoder models, this will need to be updated if we
+                    # want to only allocate what is needed.
+                    num_encoder_tokens = MULTIMODAL_REGISTRY.\
+                        get_encdec_max_encoder_len(
+                        self.vllm_config.model_config)
+                else:
+                    num_encoder_tokens = 0
+
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_computed_tokens,
@@ -476,14 +470,11 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
                     delay_cache_blocks=load_kv_async,
+                    num_encoder_tokens=num_encoder_tokens,
                 )
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
-                    if new_cross_blocks is not None:
-                        # We need to free the cross-attention blocks we
-                        # already allocated for this request.
-                        self.kv_cache_manager.free(request)
                     break
 
                 # KVTransfer: the connector uses this info to determine

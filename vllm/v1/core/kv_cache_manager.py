@@ -197,6 +197,7 @@ class KVCacheManager:
         new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
+        num_encoder_tokens: int = 0,
     ) -> Optional[KVCacheBlocks]:
         """Add slots for a request with new tokens to append.
 
@@ -263,6 +264,7 @@ class KVCacheManager:
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
+            num_encoder_tokens=num_encoder_tokens,
         )
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
@@ -283,7 +285,7 @@ class KVCacheManager:
                                                   new_computed_block_list)
 
         new_blocks = self.coordinator.allocate_new_blocks(
-            request.request_id, num_tokens_need_slot)
+            request.request_id, num_tokens_need_slot, num_encoder_tokens)
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
@@ -301,45 +303,6 @@ class KVCacheManager:
             self.req_to_block_hashes[request.request_id],
             num_tokens_to_cache,
         )
-
-        return KVCacheBlocks(new_blocks)
-
-    def allocate_slots_for_cross_attn(
-        self,
-        request: Request,
-        num_encoder_tokens: int,
-    ) -> Optional[KVCacheBlocks]:
-        """Add slots for cross-attention blocks.
-
-        This is separate from the main `allocate_slots` function because
-        cross-attention blocks are allocated based on the max encoder length,
-        which is a static value. The number of blocks to allocate is not
-        affected by the number of decoder tokens.
-
-        Args:
-            request: The request to allocate slots.
-            num_encoder_tokens: The number of tokens sent to the encoder.
-
-        Returns:
-            A list of new allocated blocks.
-        """
-        if num_encoder_tokens == 0:
-            raise ValueError("num_encoder_tokens must be greater than 0")
-
-        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
-            request_id=request.request_id,
-            num_tokens=num_encoder_tokens,
-            new_computed_blocks=tuple(),
-            cross_attn=True,
-        )
-
-        if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
-            # Cannot allocate new blocks
-            return None
-
-        new_blocks = self.coordinator.allocate_new_blocks(request.request_id,
-                                                          num_encoder_tokens,
-                                                          cross_attn=True)
 
         return KVCacheBlocks(new_blocks)
 
