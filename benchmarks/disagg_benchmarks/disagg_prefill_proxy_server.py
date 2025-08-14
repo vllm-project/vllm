@@ -7,7 +7,6 @@ import os
 
 import aiohttp
 from quart import Quart, Response, make_response, request
-
 from rate_limiter import RateLimiter
 from request_queue import RequestQueue
 
