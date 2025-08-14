@@ -4,8 +4,10 @@
 import asyncio
 import time
 
+
 class RateLimiter:
     """Token bucket rate limiter implementation"""
+
     def __init__(self, rate_limit):
         self.rate_limit = rate_limit  # Requests per second
         self.num_available_tokens = rate_limit  # Available tokens

@@ -4,8 +4,10 @@
 import asyncio
 from collections import deque
 
+
 class RequestQueue:
     """Request queue manager with concurrency control"""
+
     def __init__(self, max_concurrent, max_queue_size):
         # Maximum concurrent requests
         self.max_concurrent = max_concurrent
