@@ -266,7 +266,9 @@ async def test_multi_abort(
                 ), f"Request {idx} should have completed with partial results"
                 num_generated_tokens, request_id = result
                 # Should have generated some tokens before abort
-                assert num_generated_tokens > 0, f"Aborted request {request_id} should have generated some tokens"
+                assert num_generated_tokens > 0, (
+                    f"Aborted request "
+                    f"{request_id} should have generated some tokens")
             else:
                 # Non-aborted requests should complete normally
                 assert isinstance(
