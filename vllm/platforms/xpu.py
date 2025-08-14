@@ -100,16 +100,11 @@ class XPUPlatform(Platform):
         # Instances created using VllmConfig() typically have model_config as
         # None by default. The modification involves adding a check to prevent
         # potential null exceptions check and update model config.
-        if model_config is not None:
-            if model_config.dtype == torch.bfloat16:
-                bf16_supported = cls.device_support_bf16()
-                if not bf16_supported:
-                    model_config.dtype = torch.float16
-            if not model_config.enforce_eager:
-                logger.warning(
-                    "CUDA graph is not supported on XPU, fallback to the eager "
-                    "mode.")
-                model_config.enforce_eager = True
+        if model_config is not None and not model_config.enforce_eager:
+            logger.warning(
+                "CUDA graph is not supported on XPU, fallback to the eager "
+                "mode.")
+            model_config.enforce_eager = True
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
@@ -160,28 +155,9 @@ class XPUPlatform(Platform):
         return torch.xpu.max_memory_allocated(device)
 
     @classmethod
-    def device_support_bf16(cls) -> bool:
-        device_name = cls.get_device_name().lower()
-        if cls.is_client_gpu_a770():
-            logger.warning("Intel Arc A770 have bfloat16 accuracy known issue,"
-                           " fallback to float16")
-            return False
-        else:
-            logger.info(
-                "Device name %s supports bfloat16. Please file an issue "
-                "if you encounter any accuracy problems with bfloat16.",
-                device_name)
-            return True
-
-    @classmethod
     def is_data_center_gpu(cls) -> bool:
         device_name = cls.get_device_name().lower()
         return device_name.count("data center gpu") > 0
-
-    @classmethod
-    def is_client_gpu_a770(cls) -> bool:
-        device_name = cls.get_device_name().lower()
-        return device_name.count("a770") > 0
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
