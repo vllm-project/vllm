@@ -37,6 +37,7 @@ class CPUWorker(Worker):
                          distributed_init_method,
                          is_driver_worker=is_driver_worker)
 
+        self.local_omp_cpuid: str = ""
         self.parallel_config.disable_custom_all_reduce = True
 
     def init_device(self):
