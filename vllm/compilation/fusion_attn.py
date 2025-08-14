@@ -12,13 +12,16 @@ from vllm.attention import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils import round_up
 
-from .fusion import QUANT_OPS, GroupShape, QuantKey, empty_bf16, empty_fp32
+from .fusion import (QUANT_OPS, GroupShape, QuantKey, empty_bf16, empty_fp32,
+                     empty_i32)
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
+FP4_DTYPE = torch.uint8
 
 ATTN_OP = torch.ops.vllm.unified_attention_with_output.default
 RESHAPE_OP = torch.ops.aten.reshape.default
@@ -45,10 +48,17 @@ class AttentionStaticQuantPattern:
         self.num_heads = layer.num_heads
         self.head_size = layer.head_size
         self.quant_dtype = quant_dtype
-        self.quant_key = QuantKey(dtype=quant_dtype,
-                                  static=True,
-                                  group_shape=GroupShape.PER_TENSOR,
-                                  symmetric=symmetric)
+
+        if quant_dtype == FP8_DTYPE:
+            self.quant_key = QuantKey(dtype=quant_dtype,
+                                      static=True,
+                                      group_shape=GroupShape.PER_TENSOR,
+                                      symmetric=symmetric)
+        elif quant_dtype == FP4_DTYPE:
+            self.quant_key = QuantKey(dtype=quant_dtype)
+        else:
+            raise ValueError(f"Unsupported quantization dtype: {quant_dtype}")
+
         assert self.quant_key in QUANT_OPS, \
             f"unsupported quantization scheme {self.quant_key}"
         self.QUANT_OP = QUANT_OPS[self.quant_key]
@@ -57,13 +67,30 @@ class AttentionStaticQuantPattern:
         kwargs = {'dtype': self.quant_dtype, 'device': "cuda", **kwargs}
         return torch.empty(*args, **kwargs)
 
+    @staticmethod
+    def wrap_trace_fn(process_fx, trace_fn):
+
+        def wrapped(*args, **kwargs):
+            return process_fx(trace_fn(*args, **kwargs))
+
+        return wrapped
+
+    @staticmethod
+    def fx_view_to_reshape(gm: torch.fx.GraphModule):
+        from torch._inductor.fx_passes.post_grad import view_to_reshape
+        view_to_reshape(gm)
+        return gm
+
     def register_if_supported(self, pm_pass: PatternMatcherPass):
         if self.layer.impl.fused_output_quant_supported(
                 self.quant_dtype, self.quant_key.static,
                 self.quant_key.group_shape):
-            self._register(pm_pass)
+            if self.quant_dtype == FP8_DTYPE:
+                self._register_fp8_quant(pm_pass)
+            elif self.quant_dtype == FP4_DTYPE:
+                self._register_nvfp4_quant(pm_pass)
 
-    def _register(self, pm_pass: PatternMatcherPass):
+    def _register_fp8_quant(self, pm_pass: PatternMatcherPass):
 
         def pattern(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                     output_attn: torch.Tensor, output_quant: torch.Tensor,
@@ -74,7 +101,8 @@ class AttentionStaticQuantPattern:
                                       value=v,
                                       output=output_attn,
                                       layer_name=self.layer_name,
-                                      output_scale=None)
+                                      output_scale=None,
+                                      output_block_scale=None)
             attn_out_view = RESHAPE_OP(at1[1],
                                        [-1, self.num_heads * self.head_size])
             at2 = auto_functionalized(self.QUANT_OP,
@@ -98,7 +126,8 @@ class AttentionStaticQuantPattern:
                                       value=v,
                                       output=output_attn,
                                       layer_name=self.layer_name,
-                                      output_scale=scale)
+                                      output_scale=scale,
+                                      output_block_scale=None)
             return RESHAPE_OP(at1[1], [-1, self.num_heads * self.head_size])
 
         # Need custom fake mode, otherwise tracing happens with real tensors.
@@ -114,21 +143,80 @@ class AttentionStaticQuantPattern:
                 empty_fp32(1, 1)  # scale
             ]
 
-            def wrap_trace_fn(process_fx, trace_fn):
+            pm.register_replacement(
+                pattern, replacement, inputs,
+                AttentionStaticQuantPattern.wrap_trace_fn(
+                    AttentionStaticQuantPattern.fx_view_to_reshape,
+                    pm.fwd_only), pm_pass)
 
-                def wrapped(*args, **kwargs):
-                    return process_fx(trace_fn(*args, **kwargs))
+    def _register_nvfp4_quant(self, pm_pass: PatternMatcherPass):
 
-                return wrapped
+        def pattern(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                    output_attn: torch.Tensor, output_quant: torch.Tensor,
+                    output_scale: torch.Tensor, input_scale: torch.Tensor):
+            at1 = auto_functionalized(ATTN_OP,
+                                      query=q,
+                                      key=k,
+                                      value=v,
+                                      output=output_attn,
+                                      layer_name=self.layer_name,
+                                      output_scale=None,
+                                      output_block_scale=None)
+            attn_out_view = RESHAPE_OP(at1[1],
+                                       [-1, self.num_heads * self.head_size])
+            at2 = auto_functionalized(self.QUANT_OP,
+                                      output=output_quant,
+                                      input=attn_out_view,
+                                      output_scale=output_scale,
+                                      input_scale=input_scale)
+            output_scale_view = torch.ops.aten.view.dtype(at2[2], FP8_DTYPE)
+            return at2[1], output_scale_view
 
-            def fx_view_to_reshape(gm: torch.fx.GraphModule):
-                from torch._inductor.fx_passes.post_grad import view_to_reshape
-                view_to_reshape(gm)
-                return gm
+        def replacement(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                        output_attn: torch.Tensor, output_quant: torch.Tensor,
+                        output_scale: torch.Tensor, input_scale: torch.Tensor):
+            # attention output in quant_dtype
+            output_attn = torch.ops.aten.full.default(
+                [q.shape[0], self.num_heads, self.head_size // 2],
+                0.0,
+                dtype=self.quant_dtype,
+                device=q.device)
+            # attention output block scale
+            output_scale_view = torch.ops.aten.view.dtype(
+                output_scale, FP8_DTYPE)
+            at2 = auto_functionalized(ATTN_OP,
+                                      query=q,
+                                      key=k,
+                                      value=v,
+                                      output=output_attn,
+                                      layer_name=self.layer_name,
+                                      output_scale=input_scale,
+                                      output_block_scale=output_scale_view)
+            output = RESHAPE_OP(at2[1],
+                                [-1, self.num_heads * self.head_size // 2])
+            return output, at2[2]
+
+        # Need custom fake mode, otherwise tracing happens with real tensors.
+        # That would not work for the unified_attention custom op.
+        with unset_fake_temporarily(), FakeTensorMode():
+            inputs = [
+                empty_bf16(5, self.num_heads, self.head_size),  # q
+                empty_bf16(5, self.num_heads, self.head_size),  # k
+                empty_bf16(5, self.num_heads, self.head_size),  # v
+                empty_bf16(5, self.num_heads, self.head_size),  # output_attn
+                self.empty_quant(5, self.num_heads * self.head_size //
+                                 2),  # output_quant
+                empty_i32(128,
+                          round_up(self.num_heads * self.head_size // 16,
+                                   4)),  # output_scale
+                empty_fp32(1, 1),  # input_scale
+            ]
 
             pm.register_replacement(
                 pattern, replacement, inputs,
-                wrap_trace_fn(fx_view_to_reshape, pm.fwd_only), pm_pass)
+                AttentionStaticQuantPattern.wrap_trace_fn(
+                    AttentionStaticQuantPattern.fx_view_to_reshape,
+                    pm.fwd_only), pm_pass)
 
 
 class AttnFusionPass(VllmInductorPass):
@@ -151,8 +239,12 @@ class AttnFusionPass(VllmInductorPass):
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
         for layer_name, layer in attn_layers.items():
-            pattern = AttentionStaticQuantPattern(layer, FP8_DTYPE)
-            pattern.register_if_supported(self.patterns)
+            pattern_fp8 = AttentionStaticQuantPattern(layer, FP8_DTYPE)
+            pattern_fp8.register_if_supported(self.patterns)
+
+            pattern_fp4 = AttentionStaticQuantPattern(layer, FP4_DTYPE)
+            pattern_fp4.register_if_supported(self.patterns)
+
         if len(attn_layers) == 0:
             logger.warning(
                 "Attention + quant fusion is enabled, but no attention layers "
