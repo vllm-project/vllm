@@ -441,12 +441,15 @@ class PrometheusStatLogger(StatLoggerBase):
             vllm_config.model_config.max_model_len *
             vllm_config.scheduler_config.max_num_seqs,
             vllm_config.scheduler_config.max_num_batched_tokens)
-        self.gauge_max_token_capacity_per_batch = self._gauge_cls(
+        gauge_max_token_capacity_per_batch = self._gauge_cls(
             name="vllm:max_token_capacity_per_batch",
             documentation=
             "Maximum tokens processed by the model server at max batch size",
             labelnames=labelnames)
-        self.gauge_max_token_capacity_per_batch.set(max_token_capacity)
+        self.gauge_max_token_capacity_per_batch = make_per_engine(
+            gauge_max_token_capacity_per_batch, engine_indexes, model_name)
+        for gauge in self.gauge_max_token_capacity_per_batch.values():
+            gauge.set(max_token_capacity)
 
         #
         # LoRA metrics
