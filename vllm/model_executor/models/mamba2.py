@@ -11,7 +11,7 @@ from transformers import MambaConfig
 from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -20,7 +20,7 @@ from vllm.model_executor.layers.mamba.mamba2_metadata import (
     Mamba2Metadata, prepare_mamba2_metadata)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateShapeCalculator)
+    MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -45,6 +45,8 @@ class Mamba2DecoderLayer(nn.Module):
 
     def __init__(self,
                  config: MambaConfig,
+                 model_config: Optional[ModelConfig] = None,
+                 cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "") -> None:
         super().__init__()
@@ -62,6 +64,8 @@ class Mamba2DecoderLayer(nn.Module):
                                  head_dim=config.head_dim,
                                  rms_norm_eps=config.layer_norm_epsilon,
                                  activation=config.hidden_act,
+                                 model_config=model_config,
+                                 cache_config=cache_config,
                                  quant_config=quant_config,
                                  prefix=f"{prefix}.mixer")
 
@@ -93,6 +97,8 @@ class Mamba2Model(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         is_lora_enabled = bool(lora_config)
@@ -112,8 +118,11 @@ class Mamba2Model(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Mamba2DecoderLayer(
-                config, quant_config=quant_config, prefix=prefix),
+            lambda prefix: Mamba2DecoderLayer(config,
+                                              model_config=model_config,
+                                              cache_config=cache_config,
+                                              quant_config=quant_config,
+                                              prefix=prefix),
             prefix=f"{prefix}.layers")
 
         self.norm_f = RMSNorm(config.hidden_size,
@@ -199,6 +208,18 @@ class Mamba2Model(nn.Module):
 
 
 class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype]:
+
+        return MambaStateDtypeCalculator.mamba2_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
 
     @classmethod
     def get_mamba_state_shape_from_config(
@@ -290,10 +311,14 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
                 mamba_state_shape = \
                     self.get_mamba_state_shape_from_config(
                         self.vllm_config, use_v1=False)
+                mamba_state_dtype = \
+                    self.get_mamba_state_dtype_from_config(
+                    self.vllm_config)
                 self.mamba_cache = MambaCacheManager(self.vllm_config,
                                                      self.lm_head.weight.dtype,
                                                      num_mamba_layers,
-                                                     *mamba_state_shape)
+                                                     *mamba_state_shape,
+                                                     *mamba_state_dtype)
 
             mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
         else:
