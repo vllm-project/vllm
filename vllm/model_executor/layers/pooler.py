@@ -510,15 +510,12 @@ class EmbeddingPoolerHead(PoolerHead):
             ref = pooled_data[0] if isinstance(pooled_data,
                                                list) else pooled_data
 
-            # Ensure projector is on correct device with float32 dtype
             self._sync_projector_to_ref(ref)
 
-            # Check dimension compatibility on first run
             if not self._projector_dim_checked:
                 self._validate_projector_dimensions(ref)
                 self._projector_dim_checked = True
 
-            # Apply projection with fp32 computation for stability
             def _proj(x: torch.Tensor) -> torch.Tensor:
                 orig_dtype = x.dtype
                 y = projector(x.to(torch.float32))
@@ -528,19 +525,16 @@ class EmbeddingPoolerHead(PoolerHead):
                 pooled_data = _proj(pooled_data)
             else:
                 pooled_data = [_proj(t) for t in pooled_data]
-
+        
         pooling_params = get_pooling_params(pooling_metadata)
 
-        # for matryoshka representation
         dimensions_list = [
             pooling_param.dimensions for pooling_param in pooling_params
         ]
         if any(d is not None for d in dimensions_list):
-            # change the output dimension
             assert len(pooled_data) == len(dimensions_list)
             if len(set(dimensions_list)) == 1 and not isinstance(
                     pooled_data, list):
-                # if all dimensions are the same
                 d = dimensions_list[0]
                 pooled_data = pooled_data[..., :d]
             else:

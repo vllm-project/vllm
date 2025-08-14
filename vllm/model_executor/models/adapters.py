@@ -81,16 +81,13 @@ def _load_st_projector(vllm_config: "VllmConfig") -> Optional[nn.Module]:
     model_path = vllm_config.model_config.model
     revision = vllm_config.model_config.revision
 
-    # Read modules.json
     modules = get_hf_file_to_dict("modules.json", model_path, revision)
 
-    # Handle dict format (some ST variants)
     if isinstance(modules, dict):
         modules = modules.get("modules", [])
     if not isinstance(modules, list):
         return None
 
-    # Filter Dense modules
     dense_entries = [
         m for m in modules
         if m.get("type") == "sentence_transformers.models.Dense"
@@ -98,7 +95,6 @@ def _load_st_projector(vllm_config: "VllmConfig") -> Optional[nn.Module]:
     if not dense_entries:
         return None
 
-    # Build projection layer sequence
     layers = []
     for entry in dense_entries:
         folder = entry.get("path")
@@ -118,13 +114,10 @@ def _load_st_projector(vllm_config: "VllmConfig") -> Optional[nn.Module]:
         use_bias = cfg.get("bias", True)
         activation = _st_activation(cfg.get("activation_function"))
 
-        # Create linear layer with float32 for numerical stability
         linear = nn.Linear(in_features, out_features, bias=use_bias)
 
-        # Try to load weights - first safetensors, then pytorch_model.bin
         weight_loaded = False
-        
-        # Try safetensors
+
         try:
             b = get_hf_file_bytes(f"{folder}/model.safetensors", model_path, revision)
             if b is not None:
@@ -135,7 +128,6 @@ def _load_st_projector(vllm_config: "VllmConfig") -> Optional[nn.Module]:
         except (IOError, ImportError, ValueError) as e:
             logger.debug("Failed to load safetensors from %s: %s", folder, e)
 
-        # Try pytorch_model.bin if safetensors failed
         if not weight_loaded:
             try:
                 b = get_hf_file_bytes(f"{folder}/pytorch_model.bin", model_path, revision)
@@ -155,7 +147,6 @@ def _load_st_projector(vllm_config: "VllmConfig") -> Optional[nn.Module]:
     if not layers:
         return None
 
-    # Ensure the entire module uses float32
     projector = nn.Sequential(*layers)
     projector = projector.to(dtype=torch.float32)
     return projector
