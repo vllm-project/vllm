@@ -310,6 +310,7 @@ class Worker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
+
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
 
@@ -340,8 +341,7 @@ class Worker(WorkerBase):
                     hidden_states=last_hidden_states)
 
         # Warmup kernels used during model execution
-        kernel_warmup(self.get_model(),
-                      max_tokens=self.scheduler_config.max_num_batched_tokens)
+        kernel_warmup(self)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
