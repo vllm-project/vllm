@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+Demonstrate prompting of text-to-text
+encoder/decoder models, specifically BART and mBART.
+
+This script is refactored to allow model selection via command-line arguments.
+"""
+
 import argparse
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 from vllm import LLM, SamplingParams
 from vllm.inputs import (
@@ -13,12 +20,22 @@ from vllm.inputs import (
 
 
 class ModelConfig(NamedTuple):
+    """
+    Holds the configuration for a specific model, including its
+    HuggingFace ID and the prompts to use for the demo.
+    """
+
     model_id: str
     encoder_prompts: list
     decoder_prompts: list
+    hf_overrides: Optional[dict] = None
 
 
 def get_bart_config() -> ModelConfig:
+    """
+    Returns the configuration for facebook/bart-large-cnn.
+    This uses the exact test cases from the original script.
+    """
     encoder_prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -46,14 +63,15 @@ def get_mbart_config() -> ModelConfig:
         "How are you today?",
     ]
     decoder_prompts = ["", ""]
+    hf_overrides = {"architectures": ["MBartForConditionalGeneration"]}
     return ModelConfig(
         model_id="facebook/mbart-large-en-ro",
         encoder_prompts=encoder_prompts,
         decoder_prompts=decoder_prompts,
+        hf_overrides=hf_overrides,
     )
 
 
-# A dictionary to map model short names to their configuration getters.
 MODEL_GETTERS = {
     "bart": get_bart_config,
     "mbart": get_mbart_config,
@@ -70,26 +88,22 @@ def create_all_prompt_types(
     This function is generic and uses the provided raw prompts
     to create various vLLM input objects.
     """
-    # 1. Create basic prompt objects from the raw text.
     text_prompt_raw = encoder_prompts_raw[0]
-    text_prompt = TextPrompt(prompt=encoder_prompts_raw[1])
+    text_prompt = TextPrompt(prompt=encoder_prompts_raw[1 % len(encoder_prompts_raw)])
     tokens_prompt = TokensPrompt(
-        prompt_token_ids=tokenizer.encode(encoder_prompts_raw[2])
+        prompt_token_ids=tokenizer.encode(
+            encoder_prompts_raw[2 % len(encoder_prompts_raw)]
+        )
     )
 
     decoder_tokens_prompt = TokensPrompt(
         prompt_token_ids=tokenizer.encode(decoder_prompts_raw[0])
     )
-
-    # 2. Demonstrate passing a single prompt (implicitly for the encoder).
     single_prompt_examples = [
-        text_prompt_raw,  # Pass a raw string
-        text_prompt,  # Pass a TextPrompt object
-        tokens_prompt,  # Pass a TokensPrompt object
+        text_prompt_raw,
+        text_prompt,
+        tokens_prompt,
     ]
-
-    # 3. Demonstrate passing explicit encoder/decoder pairs.
-    #    Note the flexibility in mixing prompt types.
     explicit_pair_examples = [
         ExplicitEncoderDecoderPrompt(
             encoder_prompt=text_prompt_raw,
@@ -97,21 +111,17 @@ def create_all_prompt_types(
         ),
         ExplicitEncoderDecoderPrompt(
             encoder_prompt=text_prompt,
-            decoder_prompt=decoder_prompts_raw[1],
+            decoder_prompt=decoder_prompts_raw[1 % len(decoder_prompts_raw)],
         ),
         ExplicitEncoderDecoderPrompt(
             encoder_prompt=tokens_prompt,
             decoder_prompt=text_prompt,
         ),
     ]
-
-    # 4. Demonstrate the convenience helper for zipping lists of prompts.
     zipped_prompt_list = zip_enc_dec_prompts(
-        encoder_prompts=encoder_prompts_raw,
-        decoder_prompts=decoder_prompts_raw,
+        encoder_prompts_raw,
+        decoder_prompts_raw,
     )
-
-    # 5. Combine all examples into a single list for processing.
     return single_prompt_examples + explicit_pair_examples + zipped_prompt_list
 
 
@@ -142,8 +152,6 @@ def print_outputs(outputs: list):
 def main(args):
     """Main execution function."""
     model_key = args.model
-
-    # 1. Get the configuration for the selected model.
     if model_key not in MODEL_GETTERS:
         raise ValueError(
             f"Unknown model: {model_key}. "
@@ -153,25 +161,18 @@ def main(args):
     model_config = config_getter()
 
     print(f"🚀 Running demo for model: {model_config.model_id}")
-
-    # 2. Create the vLLM engine instance.
     llm = LLM(
         model=model_config.model_id,
         dtype="float",
+        hf_overrides=model_config.hf_overrides,
     )
-
-    # 3. Get the tokenizer and create the list of prompts.
     tokenizer = llm.llm_engine.get_tokenizer_group()
     prompts = create_all_prompt_types(
         encoder_prompts_raw=model_config.encoder_prompts,
         decoder_prompts_raw=model_config.decoder_prompts,
         tokenizer=tokenizer,
     )
-
-    # 4. Create sampling parameters.
     sampling_params = create_sampling_params()
-
-    # 5. Generate text from the prompts and print the outputs.
     outputs = llm.generate(prompts, sampling_params)
     print_outputs(outputs)
 

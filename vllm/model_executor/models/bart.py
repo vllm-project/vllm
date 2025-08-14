@@ -984,7 +984,14 @@ class MBartDecoderLayer(BartDecoderLayer):
         return hidden_states
 
 
-class MBartEncoder(BartEncoder):
+class MBartEncoder(nn.Module):
+    """
+    Transformer encoder consisting of *config.encoder_layers*
+    self attention layers. Each layer is a [`BartEncoderLayer`].
+    Args:
+        config: BartConfig
+        embed_tokens (nn.Embedding): output embedding
+    """
 
     def __init__(self,
                  config: BartConfig,
@@ -994,6 +1001,25 @@ class MBartEncoder(BartEncoder):
                  embed_tokens: Optional[nn.Embedding] = None,
                  prefix: str = ""):
         super().__init__()
+
+        self.cache_config = cache_config
+        self.quant_config = quant_config
+        self.lora_config = lora_config
+        embed_dim = config.d_model
+        self.max_source_positions = config.max_position_embeddings
+        embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
+
+        self.embed_tokens = BartScaledWordEmbedding(config.vocab_size,
+                                                    embed_dim,
+                                                    embed_scale=embed_scale)
+
+        if embed_tokens is not None:
+            self.embed_tokens.weight = embed_tokens.weight
+
+        self.embed_positions = BartLearnedPositionalEmbedding(
+            config.max_position_embeddings,
+            embed_dim,
+        )
         self.layers = nn.ModuleList([
             MBartEncoderLayer(config,
                               cache_config,
@@ -1001,7 +1027,9 @@ class MBartEncoder(BartEncoder):
                               prefix=f"{prefix}.layers.{layer_idx}")
             for layer_idx in range(config.encoder_layers)
         ])
-        self.layer_norm = nn.LayerNorm(config.d_model)
+
+        self.layernorm_embedding = nn.LayerNorm(embed_dim)
+        self.layer_norm = nn.LayerNorm(config.d_model)  # 改动
 
     def forward(
         self,
@@ -1033,11 +1061,18 @@ class MBartEncoder(BartEncoder):
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states=hidden_states)
 
-        hidden_states = self.layer_norm(hidden_states)
+        hidden_states = self.layer_norm(hidden_states)  # 改动
         return hidden_states
 
 
-class MBartDecoder(BartDecoder):
+class MBartDecoder(nn.Module):
+    """
+    Transformer decoder consisting of *config.decoder_layers* layers.
+    Each layer is a [`BartDecoderLayer`]
+    Args:
+        config: BartConfig
+        embed_tokens (nn.Embedding): output embedding
+    """
 
     def __init__(
         self,
@@ -1049,10 +1084,31 @@ class MBartDecoder(BartDecoder):
         prefix: str = "",
     ):
         super().__init__()
+        self.cache_config = cache_config
+        self.quant_config = quant_config
+        self.lora_config = lora_config
+        self.max_target_positions = config.max_position_embeddings
+        embed_scale = math.sqrt(
+            config.d_model) if config.scale_embedding else 1.0
+
+        self.embed_tokens = BartScaledWordEmbedding(config.vocab_size,
+                                                    config.d_model,
+                                                    embed_scale=embed_scale)
+
+        if embed_tokens is not None:
+            self.embed_tokens.weight = embed_tokens.weight
+
+        self.embed_positions = BartLearnedPositionalEmbedding(
+            config.max_position_embeddings,
+            config.d_model,
+        )
+
         self.layers = nn.ModuleList(
             [MBartDecoderLayer(config, cache_config, quant_config,
                                prefix=f"{prefix}.layers.{layer_idx}") \
              for layer_idx in range(config.decoder_layers)])
+
+        self.layernorm_embedding = nn.LayerNorm(config.d_model)
         self.layer_norm = nn.LayerNorm(config.d_model)
 
     def forward(
@@ -1062,6 +1118,19 @@ class MBartDecoder(BartDecoder):
         encoder_hidden_states: Optional[torch.Tensor],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        r"""
+        Args:
+            decoder_input_ids
+                Indices of *decoder* input sequence tokens in the vocabulary.
+                Padding will be ignored by default should you
+                provide it.
+            decoder_positions
+                Positions of *decoder* input sequence tokens.
+            encoder_hidden_states:
+                Tensor of encoder output embeddings
+        Returns:
+            Decoder output torch.Tensor
+        """
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(decoder_input_ids)
         else:
