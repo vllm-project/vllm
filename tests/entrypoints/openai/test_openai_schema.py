@@ -95,12 +95,8 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
                 if isinstance(tool_calls, list):
                     for tool_call in tool_calls:
                         if isinstance(tool_call, dict):
-                            # Only "function" is a valid tool call type
-                            if tool_call.get(
-                                    "type"
-                            ) != "function" and "type" in tool_call:
+                            if tool_call.get("type") != "function":
                                 return False
-                            # tool_calls should have "function" field
                             if "custom" in tool_call:
                                 return False
         return True
