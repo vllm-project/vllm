@@ -236,7 +236,7 @@ class FlexAttentionMetadata:
     def get_bidirectional_mask_mod(self) -> _mask_mod_signature:
         """Creates the encoder mask_mod function for FlexAttention.
 
-        Since the encoder bidirectional attention doesn't run with 
+        Since the encoder bidirectional attention doesn't run with
         KV cache, this function creates a mask based on the
         packed query sequences.
         """
@@ -428,6 +428,7 @@ class FlexAttentionImpl(AttentionImpl):
         attn_metadata: FlexAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FLexAttention.
 
@@ -441,7 +442,7 @@ class FlexAttentionImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-        if output_scale is not None:
+        if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
                 " for FlexAttentionImpl")
