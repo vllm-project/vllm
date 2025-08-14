@@ -107,7 +107,13 @@ def test_custom_logitsprocs(monkeypatch,
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT:
         # Scenario: vLLM loads a logitproc from a preconfigured entrypoint
         # To that end, mock a dummy logitproc entrypoint
-        monkeypatch.setenv("VLLM_MOCK_LP_ENTRYPOINT", "1")
+        import importlib.metadata
+
+        from vllm.test_utils import entry_points as fake_entry_points
+        importlib.metadata.entry_points = fake_entry_points
+
+        # fork is required for workers to see entrypoint patch
+        monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
         _run_test({}, logitproc_loaded=True)
         return
 
@@ -155,7 +161,17 @@ def test_pooling_rejects_custom_logitsprocs(
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT:
         # Scenario: vLLM loads a pooling model and ignores a logitproc that is
         # available at a preconfigured entrypoint
-        monkeypatch.setenv("VLLM_MOCK_LP_ENTRYPOINT", "1")
+
+        # Patch in dummy logitproc entrypoint
+        import importlib.metadata
+
+        from vllm.test_utils import entry_points as fake_entry_points
+        importlib.metadata.entry_points = fake_entry_points
+
+        # fork is required for entrypoint patch to be visible to workers,
+        # although they should ignore the entrypoint patch anyway
+        monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+
         llm = LLM(
             runner="pooling",
             model=POOLING_MODEL_NAME,

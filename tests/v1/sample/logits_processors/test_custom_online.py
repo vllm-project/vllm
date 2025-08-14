@@ -85,7 +85,7 @@ def server(default_server_args, request, monkeypatch):
                                 request.param) as remote_server:
             yield remote_server
     else:
-        # Launch server
+        # Launch server, inject dummy logitproc
         with RemoteOpenAIServerWithEntrypoint(
                 MODEL_NAME, default_server_args) as remote_server:
             yield remote_server
