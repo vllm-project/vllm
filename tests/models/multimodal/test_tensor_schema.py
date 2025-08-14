@@ -124,8 +124,7 @@ def test_model_tensor_schema(model_arch: str, model_id: str,
     if model_arch in ARCH_TO_SKIP:
         pytest.skip(f"Skipping {model_arch} due to {ARCH_TO_SKIP[model_arch]}")
     if model_id in REPO_ID_TO_SKIP:
-        pytest.skip(
-            f"Skipping {model_id} due to {REPO_ID_TO_SKIP[model_arch]}")
+        pytest.skip(f"Skipping {model_id} due to {REPO_ID_TO_SKIP[model_id]}")
 
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
@@ -146,11 +145,6 @@ def test_model_tensor_schema(model_arch: str, model_id: str,
     )
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
-
-    if not any(
-            hasattr(model_cls, f"_parse_and_validate_{m}_input")
-            for m in ["image", "video", "audio"]):
-        pytest.skip(f"{model_arch} does not support tensor schema validation.")
 
     ctx = InputProcessingContext(
         model_config,
@@ -216,9 +210,6 @@ def test_model_tensor_schema(model_arch: str, model_id: str,
             mm_kwargs = create_batched_mm_kwargs(model_config, processor)
 
             def validate_model_input(model):
-                for modality in ("audio", "image", "video"):
-                    method_name = f"_parse_and_validate_{modality}_input"
-                    if hasattr(model, method_name):
-                        getattr(model, method_name)(**mm_kwargs)
+                model.get_multimodal_embeddings(**mm_kwargs)
 
             vllm_model.apply_model(validate_model_input)
