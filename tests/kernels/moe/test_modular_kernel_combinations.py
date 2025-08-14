@@ -78,7 +78,7 @@ def rank_worker(
 
     for m, topk in product(Ms, TOPKs):
         try:
-            print(f"Running m={m}, topk={topk} ...")
+            print(f"Running[{pgi.rank}]: m={m}, topk={topk} ...")
             count = count + 1
             # override m and topk
             cfgx = copy.deepcopy(config)
