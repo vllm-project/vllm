@@ -69,7 +69,6 @@ line-length = 80
 "vllm/_version.py" = ["ALL"]
 # Python 3.8 typing - skip V0 code
 "vllm/attention/**/*.py" = ["UP006", "UP035"]
-"vllm/core/**/*.py" = ["UP006", "UP035"]
 "vllm/engine/**/*.py" = ["UP006", "UP035"]
 "vllm/executor/**/*.py" = ["UP006", "UP035"]
 "vllm/worker/**/*.py" = ["UP006", "UP035"]
@@ -117,7 +116,6 @@ files = [
     "vllm/adapter_commons",
     "vllm/assets",
     "vllm/entrypoints",
-    "vllm/core",
     "vllm/inputs",
     "vllm/logging_utils",
     "vllm/multimodal",

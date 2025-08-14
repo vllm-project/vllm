@@ -20,10 +20,6 @@ from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 logger = init_logger(__name__)
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner_base import ModelRunnerBase
-
 # Error string(s) for encoder/decoder
 # unsupported attention scenarios
 STR_NOT_IMPL_ENC_DEC_ROCM_HIP = ("ROCm/HIP is not currently supported "
@@ -34,9 +30,6 @@ PAD_SLOT_ID = -1
 # Switch to numpy implementation of compute_slot_mapping
 # if we have at least this many elements. Could be tuned further.
 _COMPUTE_SLOT_MAPPING_NUMPY_NUMEL = 256
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 
 def is_block_tables_empty(block_tables: Union[None, Dict]):

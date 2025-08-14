@@ -231,11 +231,7 @@ except ImportError:
         # For rocm use upstream flash attention
         from flash_attn import flash_attn_varlen_func
     except ImportError:
-        flash_attn_varlen_func = None
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import (ModelInputForGPUBuilder,
-                                          ModelInputForGPUWithSamplingMetadata)
+        flash_attn_varlen_func = None                                          ModelInputForGPUWithSamplingMetadata)
 
 is_hip = current_platform.is_rocm()
 

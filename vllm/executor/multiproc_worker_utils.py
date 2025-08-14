@@ -138,7 +138,7 @@ class WorkerMonitor(threading.Thread):
 
 
 class ProcessWorkerWrapper:
-    """Local process wrapper for vllm.worker.Worker,
+    """Local process wrapper for vllm.v1.worker.gpu_worker.Worker,
     for handling single-node multi-GPU tensor parallel."""
 
     def __init__(self, result_handler: ResultHandler,

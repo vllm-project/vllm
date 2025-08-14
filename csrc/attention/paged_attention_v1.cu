@@ -79,7 +79,7 @@ void paged_attention_v1_launcher(
       DIVIDE_ROUND_UP(max_seq_len, BLOCK_SIZE) * BLOCK_SIZE;
   int logits_size = padded_max_seq_len * sizeof(float);
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
-  // Python-side check in vllm.worker.worker._check_if_can_support_max_seq_len
+  // Python-side check ensures max sequence length support before reaching here
   // Keep that in sync with the logic here!
   int shared_mem_size = std::max(logits_size, outputs_size);
 

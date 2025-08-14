@@ -48,11 +48,7 @@ from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
 from vllm.utils.flashinfer import use_trtllm_attention
 
-logger = init_logger(__name__)
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import (ModelInputForGPUBuilder,
-                                          ModelInputForGPUWithSamplingMetadata)
+logger = init_logger(__name__)                                          ModelInputForGPUWithSamplingMetadata)
 
 
 class FlashInferBackend(AttentionBackend):

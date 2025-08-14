@@ -11,8 +11,6 @@ import uvicorn
 from fastapi import FastAPI, Request, Response
 
 from vllm import envs
-from vllm.engine.async_llm_engine import AsyncEngineDeadError
-from vllm.engine.multiprocessing import MQEngineDeadError
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.ssl import SSLCertRefresher
 from vllm.logger import init_logger
@@ -134,8 +132,6 @@ def _add_shutdown_handlers(app: FastAPI, server: uvicorn.Server) -> None:
     """
 
     @app.exception_handler(RuntimeError)
-    @app.exception_handler(AsyncEngineDeadError)
-    @app.exception_handler(MQEngineDeadError)
     @app.exception_handler(EngineDeadError)
     @app.exception_handler(EngineGenerateError)
     async def runtime_exception_handler(request: Request, __):

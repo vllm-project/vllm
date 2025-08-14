@@ -21,7 +21,7 @@ from vllm.config import (CompilationConfig, ModelDType, TokenizerMode,
                          is_init_field)
 from vllm.engine.arg_utils import (ConvertOption, EngineArgs, HfOverrides,
                                    PoolerConfig, RunnerOption)
-from vllm.engine.llm_engine import LLMEngine
+from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption,
                                          apply_hf_chat_template,

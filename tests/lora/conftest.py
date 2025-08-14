@@ -231,7 +231,7 @@ def llama_2_7b_engine_extra_embeddings():
                                                        max_lora_rank=8)
         return get_model_old(**kwargs)
 
-    with patch("vllm.worker.model_runner.get_model", get_model_patched):
+    with patch("vllm.v1.worker.gpu_model_runner.GPUModelRunner.get_model", get_model_patched):
         engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)
     yield engine.llm_engine
     del engine

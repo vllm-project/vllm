@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm.config import MultiModalConfig
-from vllm.engine.multiprocessing.client import MQLLMEngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.protocol import CompletionRequest, ErrorResponse
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
@@ -81,7 +81,7 @@ def register_mock_resolver():
 @pytest.fixture
 def mock_serving_setup():
     """Provides a mocked engine and serving completion instance."""
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=EngineClient)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 

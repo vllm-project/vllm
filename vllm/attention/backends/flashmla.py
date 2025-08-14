@@ -18,10 +18,6 @@ from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
                                          is_flashmla_supported)
 
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
-
-
 class FlashMLABackend(MLACommonBackend):
 
     @staticmethod

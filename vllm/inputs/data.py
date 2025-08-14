@@ -239,7 +239,7 @@ def embeds_inputs(
 
 DecoderOnlyInputs = Union[TokenInputs, EmbedsInputs, "MultiModalInputs"]
 """
-The inputs in [`LLMEngine`][vllm.engine.llm_engine.LLMEngine] before they are
+The inputs in [`LLMEngine`][vllm.v1.engine.llm_engine.LLMEngine] before they are
 passed to the model executor.
 This specifies the data required for decoder-only models.
 """
@@ -247,7 +247,7 @@ This specifies the data required for decoder-only models.
 
 class EncoderDecoderInputs(TypedDict):
     """
-    The inputs in [`LLMEngine`][vllm.engine.llm_engine.LLMEngine] before they
+    The inputs in [`LLMEngine`][vllm.v1.engine.llm_engine.LLMEngine] before they
     are passed to the model executor.
 
     This specifies the required data for encoder-decoder models.

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm.config import MultiModalConfig
-from vllm.engine.multiprocessing.client import MQLLMEngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
@@ -77,7 +77,7 @@ def test_async_serving_chat_init():
 
 @pytest.mark.asyncio
 async def test_serving_chat_should_set_correct_max_tokens():
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=EngineClient)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
@@ -120,7 +120,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     }
 
     # Reinitialize the engine with new settings
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=EngineClient)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
@@ -175,7 +175,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     }
 
     # Reinitialize the engine with new settings
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=EngineClient)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
@@ -232,7 +232,7 @@ async def test_serving_chat_could_load_correct_generation_config():
         "repetition_penalty": 1.05
     }
 
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=EngineClient)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
@@ -286,7 +286,7 @@ async def test_serving_chat_could_load_correct_generation_config():
 async def test_serving_chat_did_set_correct_cache_salt():
     mock_model_config = MockModelConfig()
 
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=EngineClient)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 

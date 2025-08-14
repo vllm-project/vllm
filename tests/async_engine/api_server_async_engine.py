@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, Response
 import vllm.entrypoints.api_server
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm import AsyncLLMEngine
 from vllm.utils import FlexibleArgumentParser
 
 app = vllm.entrypoints.api_server.app

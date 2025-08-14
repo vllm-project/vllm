@@ -21,10 +21,6 @@ from vllm.logger import init_logger
 from vllm.utils import async_tensor_h2d
 from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache, sparse_attn_func)
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUBuilder
-
 logger = init_logger(__name__)
 
 

@@ -34,7 +34,7 @@ from vllm.utils import (decorate_logs, get_distributed_init_method,
                         set_process_title)
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.worker.worker_base import WorkerWrapperBase
+from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
@@ -69,7 +69,7 @@ class MultiprocExecutor(Executor):
         distributed_init_method = get_distributed_init_method(
             get_loopback_ip(), get_open_port())
 
-        # Initialize worker and set up message queues for SchedulerOutputs
+        # Initialize worker and set up message queues for SchedulerOutput
         # and ModelRunnerOutputs
         max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
         self.rpc_broadcast_mq = MessageQueue(self.world_size,
