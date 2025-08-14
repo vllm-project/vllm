@@ -362,8 +362,6 @@ class EngineArgs:
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
     lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
 
-    num_scheduler_steps: int = SchedulerConfig.num_scheduler_steps
-    multi_step_stream_outputs: bool = SchedulerConfig.multi_step_stream_outputs
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: Optional[
         int] = CacheConfig.num_gpu_blocks_override
@@ -713,7 +711,7 @@ class EngineArgs:
             "--mm-processor-cache-gb",
             **multimodal_kwargs["mm_processor_cache_gb"])
         multimodal_group.add_argument("--disable-mm-preprocessor-cache",
-                                      type=bool,
+                                      action="store_true",
                                       deprecated=True)
         multimodal_group.add_argument(
             "--interleave-mm-strings",
@@ -799,11 +797,8 @@ class EngineArgs:
                                      **scheduler_kwargs["delay_factor"])
         scheduler_group.add_argument("--preemption-mode",
                                      **scheduler_kwargs["preemption_mode"])
-        scheduler_group.add_argument("--num-scheduler-steps",
-                                     **scheduler_kwargs["num_scheduler_steps"])
-        scheduler_group.add_argument(
-            "--multi-step-stream-outputs",
-            **scheduler_kwargs["multi_step_stream_outputs"])
+        # multi-step scheduling has been removed; corresponding arguments
+        # are no longer supported.
         scheduler_group.add_argument("--scheduling-policy",
                                      **scheduler_kwargs["policy"])
         scheduler_group.add_argument(
@@ -826,6 +821,10 @@ class EngineArgs:
             title="VllmConfig",
             description=VllmConfig.__doc__,
         )
+        # We construct SpeculativeConfig using fields from other configs in
+        # create_engine_config. So we set the type to a JSON string here to
+        # delay the Pydantic validation that comes with SpeculativeConfig.
+        vllm_kwargs["speculative_config"]["type"] = optional_type(json.loads)
         vllm_group.add_argument("--speculative-config",
                                 **vllm_kwargs["speculative_config"])
         vllm_group.add_argument("--kv-transfer-config",
@@ -1253,28 +1252,11 @@ class EngineArgs:
             disable_log_stats=self.disable_log_stats,
         )
 
-        # Reminder: Please update docs/features/compatibility_matrix.md
-        # If the feature combo become valid
-        if self.num_scheduler_steps > 1:
-            if speculative_config is not None:
-                raise ValueError("Speculative decoding is not supported with "
-                                 "multi-step (--num-scheduler-steps > 1)")
-            if self.enable_chunked_prefill and self.pipeline_parallel_size > 1:
-                raise ValueError("Multi-Step Chunked-Prefill is not supported "
-                                 "for pipeline-parallel-size > 1")
-            if current_platform.is_cpu():
-                logger.warning("Multi-Step (--num-scheduler-steps > 1) is "
-                               "currently not supported for CPUs and has been "
-                               "disabled.")
-                self.num_scheduler_steps = 1
-
-        # make sure num_lookahead_slots is set the higher value depending on
-        # if we are using speculative decoding or multi-step
-        num_lookahead_slots = max(self.num_lookahead_slots,
-                                  self.num_scheduler_steps - 1)
-        num_lookahead_slots = num_lookahead_slots \
-            if speculative_config is None \
-            else speculative_config.num_lookahead_slots
+        # make sure num_lookahead_slots is set appropriately depending on
+        # whether speculative decoding is enabled
+        num_lookahead_slots = self.num_lookahead_slots
+        if speculative_config is not None:
+            num_lookahead_slots = speculative_config.num_lookahead_slots
 
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
@@ -1288,8 +1270,6 @@ class EngineArgs:
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
             preemption_mode=self.preemption_mode,
-            num_scheduler_steps=self.num_scheduler_steps,
-            multi_step_stream_outputs=self.multi_step_stream_outputs,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
             policy=self.scheduling_policy,
@@ -1385,11 +1365,6 @@ class EngineArgs:
         if (self.disable_async_output_proc
                 != EngineArgs.disable_async_output_proc):
             _raise_or_fallback(feature_name="--disable-async-output-proc",
-                               recommend_to_remove=True)
-            return False
-
-        if self.num_scheduler_steps != SchedulerConfig.num_scheduler_steps:
-            _raise_or_fallback(feature_name="--num-scheduler-steps",
                                recommend_to_remove=True)
             return False
 
@@ -1600,11 +1575,10 @@ class EngineArgs:
         else:
 
             pooling_type = model_config.pooler_config.pooling_type
-
-            # TODO: when encoder models are supported we'll have to
-            # check for causal attention here.
-            incremental_prefill_supported = (pooling_type is not None and
-                                             pooling_type.lower() == "last")
+            is_causal = getattr(model_config.hf_config, "is_causal", True)
+            incremental_prefill_supported = (pooling_type is not None
+                                             and pooling_type.lower() == "last"
+                                             and is_causal)
 
             action = "Enabling" if \
                 incremental_prefill_supported else "Disabling"

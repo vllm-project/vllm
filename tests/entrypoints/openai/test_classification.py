@@ -211,3 +211,18 @@ async def test_activation(server: RemoteOpenAIServer, model_name: str):
     assert torch.allclose(
         F.softmax(wo_activation, dim=-1), w_activation, atol=1e-2
     ), "w_activation should be close to activation(wo_activation)."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_pooling(server: RemoteOpenAIServer, model_name: str):
+    # pooling api uses ALL pooling, which does not support chunked prefill.
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "input": "test",
+            "encoding_format": "float"
+        },
+    )
+    assert response.json()["error"]["type"] == "BadRequestError"
