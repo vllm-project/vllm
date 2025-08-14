@@ -288,6 +288,7 @@ class PerLayerParameters:
     window_left: int
     logits_soft_cap: Optional[float]
     sm_scale: float
+    has_sinks: bool = False
 
 
 def get_per_layer_parameters(
@@ -310,9 +311,11 @@ def get_per_layer_parameters(
         window_left = window_size[0] if window_size is not None else -1
         logits_soft_cap = getattr(impl, "logits_soft_cap", None)
         sm_scale = impl.scale
+        has_sinks = getattr(impl, "sinks", None) is not None
 
         per_layer_params[key] = PerLayerParameters(window_left,
-                                                   logits_soft_cap, sm_scale)
+                                                   logits_soft_cap, sm_scale,
+                                                   has_sinks)
 
     return per_layer_params
 
