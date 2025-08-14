@@ -17,6 +17,9 @@ from vllm.assets.audio import AudioAsset
 
 from ...utils import RemoteOpenAIServer
 
+MODEL_NAME = "openai/whisper-small"
+SERVER_ARGS = ["--enforce-eager"]
+
 
 @pytest.fixture
 def foscolo():
@@ -26,13 +29,9 @@ def foscolo():
         yield f
 
 
-MODEL_NAME = "openai/whisper-small"
-
-
 @pytest.fixture(scope="module")
 def server():
-    server_args = ["--enforce-eager"]
-    with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, SERVER_ARGS) as remote_server:
         yield remote_server
 
 
@@ -46,8 +45,7 @@ async def client(server):
 async def test_non_asr_model(foscolo):
     # text to text model
     model_name = "JackFram/llama-68m"
-    server_args = ["--enforce-eager"]
-    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+    with RemoteOpenAIServer(model_name, SERVER_ARGS) as remote_server:
         client = remote_server.get_async_client()
         res = await client.audio.translations.create(model=model_name,
                                                      file=foscolo,

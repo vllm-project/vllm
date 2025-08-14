@@ -18,6 +18,8 @@ from vllm.assets.audio import AudioAsset
 
 from ...utils import RemoteOpenAIServer
 
+MODEL_NAME = "openai/whisper-large-v3-turbo"
+SERVER_ARGS = ["--enforce-eager"]
 MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode", "mistral", "--config_format", "mistral",
     "--load_format", "mistral"
@@ -38,13 +40,9 @@ def winning_call():
         yield f
 
 
-MODEL_NAME = "openai/whisper-large-v3-turbo"
-
-
 @pytest.fixture(scope="module")
 def server():
-    server_args = ["--enforce-eager"]
-    with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, SERVER_ARGS) as remote_server:
         yield remote_server
 
 
@@ -81,8 +79,7 @@ async def test_basic_audio(mary_had_lamb, model_name):
 async def test_non_asr_model(winning_call):
     # text to text model
     model_name = "JackFram/llama-68m"
-    server_args = ["--enforce-eager"]
-    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+    with RemoteOpenAIServer(model_name, SERVER_ARGS) as remote_server:
         client = remote_server.get_async_client()
         res = await client.audio.transcriptions.create(model=model_name,
                                                        file=winning_call,
@@ -105,10 +102,7 @@ async def test_bad_requests(mary_had_lamb, client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", ["openai/whisper-large-v3-turbo"])
-async def test_long_audio_request(mary_had_lamb, model_name):
-    server_args = ["--enforce-eager"]
-
+async def test_long_audio_request(mary_had_lamb, client):
     mary_had_lamb.seek(0)
     audio, sr = librosa.load(mary_had_lamb)
     # Add small silence after each audio for repeatability in the split process
@@ -118,17 +112,15 @@ async def test_long_audio_request(mary_had_lamb, model_name):
     buffer = io.BytesIO()
     sf.write(buffer, repeated_audio, sr, format='WAV')
     buffer.seek(0)
-    with RemoteOpenAIServer(model_name, server_args) as remote_server:
-        client = remote_server.get_async_client()
-        transcription = await client.audio.transcriptions.create(
-            model=model_name,
-            file=buffer,
-            language="en",
-            response_format="text",
-            temperature=0.0)
-        out = json.loads(transcription)['text']
-        counts = out.count("Mary had a little lamb")
-        assert counts == 10, counts
+    transcription = await client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=buffer,
+        language="en",
+        response_format="text",
+        temperature=0.0)
+    out = json.loads(transcription)['text']
+    counts = out.count("Mary had a little lamb")
+    assert counts == 10, counts
 
 
 @pytest.mark.asyncio
