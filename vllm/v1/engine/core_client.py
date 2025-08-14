@@ -24,7 +24,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.utils import (close_sockets, get_open_port, get_open_zmq_inproc_path,
-                        make_zmq_socket)
+                        in_loop, make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
                             ReconfigureDistributedRequest, ReconfigureRankType,
@@ -348,22 +348,27 @@ class BackgroundResources:
         if isinstance(self.output_socket, zmq.asyncio.Socket):
             # Async case.
             loop = self.output_socket._get_loop()
+            asyncio.get_running_loop()
             sockets = (self.output_socket, self.input_socket,
                        self.first_req_send_socket, self.first_req_rcv_socket,
                        self.stats_update_socket)
 
-            if not loop.is_closed():
-                tasks = (self.output_queue_task, self.stats_update_task)
+            tasks = (self.output_queue_task, self.stats_update_task)
 
-                def close_sockets_and_tasks():
-                    close_sockets(sockets)
-                    for task in tasks:
-                        if task is not None and not task.done():
-                            task.cancel()
+            def close_sockets_and_tasks():
+                close_sockets(sockets)
+                for task in tasks:
+                    if task is not None and not task.done():
+                        task.cancel()
 
+            if in_loop(loop):
+                close_sockets_and_tasks()
+            elif not loop.is_closed():
                 loop.call_soon_threadsafe(close_sockets_and_tasks)
             else:
                 # Loop has been closed, try to clean up directly.
+                del tasks
+                del close_sockets_and_tasks
                 close_sockets(sockets)
                 del self.output_queue_task
                 del self.stats_update_task
