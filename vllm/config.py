@@ -492,6 +492,10 @@ class ModelConfig:
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
 
+    video_pruning_rate: Optional[float] = None
+    """Enable video modality pruning rate (Percentage of video tokens to be pruned via Efficient Video Sampling)
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -889,7 +893,9 @@ class ModelConfig:
                 media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 mm_processor_cache_gb=self.mm_processor_cache_gb,
-                interleave_mm_strings=self.interleave_mm_strings)
+                interleave_mm_strings=self.interleave_mm_strings,
+                video_pruning_rate=self.video_pruning_rate,
+            )
 
         return None
 
@@ -3415,6 +3421,10 @@ class MultiModalConfig:
     interleave_mm_strings: bool = False
     """
     Enable fully interleaved support for multimodal prompts.
+    """
+
+    video_pruning_rate: Optional[float] = None
+    """Enable video modality pruning rate (Percentage of video tokens to be pruned via Efficient Video Sampling)
     """
 
     def compute_hash(self) -> str:
