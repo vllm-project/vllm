@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_LOGITS_PROCESSOR_THREADS: Optional[int] = None
+    VLLM_LOG_STATS_INTERVAL: float = 10.
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
@@ -428,6 +429,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOGITS_PROCESSOR_THREADS":
     lambda: int(os.getenv("VLLM_LOGITS_PROCESSOR_THREADS", "0"))
     if "VLLM_LOGITS_PROCESSOR_THREADS" in os.environ else None,
+
+    # If set, vllm will log stats at this interval in seconds
+    # If not set, vllm will log stats every 10 seconds.
+    "VLLM_LOG_STATS_INTERVAL":
+    lambda: float(os.getenv("VLLM_LOG_STATS_INTERVAL", "10."))
+    if float(os.getenv("VLLM_LOG_STATS_INTERVAL", "10.")) > 0. else 10.,
 
     # Trace function calls
     # If set to 1, vllm will trace function calls
