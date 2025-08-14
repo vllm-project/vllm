@@ -488,7 +488,14 @@ class Processor:
             # Only run this check if we are sure that the EngineCore is not
             # running profiling on the same GPU
             new_device_index = torch.device(new_device).index or 0
-            if new_device_index >= parallel_config.world_size_across_dp:
+            if new_device_index < parallel_config.world_size_across_dp:
+                logger.warning(
+                    "Both EngineCore and multi-modal processing are using "
+                    "the same GPU (%s). This may result in inaccurate memory "
+                    "profiling, and resource contention during inference.",
+                    new_device,
+                )
+            else:
                 check_enough_init_memory(baseline_snapshot, self.cache_config)
 
             with memory_profiling(baseline_snapshot) as diff:
@@ -508,6 +515,6 @@ class Processor:
                 new_device,
             )
             if memory_usage > diff.before_profile.free_memory:
-                raise ValueError(f"No available memory in {new_device} "
+                raise ValueError(f"Not enough memory in {new_device} "
                                  f"for multi-modal processing. "
                                  f"Try reducing `api_server_count`.")
