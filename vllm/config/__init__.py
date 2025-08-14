@@ -847,7 +847,7 @@ class ModelConfig:
         if mm_config := self.multimodal_config:
             mm_config.mm_processor_cache_gb = value
 
-    def set_mm_processor_kwargs(self, value: dict[str, Any]) -> None:
+    def update_mm_processor_kwargs(self, value: dict[str, Any]) -> None:
         if self.mm_processor_kwargs is None:
             self.mm_processor_kwargs = {}
 

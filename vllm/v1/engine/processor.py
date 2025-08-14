@@ -464,7 +464,7 @@ class Processor:
                 if gpu_allocation[rank] == new_device
             ]
 
-            model_config.set_mm_processor_kwargs({"device": new_device})
+            model_config.update_mm_processor_kwargs({"device": new_device})
 
             # Only run profiling on the first Processor for each device,
             # then multiply the usage by the number of processors for that
