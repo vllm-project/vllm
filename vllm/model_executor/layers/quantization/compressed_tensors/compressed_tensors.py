@@ -719,12 +719,13 @@ registry = {}
 
 
 # one to one with (scheme, module, location)
+# replicated across tp
 class vllmTransformBase(torch.nn.Module):  # InternalModule
     weight: PartitionedLinearWeightParameter
 
     def __init__(self, scheme: TransformScheme, args: TransformArgs, partition_ids,
                  layer: torch.nn.Module, weight_loader: Callable,
-                 input_size_per_partition, output_partition_sizes, asdf_args):
+                 input_size_per_partition, output_partition_sizes, asdf_args, input_size, output_size):
         super().__init__()
         self.scheme = scheme
         self.args = args
@@ -737,20 +738,26 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
             raise ValueError(layer.__mro__)
 
         self.weight = PartitionedLinearWeightParameter(
-            weight_loader=weight_loader)
+            weight_loader=weight_loader)  # copies the weight loader of the parent linear
+
+
+        dim_0_factor = input_size // input_size_per_partition
+        dim_1_factor = output_size // sum(output_partition_sizes)
+
 
         #for partition_id, output_shape in enumerate(output_partition_sizes):
         for partition_id in partition_ids:
-            output_shape = output_partition_sizes[partition_id]
+            output_size_per_partition = output_partition_sizes[partition_id]
 
             if isinstance(layer, LinearBase):
                 assert hasattr(layer, "weight")
                 if args.location == TransformLocation.INPUT:
-                    weight_shape = (input_size_per_partition // get_tensor_model_parallel_world_size(),
-                                    input_size_per_partition)
+                    weight_size = input_size
+                    weight_shape = (input_size // dim_0_factor, input_size // dim_1_factor)
 
                 elif args.location == TransformLocation.OUTPUT:
-                    weight_shape = (output_shape // get_tensor_model_parallel_world_size(), output_shape)
+                    weight_size = output_size_per_partition
+                    weight_shape = (output_size_per_partition // dim_0_factor, output_size_per_partition // dim_1_factor)
 
                 else:
                     raise ValueError()
@@ -761,7 +768,7 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
             else:
                 raise ValueError()
 
-            key = (id(scheme), weight_shape, )
+            key = (id(scheme), weight_size, )
             if key not in registry:
                 registry[key] = torch.zeros(
                     weight_shape,
@@ -770,7 +777,13 @@ class vllmTransformBase(torch.nn.Module):  # InternalModule
                 )
 
             self.weight.add_partition(partition_id, registry[key])
-            print((layer.layer_name, hash(registry[key]), id(scheme), weight_shape))
+            print((layer.layer_name, hash(registry[key]), id(scheme), weight_size, weight_shape))
+ 
+    # def weight_loader(self, param: torch.nn.Parameter, loaded_weight: torch.Tensor):
+    #     assert False
+    #     assert param.shape == loaded_weight.shape, (param.shape, loaded_weight.shape)
+    #     param.data.copy_(loaded_weight)
+
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         if self.args.location == TransformLocation.INPUT:
@@ -816,7 +829,7 @@ class CompressedTensorsUnquantizedLinearMethod(UnquantizedLinearMethod):
                 transform = vllmTransformBase(
                     scheme, args, partition_ids, layer, weight_loader,
                     input_size_per_partition, output_partition_sizes,
-                    asdf_args)
+                    asdf_args, input_size, output_size)
 
                 # make sure this checks for duplicates?
                 layer.register_module(transform_name, transform)

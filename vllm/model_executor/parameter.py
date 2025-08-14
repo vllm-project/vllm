@@ -127,7 +127,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         shard_size = self.data.shape[self.output_dim]
         loaded_weight = loaded_weight.narrow(self.output_dim,
                                              tp_rank * shard_size, shard_size)
-        assert self.data.shape == loaded_weight.shape
+        assert self.data.shape == loaded_weight.shape, (self.data.shape, loaded_weight.shape)
         self.data.copy_(loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
@@ -204,7 +204,7 @@ class RowvLLMParameter(BasevLLMParameter):
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 
-        assert self.data.shape == loaded_weight.shape
+        assert self.data.shape == loaded_weight.shape, (self.data.shape, loaded_weight.shape)
         self.data.copy_(loaded_weight)
 
 
@@ -422,12 +422,14 @@ class PartitionedLinearWeightParameter(ModelWeightParameter):
         key = self._shard_id_as_int(key)
         return key in self.partitions
     
-    # Cannot support this, since it doesn't know if we're column parallel or row parallel
-    # cannot call the weight loader passed by module, since that weight loader assumes
-    # that the weight is fused, not separate tensors
     # def weight_loader(self, param: BasevLLMParameter,
     #                      loaded_weight: torch.Tensor,
     #                      loaded_shard_id: Optional[int | str] = None):
+    #     # Note that if this parameter is going to support TP
+    #     # it must use weight_loader_v2 since this function
+    #     # doesn't know if we're column parallel or row parallel
+    #     # and we cannot call the weight loader passed by module,
+    #     # since that weight loader assumes that the weight is fused
     #     key = self._shard_id_as_int(loaded_shard_id)
     #     partition = self.partitions[key]
 
@@ -440,13 +442,13 @@ class PartitionedLinearWeightParameter(ModelWeightParameter):
         assert len(self.partitions) == 1 and 0 in self.partitions
         partition = self.partitions[0]
 
-        _ColumnvLLMParameter.load_column_parallel_weight(partition, loaded_weight)
+        ModelWeightParameter.load_column_parallel_weight(partition, loaded_weight)
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
         assert len(self.partitions) == 1 and 0 in self.partitions
         partition = self.partitions[0]
 
-        RowvLLMParameter.load_row_parallel_weight(partition, loaded_weight)
+        ModelWeightParameter.load_row_parallel_weight(partition, loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
         partition_id = kwargs.pop("shard_id")
@@ -460,8 +462,8 @@ class PartitionedLinearWeightParameter(ModelWeightParameter):
         # param_data = partition.data
         # assert param_data.shape == loaded_weight.shape
         # param_data.copy_(loaded_weight)
-        print(f"load_merged_column_weight {partition_id} {shard_offset} {shard_size} {partition.data.shape}")
-        _ColumnvLLMParameter.load_merged_column_weight(partition, loaded_weight, shard_offset=shard_offset, shard_size=shard_size)
+        print(f"load_merged_column_weight {partition_id} {partition.data.shape} {loaded_weight.shape}")
+        ModelWeightParameter.load_row_parallel_weight(partition, loaded_weight)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         partition_id = kwargs.pop("shard_id")
@@ -478,14 +480,14 @@ class PartitionedLinearWeightParameter(ModelWeightParameter):
         # assert param_data.shape == loaded_weight.shape
         # param_data.copy_(loaded_weight)
         #print("load_qkv_weight")
-        _ColumnvLLMParameter.load_qkv_weight(
-            partition,
-            loaded_weight,
-            shard_offset=shard_offset,
-            shard_size=shard_size,
-            shard_id=shard_id,
-            num_heads=num_heads,
-        )
+        ModelWeightParameter.load_column_parallel_weight(partition, loaded_weight)
+        #     partition,
+        #     loaded_weight,
+        #     shard_offset=shard_offset,
+        #     shard_size=shard_size,
+        #     shard_id=shard_id,
+        #     num_heads=num_heads,
+        # )
 
     @property
     def data(self):
