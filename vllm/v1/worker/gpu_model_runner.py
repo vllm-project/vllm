@@ -898,6 +898,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 causal=True,
             )
 
+            # This is for determining whether the current attention layer is
+            # encoder-decoder attention, NOT whether this is an encoder-decoder
+            # model. In a future change, renaming ENCODER_DECODER attention to
+            # CROSS_ATTN would help avoid confusing the two.
             is_enc_dec = isinstance(kv_cache_group_spec.kv_cache_spec,
                                     CrossAttentionSpec)
             if is_enc_dec:
