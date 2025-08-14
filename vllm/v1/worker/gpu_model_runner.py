@@ -338,12 +338,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         model_kwargs = dict[str, Any]()
         num_reqs = self.input_batch.num_reqs
 
-        pooling_params = self.input_batch.pooling_metadata.pooling_params
-
-        num_pooling_reqs = len(pooling_params)
+        num_pooling_reqs = len(self.input_batch.pooling_params)
 
         if num_pooling_reqs == 0:
             return model_kwargs
+
+        pooling_params = self.input_batch.pooling_metadata.pooling_params
 
         assert num_pooling_reqs == num_reqs
 
