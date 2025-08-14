@@ -222,11 +222,11 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR ASIMD_FOUND)
     FetchContent_MakeAvailable(oneDNN)
     
     list(APPEND LIBS dnnl)
-elseif(POWER10_FOUND)
+elseif(POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     FetchContent_Declare(
         oneDNN
         GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-        GIT_TAG v3.7.2
+        GIT_TAG v3.9
         GIT_PROGRESS TRUE
         GIT_SHALLOW TRUE
     )
@@ -289,7 +289,7 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
             ${VLLM_EXT_SRC})
         add_compile_definitions(-DCPU_CAPABILITY_AVX512)
     endif()
-elseif(POWER10_FOUND)
+elseif(POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/quant.cpp"
         ${VLLM_EXT_SRC})
