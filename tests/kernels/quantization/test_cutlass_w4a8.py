@@ -177,8 +177,8 @@ def mm_test_helper(types: TypeConfig,
     output = ops.cutlass_w4a8_mm(
         a=tensors.a,
         b_q=tensors.w_q,
-        b_type=types.weight_type,
         b_group_scales=tensors.w_g_s,
+        b_group_size=group_size,
         b_channel_scales=tensors.w_ch_s,
         a_token_scales=tensors.w_tok_s,
     )

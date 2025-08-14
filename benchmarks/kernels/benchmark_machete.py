@@ -315,8 +315,8 @@ def cutlass_w4a8_create_bench_fn(
     return lambda: ops.cutlass_w4a8_mm(
         a=bt.a,
         b_q=w_q,
-        b_type=bt.wtype,
         b_group_scales=w_s,
+        b_group_size=bt.group_size,
         b_channel_scales=bt.w_ch_s,
         a_token_scales=bt.w_tok_s,
     )
@@ -423,7 +423,7 @@ def bench(
     )
 
     # cutlass w4a8
-    if types.act_type == torch.float8_e4m3fn:
+    if types.act_type == torch.float8_e4m3fn and group_size == 128:
         timers.append(
             bench_fns(
                 label,

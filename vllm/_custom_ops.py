@@ -1039,17 +1039,17 @@ def machete_prepack_B(
 
 def cutlass_w4a8_mm(
         a: torch.Tensor,
-        # b_q Should be the tensor returned by machete_prepack_B
+        # b_q Should be the tensor returned by cutlass_encode_and_reorder_int4b
         b_q: torch.Tensor,
-        b_type: ScalarType,
-        out_type: Optional[torch.dtype] = None,
-        b_group_scales: Optional[torch.Tensor] = None,
-        b_group_size: Optional[int] = None,
-        b_channel_scales: Optional[torch.Tensor] = None,
-        a_token_scales: Optional[torch.Tensor] = None) -> torch.Tensor:
-    return torch.ops._C.cutlass_w4a8_mm(a, b_q, b_type.id, out_type,
+        b_group_scales: torch.Tensor,
+        b_group_size: int,
+        b_channel_scales: torch.Tensor,
+        a_token_scales: torch.Tensor,
+        out_type: Optional[torch.dtype] = None) -> torch.Tensor:
+    return torch.ops._C.cutlass_w4a8_mm(a, b_q,
                                         b_group_scales, b_group_size,
-                                        b_channel_scales, a_token_scales)
+                                        b_channel_scales, a_token_scales,
+                                        out_type)
 
 
 def cutlass_pack_scale_fp8(scales: torch.Tensor) -> torch.Tensor:

@@ -323,12 +323,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cutlass_w4a8_mm("
       "   Tensor A,"
       "   Tensor B,"
-      "   int b_type,"
-      "   ScalarType? out_type,"
       "   Tensor group_scales,"
-      "   int?    group_size,"
-      "   Tensor? channel_scales,"
-      "   Tensor? token_scales"
+      "   int    group_size,"
+      "   Tensor channel_scales,"
+      "   Tensor token_scales,"
+      "   ScalarType? out_type"
       ") -> Tensor",
       {stride_tag});
   // pack scales

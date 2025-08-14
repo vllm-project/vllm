@@ -6,7 +6,6 @@
 
 #include "core/registration.h"
 
-// cutlass imports
 #include "cutlass/cutlass.h"
 
 #include "cute/tensor.hpp"
@@ -34,9 +33,7 @@
 namespace vllm::cutlass_w4a8 {
 
 using namespace cute;
-// end cutlass imports
 
-// start w4a8 example
 /////////////////////////////////////////////////////////////////////////////////////////////////
 /// GEMM kernel configurations
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -168,44 +165,22 @@ using StrideC = typename GemmKernelShuffled::StrideC;
 using StrideD = typename GemmKernelShuffled::StrideD;
 using StrideS = typename CollectiveMainloopShuffled::StrideScale;
 
-//
-// Data members
-//
-
-/// Initialization
-StrideA stride_A;
-StrideC stride_C;
-StrideD stride_D;
-StrideS stride_S;
-uint64_t seed;
-
-LayoutB_Reordered layout_B_reordered;
-
-cutlass::DeviceAllocation<ElementC> block_C;
-
-/////////////////////////////////////////////////////////////////////////////////////////////////
-/// GEMM setup and evaluation
-/////////////////////////////////////////////////////////////////////////////////////////////////
 torch::Tensor mm(torch::Tensor const& A,
                  torch::Tensor const& B,  // already packed
-                 int64_t b_type_id,
-                 std::optional<at::ScalarType> const& maybe_out_type,
                  torch::Tensor const& group_scales,  // already packed
-                 std::optional<int64_t> maybe_group_size,
-                 std::optional<torch::Tensor> const& maybe_channel_scales,
-                 std::optional<torch::Tensor> const& maybe_token_scales) {
+                 int64_t group_size,
+                 torch::Tensor const& channel_scales,
+                 torch::Tensor const& token_scales,
+                 std::optional<at::ScalarType> const& maybe_out_type) {
+  // TODO: param validation
   int m = A.size(0);
   int k = A.size(1);
   int n = B.size(1);
-  int g = 128;
-  float alpha = 1.0f;
-  float beta = 0.0f;
 
   // Allocate output
-  using ElementOutput = typename GemmShuffled::EpilogueOutputOp::ElementOutput;
   auto device = A.device();
   torch::Tensor D =
-      torch::zeros({m, n},
+      torch::empty({m, n},
                    torch::TensorOptions()
                        .dtype(equivalent_scalar_type_v<ElementD>)
                        .device(device));
@@ -231,22 +206,19 @@ torch::Tensor mm(torch::Tensor const& A,
       group_scales.const_data_ptr());
   // currently uses all the input (A, B, scales)
   // init strides here
-  int const scale_k = cutlass::ceil_div(k, g);
-  stride_A = cutlass::make_cute_packed_stride(
+  int const scale_k = cutlass::ceil_div(k, group_size);
+  StrideA stride_A = cutlass::make_cute_packed_stride(
       StrideA{}, cute::make_shape(m, k, 1));
   // Reverse stride here due to swap and transpose
-  stride_C = cutlass::make_cute_packed_stride(
-      StrideC{}, cute::make_shape(n, m, 1));
-  // Reverse stride here due to swap and transpose
-  stride_D = cutlass::make_cute_packed_stride(
+  StrideD stride_D = cutlass::make_cute_packed_stride(
       StrideD{}, cute::make_shape(n, m, 1));
-  stride_S = cutlass::make_cute_packed_stride(
+  StrideS stride_S = cutlass::make_cute_packed_stride(
       StrideS{}, cute::make_shape(n, scale_k, 1));
 
   MainloopArguments mainloop_arguments{
-      B_ptr, layout_B_reordered_local, A_ptr, stride_A, S_ptr, stride_S, g};
+      B_ptr, layout_B_reordered_local, A_ptr, stride_A, S_ptr, stride_S, group_size};
   EpilogueArguments epilogue_arguments{
-    ChTokScalesEpilogue::prepare_args(*maybe_channel_scales, *maybe_token_scales),
+    ChTokScalesEpilogue::prepare_args(channel_scales, token_scales),
     nullptr,
     {},
     D_ptr,

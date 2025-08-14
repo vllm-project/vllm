@@ -142,8 +142,8 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         x_2d, act_scales = fp8_per_token(x_2d, fake=False)
         output = ops.cutlass_w4a8_mm(a=x_2d,
                                      b_q=w_q,
-                                     b_type=c.weight_type, # not actually used?
                                      b_group_scales=w_s,
+                                     b_group_size=c.group_size,
                                      a_token_scales=act_scales.to(torch.float32),
                                      b_channel_scales=self.w_ch_s)
 
