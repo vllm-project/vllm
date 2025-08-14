@@ -502,7 +502,7 @@ class Processor:
 
             memory_usage = diff.torch_peak_increase * len(new_device_ranks)
             logger.info(
-                "Input processing took %.4f GiB and %.6f seconds on %s",
+                "Multi-modal processing took %.4f GiB and %.6f seconds on %s",
                 memory_usage / GiB_bytes,
                 diff.profile_time,
                 new_device,
@@ -510,5 +510,4 @@ class Processor:
             if memory_usage > diff.before_profile.free_memory:
                 raise ValueError(f"No available memory in {new_device} "
                                  f"for multi-modal processing. "
-                                 f"Try increasing `gpu_memory_utilization` "
-                                 f"or reduce `api_server_count`.")
+                                 f"Try reducing `api_server_count`.")
