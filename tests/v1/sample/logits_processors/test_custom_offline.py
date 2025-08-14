@@ -31,7 +31,24 @@ sampling_params_list = [
 ]
 
 
-def _run_test(kwargs: dict, logitproc_loaded: bool):
+def _run_test(kwargs: dict, logitproc_loaded: bool) -> None:
+    """Compare `LLM` instance initialized with specified `kwargs` against
+    reference `LLM` instance.
+
+    Two scenarios:
+    1. Server has loaded dummy logitproc; test that requests which specify
+       dummy logitproc arg value behave as if logitproc is operating (output
+       token value should repeat), while requests that don't specify dummy
+       logitproc arg value should match reference `LLM` output.
+    2. Server has *not* loaded dummy logitproc; test that all requests
+       behave as if logitproc is *not* operating (output matches reference
+       `LLM` output.)
+    
+    Args:
+      kwargs: `LLM` constructor kwargs
+      logitproc_loaded: server has loaded dummy logitproc if True
+    """
+
     # Create a vLLM instance and load custom logitproc
     llm_logitproc = LLM(
         model=MODEL_NAME,
@@ -89,11 +106,21 @@ def test_custom_logitsprocs(monkeypatch,
       results for both `LLM` instances
     * Requests which activate the custom logitproc, only output `target_token`
 
+    Test four scenarios, corresponding to `logitproc_source` value
+    * No logitsprocs loaded - test that generated tokens match reference `LLM`
+      instance output
+    * Logitproc passed in via {entrypoint, class object, fully-qualified class
+      name (FQCN)} - test that dummy logitproc is utilized correctly when
+      provided via any of these three possible sources 
+
     Args:
+      monkeypatch: for setting env vars
       logitproc_source: what source (entrypoint, fully-qualified class name
                         (FQCN), class object, or None) the user pulls the
                         logitproc from
     """
+
+    # Test that logitproc info is passed to workers
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
     random.seed(40)
 
@@ -151,6 +178,7 @@ def test_pooling_rejects_custom_logitsprocs(
     * Validate that initialization fails with appropriate exception
 
     Args:
+      monkeypatch: used to set environment variables
       logitproc_source: what source (entrypoint, fully-qualified class name
                         (FQCN), or class object) the user pulls the
                         logitproc from

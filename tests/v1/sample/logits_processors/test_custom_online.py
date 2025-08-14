@@ -65,7 +65,6 @@ def default_server_args():
         "2048",
         "--max-num-seqs",
         "128",
-        "--enforce-eager"
     ]
 
 
@@ -75,10 +74,13 @@ def server(default_server_args, request, monkeypatch):
     """Consider two server configurations:
     (1) --logits-processors cli arg specifies dummy logits processor via fully-
     qualified class name (FQCN)
-    (2) No --logits-processors cli arg; monkeypatch dummy logits processor
+    (2) No --logits-processors cli arg; patch in a dummy logits processor
     entrypoint
     """
+
+    # Test that logitproc info is passed to workers
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+
     if request.param:
         # Append FQCN argument
         with RemoteOpenAIServer(MODEL_NAME, default_server_args +
@@ -124,8 +126,8 @@ async def test_custom_logitsprocs(client: openai.AsyncOpenAI, model_name: str):
     Pass in requests, 50% of which pass a `target_token` value
     in through `extra_body["vllm_xargs"]`, 50% of which do not.
 
-    Validate that requests which activate the custom logitproc, only output
-    `target_token`
+    Validate that requests which activate the custom logitproc, repeat the same
+    token
     """
 
     use_dummy_logitproc = True
@@ -152,7 +154,7 @@ async def test_custom_logitsprocs(client: openai.AsyncOpenAI, model_name: str):
 
         if use_dummy_logitproc:
             # Only for requests which activate dummy logitproc - validate that
-            # only `target_token` is generated
+            # output token is repeated
             choices: openai.types.CompletionChoice = batch.choices
             toks = choices[0].logprobs.tokens
             if not all([x == toks[0] for x in toks]):
