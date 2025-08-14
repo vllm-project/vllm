@@ -692,7 +692,7 @@ class TransformersMoEBase(TransformersBase):
         # and let FusedMoE handle any errors from misconfiguration
         num_expert_group = getattr(text_config, "n_group", None)
         topk_group = getattr(text_config, "topk_group", None)
-        use_grouped_topk = num_expert_group or topk_group
+        use_grouped_topk = bool(num_expert_group or topk_group)
 
         def reduce_results(module, _, output):
             """Forward hook that performs all-reduce on a nn.Module's
