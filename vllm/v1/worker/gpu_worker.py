@@ -33,6 +33,8 @@ from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
 
+from .utils import check_enough_init_memory
+
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
@@ -171,20 +173,11 @@ class Worker(WorkerBase):
             torch.cuda.empty_cache()
 
             # take current memory snapshot
-            self.init_snapshot = MemorySnapshot()
-            self.requested_memory = (self.init_snapshot.total_memory *
-                                     self.cache_config.gpu_memory_utilization)
-            if self.init_snapshot.free_memory < self.requested_memory:
-                GiB = lambda b: round(b / GiB_bytes, 2)
-                raise ValueError(
-                    f"Free memory on device "
-                    f"({GiB(self.init_snapshot.free_memory)}/"
-                    f"{GiB(self.init_snapshot.total_memory)} GiB) on startup "
-                    f"is less than desired GPU memory utilization "
-                    f"({self.cache_config.gpu_memory_utilization}, "
-                    f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
-                    f"utilization or reduce GPU memory used by other processes."
-                )
+            self.init_snapshot = MemorySnapshot(device=self.device)
+            self.requested_memory = check_enough_init_memory(
+                self.init_snapshot,
+                self.cache_config,
+            )
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")

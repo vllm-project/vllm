@@ -346,17 +346,13 @@ def allocate_gpu_mm_processors(
     processors, return the GPU allocation information.
      
     Returns:
-        A tuple `(mm_processor_gpus, mm_processors_per_engine_gpu)`, where:
+        A tuple `(mm_processor_gpus, mm_processors_per_gpu)`, where:
             - `gpu_allocation` is the device to allocate for each
               multi-modal processor.
-            - `mm_processors_per_engine_gpu` is the number of
+            - `mm_processors_per_gpu` is the number of
               multi-modal processors allocated to each GPU that is used
               by vLLM engine.
     """
-    engine_device_count = min(engine_device_count, available_device_count)
-
-    engine_gpu_idxs = list(range(engine_device_count))
-
     # In API server scale-out, allocate_gpu_mm_processors is called twice.
     # The first call happens in vllm.entrypoints.cli.serve and corresponds
     # to len(rest) == 0, resulting in each server targeting a specific device.
@@ -365,8 +361,8 @@ def allocate_gpu_mm_processors(
     if len(rest) == 0:
         # Try to run each processor on a different GPU, preferably those
         # that are not used by vLLM engine
-        remaining_count = max(0, available_device_count - engine_device_count)
-        if remaining_count > 0:
+        if available_device_count > engine_device_count:
+            remaining_count = available_device_count - engine_device_count
             processor_gpu_idxs = [
                 engine_device_count + server_idx % remaining_count
                 for server_idx in range(mm_processor_count)
@@ -384,15 +380,12 @@ def allocate_gpu_mm_processors(
     gpu_allocation = [
         f"{device_type}:{gpu_idx}" for gpu_idx in processor_gpu_idxs
     ]
-
-    processor_engine_gpu_idxs = (gpu_idx for gpu_idx in processor_gpu_idxs
-                                 if gpu_idx in engine_gpu_idxs)
-    mm_processors_per_engine_gpu = max(
-        Counter(processor_engine_gpu_idxs).values(),
+    mm_processors_per_gpu = max(
+        Counter(processor_gpu_idxs).values(),
         default=0,
     )
 
-    return gpu_allocation, mm_processors_per_engine_gpu
+    return gpu_allocation, mm_processors_per_gpu
 
 
 def argsort_mm_positions(

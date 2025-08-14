@@ -7,10 +7,11 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.config import ModelConfig, SchedulerConfig
+from vllm.config import CacheConfig, ModelConfig, SchedulerConfig
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.registry import MultiModalRegistry
+from vllm.utils import GiB_bytes, MemorySnapshot
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
@@ -200,6 +201,31 @@ def gather_mm_placeholders(
         return placeholders
 
     return placeholders[is_embed]
+
+
+def check_enough_init_memory(
+    init_snapshot: MemorySnapshot,
+    cache_config: CacheConfig,
+) -> float:
+    """
+    Calculate the amount of memory required by vLLM, then validate
+    that the current amount of free memory is sufficient for that.
+    """
+    requested_memory = init_snapshot.total_memory * (
+        cache_config.gpu_memory_utilization)
+
+    if init_snapshot.free_memory < requested_memory:
+        GiB = lambda b: round(b / GiB_bytes, 2)
+        raise ValueError(
+            f"Free memory on device {init_snapshot.device} "
+            f"({GiB(init_snapshot.free_memory)}/"
+            f"{GiB(init_snapshot.total_memory)} GiB) on startup "
+            f"is less than desired GPU memory utilization "
+            f"({cache_config.gpu_memory_utilization}, "
+            f"{GiB(requested_memory)} GiB). Decrease GPU memory "
+            f"utilization or reduce GPU memory used by other processes.")
+
+    return requested_memory
 
 
 def initialize_kv_cache_for_kv_sharing(

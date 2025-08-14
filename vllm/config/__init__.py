@@ -422,14 +422,12 @@ class ModelConfig:
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
     Set to `0` to disable this cache completely (not recommended)."""
-    mm_processors_per_engine_gpu: int = 0
+    mm_processors_per_gpu: int = 0
     """
-    [Internal] The maximum number of multi-modal processors that use each GPU
-    in vLLM engine.
+    [Internal] The maximum number of multi-modal processors that use each GPU.
 
     This is needed to determine the peak memory of multi-modal processing
-    in the case of API server scale-out.
-    """
+    in the case of API server scale-out."""
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -867,11 +865,11 @@ class ModelConfig:
 
             mm_config.mm_processor_kwargs.update(value)
 
-    def set_mm_processors_per_engine_gpu(self, value: int) -> None:
-        self.mm_processors_per_engine_gpu = value
+    def set_mm_processors_per_gpu(self, value: int) -> None:
+        self.mm_processors_per_gpu = value
 
         if mm_config := self.multimodal_config:
-            mm_config.mm_processors_per_engine_gpu = value
+            mm_config.mm_processors_per_gpu = value
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -2510,7 +2508,7 @@ class MultiModalConfig:
     For example, to set num_frames for video, set
     `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
 
-    mm_processor_kwargs: Optional[dict[str, object]] = None
+    mm_processor_kwargs: Optional[dict[str, Any]] = None
     """
     Overrides for the multi-modal processor obtained from
     `transformers.AutoProcessor.from_pretrained`.
@@ -2532,10 +2530,9 @@ class MultiModalConfig:
     Set to `0` to disable this cache completely (not recommended).
     """
 
-    mm_processors_per_engine_gpu: int = -1
+    mm_processors_per_gpu: int = 0
     """
-    [Internal] The maximum number of multi-modal processors that use each GPU
-    in vLLM engine. A value of `-1` means not set.
+    [Internal] The maximum number of multi-modal processors that use each GPU.
 
     This is needed to determine the peak memory of multi-modal processing
     in the case of API server scale-out.

@@ -49,8 +49,8 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, MemorySnapshot, check_use_alibi,
-                        get_dtype_size, is_pin_memory_available, round_up,
-                        supports_dynamo)
+                        get_dtype_size, is_pin_memory_available,
+                        memory_profiling, round_up, supports_dynamo)
 from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
@@ -78,7 +78,8 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from ..sample.logits_processor import LogitsProcessorManager
 from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
-                    gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
+                    check_enough_init_memory, gather_mm_placeholders,
+                    initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
 if TYPE_CHECKING:
@@ -2031,43 +2032,53 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         model_config = self.model_config
         mm_config = model_config.multimodal_config
 
-        if mm_config and (mm_config.is_mm_processing_gpu and
-                          (usage_mult :=
-                           mm_config.mm_processors_per_engine_gpu) > 0):
-            self.mm_registry.reset_processor_cache(model_config)
+        processor_memory_usage = 0
 
-            mm_budget = self.mm_budget
-            assert mm_budget is not None
+        if mm_config and (mm_processor_kwargs :=
+                          mm_config.mm_processor_kwargs):
+            mm_processor_device = torch.device(
+                mm_processor_kwargs.get("device", "cpu"))
+            device_mult = mm_config.mm_processors_per_gpu
 
-            gc.collect()
-            torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
+            if mm_processor_device != "cpu" and device_mult > 0:
+                mm_budget = self.mm_budget
+                assert mm_budget is not None
 
-            time_before_processing = time.perf_counter()
-            before_profile = MemorySnapshot(auto_measure=True)
+                self.mm_registry.reset_processor_cache(model_config)
 
-            for modality, max_items_per_prompt in (
-                    mm_budget.max_items_per_prompt_by_modality.items()):
-                self.mm_registry.get_decoder_dummy_data(
-                    model_config=model_config,
-                    seq_len=self.max_num_tokens,
-                    mm_counts={modality: max_items_per_prompt},
+                baseline_snapshot = MemorySnapshot(device=mm_processor_device)
+                if mm_processor_device != self.device:
+                    check_enough_init_memory(baseline_snapshot,
+                                             self.cache_config)
+
+                with memory_profiling(baseline_snapshot) as diff:
+                    for modality, max_items_per_prompt in (
+                            mm_budget.max_items_per_prompt_by_modality.items()
+                    ):
+                        self.mm_registry.get_decoder_dummy_data(
+                            model_config=model_config,
+                            seq_len=self.max_num_tokens,
+                            mm_counts={modality: max_items_per_prompt},
+                        )
+
+                processor_memory_usage = diff.torch_peak_increase * device_mult
+                logger.info(
+                    "Input processing took %.4f GiB and %.6f seconds on %s",
+                    processor_memory_usage / GiB_bytes,
+                    diff.profile_time,
+                    mm_processor_device,
                 )
+                if processor_memory_usage > diff.before_profile.free_memory:
+                    raise ValueError(
+                        f"No available memory in {mm_processor_device} "
+                        f"for multi-modal processing. "
+                        f"Try increasing `gpu_memory_utilization` "
+                        f"or reduce `api_server_count`.")
 
-            gc.collect()
-            torch.cuda.empty_cache()
+                if mm_processor_device != self.device:
+                    processor_memory_usage = 0  # Not on the engine GPU
 
-            time_after_processing = time.perf_counter()
-            after_profile = MemorySnapshot(auto_measure=True)
-
-            diff_profile = after_profile - before_profile
-            self.processor_memory_usage = diff_profile.torch_peak * usage_mult
-
-            logger.info("Input processing took %.4f GiB and %.6f seconds",
-                        self.processor_memory_usage / GiB_bytes,
-                        time_after_processing - time_before_processing)
-        else:
-            self.processor_memory_usage = 0
+        self.processor_memory_usage = processor_memory_usage
 
     def reload_weights(self) -> None:
         assert getattr(self, "model", None) is not None, \
