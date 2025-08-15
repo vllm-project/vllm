@@ -10,8 +10,8 @@ from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
-from vllm.model_executor.layers.fused_moe.config import (FusedMoEQuantConfig,
-                                                         mxfp4_w4a4_moe_quant_config)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig, mxfp4_w4a4_moe_quant_config)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -451,7 +451,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
 
         if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-            or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
             return None
 
         return mxfp4_w4a4_moe_quant_config(

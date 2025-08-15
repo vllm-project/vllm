@@ -131,15 +131,14 @@ def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
 
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
-        out = fused_experts(
-            a,
-            w1,
-            w2,
-            topk_weights,
-            topk_ids,
-            quant_config=quant_config
-        )
-        ref_out = torch_w8a8_block_int8_moe(a, w1, w2, quant_config.w1_scale, quant_config.w2_scale, score, topk,
+        out = fused_experts(a,
+                            w1,
+                            w2,
+                            topk_weights,
+                            topk_ids,
+                            quant_config=quant_config)
+        ref_out = torch_w8a8_block_int8_moe(a, w1, w2, quant_config.w1_scale,
+                                            quant_config.w2_scale, score, topk,
                                             block_size)
 
     # Check results

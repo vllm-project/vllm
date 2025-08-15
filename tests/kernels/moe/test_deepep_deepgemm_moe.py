@@ -15,8 +15,9 @@ from torch.distributed import ProcessGroup
 from typing_extensions import ParamSpec
 
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig, fp8_w8a8_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig, fp8_w8a8_moe_quant_config
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.platforms import current_platform
@@ -131,11 +132,11 @@ class TestTensors:
                            config=config)
 
 
-def make_ll_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo,
-                           max_tokens_per_rank: int, dp_size: int,
-                           hidden_size: int, q_dtype: Optional[torch.dtype],
-                           test_config: TestConfig,
-                           quant_config: FusedMoEQuantConfig) -> FusedMoEModularKernel:
+def make_ll_modular_kernel(
+        pg: ProcessGroup, pgi: ProcessGroupInfo, max_tokens_per_rank: int,
+        dp_size: int, hidden_size: int, q_dtype: Optional[torch.dtype],
+        test_config: TestConfig,
+        quant_config: FusedMoEQuantConfig) -> FusedMoEModularKernel:
 
     assert test_config.low_latency
     assert test_config.use_fp8_dispatch is not None
@@ -163,11 +164,11 @@ def make_ll_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo,
     return mk
 
 
-def make_ht_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo,
-                           dp_size: int, num_local_experts: int,
-                           q_dtype: Optional[torch.dtype],
-                           test_config: TestConfig,
-                           quant_config: FusedMoEQuantConfig) -> FusedMoEModularKernel:
+def make_ht_modular_kernel(
+        pg: ProcessGroup, pgi: ProcessGroupInfo, dp_size: int,
+        num_local_experts: int, q_dtype: Optional[torch.dtype],
+        test_config: TestConfig,
+        quant_config: FusedMoEQuantConfig) -> FusedMoEModularKernel:
 
     assert not test_config.low_latency
     assert test_config.use_fp8_dispatch is None
@@ -187,10 +188,10 @@ def make_ht_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo,
     return mk
 
 
-def make_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo, dp_size: int,
-                        num_local_experts: int,
-                        test_tensors: TestTensors,
-                        quant_config: FusedMoEQuantConfig) -> FusedMoEModularKernel:
+def make_modular_kernel(
+        pg: ProcessGroup, pgi: ProcessGroupInfo, dp_size: int,
+        num_local_experts: int, test_tensors: TestTensors,
+        quant_config: FusedMoEQuantConfig) -> FusedMoEModularKernel:
 
     q_dtype = torch.float8_e4m3fn
     test_config = test_tensors.config
@@ -211,8 +212,13 @@ def make_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo, dp_size: int,
                                     test_config=test_config,
                                     quant_config=quant_config)
     else:
-        mk = make_ht_modular_kernel(pg, pgi, dp_size, num_local_experts,
-                                    q_dtype, test_config, quant_config=quant_config)
+        mk = make_ht_modular_kernel(pg,
+                                    pgi,
+                                    dp_size,
+                                    num_local_experts,
+                                    q_dtype,
+                                    test_config,
+                                    quant_config=quant_config)
 
     return mk
 
@@ -242,8 +248,8 @@ def deepep_deepgemm_moe_impl(pg: ProcessGroup, pgi: ProcessGroupInfo,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         # Low-Latency kernels can't dispatch scales.
-        a1_scale = (None
-                    if test_config.low_latency else test_tensors.rank_token_scales),
+        a1_scale=(None if test_config.low_latency else
+                  test_tensors.rank_token_scales),
         block_shape=test_config.block_size,
     )
 
@@ -277,7 +283,7 @@ def triton_impl(a: torch.Tensor, topk_ids: torch.Tensor,
     quant_config = fp8_w8a8_moe_quant_config(
         w1_scale=w1_scale,
         w2_scale=w2_scale,
-        a1_scale = a1_scale,
+        a1_scale=a1_scale,
         block_shape=block_shape,
     )
 

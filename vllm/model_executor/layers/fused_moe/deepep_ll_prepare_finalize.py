@@ -95,7 +95,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_experts, max_tokens, hidden_dim = x.size()
 
         assert torch.isnan(x).sum() == 0
-        assert quant_config.a1_scale is None or torch.isnan(quant_config.a1_scale).sum() == 0
+        assert quant_config.a1_scale is None or torch.isnan(
+            quant_config.a1_scale).sum() == 0
 
         # TODO (varun): Optimization - Use a batched version of quant
         x = x.view((-1, hidden_dim))
@@ -123,7 +124,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
                Optional[torch.Tensor]]:
 
-        assert quant_config.quant_dtype is None or quant_config.is_per_tensor or quant_config.is_block_quantized
+        assert (quant_config.quant_dtype is None or quant_config.is_per_tensor
+                or quant_config.is_block_quantized)
 
         hidden_size = a1.size(1)
         assert hidden_size in self.SUPPORTED_HIDDEN_SIZES, \
@@ -154,7 +156,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         print(f"TPR {self.max_tokens_per_rank}")
         print(f"NE {num_experts}")
         print(f"A1 {a1.shape}")
-        print(f"ND {self.num_dispatchers_}")
+        print(f"AND {self.num_dispatchers_}")
         print(f"TOPK {topk_ids.shape}")
 
         # Dispatch

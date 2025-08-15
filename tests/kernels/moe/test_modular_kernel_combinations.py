@@ -64,7 +64,8 @@ def rank_worker(
     # sanity check
     from vllm import envs
     if base_config.fused_moe_chunk_size is not None:
-        assert (base_config.fused_moe_chunk_size == envs.VLLM_FUSED_MOE_CHUNK_SIZE)
+        assert (
+            base_config.fused_moe_chunk_size == envs.VLLM_FUSED_MOE_CHUNK_SIZE)
 
     # get weights to this device
     weights.to_current_device()
@@ -140,10 +141,10 @@ Ms = [32, 64]
 # Also needs to be a multiple of 1024 for deep_gemm.
 Ks = [4096]
 Ns = [2048]
-TOPKs = [4] #, 1]
+TOPKs = [4]  #, 1]
 Es = [32]
 DTYPEs = [torch.bfloat16]
-FUSED_MOE_CHUNK_SIZEs = [None] #[None, 16]
+FUSED_MOE_CHUNK_SIZEs = [None]  #[None, 16]
 
 
 def is_nyi_config(config: Config) -> bool:

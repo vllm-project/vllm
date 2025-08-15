@@ -15,14 +15,13 @@ from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
-from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
 from tests.kernels.moe.utils import fused_moe
+from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import init_distributed_environment
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig,
-    int4_w4a16_moe_quant_config,
+    FusedMoEQuantConfig, int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, modular_triton_fused_moe)
@@ -345,12 +344,11 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
         assert weight_bits == 8
         quant_config_builder = int8_w8a16_moe_quant_config
 
-    quant_config = quant_config_builder(
-        w1_scale=w1_scales,
-        w2_scale=w2_scales,
-        w1_zp=w1_qzeros if has_zp else None,
-        w2_zp=w2_qzeros if has_zp else None,
-        block_shape=[0, group_size])
+    quant_config = quant_config_builder(w1_scale=w1_scales,
+                                        w2_scale=w2_scales,
+                                        w1_zp=w1_qzeros if has_zp else None,
+                                        w2_zp=w2_qzeros if has_zp else None,
+                                        block_shape=[0, group_size])
 
     with set_current_vllm_config(vllm_config):
         triton_output = fused_moe(a,
