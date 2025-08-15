@@ -47,21 +47,25 @@ AudioInput = list[tuple[np.ndarray, int]]
 def _resize_data(_data: Union[Image.Image, np.ndarray],
                  size_factor: float) -> Union[Image.Image, np.ndarray]:
     assert size_factor <= 1, "Size factor must be less than 1"
+    # Image input
     if isinstance(_data, Image.Image):
         W, H = _data.width, _data.height
         W, H = map(lambda x: int(x * size_factor), (W, H))
         return _data.resize((W, H))
+    # Video input with PIL Images
     elif is_list_of(_data, Image.Image):
         W, H = next(iter(_data)).width, next(iter(_data)).height
         T = len(_data)
         T, W, H = map(lambda x: max(int(x * size_factor), 1), (T, W, H))
         return [d.resize((W, H)) for d in _data[:T]]
-    elif isinstance(_data, np.ndarray) and _data.ndim == 1:
-        return _data[:int(len(_data) * size_factor)]
-    elif _data.ndim >= 4:
+    # Video input with numpy arrays
+    elif isinstance(_data, np.ndarray) and _data.ndim >= 4:
         T, H, W, C = _data.shape[-4:]
         T, H, W = map(lambda x: max(int(x * size_factor), 1), (T, H, W))
         return _data[..., :T, :H, :W, :C]
+    # Audio input
+    elif isinstance(_data, np.ndarray) and _data.ndim == 1:
+        return _data[:int(len(_data) * size_factor)]
     raise AssertionError("This line should be unreachable.")
 
 
@@ -225,7 +229,6 @@ def test_model_tensor_schema(model_arch: str, model_id: str,
                 mm_registry = llm_engine.input_preprocessor.mm_registry
 
             processor = mm_registry.create_processor(model_config)
-            mm_kwargs_group = create_batched_mm_kwargs(model_config, processor)
 
             def validate_model_input(model, modality: str,
                                      mm_kwargs: MultiModalKwargs):
@@ -233,7 +236,8 @@ def test_model_tensor_schema(model_arch: str, model_id: str,
                 if hasattr(model, method_name):
                     getattr(model, method_name)(**mm_kwargs)
 
-            for modality, _, mm_kwargs in mm_kwargs_group:
+            for modality, _, mm_kwargs in create_batched_mm_kwargs(
+                    model_config, processor):
                 valid_func = partial(validate_model_input,
                                      modality=modality,
                                      mm_kwargs=mm_kwargs)
