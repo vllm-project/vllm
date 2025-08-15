@@ -250,7 +250,7 @@ def initialize_kv_cache_for_kv_sharing(
 def bind_kv_cache(
     kv_caches: dict[str, torch.Tensor],
     forward_context: dict[str, "Attention"],
-    runner_kv_caches: Optional[list[torch.Tensor]],
+    runner_kv_caches: list[torch.Tensor],
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -268,21 +268,22 @@ def bind_kv_cache(
         layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
     """
+    # Bind kv_caches to ModelRunner
+    assert len(runner_kv_caches) == 0
+
     # Convert kv_caches dict to a list of tensors in the order of layer_index.
     index2name = defaultdict(list)
     for layer_name in kv_caches:
         index2name[extract_layer_index(layer_name)].append(layer_name)
 
-    if runner_kv_caches is not None:
-        assert len(runner_kv_caches) == 0
-        for layer_index in sorted(index2name.keys()):
-            layer_names = index2name[layer_index]
-            if len(layer_names) > 1:
-                # One typical case is encoder-decoder model, e.g., bart.
-                # The cross attention and self attention in the same decoder
-                # layer has different layer_name but the same layer_index.
-                raise NotImplementedError
-            layer_name = layer_names[0]
+    for layer_index in sorted(index2name.keys()):
+        # Some models (like encoder-decoder models) may have multiple
+        # layers with the same index, so we need to append all of them.
+        # For an encoder-decoder model, each decoder layer has
+        # self-attention (AttentionType.DECODER)
+        # and cross-attention (AttentionType.ENCODER_DECODER).
+        layer_names = index2name[layer_index]
+        for layer_name in layer_names:
             runner_kv_caches.append(kv_caches[layer_name])
 
     # Bind kv_caches to forward context
