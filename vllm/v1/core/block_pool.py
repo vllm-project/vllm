@@ -142,7 +142,9 @@ class BlockPool:
         new_hashes: Optional[list[int]] = ([] if self.enable_kv_cache_events
                                            else None)
         for i, blk in enumerate(new_full_blocks):
-            assert blk.block_hash is None
+            if blk.block_hash is not None:
+                prev_block_hash_value = blk.block_hash.get_hash_value()
+                continue
 
             if i < len(new_block_hashes):
                 # The block hash may already be computed in
