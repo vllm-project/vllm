@@ -128,7 +128,6 @@ class AsyncLLM(EngineClient):
 
         # Loggers.
         self.logger_manager: Optional[StatLoggerManager] = None
-        elapsed = time.time() - self._startup_ts
         if self.log_stats:
             self.logger_manager = StatLoggerManager(
                 vllm_config=vllm_config,
