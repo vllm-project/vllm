@@ -103,11 +103,11 @@ class Scheduler(SchedulerInterface):
             self.policy = SchedulingPolicy.PRIORITY
         elif self.scheduler_config.policy == "fcfs":
             self.policy = SchedulingPolicy.FCFS
+        elif self.scheduler_config.policy == "shortest_prefill_first":
+            self.policy = SchedulingPolicy.SHORTEST_PREFILL_FIRST
         else:
             raise ValueError(
                 f"Unknown scheduling policy: {self.scheduler_config.policy}")
-        # Priority queues for requests.
-        self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
 
         # The request IDs that are finished in between the previous and the
@@ -160,6 +160,12 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
+        # Priority queues for requests.
+        # It needs to be created after the KV cache manager
+        # because shortest_prefill_first policy needs to check the
+        # number of KV cache hit tokens.
+        self.waiting = create_request_queue(self.policy, self.kv_cache_manager)
+
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
     def schedule(self) -> SchedulerOutput:
@@ -326,7 +332,8 @@ class Scheduler(SchedulerInterface):
 
         # Use a temporary RequestQueue to collect requests that need to be
         # skipped and put back at the head of the waiting queue later
-        skipped_waiting_requests = create_request_queue(self.policy)
+        skipped_waiting_requests = create_request_queue(
+            self.policy, self.kv_cache_manager)
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
