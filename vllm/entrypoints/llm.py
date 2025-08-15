@@ -110,6 +110,11 @@ class LLM:
             values will increase the KV cache size and thus improve the model's
             throughput. However, if the value is too high, it may cause out-of-
             memory (OOM) errors.
+        kv_cache_memory: Size of KV Cache per GPU in bytes. By default, this is
+            set to None and vllm can automatically infer the kv cache size based
+            on gpu_memory_utilization. However, pro users may want to manually
+            specify the kv cache memory size. Note that this config would not
+            respect gpu_memory_utilization.
         swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
             This can be used for temporarily storing the states of the requests
             when their `best_of` sampling parameters are larger than 1. If all
@@ -196,6 +201,7 @@ class LLM:
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         override_pooler_config: Optional[PoolerConfig] = None,
+        kv_cache_memory: Optional[int] = None,
         compilation_config: Optional[Union[int, dict[str, Any],
                                            CompilationConfig]] = None,
         **kwargs,
@@ -261,6 +267,7 @@ class LLM:
             tokenizer_revision=tokenizer_revision,
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
+            kv_cache_memory=kv_cache_memory,
             swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             enforce_eager=enforce_eager,
