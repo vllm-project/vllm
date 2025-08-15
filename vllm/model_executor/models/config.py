@@ -318,7 +318,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         # get mamba page size
         mamba_page_size = MambaSpec(
             shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
-            dtype=kv_cache_dtype,
+            dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
             block_size=model_config.max_model_len,
         ).page_size_bytes
 

@@ -23,6 +23,7 @@ logger = init_logger(__name__)
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
 CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
+MambaDType = Literal["auto", "float32"]
 PrefixCachingHashAlgo = Literal["builtin", "sha256", "sha256_cbor_64bit"]
 
 
@@ -93,6 +94,15 @@ class CacheConfig:
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
 
+    mamba_cache_dtype: MambaDType = "auto"
+    """The data type to use for the Mamba cache (both the conv as well as the
+    ssm state). If set to 'auto', the data type will be inferred from the model
+    config."""
+    mamba_ssm_cache_dtype: MambaDType = "auto"
+    """The data type to use for the Mamba cache (ssm state only, conv state will
+    still be controlled by mamba_cache_dtype). If set to 'auto', the data type
+    for the ssm state will be determined by mamba_cache_dtype."""
+
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for GPU memory."""
@@ -123,6 +133,8 @@ class CacheConfig:
         """
         factors: list[Any] = []
         factors.append(self.cache_dtype)
+        factors.append(self.mamba_cache_dtype)
+        factors.append(self.mamba_ssm_cache_dtype)
         # `cpu_offload_gb` does not use `torch.compile` yet.
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()

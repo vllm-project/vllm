@@ -24,9 +24,14 @@ class MambaCacheParams:
 
 class MambaCacheManager(ConstantSizeCache):
 
-    def __init__(self, vllm_config: VllmConfig, dtype: torch.dtype,
-                 num_mamba_layers: int, conv_state_shape: tuple[int, int],
-                 temporal_state_shape: tuple[int, int]):
+    def __init__(self, vllm_config: VllmConfig, num_mamba_layers: int,
+                 conv_state_shape: tuple[int, int],
+                 temporal_state_shape: tuple[int, int],
+                 conv_state_dtype: torch.dtype,
+                 temporal_state_dtype: torch.dtype):
+
+        self.conv_state_dtype = conv_state_dtype
+        self.temporal_state_dtype = temporal_state_dtype
 
         # Determine max batch size to set size of MambaCache
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
@@ -40,11 +45,11 @@ class MambaCacheManager(ConstantSizeCache):
         assert conv_state_shape[0] > conv_state_shape[1]
         conv_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
                                  (conv_state_shape[1], conv_state_shape[0]),
-                                 dtype=dtype,
+                                 dtype=self.conv_state_dtype,
                                  device="cuda").transpose(-1, -2)
         temporal_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
                                      temporal_state_shape,
-                                     dtype=dtype,
+                                     dtype=self.temporal_state_dtype,
                                      device="cuda")
 
         self._mamba_cache = (conv_state, temporal_state)

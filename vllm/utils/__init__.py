@@ -173,6 +173,7 @@ CYAN = '\033[1;36m'
 RESET = '\033[0;0m'
 
 STR_DTYPE_TO_TORCH_DTYPE = {
+    "float32": torch.float32,
     "half": torch.half,
     "bfloat16": torch.bfloat16,
     "float": torch.float,
