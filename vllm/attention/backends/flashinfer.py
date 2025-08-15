@@ -1054,10 +1054,13 @@ class FlashInferImpl(AttentionImpl):
             # TODO: @pavanimajety Remove this once the switch happens
             # inside flashinfer.
             # see https://github.com/flashinfer-ai/flashinfer/issues/1493
-            if not use_trtllm_attention(
-                    attn_metadata.num_qo_heads, attn_metadata.num_kv_heads,
-                    num_decode_tokens, attn_metadata.max_decode_seq_len,
-                    kv_cache_dtype):
+            if not use_trtllm_attention(attn_metadata.num_qo_heads,
+                                        attn_metadata.num_kv_heads,
+                                        num_decode_tokens,
+                                        attn_metadata.max_decode_seq_len,
+                                        kv_cache_dtype,
+                                        decode_query.dtype,
+                                        is_prefill=False):
                 decode_meta.decode_wrapper.run(
                     decode_query,
                     kv_cache.permute(*stride_order),

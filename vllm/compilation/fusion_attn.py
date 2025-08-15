@@ -38,6 +38,7 @@ class AttentionStaticQuantPattern:
         self,
         layer: Attention,
         quant_dtype: torch.dtype,
+        symmetric=True,
     ):
         self.layer = layer
         self.layer_name = layer.layer_name
@@ -47,7 +48,7 @@ class AttentionStaticQuantPattern:
         self.quant_key = QuantKey(dtype=quant_dtype,
                                   static=True,
                                   group_shape=GroupShape.PER_TENSOR,
-                                  symmetric=True)
+                                  symmetric=symmetric)
         assert self.quant_key in QUANT_OPS, \
             f"unsupported quantization scheme {self.quant_key}"
         self.QUANT_OP = QUANT_OPS[self.quant_key]
@@ -65,28 +66,28 @@ class AttentionStaticQuantPattern:
     def _register(self, pm_pass: PatternMatcherPass):
 
         def pattern(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    attn_output: torch.Tensor, quant_scale: torch.Tensor,
-                    quant_output: torch.Tensor):
+                    output_attn: torch.Tensor, output_quant: torch.Tensor,
+                    scale: torch.Tensor):
             at1 = auto_functionalized(ATTN_OP,
                                       query=q,
                                       key=k,
                                       value=v,
-                                      output=attn_output,
+                                      output=output_attn,
                                       layer_name=self.layer_name,
                                       output_scale=None)
-            attn_output_view = RESHAPE_OP(
-                at1[1], [-1, self.num_heads * self.head_size])
+            attn_out_view = RESHAPE_OP(at1[1],
+                                       [-1, self.num_heads * self.head_size])
             at2 = auto_functionalized(self.QUANT_OP,
-                                      result=quant_output,
-                                      input=attn_output_view,
-                                      scale=quant_scale)
+                                      result=output_quant,
+                                      input=attn_out_view,
+                                      scale=scale)
             return at2[1]
 
         def replacement(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                        attn_output: torch.Tensor, quant_scale: torch.Tensor,
-                        quant_output: torch.Tensor):
-            # attn out in quant_dtype
-            attn_output = torch.ops.aten.full.default(
+                        output_attn: torch.Tensor, output_quant: torch.Tensor,
+                        scale: torch.Tensor):
+            # attn output in quant_dtype
+            output_attn = torch.ops.aten.full.default(
                 [q.shape[0], self.num_heads, self.head_size],
                 0.0,
                 dtype=self.quant_dtype,
@@ -95,9 +96,9 @@ class AttentionStaticQuantPattern:
                                       query=q,
                                       key=k,
                                       value=v,
-                                      output=attn_output,
+                                      output=output_attn,
                                       layer_name=self.layer_name,
-                                      output_scale=quant_scale)
+                                      output_scale=scale)
             return RESHAPE_OP(at1[1], [-1, self.num_heads * self.head_size])
 
         # Need custom fake mode, otherwise tracing happens with real tensors.
@@ -108,9 +109,9 @@ class AttentionStaticQuantPattern:
                 empty_bf16(5, self.num_heads, self.head_size),  # k
                 empty_bf16(5, self.num_heads, self.head_size),  # v
                 empty_bf16(5, self.num_heads, self.head_size),  # attn_output
-                empty_fp32(1, 1),  # quant_scale
                 self.empty_quant(5, self.num_heads *
                                  self.head_size),  # quant_output
+                empty_fp32(1, 1)  # scale
             ]
 
             def wrap_trace_fn(process_fx, trace_fn):
