@@ -965,7 +965,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
         # List of [waiting, running] pair per engine.
         # Used only by DPLBAsyncMPClient subclass.
-        self.lb_engines: list[list[int]] = []
+        self.lb_engines: list[list[int]] = [[0, 0] for _ in self.core_engines]
 
         self.first_req_sock_addr = get_open_zmq_inproc_path()
         self.first_req_send_socket = self.resources.first_req_send_socket = (
@@ -1121,10 +1121,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     def get_core_engine_for_request(
             self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
-        current_counts = self.lb_engines
         if (eng_index := request.data_parallel_rank) is None:
-            if not current_counts:
-                return self.core_engine
+            current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
             min_score = sys.maxsize
