@@ -491,7 +491,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         use_audio_in_video=use_audio_in_video,
                     )
                 print(f"Adding new request {req_id} with {self.requests[req_id].mrope_position_delta=} "
-                      f"{self.requests[req_id].mrope_positions.shape=}")
+                      f"{self.requests[req_id].mrope_positions.shape=} "
+                      f"{len(self.requests[req_id].prompt_token_ids)}")
 
             req_ids_to_add.append(req_id)
 
