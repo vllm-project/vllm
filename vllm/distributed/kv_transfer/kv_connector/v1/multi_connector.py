@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -52,7 +53,7 @@ class MultiConnector(KVConnectorBase_V1):
             temp_config.kv_transfer_config = KVTransferConfig(
                 **ktc, engine_id=engine_id)
             self._connectors.append(
-                KVConnectorFactory.create_connector_v1(temp_config, role))
+                KVConnectorFactory.create_connector(temp_config, role))
 
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
@@ -177,6 +178,10 @@ class MultiConnector(KVConnectorBase_V1):
             self._extra_async_saves = {}
         return metadata
 
+    def update_connector_output(self, connector_output: KVConnectorOutput):
+        for c in self._connectors:
+            c.update_connector_output(connector_output)
+
     def request_finished(
         self,
         request: "Request",
@@ -223,9 +228,10 @@ class MultiConnector(KVConnectorBase_V1):
         for ktc in ktcs:
             kv_transfer_config = KVTransferConfig(**ktc)
             temp_vllm_config.kv_transfer_config = kv_transfer_config
-            required_kvcache_layout = KVConnectorFactory.get_connector_class(
-                kv_transfer_config).get_required_kvcache_layout(
-                    temp_vllm_config)
+            connector_cls = KVConnectorFactory.get_connector_class(
+                kv_transfer_config)
+            required_kvcache_layout = (
+                connector_cls.get_required_kvcache_layout(temp_vllm_config))
             if required_kvcache_layout is not None:
                 layouts.add(required_kvcache_layout)
 

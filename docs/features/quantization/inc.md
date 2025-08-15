@@ -1,7 +1,4 @@
----
-title: FP8 INC
----
-[](){ #inc }
+# FP8 INC
 
 vLLM supports FP8 (8-bit floating point) weight and activation quantization using Intel® Neural Compressor (INC) on Intel® Gaudi® 2 and Intel® Gaudi® 3 AI accelerators.
 Currently, quantization is validated only in Llama models.
