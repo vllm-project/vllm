@@ -235,6 +235,37 @@ if has_flashinfer():
                            dtype=dtype,
                            device=A.device)
 
+    @torch.library.custom_op(
+        "vllm::bmm_fp8",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def bmm_fp8(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        A_scale: torch.Tensor,
+        B_scale: torch.Tensor,
+        dtype: torch.dtype,
+        backend: str = "cublas",
+    ) -> torch.Tensor:
+        from flashinfer import bmm_fp8 as bmm_fp8_
+        return bmm_fp8_(A, B, A_scale, B_scale, dtype, None, backend)
+
+    @torch.library.register_fake("vllm::bmm_fp8", )
+    def bmm_fp8_fake(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        A_scale: torch.Tensor,
+        B_scale: torch.Tensor,
+        dtype: torch.dtype,
+        backend: str,
+    ) -> torch.Tensor:
+        return torch.empty(A.shape[0],
+                           A.shape[1],
+                           B.shape[2],
+                           dtype=dtype,
+                           device=A.device)
+
 
 def flashinfer_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
                              block_scale_a: torch.Tensor,
@@ -261,6 +292,27 @@ def flashinfer_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
         out_dtype,
         backend=backend,
     )
+
+
+def flashinfer_scaled_fp8_mm(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+        out_dtype: torch.dtype,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    output = bmm_fp8(
+        a.unsqueeze(0),
+        b.unsqueeze(0),
+        scale_a,
+        scale_b,
+        out_dtype,
+        "auto",
+    )[0]
+
+    if bias is not None:
+        output = output + bias
+    return output
 
 
 __all__ = [
