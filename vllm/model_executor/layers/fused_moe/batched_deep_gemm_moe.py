@@ -226,33 +226,44 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def _get_effective_num_dispatchers(self) -> int:
         """
-        Calculate effective number of dispatchers for optimized token dispatch.
+        Calculates the effective number of token dispatchers considering tensor parallelism.
         
-        When TP > 1, only leader ranks (rank 0 in each TP group) should dispatch
-        tokens to reduce cross-rank communication overhead.
+        When tensor parallelism (TP) is used (TP > 1), only the leader rank (rank 0) in each 
+        TP group should dispatch tokens to avoid redundant communication. This significantly
+        reduces cross-rank communication overhead in distributed environments.
         
         Returns:
-            Effective number of dispatchers, always at least 1.
+            int: The effective number of dispatchers to use, guaranteed to be at least 1.
+            When TP > 1:
+            - Returns (num_dispatchers // tp_size) for leader ranks (tp_rank == 0)
+            - Returns 0 for non-leader ranks (tp_rank != 0)
+            When TP == 1:
+            - Returns the original num_dispatchers
+            
+        Note:
+            The final max(1, ...) ensures we always have at least 1 dispatcher,
+            which is important for single-rank operation fallback.
         """
-        from vllm.distributed import (get_tensor_model_parallel_world_size,
-                                      get_tensor_model_parallel_rank)
+        from vllm.distributed import (
+            get_tensor_model_parallel_world_size,
+            get_tensor_model_parallel_rank
+        )
         
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         
-        if tp_size > 1:
-            # Only leader ranks (rank 0 in each TP group) dispatch tokens
-            if tp_rank == 0:
-                # Leader rank: use reduced number of dispatchers
-                effective_dispatchers = self.num_dispatchers // tp_size
-            else:
-                # Non-leader rank: no dispatch
-                effective_dispatchers = 0
-        else:
-            # Single TP rank: use all dispatchers
-            effective_dispatchers = self.num_dispatchers
-            
-        return max(1, effective_dispatchers)  # Ensure at least 1 dispatcher
+        if tp_size <= 1:
+            # No TP or single device - use all dispatchers
+            return self.num_dispatchers
+        
+        # TP > 1 case
+        if tp_rank == 0:
+            # Leader rank gets a proportional share of dispatchers
+            dispatchers_per_group = max(1, self.num_dispatchers // tp_size)
+            return dispatchers_per_group
+        
+        # Non-leader ranks don't dispatch
+        return 0
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
