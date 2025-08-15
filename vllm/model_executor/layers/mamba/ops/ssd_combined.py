@@ -65,7 +65,7 @@ def _mamba_chunk_scan_combined_fwd(x,
             0) != 1:  # Either M or K dimension should be contiguous
         x = x.contiguous()
     if z is not None and z.stride(-1) != 1 and z.stride(
-            1) != 1:  # Either M or K dimension should be contiguous
+            0) != 1:  # Either M or K dimension should be contiguous
         z = z.contiguous()
     if D is not None and D.stride(-1) != 1:
         D = D.contiguous()
