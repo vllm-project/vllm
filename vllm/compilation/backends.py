@@ -15,7 +15,7 @@ import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
-from vllm.config import CompilationConfig, VllmConfig
+from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
@@ -277,9 +277,6 @@ def split_graph(graph: fx.GraphModule,
     return split_gm, outputs
 
 
-# we share the global graph pool among all the backends
-global_graph_pool = None
-
 compilation_start_time = 0.0
 
 
@@ -339,13 +336,36 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 graph_index=index,
                 num_graphs=len(self.compile_submod_names),
                 runtime_shape=None)
+            # Lazy import here to avoid circular import
+            from .cuda_graph import CUDAGraphOptions
+            from .cuda_piecewise_backend import PiecewiseBackend
 
-            piecewise_backend = resolve_obj_by_qualname(
-                current_platform.get_piecewise_backend_cls())
-            self.module.__dict__[target] = piecewise_backend(
-                submod, self.vllm_config, self.graph_pool, index,
+            piecewise_backend = PiecewiseBackend(
+                submod, self.vllm_config, index,
                 len(self.compile_submod_names), sym_shape_indices,
                 compiled_graph_for_dynamic_shape, self.vllm_backend)
+
+            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                # resolve the static graph wrapper class (e.g. CUDAGraphWrapper
+                # class) as platform dependent.
+                static_graph_wrapper_class = resolve_obj_by_qualname(
+                    current_platform.get_static_graph_wrapper_cls())
+
+                # Always assign PIECEWISE runtime mode to the
+                # CUDAGraphWrapper for piecewise_backend, to distinguish
+                # it from the FULL cudagraph runtime mode, no matter it
+                # is wrapped on a full or piecewise fx graph.
+                self.module.__dict__[target] = static_graph_wrapper_class(
+                    runnable=piecewise_backend,
+                    vllm_config=self.vllm_config,
+                    runtime_mode=CUDAGraphMode.PIECEWISE,
+                    graph_pool=self.graph_pool,
+                    cudagraph_options=CUDAGraphOptions(
+                        debug_log_enable=piecewise_backend.is_first_graph,
+                        gc_disable=not piecewise_backend.is_first_graph,
+                        weak_ref_output=piecewise_backend.is_last_graph))
+            else:
+                self.module.__dict__[target] = piecewise_backend
 
             compilation_counter.num_piecewise_capturable_graphs_seen += 1
 
@@ -413,9 +433,7 @@ class VllmBackend:
         # them, e.g. backbone (default), eagle_head, etc.
         self.prefix = prefix or model_tag
 
-        global global_graph_pool
-        if global_graph_pool is None:
-            global_graph_pool = current_platform.graph_pool_handle()
+        global_graph_pool = current_platform.get_global_graph_pool()
 
         # TODO: in the future, if we want to use multiple
         # streams, it might not be safe to share a global pool.
@@ -585,7 +603,7 @@ class VllmBackend:
 
         self._called = True
 
-        if not self.compilation_config.use_cudagraph or \
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE or \
             not self.compilation_config.cudagraph_copy_inputs:
             return self.split_gm
 
