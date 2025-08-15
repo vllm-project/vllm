@@ -309,7 +309,9 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     total_head_size = kv_lora_rank + qk_rope_head_dim
     assert kv_lora_rank + qk_rope_head_dim == head_size, \
         f"MLA dimensions don't match: {total_head_size} != {head_size}"
-    scale = 1.0 / (kv_lora_rank**0.5)
+    # Use the same scale as the actual backend: 1.0 / sqrt(head_size)
+    # where head_size = kv_lora_rank + qk_rope_head_dim
+    scale = 1.0 / (total_head_size**0.5)
 
     # 2. Generate data and compute SDPA reference output for MLA
     all_q_vllm, all_kv_c_vllm, all_k_pe_vllm = [], [], []
@@ -328,25 +330,10 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
                        dtype=dtype,
                        device=device)
 
-    # Separate decode and prefill sequences like in common.py
-    decode_sequences = []
-    prefill_sequences = []
-
     for i in range(batch_size):
         s_len = seq_lens[i]
         q_len = query_lens[i]
         context_len = s_len - q_len
-
-        if q_len == 1:
-            decode_sequences.append(i)
-        else:
-            prefill_sequences.append(i)
-
-    for i in range(batch_size):
-        s_len = seq_lens[i]
-        q_len = query_lens[i]
-        context_len = s_len - q_len
-        is_decode = q_len == 1
 
         # Generate MLA tensors
         # Q has both nope and rope components:
@@ -369,111 +356,53 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
                                 dtype=dtype,
                                 device=device)
 
-        # Split the computation based on decode vs prefill workload
-        if is_decode:
-            # Decode path: data-movement friendly approach (MQA-like)
-            # Transform Q nope to latent space: ql_nope = q_nope @ W_UK
-            q_nope, q_pe_part = q.split([qk_nope_head_dim, qk_rope_head_dim],
-                                        dim=-1)
-            # [q_len, num_heads, qk_nope_head_dim] @
-            # [kv_lora_rank, num_heads, qk_nope_head_dim]
-            # -> [q_len, num_heads, kv_lora_rank]
-            ql_nope = torch.einsum("qnh,lnh->qnl", q_nope, W_UK)
+        # SDPA reference calculation using compute-friendly approach (MHA-like)
+        # Apply kv_b_proj (concatenated [W_UK; W_UV]) to the full sequence
+        kv_b_proj_weight = torch.cat(
+            [W_UK, W_UV],
+            dim=-1)  # [kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim]
+        kv_nope_and_v = torch.einsum("sl,lnh->snh", kv_c_full,
+                                     kv_b_proj_weight)
 
-            # Q for attention:
-            # [q_len, num_heads, kv_lora_rank + qk_rope_head_dim]
-            q_attn = torch.cat([ql_nope, q_pe_part], dim=-1)
+        # Split into k_nope and v components
+        k_nope, v_attn = kv_nope_and_v.split([qk_nope_head_dim, v_head_dim],
+                                             dim=-1)
 
-            # K for attention: [s_len, kv_lora_rank + qk_rope_head_dim]
-            # No head dimension - this is MQA (multi-query attention)
-            k_attn = torch.cat([kv_c_full, k_pe_full], dim=-1)
+        # Q components
+        q_nope, q_pe_part = q.split([qk_nope_head_dim, qk_rope_head_dim],
+                                    dim=-1)
 
-            # V for attention: kv_c (latent space) [s_len, kv_lora_rank]
-            v_attn = kv_c_full
+        # K for attention:
+        # [s_len, num_heads, qk_nope_head_dim + qk_rope_head_dim]
+        k_pe_expanded = k_pe_full.unsqueeze(1).expand(-1, num_q_heads, -1)
+        k_attn = torch.cat([k_nope, k_pe_expanded], dim=-1)
 
-            # SDPA expects (N, H, L, D), so reshape appropriately
-            # [1, num_heads, q_len, kv_lora_rank + qk_rope_head_dim]
-            q_sdpa_in = q_attn.unsqueeze(0).transpose(1, 2)
-            # [1, num_heads, s_len, kv_lora_rank + qk_rope_head_dim]
-            k_sdpa_in = k_attn.unsqueeze(0).unsqueeze(1).expand(
-                -1, num_q_heads, -1, -1)
-            # [1, num_heads, s_len, kv_lora_rank]
-            v_sdpa_in = v_attn.unsqueeze(0).unsqueeze(1).expand(
-                -1, num_q_heads, -1, -1)
+        # Q for attention:
+        # [q_len, num_heads, qk_nope_head_dim + qk_rope_head_dim]
+        q_attn = torch.cat([q_nope, q_pe_part], dim=-1)
 
-            # Create causal mask: query token i attends to
-            # positions 0 to (context_len + i)
-            kv_len = s_len
-            offset = context_len
-            attn_mask = torch.full((q_len, kv_len),
-                                   float('-inf'),
-                                   device=device,
-                                   dtype=dtype)
-            for j in range(q_len):
-                attn_mask[j, :offset + j + 1] = 0.0
+        # SDPA expects (N, H, L, D), so reshape appropriately
+        # [1, num_heads, q_len, total_head_dim]
+        q_sdpa_in = q_attn.unsqueeze(0).transpose(1, 2)
+        # [1, num_heads, s_len, total_head_dim]
+        k_sdpa_in = k_attn.unsqueeze(0).transpose(1, 2)
+        # [1, num_heads, s_len, v_head_dim]
+        v_sdpa_in = v_attn.unsqueeze(0).transpose(1, 2)
 
-            sdpa_out_i = torch.nn.functional.scaled_dot_product_attention(
-                q_sdpa_in,
-                k_sdpa_in,
-                v_sdpa_in,
-                attn_mask=attn_mask,
-                scale=scale,
-                enable_gqa=True)
-            # Convert back to (L, H, D) where D is kv_lora_rank
-            sdpa_out_i = sdpa_out_i.transpose(1, 2).squeeze(
-                0)  # (L, H, kv_lora_rank)
-            # Transform from latent space to v_head_dim: o @ W_UV
-            sdpa_out_i = torch.einsum("qnl,lnv->qnv", sdpa_out_i, W_UV)
-        else:
-            # Prefill path: compute friendly approach (MHA-like)
-            # First split K/V into nope and rope components
-            kv_nope = torch.einsum("sl,lnh->snh", kv_c_full, W_UK)
-            kv_v = torch.einsum("sl,lnv->snv", kv_c_full, W_UV)
+        # Create causal mask: query token i attends to
+        # positions 0 to (context_len + i)
+        attn_mask = torch.full((q_len, s_len),
+                               float('-inf'),
+                               device=device,
+                               dtype=dtype)
+        for j in range(q_len):
+            attn_mask[j, :context_len + j + 1] = 0.0
 
-            # Q components
-            q_nope, q_pe_part = q.split([qk_nope_head_dim, qk_rope_head_dim],
-                                        dim=-1)
-
-            # K for attention:
-            # [s_len, num_heads, qk_nope_head_dim + qk_rope_head_dim]
-            k_pe_expanded = k_pe_full.unsqueeze(1).expand(-1, num_q_heads, -1)
-            k_attn = torch.cat([kv_nope, k_pe_expanded], dim=-1)
-
-            # Q for attention:
-            # [q_len, num_heads, qk_nope_head_dim + qk_rope_head_dim]
-            q_attn = torch.cat([q_nope, q_pe_part], dim=-1)
-
-            # V for attention: [s_len, num_heads, v_head_dim]
-            v_attn = kv_v
-
-            # SDPA expects (N, H, L, D), so reshape appropriately
-            # [1, num_heads, q_len, qk_nope_head_dim + qk_rope_head_dim]
-            q_sdpa_in = q_attn.unsqueeze(0).transpose(1, 2)
-            # [1, num_heads, s_len, qk_nope_head_dim + qk_rope_head_dim]
-            k_sdpa_in = k_attn.unsqueeze(0).transpose(1, 2)
-            # [1, num_heads, s_len, v_head_dim]
-            v_sdpa_in = v_attn.unsqueeze(0).transpose(1, 2)
-
-            # Create causal mask: query token i attends to
-            # positions 0 to (context_len + i)
-            kv_len = s_len
-            offset = context_len
-            attn_mask = torch.full((q_len, kv_len),
-                                   float('-inf'),
-                                   device=device,
-                                   dtype=dtype)
-            for j in range(q_len):
-                attn_mask[j, :offset + j + 1] = 0.0
-
-            sdpa_out_i = torch.nn.functional.scaled_dot_product_attention(
-                q_sdpa_in,
-                k_sdpa_in,
-                v_sdpa_in,
-                attn_mask=attn_mask,
-                scale=scale)
-            # Convert back to (L, H, v_head_dim)
-            sdpa_out_i = sdpa_out_i.transpose(1, 2).squeeze(
-                0)  # (L, H, v_head_dim)
+        sdpa_out_i = torch.nn.functional.scaled_dot_product_attention(
+            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=scale)
+        # Convert back to (L, H, v_head_dim)
+        sdpa_out_i = sdpa_out_i.transpose(1, 2).squeeze(
+            0)  # (q_len, num_heads, v_head_dim)
 
         # Flatten to (L, H*v_head_dim)
         sdpa_out_i = sdpa_out_i.flatten(start_dim=-2)  # (L, H*v_head_dim)
@@ -488,6 +417,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         kv_c_contexts.append(kv_c_full[:context_len])
         k_pe_contexts.append(k_pe_full[:context_len])
 
+    # Concatenate all sequences (no reordering needed)
     query_vllm = torch.cat(all_q_vllm, dim=0)
     kv_c_vllm = torch.cat(all_kv_c_vllm, dim=0)
     k_pe_vllm = torch.cat(all_k_pe_vllm, dim=0).unsqueeze(1)
@@ -509,6 +439,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         kv_lora_rank, num_q_heads * (qk_nope_head_dim + v_head_dim))
     mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T)
 
+    # Create metadata using original batch spec
     common_attn_metadata = create_common_attn_metadata(
         batch_spec, vllm_config.cache_config.block_size, device)
 
