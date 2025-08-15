@@ -454,15 +454,17 @@ class ShareGPTDataset(BenchmarkDataset):
                                      skip_min_output_len_check=output_len
                                      is not None):
                 continue
+            mm_content = process_image(entry["image"]) if "image" in entry else None
             if enable_multimodal_chat:
                 prompt = self.apply_multimodal_chat_transformation(
-                    prompt, None)
+                    prompt, mm_content)
             samples.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=new_output_len,
                     lora_request=lora_request,
+                    multi_modal_data=mm_content,
                 ))
         self.maybe_oversample_requests(samples, num_requests)
         return samples
