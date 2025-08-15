@@ -710,8 +710,28 @@ class AsyncMicrobatchTokenizer:
 
 
 def cancel_task_threadsafe(task: Task):
-    if task and not task.done() and not (loop := task.get_loop()).is_closed():
-        loop.call_soon_threadsafe(task.cancel)
+    if task and not task.done():
+        run_in_loop(task.get_loop(), task.cancel)
+
+
+def close_sockets(sockets: Sequence[Union[zmq.Socket, zmq.asyncio.Socket]]):
+    for sock in sockets:
+        if sock is not None:
+            sock.close(linger=0)
+
+
+def run_in_loop(loop: AbstractEventLoop, function: Callable, *args):
+    if in_loop(loop):
+        function(*args)
+    elif not loop.is_closed():
+        loop.call_soon_threadsafe(function, *args)
+
+
+def in_loop(event_loop: AbstractEventLoop) -> bool:
+    try:
+        return asyncio.get_running_loop() == event_loop
+    except RuntimeError:
+        return False
 
 
 def make_async(
