@@ -389,11 +389,8 @@ class ModelConfig:
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string. Defaults to False."""
     skip_mm_profiling: bool = False
-    """When enabled, skips multimodal profiling during engine initialization.
-    
-    This reduces engine startup time but shifts the responsibility to users for 
-    estimating the peak memory usage of the activation of multimodal encoder and
-    embedding cache.
+    """When enabled, skips multimodal memory profiling during engine
+    initialization.
     """
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Additional args passed to process media inputs, keyed by modalities.
