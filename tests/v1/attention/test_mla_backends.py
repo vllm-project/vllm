@@ -237,9 +237,11 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
 
     # Create mock layer and output buffer
     mock_layer = MockAttentionLayer(device)
-    output = torch.empty_like(query)
-
-    breakpoint()
+    num_tokens = query.shape[0]
+    output = torch.empty(num_tokens,
+                         num_heads * v_head_dim,
+                         dtype=query.dtype,
+                         device=query.device)
 
     # Run forward pass
     # NOTE: The query, key, and value are already shaped correctly
@@ -390,8 +392,11 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
 
         sdpa_out_i = torch.nn.functional.scaled_dot_product_attention(
             q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=scale)
-        # Convert back to (L, H, D) where D is v_head_dim
-        all_sdpa_outputs.append(sdpa_out_i.transpose(1, 2).squeeze(0))
+        # Convert back to (L, H, D) where D is v_head_dim,
+        # then flatten to (L, H*D)
+        sdpa_out_i = sdpa_out_i.transpose(1, 2).squeeze(0)  # (L, H, D)
+        sdpa_out_i = sdpa_out_i.flatten(start_dim=-2)  # (L, H*D)
+        all_sdpa_outputs.append(sdpa_out_i)
 
         # Inputs for vLLM MLA backends are just the new tokens
         all_q_vllm.append(q)
