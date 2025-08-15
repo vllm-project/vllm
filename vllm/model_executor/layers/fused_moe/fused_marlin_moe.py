@@ -18,6 +18,8 @@ from vllm.utils import direct_register_custom_op
 def fused_marlin_moe(hidden_states: torch.Tensor,
                      w1: torch.Tensor,
                      w2: torch.Tensor,
+                     bias1: Optional[torch.Tensor],
+                     bias2: Optional[torch.Tensor],
                      w1_scale: torch.Tensor,
                      w2_scale: torch.Tensor,
                      gating_output: torch.Tensor,
@@ -26,6 +28,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
                      quant_type_id: int,
                      apply_router_weight_on_input: bool = False,
                      global_num_experts: int = -1,
+                     activation: Optional[str] = "silu",
                      expert_map: Optional[torch.Tensor] = None,
                      global_scale1: Optional[torch.Tensor] = None,
                      global_scale2: Optional[torch.Tensor] = None,
@@ -88,6 +91,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
     assert hidden_states.dtype in [torch.float16, torch.bfloat16]
     assert num_bits in [4, 8]
+    assert topk_weights.dtype == torch.float32
 
     M, K = hidden_states.shape
     E = w1.shape[0]
@@ -138,6 +142,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         hidden_states,
         intermediate_cache1,
         w1,
+        bias1,
         w1_scale,
         global_scale1,
         w1_zeros,
@@ -161,8 +166,28 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         use_fp32_reduce=True,
         is_zp_float=False)
 
-    torch.ops._C.silu_and_mul(intermediate_cache2,
-                              intermediate_cache1.view(-1, 2 * N))
+    if activation == "silu":
+        torch.ops._C.silu_and_mul(intermediate_cache2,
+                                  intermediate_cache1.view(-1, 2 * N))
+    elif activation == "swiglu_oai":
+        # NOTE: in gpt-oss, the gate_proj and up_proj is interleaved
+        # - interleaved: gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+        # - origin: gate, up = gate_up[..., :N], gate_up[..., N:]
+
+        @torch.compile(dynamic=True)
+        def swiglu_oai(gate_up):
+            alpha = 1.702
+            limit = 7.0
+            gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+            gate = gate.clamp(min=None, max=limit)
+            up = up.clamp(min=-limit, max=limit)
+            glu = gate * torch.sigmoid(gate * alpha)
+            return (up + 1) * glu
+
+        intermediate_cache2 = swiglu_oai(intermediate_cache1)
+    else:
+        raise ValueError(f"Unsupported activation: {activation}. "
+                         "Only silu and swiglu_oai activations are supported.")
 
     if expert_map is not None:
         intermediate_cache3.zero_()
@@ -171,6 +196,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         intermediate_cache2,
         intermediate_cache3,
         w2,
+        bias2,
         w2_scale,
         global_scale2,
         w2_zeros,
