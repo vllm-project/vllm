@@ -109,7 +109,7 @@ class EplbState:
 
     expert_load_pass: torch.Tensor
     """
-    Expert load during this forward pass. 
+    Expert load during this forward pass.
     We use the token count each expert processes as the load.
 
     Shape: (num_moe_layers, num_physical_experts)
@@ -409,6 +409,47 @@ class EplbState:
             self.expert_rearrangement_step = 0
             self.rearrange(model)
 
+    def _update_expert_tensors_size(
+            self,
+            model: MixtureOfExperts,
+            num_local_physical_experts: Optional[int] = None) -> None:
+        """
+        Update the size of expert-related tensors to match
+        model.num_physical_experts. This ensures tensors are properly sized
+        when the number of physical experts changes.
+
+        Args:
+            model: The MoE model instance
+            num_local_physical_experts: Optional new number of local physical
+                experts. If None, uses model.num_local_physical_experts.
+        """
+        current_size = self.expert_load_pass.size(-1)
+        target_size = model.num_physical_experts
+
+        if current_size != target_size:
+            logger.debug("Updating expert_load_pass tensor size from %d to %d",
+                         current_size, target_size)
+
+            # Resize expert_load_pass tensor
+            if current_size < target_size:
+                # Expand tensor by padding with zeros
+                padding_needed = target_size - current_size
+                self.expert_load_pass = torch.nn.functional.pad(
+                    self.expert_load_pass, (0, padding_needed))
+            else:
+                # Truncate tensor to target size
+                self.expert_load_pass = self.expert_load_pass[
+                    ..., :target_size]
+
+            # Update expert load view in the model if supported
+            if hasattr(model, 'update_expert_load_view'):
+                logger.debug("Calling model.update_expert_load_view with "
+                             "resized expert_load_pass tensor")
+                model.update_expert_load_view(self.expert_load_pass)
+            else:
+                logger.warning("Model does not support "
+                               "update_expert_load_view interface")
+
     def rearrange(self,
                   model: MixtureOfExperts,
                   is_profile: bool = False,
@@ -431,7 +472,31 @@ class EplbState:
                         "(profile)" if is_profile else "")
 
         if global_expert_load is None:
-            # Map the physical expert load to global logical experts
+            # Update expert_load_pass tensor size to match
+            # model.num_physical_experts
+            self._update_expert_tensors_size(model)
+
+            # This mapping is only used here, so we do not store it in the
+            # state
+            if self.physical_to_logical_map.size(
+                    -1) < model.num_physical_experts:
+                # Pad with zeros to expand
+                padding_needed = (model.num_physical_experts -
+                                  self.physical_to_logical_map.size(-1))
+                local_physical_to_logical_map = torch.nn.functional.pad(
+                    self.physical_to_logical_map, (0, padding_needed))
+                self.expert_load_window = torch.nn.functional.pad(
+                    self.expert_load_window,
+                    (0, padding_needed),
+                    value=0,
+                )
+            else:
+                local_physical_to_logical_map = (self.physical_to_logical_map[
+                    ..., :model.num_physical_experts])
+                self.expert_load_window = self.expert_load_window[
+                    ..., :model.num_physical_experts]
+
+            # Map the local physical expert load to global logical experts
             logical_expert_load_window = torch.zeros(
                 self.expert_load_window_size,
                 model.num_moe_layers,
@@ -441,7 +506,7 @@ class EplbState:
             )
             logical_expert_load_window.scatter_add_(
                 dim=-1,
-                index=self.physical_to_logical_map.unsqueeze(0).expand_as(
+                index=local_physical_to_logical_map.unsqueeze(0).expand_as(
                     self.expert_load_window).long(),
                 src=self.expert_load_window,
             )
