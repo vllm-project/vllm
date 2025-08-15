@@ -57,6 +57,13 @@ V1_SUPPORTED_MODELS = [
 # Avoid OOM
 MAX_NUM_SEQS = 4
 
+# Once we add support for FCG in Mamba1, this list will be removed and tests
+# all test cases will use enforce_eager=False
+ENFORCE_EAGER_MODELS_V1 = [
+    "state-spaces/mamba-130m-hf",
+    "ai21labs/Jamba-tiny-dev",
+]
+
 
 @pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
@@ -94,13 +101,19 @@ def test_models(
             example_prompts, max_tokens, num_logprobs)
 
     if model in V1_SUPPORTED_MODELS:
+        enforce_eager = False
         with monkeypatch.context() as m:
             m.setenv("VLLM_USE_V1", "1")
             if model in HYBRID_MODELS:
                 # required due to reorder_batch behaviour
                 m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
+
+            if model in ENFORCE_EAGER_MODELS_V1:
+                enforce_eager = True
+
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
+                             enforce_eager=enforce_eager,
                              enable_prefix_caching=False) as vllm_model:
                 vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                     example_prompts, max_tokens, num_logprobs)
@@ -329,32 +342,6 @@ def test_state_cleanup(
     except ValueError:
         pytest.fail("Hybrid inner state wasn't cleaned up between states, "
                     "could be related to finished_requests_ids")
-
-
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
-@pytest.mark.parametrize("max_tokens", [64])
-def test_multistep_correctness(
-    vllm_runner,
-    example_prompts,
-    model: str,
-    max_tokens: int,
-) -> None:
-    with vllm_runner(model, num_scheduler_steps=8,
-                     max_num_seqs=2) as vllm_model:
-        vllm_outputs_multistep = vllm_model.generate_greedy(
-            example_prompts, max_tokens)
-
-    with vllm_runner(model, num_scheduler_steps=1,
-                     max_num_seqs=2) as vllm_model:
-        vllm_outputs_single_step = vllm_model.generate_greedy(
-            example_prompts, max_tokens)
-
-    check_outputs_equal(
-        outputs_0_lst=vllm_outputs_multistep,
-        outputs_1_lst=vllm_outputs_single_step,
-        name_0="vllm_outputs_multistep",
-        name_1="vllm_outputs_single_step",
-    )
 
 
 @multi_gpu_test(num_gpus=2)

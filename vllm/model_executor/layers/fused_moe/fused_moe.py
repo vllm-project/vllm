@@ -701,20 +701,32 @@ def get_moe_configs(
     block_shape = [block_n, block_k] if block_n and block_k else None
     json_file_name = get_config_file_name(E, N, dtype, block_shape)
 
-    config_file_path = os.path.join(
+    config_file_paths = []
+
+    # note that we prioritize user defined config
+    user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
+    if user_defined_config_folder is not None:
+        user_defined_config_file_path = os.path.join(
+            user_defined_config_folder, json_file_name)
+        config_file_paths.append(user_defined_config_file_path)
+
+    default_config_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
-    if os.path.exists(config_file_path):
-        with open(config_file_path) as f:
-            logger.info("Using configuration from %s for MoE layer.",
-                        config_file_path)
-            # If a configuration has been found, return it
-            return {int(key): val for key, val in json.load(f).items()}
+    config_file_paths.append(default_config_file_path)
+
+    for config_file_path in config_file_paths:
+        if os.path.exists(config_file_path):
+            with open(config_file_path) as f:
+                logger.info("Using configuration from %s for MoE layer.",
+                            config_file_path)
+                # If a configuration has been found, return it
+                return {int(key): val for key, val in json.load(f).items()}
 
     # If no optimized configuration is available, we will use the default
     # configuration
     logger.warning(
         ("Using default MoE config. Performance might be sub-optimal! "
-         "Config file not found at %s"), config_file_path)
+         "Config file not found at %s"), config_file_paths)
     return None
 
 
@@ -1177,10 +1189,10 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
         hidden_states: torch.Tensor,
         input_scale: torch.Tensor,
         gemm1_weights: torch.Tensor,
-        gemm1_weights_scale: torch.Tensor,
-        activation_scale: torch.Tensor,
         gemm2_weights: torch.Tensor,
-        gemm2_weights_scale: torch.Tensor,
+        output1_scales_scalar: torch.Tensor,
+        output1_scales_gate_scalar: torch.Tensor,
+        output2_scales_scalar: torch.Tensor,
         num_experts: int,
         top_k: int,
         num_expert_group: Optional[int],
@@ -1194,16 +1206,11 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
     num_expert_group = num_expert_group if num_expert_group is not None else 0
     topk_group = topk_group if topk_group is not None else 0
 
-    quant_hidden_states, input_scale = moe_kernel_quantize_input(
+    quant_hidden_states, _ = moe_kernel_quantize_input(
         hidden_states,
         input_scale,
         quant_dtype=torch.float8_e4m3fn,
         per_act_token_quant=False)
-
-    output1_scales_scalar = gemm1_weights_scale * input_scale * (
-        1.0 / activation_scale)
-    output1_scales_gate_scalar = gemm1_weights_scale * input_scale
-    output2_scales_scalar = activation_scale * gemm2_weights_scale
 
     from vllm.utils.flashinfer import (
         flashinfer_trtllm_fp8_per_tensor_scale_moe)
@@ -1232,24 +1239,24 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
 
 def flashinfer_fused_moe_per_tensor_scale_fp8_fake(
         routing_logits: torch.Tensor,
-        routing_bias: torch.Tensor,
+        routing_bias: Optional[torch.Tensor],
         hidden_states: torch.Tensor,
+        input_scale: torch.Tensor,
         gemm1_weights: torch.Tensor,
+        gemm2_weights: torch.Tensor,
         output1_scales_scalar: torch.Tensor,
         output1_scales_gate_scalar: torch.Tensor,
-        gemm2_weights: torch.Tensor,
         output2_scales_scalar: torch.Tensor,
         num_experts: int,
         top_k: int,
-        num_expert_group: int,
-        topk_group: int,
+        num_expert_group: Optional[int],
+        topk_group: Optional[int],
         intermediate_size: int,
         local_expert_offset: int,
         local_num_experts: int,
-        routed_scaling_factor: float = 1.0,
-        use_routing_scales_on_input: bool = False,
-        tile_tokens_dim: int = 8,
-        routing_method_type: int = 0) -> torch.Tensor:
+        use_routing_scales_on_input: bool,
+        routing_method_type: int,
+        routed_scaling_factor: float = 1.0) -> torch.Tensor:
     pass
 
 
