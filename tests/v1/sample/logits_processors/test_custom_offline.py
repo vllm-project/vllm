@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
+import sys
 from typing import Union
 
 import pytest
@@ -12,7 +13,8 @@ from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
                                                      POOLING_MODEL_NAME,
                                                      TEMP_GREEDY,
                                                      CustomLogitprocSource,
-                                                     DummyLogitsProcessor)
+                                                     DummyLogitsProcessor,
+                                                     dummy_module)
 from tests.v1.sample.logits_processors.utils import (
     entry_points as fake_entry_points)
 from tests.v1.sample.logits_processors.utils import prompts
@@ -148,6 +150,7 @@ def test_custom_logitsprocs(monkeypatch,
     kwargs: dict[str, list[Union[str, type[LogitsProcessor]]]] = {}
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_FQCN:
         # Scenario: load logitproc based on fully-qualified class name (FQCN)
+        sys.modules["DummyModule"] = dummy_module
         kwargs["logits_processors"] = [DUMMY_LOGITPROC_FQCN]
     elif logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_CLASS:
         # Scenario: load logitproc from provided class object
@@ -166,7 +169,8 @@ def test_pooling_rejects_custom_logitsprocs(
     """Validate that vLLM engine initialization properly rejects custom
     logitsprocs when the model is a pooling model.
 
-    Use `LLM` entrypoint.
+    Use `LLM` entrypoint. We expect `LLM` initialization to fail before the
+    logitproc is actually loaded.
 
     Scenario 1:
     * Mock a logitproc entrypoint
