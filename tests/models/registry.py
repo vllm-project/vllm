@@ -455,6 +455,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Llama_Nemotron_Nano_VL" : _HfExamplesInfo("nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1", # noqa: E501
                                                      trust_remote_code=True),
     "Ovis": _HfExamplesInfo("AIDC-AI/Ovis2-1B", trust_remote_code=True,
+                            max_transformers_version="4.54",
+                            transformers_version_reason="HF model is not compatible",  # noqa: E501
                             extras={"1.6-llama": "AIDC-AI/Ovis1.6-Llama3.2-3B",
                                     "1.6-gemma": "AIDC-AI/Ovis1.6-Gemma2-9B"}),  # noqa: E501
     "PaliGemmaForConditionalGeneration": _HfExamplesInfo("google/paligemma-3b-mix-224",  # noqa: E501
