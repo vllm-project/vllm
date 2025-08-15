@@ -310,6 +310,7 @@ class Worker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
+
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
 
@@ -321,16 +322,11 @@ class Worker(WorkerBase):
         if get_pp_group().is_last_rank:
             max_num_reqs = min(self.scheduler_config.max_num_seqs,
                                self.scheduler_config.max_num_batched_tokens)
-            # activate building attn_metadata for this dummy run to avoid
-            # potential illegal memory access for full cudagraph relay.
-            attn_cudagraph = self.compilation_config.full_cuda_graph and\
-                not self.model_config.enforce_eager
 
             # We skip EPLB here since we don't want to record dummy metrics
             hidden_states, last_hidden_states = \
                 self.model_runner._dummy_run(
                     num_tokens=max_num_reqs,
-                    capture_attn_cudagraph=attn_cudagraph,
                     skip_eplb=True,
                 )
             if self.model_runner.is_pooling_model:
@@ -340,8 +336,7 @@ class Worker(WorkerBase):
                     hidden_states=last_hidden_states)
 
         # Warmup kernels used during model execution
-        kernel_warmup(self.get_model(),
-                      max_tokens=self.scheduler_config.max_num_batched_tokens)
+        kernel_warmup(self)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
