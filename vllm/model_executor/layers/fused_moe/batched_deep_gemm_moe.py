@@ -226,23 +226,26 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def _get_effective_num_dispatchers(self) -> int:
         """
-        Calculates the effective number of token dispatchers considering tensor parallelism.
+        Calculates the effective number of token dispatchers considering tensor
+        parallelism.
         
-        When tensor parallelism (TP) is used (TP > 1), only the leader rank (rank 0) in each 
-        TP group should dispatch tokens to avoid redundant communication. This significantly
-        reduces cross-rank communication overhead in distributed environments.
+        When tensor parallelism (TP) is used (TP > 1), only the leader rank
+        (rank 0) in each TP group should dispatch tokens to avoid redundant
+        communication. This significantly reduces cross-rank communication
+        overhead in distributed environments.
         
         Returns:
-            int: The effective number of dispatchers to use, guaranteed to be at least 1.
+            int: The effective number of dispatchers to use.
             When TP > 1:
-            - Returns (num_dispatchers // tp_size) for leader ranks (tp_rank == 0)
+            - Returns max(1, num_dispatchers // tp_size) for leader ranks
+              (tp_rank == 0)
             - Returns 0 for non-leader ranks (tp_rank != 0)
-            When TP == 1:
+            When TP <= 1:
             - Returns the original num_dispatchers
             
         Note:
-            The final max(1, ...) ensures we always have at least 1 dispatcher,
-            which is important for single-rank operation fallback.
+            Leader ranks are guaranteed at least 1 dispatcher for stability,
+            while non-leader ranks return 0 to eliminate redundant dispatching.
         """
         from vllm.distributed import (
             get_tensor_model_parallel_world_size,
@@ -282,8 +285,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_metadata: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        # Optimize token dispatch: only leader DP ranks dispatch tokens when TP > 1
-        # This reduces cross-rank communication overhead in distributed MoE models
+        # Optimize token dispatch: only leader DP ranks dispatch tokens when
+        # TP > 1. This reduces cross-rank communication overhead in distributed
+        # MoE models.
         num_dispatchers = self._get_effective_num_dispatchers()
         num_experts = local_num_experts
         max_num_tokens = a.size(
