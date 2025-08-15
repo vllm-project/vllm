@@ -128,6 +128,19 @@ class MultiModalRegistry:
 
         return mm_config.mm_processor_cache_gb > 0
 
+    def enable_mm_input_shm_cache(self, model_config: "ModelConfig") -> bool:
+        """Whether the shared memory based cache should be enabled.
+        NOTE: This is put under MultiModalRegistry on purpose to respect 
+        text-only mode for multimodal models.
+        """
+
+        if not self.enable_mm_input_cache(model_config):
+            return False
+
+        mm_config = model_config.get_multimodal_config()
+
+        return mm_config.mm_processor_cache_type == "shm"
+
     def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
         """
         Checks if the model supports multimodal inputs.

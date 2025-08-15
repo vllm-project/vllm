@@ -687,6 +687,8 @@ steps:
   commands:
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
+  - pytest -v -s distributed/test_shm_buffer.py
+  - pytest -v -s distributed/test_shm_storage.py
 
 - label: 2 Node Tests (4 GPUs in total) # 16min
   mirror_hardwares: [amdexperimental]

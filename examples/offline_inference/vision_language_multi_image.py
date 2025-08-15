@@ -81,6 +81,7 @@ def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
         model=model_name,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
+        mm_processor_cache_type="shm",
     )
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
@@ -690,6 +691,7 @@ def load_pixtral_hf(question: str, image_urls: list[str]) -> ModelRequestData:
         max_num_seqs=2,
         tensor_parallel_size=2,
         limit_mm_per_prompt={"image": len(image_urls)},
+        mm_processor_cache_type="shm",
     )
 
     placeholders = "[IMG]" * len(image_urls)
