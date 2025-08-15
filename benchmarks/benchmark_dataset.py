@@ -52,7 +52,7 @@ class SampleRequest:
     prompt: Union[str, Any]
     prompt_len: int
     expected_output_len: int
-    multi_modal_data: Optional[Union[MultiModalDataDict, dict]] = None
+    multi_modal_data: Optional[Union[MultiModalDataDict, dict, list[dict]]] = None
     lora_request: Optional[LoRARequest] = None
 
 
@@ -430,14 +430,20 @@ class ShareGPTDataset(BenchmarkDataset):
                 skip_min_output_len_check=output_len is not None,
             ):
                 continue
+            # TODO: Also support ShareGPT4Video.
+            if image_path := entry.get("image"):
+                mm_content = process_image(image_path)
+            else:
+                mm_content = None
             if enable_multimodal_chat:
-                prompt = self.apply_multimodal_chat_transformation(prompt, None)
+                prompt = self.apply_multimodal_chat_transformation(prompt, mm_content)
             samples.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=new_output_len,
                     lora_request=lora_request,
+                    multi_modal_data=mm_content,
                 )
             )
         self.maybe_oversample_requests(samples, num_requests)
