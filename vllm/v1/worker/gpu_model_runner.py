@@ -87,15 +87,11 @@ from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
 
 if TYPE_CHECKING:
     import xgrammar as xgr
-    import xgrammar.kernels.apply_token_bitmask_inplace_torch_compile as xgr_torch_compile  # noqa: E501
 
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
-    xgr_torch_compile = LazyLoader(
-        "xgr_torch_compile", globals(),
-        "xgrammar.kernels.apply_token_bitmask_inplace_torch_compile")
 
 logger = init_logger(__name__)
 
@@ -1363,10 +1359,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # so we receive it in that format.
         grammar_bitmask = torch.from_numpy(grammar_bitmask).contiguous()
 
-        # Force use of the torch.compile implementation from xgrammar to work
-        # around issues with the Triton kernel in concurrent structured output
-        # scenarios. See PR #19565 and issues #19493, #18376 for details.
-        xgr_torch_compile.apply_token_bitmask_inplace_torch_compile(
+        xgr.apply_token_bitmask_inplace(
             logits,
             grammar_bitmask.to(self.device, non_blocking=True),
             indices=out_indices if not skip_out_indices else None,
