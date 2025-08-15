@@ -39,7 +39,7 @@ def _should_use_flashinfer_mxfp4_bf16():
         return envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
 
     # Enable by default on SM100 if MXFP8 is not explicitly enabled
-    if (current_platform.is_device_capability(100)
+    if (current_platform.is_device_capability(100) and has_flashinfer()
             and not envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8")):
         logger.info_once(
             "Enabling FlashInfer MXFP4 BF16 backend by default for Blackwell. "
@@ -116,16 +116,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         if current_platform.is_device_capability(100) and not has_flashinfer():
             logger.warning_once(
-                "MXFP4 quantization is enabled on Blackwell but FlashInfer "
+                "MXFP4 MoE is enabled on Blackwell but FlashInfer "
                 "is not available. This may result in degraded performance. "
-                "Please install using `vllm[flashinfer]` for best results.")
+                "Please `pip install vllm[flashinfer]` for best results.")
 
     def _should_use_marlin(self):
         if envs.VLLM_MXFP4_USE_MARLIN is not None:
             return envs.VLLM_MXFP4_USE_MARLIN
         if current_platform.is_cuda() and \
-                not current_platform.has_device_capability(100):
-            if not current_platform.is_device_capability(90):
+                not current_platform.is_device_capability(100):
+            if not current_platform.has_device_capability(90):
                 # marlin kernel has better performance on ampere
                 return True
             if not has_triton_kernels():
