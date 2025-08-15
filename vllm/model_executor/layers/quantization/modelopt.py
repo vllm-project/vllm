@@ -582,7 +582,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_experts)
-
         return fused_experts(
             x,
             layer.w13_weight,
@@ -591,9 +590,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             topk_ids=topk_ids,
             inplace=True,
             activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
-            apply_router_weight_on_input=apply_router_weight_on_input,
             quant_config=self.moe_quant_config,
         )
 
@@ -1560,29 +1559,32 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 w2_fp4=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
+                quant_config=self.moe_quant_config,
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input,
-                quant_config=self.moe_quant_config,
                 # TODO: derive from arguments
                 m=x.shape[0],
                 n=layer.w2_weight.shape[2] * 2,
                 k=x.shape[1],
                 e=layer.w13_weight.shape[0],
             )
+        else:
+            assert self.allow_flashinfer and \
+               self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
 
-        assert is_valid_flashinfer_cutlass_fused_moe(
-            x, layer.w13_weight,
-            layer.w2_weight), ("Flashinfer CUTLASS Fused MoE not applicable!")
+            assert is_valid_flashinfer_cutlass_fused_moe(
+                x, layer.w13_weight, layer.w2_weight), (
+                    "Flashinfer CUTLASS Fused MoE not applicable!")
 
-        return self.fused_experts(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=False,  # TODO(shuw): fix later, now output is high prec
-            activation=activation,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-        )
+            return self.fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=False,  # TODO(shuw): fix later, now output is high prec
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )

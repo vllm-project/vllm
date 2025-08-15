@@ -308,7 +308,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             (layer.w2_input_global_scale), requires_grad=False)
 
     def maybe_make_prepare_finalize(
-        self, ) -> Optional[mk.FusedMoEPrepareAndFinalize]:
+        self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
         if not self.allow_flashinfer:
             return super().maybe_make_prepare_finalize()
 
@@ -470,9 +470,9 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             w2_fp4=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            apply_router_weight_on_input=apply_router_weight_on_input,
             quant_config=self.moe_quant_config,
-            # TODO: derive these from arguments
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            # TODO(bnell): derive these from arguments
             m=x.shape[0],
             n=layer.w2_weight.shape[2] * 2,
             k=x.shape[1],
@@ -788,22 +788,22 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
-        if not self.use_marlin:
-            per_act_token = (
-                self.input_quant.strategy == QuantizationStrategy.TOKEN)
-            per_channel_quant = (
-                self.weight_quant.strategy == QuantizationStrategy.CHANNEL)
+        if self.use_marlin:
+            return None
 
-            return fp8_w8a8_moe_quant_config(
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                a1_scale=layer.w13_input_scale,
-                a2_scale=layer.w2_input_scale,
-                per_act_token_quant=per_act_token,
-                per_out_ch_quant=per_channel_quant,
-            )
+        per_act_token = (
+            self.input_quant.strategy == QuantizationStrategy.TOKEN)
+        per_channel_quant = (
+            self.weight_quant.strategy == QuantizationStrategy.CHANNEL)
 
-        return None
+        return fp8_w8a8_moe_quant_config(
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            a1_scale=layer.w13_input_scale,
+            a2_scale=layer.w2_input_scale,
+            per_act_token_quant=per_act_token,
+            per_out_ch_quant=per_channel_quant,
+        )
 
     def apply(
         self,
@@ -883,6 +883,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     layer.w2_weight,
                     topk_weights,
                     topk_ids,
+                    quant_config=self.moe_quant_config,
                     activation=activation,
                     global_num_experts=global_num_experts,
                     expert_map=None if self.disable_expert_map else expert_map,
@@ -890,7 +891,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     ab_strides2=self.ab_strides2,
                     c_strides1=self.c_strides1,
                     c_strides2=self.ab_strides1_c_strides2,
-                    quant_config=self.moe_quant_config,
                 )
             else:
                 return self.fused_experts(
@@ -1590,23 +1590,17 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
-        if self.num_bits == 4:
-            return int4_w4a16_moe_quant_config(
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                w1_zp=None,
-                w2_zp=None,
-                block_shape=[0, self.group_size],
-            )
-        else:
-            assert self.num_bits == 8
-            return int8_w8a16_moe_quant_config(
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                w1_zp=None,
-                w2_zp=None,
-                block_shape=[0, self.group_size],
-            )
+        assert self.num_bits == 4 or self.num_bits == 8
+        config_builder = (int4_w4a16_moe_quant_config if self.num_bits == 4
+                          else int8_w8a16_moe_quant_config)
+
+        return config_builder(
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            w1_zp=None,
+            w2_zp=None,
+            block_shape=[0, self.group_size],
+        )
 
     def apply(
         self,
@@ -1661,8 +1655,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             topk_ids=topk_ids,
             inplace=True,
             activation=activation,
-            global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
             expert_map=expert_map,
             quant_config=self.moe_quant_config,
         )

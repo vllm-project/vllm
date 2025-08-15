@@ -276,20 +276,14 @@ class RTNMoEMethod(FusedMoEMethodBase):
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         weight_bits = self.quant_config.weight_bits
         group_size = self.quant_config.group_size
-
-        if weight_bits == 4:
-            return int4_w4a16_moe_quant_config(
-                w1_scale=layer.w13_scale,
-                w2_scale=layer.w2_scale,
-                block_shape=[0, group_size],
-            )
-        else:
-            assert weight_bits == 8
-            return int8_w8a16_moe_quant_confg(
-                w1_scale=layer.w13_scale,
-                w2_scale=layer.w2_scale,
-                block_shape=[0, group_size],
-            )
+        assert weight_bits == 4 or weight_bits == 8
+        config_builder = (int4_w4a16_moe_quant_config if weight_bits == 4 else
+                          int8_w8a16_moe_quant_confg)
+        return config_builder(
+            w1_scale=layer.w13_scale,
+            w2_scale=layer.w2_scale,
+            block_shape=[0, group_size],
+        )
 
     def apply(
         self,
@@ -344,8 +338,8 @@ class RTNMoEMethod(FusedMoEMethodBase):
             topk_ids=topk_ids,
             inplace=True,
             activation=activation,
-            global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
             expert_map=expert_map,
             quant_config=self.moe_quant_config,
         )

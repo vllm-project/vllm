@@ -217,6 +217,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
         c_strides2: torch.Tensor,
         quant_config: FusedMoEQuantConfig,
     ):
+        assert quant_config.use_fp8_w8a8
         super().__init__(quant_config)
         self.out_dtype = out_dtype
         self.ab_strides1 = ab_strides1
@@ -398,9 +399,9 @@ def cutlass_moe_fp8(
     ab_strides2: torch.Tensor,
     c_strides1: torch.Tensor,
     c_strides2: torch.Tensor,
+    quant_config: FusedMoEQuantConfig,
     activation: str = "silu",
     expert_map: Optional[torch.Tensor] = None,
-    quant_config: Optional[FusedMoEQuantConfig] = None,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
 ) -> torch.Tensor:
@@ -519,7 +520,7 @@ def run_cutlass_moe_fp4(
 ) -> None:
     """
     MoE implementation for FP4 Inputs
-    
+
     # Gemm 1
     a: Input tensor: [m, k] (half/bfloat16)
     a1_gscale: Activation scale per expert: [e]  (float32)
@@ -529,16 +530,16 @@ def run_cutlass_moe_fp4(
      full precision)
     w1_blockscale: [e, 2 * n, k // block_size] (float8_e4m3)
                    (Block size = 16 for NVFP4)
-    
+
     # Gemm 2
     a2_gscale: Activation scale per expert: [e]
     w2(down projection) (not an argument to cutlass_moe_fp4): [e, k, n]
     w2_fp4: [e, k, n // 2], dtype: torch.uint8 (stacked E2M1)
     w2_blockscale: [e, k, n // block_size], dtype: float8_e4m3
-    
+
     topk_weights: [m, topk] dtype: float8
     topk_ids: [m, topk] dtype: float8
-    
+
     m, n, k: Unquantized weight shapes, dtype: int
     e: number of experts, dtype: int
 
@@ -636,24 +637,10 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         max_experts_per_worker: int,
         out_dtype: torch.dtype,
-        per_act_token_quant: bool,
-        per_out_ch_quant: bool,
-        block_shape: Optional[list[int]] = None,
-        use_batched_format: bool = False,  # TODO: split/remove?
-        #quant_config: Optional[FusedMoEQuantConfig] = None,
+        quant_config: FusedMoEQuantConfig,
+        use_batched_format: bool = False,
     ):
-        # XXXXXXXXXXXX skip quantization
-        super().__init__(
-            # NVFP4 requires two levels of quantization, which involves
-            # computing some scaling factors dynamically. This makes it
-            # incompatible with the typical prepare -> MoE -> finalize
-            # pipeline. Move the quantization logic into the MoE body.
-            FusedMoEQuantConfig(
-                quant_dtype=None,  # skip quantization in prepare/finalize
-                per_act_token_quant=per_act_token_quant,
-                per_out_ch_quant=per_out_ch_quant,
-                block_shape=block_shape,
-            ))
+        super().__init__(quant_config)
         self.max_experts_per_worker = max_experts_per_worker
         self.out_dtype = out_dtype
         self.use_batched_format = use_batched_format
@@ -770,17 +757,30 @@ def cutlass_moe_fp4(
     assert expert_map is None, ("Expert Parallelism / expert_map "
                                 "is currently not supported for "
                                 "ModelOptNvFp4FusedMoE's cutlass_moe_fp4.")
+
+    # NVFP4 requires two levels of quantization, which involves
+    # computing some scaling factors dynamically. This makes it
+    # incompatible with the typical prepare -> MoE -> finalize
+    # pipeline. Move the quantization logic into the MoE body.
+    quant_config = FusedMoEQuantConfig.make(
+        quant_dtype=None,  # skip quantization in prepare/finalize
+        per_act_token_quant=False,
+        per_out_ch_quant=False,
+        block_shape=None,
+        g1_alphas=g1_alphas,
+        g2_alphas=g2_alphas,
+        a1_gscale=a1_gscale,
+        a2_gscale=a2_gscale,
+        w1_scale=w1_blockscale,
+        w2_scale=w2_blockscale,
+    )
+
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
         CutlassExpertsFp4(
-            g1_alphas,
-            g2_alphas,
-            a1_gscale,
-            a2_gscale,
             max_experts_per_worker=e,
             out_dtype=a.dtype,
-            per_act_token_quant=False,
-            per_out_ch_quant=False,
+            quant_config=quant_config,
             use_batched_format=False,
         ),
     )
@@ -795,10 +795,6 @@ def cutlass_moe_fp4(
         activation="silu",
         global_num_experts=e,
         expert_map=None,
-        w1_scale=w1_blockscale,
-        w2_scale=w2_blockscale,
-        a1_scale=None,
-        a2_scale=None,
         apply_router_weight_on_input=apply_router_weight_on_input,
     )
 
@@ -856,6 +852,7 @@ def _valid_cutlass_block_scaled_grouped_gemm(
     return True
 
 
+# TODO: combine with regular cutlass_fp8
 def run_cutlass_block_scaled_fused_experts(
     a: torch.Tensor,
     w1: torch.Tensor,

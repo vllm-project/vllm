@@ -48,7 +48,7 @@ def reorder_w1w3_to_w3w1(weight: torch.Tensor,
 
 
 def build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-    moe: FusedMoEConfig, ) -> mk.FusedMoEPrepareAndFinalize:
+    moe: FusedMoEConfig) -> mk.FusedMoEPrepareAndFinalize:
     """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
     use_dp = moe.moe_parallel_config.dp_size > 1
     return FlashInferCutlassMoEPrepareAndFinalize(use_dp)

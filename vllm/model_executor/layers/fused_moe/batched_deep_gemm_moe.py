@@ -10,6 +10,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
+from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+    deep_gemm_block_shape)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -212,14 +214,12 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
 
 
 class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    # The Deep Gemm kernels only support block size of 128
-    DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
 
     def __init__(
         self,
         max_num_tokens: int,
         num_dispatchers: int,
-        quant_config: Optional[FusedMoEQuantConfig] = None,
+        quant_config: FusedMoEQuantConfig,
     ):
         """
         max_num_tokens: Maximum number of tokens from a DP Rank
@@ -227,7 +227,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_config: Quantization configuration
         """
         super().__init__(quant_config)
-        assert self.block_shape == self.DEEPGEMM_BLOCK_SHAPE
+        assert self.block_shape == deep_gemm_block_shape()
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 

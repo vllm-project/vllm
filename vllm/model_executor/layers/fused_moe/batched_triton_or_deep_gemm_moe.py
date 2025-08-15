@@ -7,6 +7,8 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts)
+from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+    deep_gemm_block_shape)
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts)
@@ -18,7 +20,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         max_num_tokens: int,
         num_dispatchers: int,
-        quant_config: Optional[FusedMoEQuantConfig] = None,
+        quant_config: FusedMoEQuantConfig,
         allow_deep_gemm: bool = False,
     ):
         super().__init__(quant_config)
@@ -31,7 +33,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         self.allow_deep_gemm = (allow_deep_gemm and self.quant_config.use_fp8_w8a8
                                 and self.block_shape
-                                == BatchedDeepGemmExperts.DEEPGEMM_BLOCK_SHAPE)
+                                == deep_gemm_block_shape())
 
         self.batched_deep_gemm_experts = BatchedDeepGemmExperts(
             max_num_tokens=max_num_tokens,

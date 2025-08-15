@@ -1219,8 +1219,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 activation=activation,
                 global_num_experts=global_num_experts,
                 apply_router_weight_on_input=apply_router_weight_on_input,
-                quant_config=self.moe_quant_config,
                 expert_map=expert_map,
+                quant_config=self.moe_quant_config,
                 allow_deep_gemm=self.allow_deep_gemm,
                 allow_cutlass_block_scaled_grouped_gemm=(
                     self.allow_cutlass_block_scaled_grouped_gemm),

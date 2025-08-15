@@ -386,9 +386,10 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
+            activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
-            activation=activation,
             quant_config=self.moe_quant_config)
 
 
@@ -555,10 +556,10 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
-            global_num_experts=global_num_experts,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            expert_map=expert_map,
             activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
             quant_config=self.moe_quant_config,
         )
         return out

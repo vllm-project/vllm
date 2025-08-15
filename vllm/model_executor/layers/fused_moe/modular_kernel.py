@@ -320,12 +320,9 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     def __init__(
         self,
-        quant_config: Optional[FusedMoEQuantConfig],
+        quant_config: FusedMoEQuantConfig,
     ):
-        if quant_config is not None:
-            self.quant_config = quant_config
-        else:
-            self.quant_config = FusedMoEQuantConfig()
+        self.quant_config = quant_config
 
     @property
     @abstractmethod

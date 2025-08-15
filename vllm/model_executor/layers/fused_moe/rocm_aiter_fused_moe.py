@@ -7,7 +7,9 @@ from typing import Optional
 import torch
 
 from vllm import envs
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig,
+    FUSED_MOE_UNQUANTIZED_CONFIG)
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
@@ -306,15 +308,18 @@ def rocm_aiter_grouped_topk(
 
 
 def rocm_aiter_fused_experts(
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str = "silu",
-        apply_router_weight_on_input: bool = False,
-        quant_config: Optional[FusedMoEQuantConfig] = None,
-        expert_map: Optional[torch.Tensor] = None) -> torch.Tensor:
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation: str = "silu",
+    apply_router_weight_on_input: bool = False,
+    expert_map: Optional[torch.Tensor] = None,
+    quant_config: Optional[FusedMoEQuantConfig] = None,
+) -> torch.Tensor:
+    if quant_config is None:
+        quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
     activation_method = (ActivationMethod.SILU
                          if activation == "silu" else ActivationMethod.GELU)

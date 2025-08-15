@@ -18,7 +18,8 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 # yapf: disable
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig, _get_config_dtype_str, _get_config_quant_dtype)
+    FusedMoEQuantConfig, _get_config_dtype_str, _get_config_quant_dtype,
+    FUSED_MOE_UNQUANTIZED_CONFIG)
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     _valid_cutlass_block_scaled_grouped_gemm,
     run_cutlass_block_scaled_fused_experts)
@@ -1399,7 +1400,7 @@ def fused_experts(
 ) -> torch.Tensor:
 
     if quant_config is None:
-        quant_config = FusedMoEQuantConfig.make()
+        quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
     use_fp8_w8a8 = quant_config.use_fp8_w8a8
 
     # For now, disable DeepGemm for small N (<= 512) until better

@@ -50,7 +50,7 @@ def triton_moe(
                          w2,
                          topk_weight,
                          topk_ids,
-                         quant_confg=quant_config)
+                         quant_config=quant_config)
 
 
 def batched_moe(
