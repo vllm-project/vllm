@@ -574,8 +574,17 @@ class MPClient(EngineCoreClient):
 
 def _process_utility_output(output: UtilityOutput,
                             utility_results: dict[int, AnyFuture]):
-    """Set the result from a utility method in the waiting future"""
+    """Set the result from a utility method in the waiting future."""
     future = utility_results.pop(output.call_id)
+    if future.done():
+        # The future may be canceled here if the original calling task
+        # was canceled.
+        assert future.cancelled()
+        if output.failure_message is not None:
+            logger.error(
+                "Canceled call to utility method failed "
+                "with error: %s", output.failure_message)
+        return
     if output.failure_message is not None:
         future.set_exception(Exception(output.failure_message))
     else:
