@@ -143,7 +143,7 @@ def evaluate_gsm8k(num_questions: int = 1319,
     assert all(label != INVALID for label in labels), "Some labels are invalid"
 
     # Run evaluation
-    states = [None] * num_questions
+    states: list[str] = [""] * num_questions
 
     def get_answer(i: int) -> str:
         prompt = few_shot_examples + questions[i]
