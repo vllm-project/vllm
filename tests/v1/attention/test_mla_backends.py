@@ -309,8 +309,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     total_head_size = kv_lora_rank + qk_rope_head_dim
     assert kv_lora_rank + qk_rope_head_dim == head_size, \
         f"MLA dimensions don't match: {total_head_size} != {head_size}"
-    # Use the same scale as the actual backend: 1.0 / sqrt(head_size)
-    # where head_size = kv_lora_rank + qk_rope_head_dim
     scale = 1.0 / (total_head_size**0.5)
 
     # 2. Generate data and compute SDPA reference output for MLA
@@ -329,6 +327,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
                        v_head_dim,
                        dtype=dtype,
                        device=device)
+    kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
 
     for i in range(batch_size):
         s_len = seq_lens[i]
@@ -338,11 +337,11 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         # Generate MLA tensors
         # Q has both nope and rope components:
         # [q_len, num_heads, qk_nope_head_dim + qk_rope_head_dim]
-        q = torch.randn(q_len,
-                        num_q_heads,
-                        qk_nope_head_dim + qk_rope_head_dim,
-                        dtype=dtype,
-                        device=device)
+        q_c = torch.randn(q_len,
+                          num_q_heads,
+                          qk_nope_head_dim + qk_rope_head_dim,
+                          dtype=dtype,
+                          device=device)
 
         # KV_C (latent K/V): [s_len, kv_lora_rank]
         kv_c_full = torch.randn(s_len,
@@ -358,9 +357,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
 
         # SDPA reference calculation using compute-friendly approach (MHA-like)
         # Apply kv_b_proj (concatenated [W_UK; W_UV]) to the full sequence
-        kv_b_proj_weight = torch.cat(
-            [W_UK, W_UV],
-            dim=-1)  # [kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim]
+        # [kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim]
         kv_nope_and_v = torch.einsum("sl,lnh->snh", kv_c_full,
                                      kv_b_proj_weight)
 
@@ -369,17 +366,16 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
                                              dim=-1)
 
         # Q components
-        q_nope, q_pe_part = q.split([qk_nope_head_dim, qk_rope_head_dim],
-                                    dim=-1)
+        q_nope, q_pe = q_c.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
+
+        # Q for attention:
+        # [q_len, num_heads, qk_nope_head_dim + qk_rope_head_dim]
+        q_attn = torch.cat([q_nope, q_pe], dim=-1)
 
         # K for attention:
         # [s_len, num_heads, qk_nope_head_dim + qk_rope_head_dim]
         k_pe_expanded = k_pe_full.unsqueeze(1).expand(-1, num_q_heads, -1)
         k_attn = torch.cat([k_nope, k_pe_expanded], dim=-1)
-
-        # Q for attention:
-        # [q_len, num_heads, qk_nope_head_dim + qk_rope_head_dim]
-        q_attn = torch.cat([q_nope, q_pe_part], dim=-1)
 
         # SDPA expects (N, H, L, D), so reshape appropriately
         # [1, num_heads, q_len, total_head_dim]
@@ -400,16 +396,12 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
 
         sdpa_out_i = torch.nn.functional.scaled_dot_product_attention(
             q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=scale)
-        # Convert back to (L, H, v_head_dim)
-        sdpa_out_i = sdpa_out_i.transpose(1, 2).squeeze(
-            0)  # (q_len, num_heads, v_head_dim)
-
-        # Flatten to (L, H*v_head_dim)
-        sdpa_out_i = sdpa_out_i.flatten(start_dim=-2)  # (L, H*v_head_dim)
+        sdpa_out_i = sdpa_out_i.transpose(1, 2).squeeze(0)
+        sdpa_out_i = sdpa_out_i.flatten(start_dim=-2)
         all_sdpa_outputs.append(sdpa_out_i)
 
         # Inputs for vLLM MLA backends are just the new tokens
-        all_q_vllm.append(q)
+        all_q_vllm.append(q_c)
         all_kv_c_vllm.append(kv_c_full[context_len:])  # New kv_c tokens
         all_k_pe_vllm.append(k_pe_full[context_len:])  # New k_pe tokens
 
@@ -434,7 +426,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     # Set the mock weights to match our reference implementation
     # Reshape W_UK and W_UV to match the expected kv_b_proj format
     # [kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim]
-    kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
     kv_b_proj_weight = kv_b_proj_weight.view(
         kv_lora_rank, num_q_heads * (qk_nope_head_dim + v_head_dim))
     mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T)
