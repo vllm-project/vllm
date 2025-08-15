@@ -261,8 +261,35 @@ class DefaultModelLoader(BaseModelLoader):
     def load_weights(self, model: nn.Module,
                      model_config: ModelConfig) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
-        loaded_weights = model.load_weights(
-            self.get_all_weights(model_config, model))
+        loaded_weights = dict(self.get_all_weights(model_config, model))
+
+        # on the fly quantization
+        quantization = model_config.quantization
+        quantization_config = model_config.hf_overrides.get("quantization_config", None)
+        quantization_config_file = None
+        if quantization_config is not None:
+            quantization_config_file = quantization_config.get("quantization_config_file", None)
+            quantization_config_object = quantization_config.get("quantization_config_object", None)
+
+        from vllm.model_executor.layers.quantization import get_quantization_config
+        if quantization is not None and (quantization_config_file is not None or quantization_config_object is not None):
+            quant_cls = get_quantization_config(quantization)
+            if quantization_config_file is not None:
+                config = quant_cls.from_config_file(quantization_config_file)
+            else:
+                assert quantization_config_object is not None
+                config = quant_cls.from_config_object(quantization_config_object)
+
+            quantized_loaded_weights = {}
+            for name, weight in loaded_weights.items():
+                if name.endswith("proj.weight"):
+                    quantized_loaded_weights[name] = config.quantize_param(weight)
+                else:
+                    quantized_loaded_weights[name] = weight
+            model.load_weights(quantized_loaded_weights.items())
+        else:
+            model.load_weights(loaded_weights.items())
+
         self.counter_after_loading_weights = time.perf_counter()
         logger.info(
             "Loading weights took %.2f seconds",
