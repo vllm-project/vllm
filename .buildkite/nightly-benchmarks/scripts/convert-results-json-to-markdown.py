@@ -4,7 +4,6 @@
 import argparse
 import json
 import os
-import re
 import shlex
 from importlib import util
 from pathlib import Path
@@ -12,6 +11,7 @@ from typing import Any
 
 import pandas as pd
 import psutil
+import regex as re
 from tabulate import tabulate
 
 # latency results and the keys that will be printed into markdown
