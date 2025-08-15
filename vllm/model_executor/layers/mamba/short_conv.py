@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Optional
+
 import torch
 
 from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.config import get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import CustomOp
@@ -15,7 +17,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba2_metadata import update_metadata
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateShapeCalculator)
+    MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.platforms import current_platform
@@ -27,7 +29,13 @@ from vllm.v1.attention.backends.short_conv_attn import (
 @CustomOp.register("short_conv")
 class ShortConv(MambaBase, CustomOp):
 
-    def __init__(self, config, dim: int, layer_idx: int, prefix: str = ""):
+    def __init__(self,
+                 config,
+                 dim: int,
+                 layer_idx: int,
+                 model_config: Optional[ModelConfig] = None,
+                 cache_config: Optional[CacheConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -70,8 +78,8 @@ class ShortConv(MambaBase, CustomOp):
         # of Attention + v0 PP.
         self.kv_cache = [(torch.tensor([]), )]
 
-        # For compatibility with MambaSpec utils
-        self.chunk_size = 1
+        self.model_config = model_config
+        self.cache_config = cache_config
         self.prefix = prefix
 
     def forward_native(
@@ -204,6 +212,14 @@ class ShortConv(MambaBase, CustomOp):
 
         # Final linear projection
         output[:num_actual_tokens], _ = self.out_proj(hidden_states)
+
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
+        assert self.model_config is not None
+        assert self.cache_config is not None
+        return MambaStateDtypeCalculator.short_conv_state_dtype(
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+        )
 
     def get_state_shape(self) -> tuple[tuple[int, ...]]:
         return MambaStateShapeCalculator.short_conv_state_shape(

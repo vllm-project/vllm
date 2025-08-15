@@ -10,7 +10,7 @@ from transformers import Lfm2Config
 from vllm import envs
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -19,7 +19,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateShapeCalculator)
+    MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.mamba.short_conv import ShortConv
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -183,6 +183,7 @@ class Lfm2AttentionDecoderLayer(nn.Module):
         self,
         config: Lfm2Config,
         layer_idx: int,
+        model_config: Optional[ModelConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -252,6 +253,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
         self,
         config: Lfm2Config,
         layer_idx: int,
+        model_config: Optional[ModelConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -262,6 +264,8 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
             config=config,
             dim=config.conv_dim,
             layer_idx=layer_idx,
+            model_config=model_config,
+            cache_config=cache_config,
             prefix=f"{prefix}.conv",
         )
 
@@ -307,6 +311,7 @@ class Lfm2Model(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
@@ -330,6 +335,7 @@ class Lfm2Model(nn.Module):
             return layer_class(
                 config,
                 layer_idx,
+                model_config,
                 cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
@@ -437,6 +443,17 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         "lm_head": "output_embeddings",
     }
     embedding_padding_modules = ["lm_head"]
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, ...]:
+
+        return MambaStateDtypeCalculator.short_conv_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+        )
 
     @classmethod
     def get_mamba_state_shape_from_config(
