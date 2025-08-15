@@ -921,6 +921,7 @@ class EngineArgs:
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             interleave_mm_strings=self.interleave_mm_strings,
             media_io_kwargs=self.media_io_kwargs,
+            skip_mm_profiling=self.skip_mm_profiling,
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
