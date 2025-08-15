@@ -61,7 +61,7 @@ FULL_CUDA_GRAPH_MODELS = [
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 
-VO_UNSUPPORTED_MODELS = [
+V0_UNSUPPORTED_MODELS = [
     "LiquidAI/LFM2-1.2B",
 ]
 
@@ -100,7 +100,7 @@ def test_models(
         else:
             hf_outputs = None
 
-    if model not in VO_UNSUPPORTED_MODELS:
+    if model not in V0_UNSUPPORTED_MODELS:
         with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
             vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, num_logprobs)
@@ -150,6 +150,9 @@ def test_batching(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
+    if model in V0_UNSUPPORTED_MODELS:
+        pytest.skip(
+            f"Unsupported V0 Engine. Skipping `test_batching` on {model}.")
 
     try:
         model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
@@ -402,7 +405,7 @@ def test_full_cuda_graph(
         else:
             hf_outputs = None
 
-    if model not in VO_UNSUPPORTED_MODELS:
+    if model not in V0_UNSUPPORTED_MODELS:
         with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
             vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, num_logprobs)
