@@ -5,13 +5,13 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -24,6 +24,27 @@ last_logging_time: float = 0
 forward_start_time: float = 0
 batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
 batchsize_forward_time: defaultdict = defaultdict(list)
+
+
+class BatchDescriptor(NamedTuple):
+    """
+    Batch descriptor for cudagraph dispatching. We should keep the num of
+    items as minimal as possible to properly and uniquely describe the padded
+    batch for cudagraph.
+    """
+    num_tokens: int
+    uniform_decode: bool = False
+    """
+    False can also be used for an uniform decode batch to dispatch to the 
+    cudagraph supporting non-uniform batches.
+    """
+
+    @property
+    def non_uniform(self) -> "BatchDescriptor":
+        """
+        Return a non-uniform version of current batch descriptor.
+        """
+        return BatchDescriptor(self.num_tokens, uniform_decode=False)
 
 
 def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: list[int],
@@ -152,7 +173,15 @@ class ForwardContext:
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
-    skip_cuda_graphs: bool = False
+    # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
+    # by default NONE, no cudagraph is used.
+    cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE
+    batch_descriptor: Optional[BatchDescriptor] = None
+
+    def __post_init__(self):
+        assert self.cudagraph_runtime_mode in [
+            CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL], \
+            f"Invalid cudagraph runtime mode: {self.cudagraph_runtime_mode}"
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -168,13 +197,13 @@ def get_forward_context() -> ForwardContext:
 
 @contextmanager
 def set_forward_context(
-    attn_metadata: Any,
-    vllm_config: VllmConfig,
-    virtual_engine: int = 0,
-    num_tokens: Optional[int] = None,
-    num_tokens_across_dp: Optional[torch.Tensor] = None,
-    skip_cuda_graphs: bool = False,
-):
+        attn_metadata: Any,
+        vllm_config: VllmConfig,
+        virtual_engine: int = 0,
+        num_tokens: Optional[int] = None,
+        num_tokens_across_dp: Optional[torch.Tensor] = None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        batch_descriptor: Optional[BatchDescriptor] = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -198,7 +227,8 @@ def set_forward_context(
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
-        skip_cuda_graphs=skip_cuda_graphs,
+        cudagraph_runtime_mode=cudagraph_runtime_mode,
+        batch_descriptor=batch_descriptor,
     )
 
     try:
