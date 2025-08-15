@@ -308,7 +308,7 @@ def flashinfer_scaled_fp8_mm(
         scale_b,
         out_dtype,
         "auto",
-    )[0]
+    ).view(a.shape[0], b.shape[1])
 
     if bias is not None:
         output = output + bias
