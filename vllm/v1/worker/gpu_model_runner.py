@@ -1269,7 +1269,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
                 self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
                     self.mrope_positions_cpu[:, :total_num_scheduled_tokens],
-                    non_blocking=True)
+                    non_blocking=False)
 
         return mm_embeds
 
