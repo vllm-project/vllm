@@ -4,7 +4,7 @@
 import argparse
 import json
 import os
-import re
+import regex as re
 import shlex
 from importlib import util
 from pathlib import Path
