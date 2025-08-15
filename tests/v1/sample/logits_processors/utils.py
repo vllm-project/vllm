@@ -98,7 +98,7 @@ class DummyLogitsProcessor(LogitsProcessor):
 
 """Dummy module with dummy logitproc class"""
 dummy_module = types.ModuleType(DUMMY_LOGITPROC_MODULE)
-dummy_module.DummyLogitsProcessor = DummyLogitsProcessor
+dummy_module.DummyLogitsProcessor = DummyLogitsProcessor  # type: ignore
 
 
 class EntryPoint:
