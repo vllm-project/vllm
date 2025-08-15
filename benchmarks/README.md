@@ -640,6 +640,7 @@ Benchmark the performance of multi-modal requests in vLLM.
 ### Images (ShareGPT4V)
 
 Start vLLM:
+
 ```bash
 python -m vllm.entrypoints.openai.api_server \
   --model Qwen/Qwen2.5-VL-7B-Instruct \
@@ -649,6 +650,7 @@ python -m vllm.entrypoints.openai.api_server \
 ```
 
 Send requests with images:
+
 ```bash
 python benchmarks/benchmark_serving.py \
   --backend openai-chat \
