@@ -34,7 +34,7 @@ To serve these models efficiently, our [KVCacheManager][vllm.v1.core.kv_cache_ma
     `num_layers` doesn't mean the total number of layers in the model. The exact number depends on the context in this doc.
 
     !!! note
-        This is different from [KVCacheSpec.page_size_bytes][vllm.v1.core.kv_cache_interface.KVCacheSpec.page_size_bytes] in the code, which is defined as:
+        This is different from `KVCacheSpec.page_size_bytes` in the code, which is defined as:
 
         $$
         \text{block_size} \times \text{kv_hidden_size}
@@ -56,7 +56,7 @@ However, in hybrid models, `num_hidden_layers` varies by attention type, which w
 
 ### Case 1: toy model
 
-Let's start with a toy example: a model has 1 full attention layer and 3 sliding attention layers. All layers have the same `kv_hidden_size`.
+Let's start with a toy example: a model has 1 full attention layer and 3 sliding window attention layers. All layers have the same `kv_hidden_size`.
 
 We let each block to hold `block_size` tokens for one layer, so:
 
@@ -70,7 +70,7 @@ This case is only a toy example. For real models, please refer to the following 
 
 ### Case 2: same `kv_hidden_size` and a regular pattern
 
-When the model has more layers, e.g., 20 sliding attention layers and 10 full attention layers with the same `kv_hidden_size`. Calling the allocator once per layer (30 calls) is OK but becomes inefficient. As a solution, we group the allocation of layers that need the same number of blocks to reduce the number of calls.
+When the model has more layers, e.g., 20 sliding window attention layers and 10 full attention layers with the same `kv_hidden_size`. Calling the allocator once per layer (30 calls) is OK but becomes inefficient. As a solution, we group the allocation of layers that need the same number of blocks to reduce the number of calls.
 
 The grouping is feasible because there is usually a beautiful ratio between the number of different types of layers. For example:
 
@@ -97,8 +97,8 @@ See the formal definition below. The layers are divided into multiple *KV Cache 
 Our example model is divided into 3 KV cache groups:
 
 - Group 0: 10 full attention layers (full.0 - full.9)
-- Group 1: 10 sliding attention layers (sw.0 - sw.9)
-- Group 2: 10 sliding attention layers (sw.10 - sw.19)
+- Group 1: 10 sliding window attention layers (sw.0 - sw.9)
+- Group 2: 10 sliding window attention layers (sw.10 - sw.19)
 
 Obviously, it satisfies rule 1. For rule 2, all 3 groups have
 
@@ -110,14 +110,14 @@ as their page size.
 
 ### Case 3: same `kv_hidden_size` and no regular pattern
 
-Unfortunately, not all models have such a beautiful ratio, and approach in Case 2 will produce too many small groups. For example, Gemma-3-27b has 52 sliding attention layers and 10 full attention layers. With the constraints in case 2, it would be 26 sliding window groups and 5 full attention groups, each contains 2 layers. The allocation is still inefficient. To reduce the number of kv cache groups, we group layers using the smallest layer count among all attention types. For example, min(52, 10)=10 layers per group in Gemma-3-27b. Then the grouping result is:
+Unfortunately, not all models have such a beautiful ratio, and approach in Case 2 will produce too many small groups. For example, Gemma-3-27b has 52 sliding window attention layers and 10 full attention layers. With the constraints in case 2, it would be 26 sliding window groups and 5 full attention groups, each contains 2 layers. The allocation is still inefficient. To reduce the number of kv cache groups, we group layers using the smallest layer count among all attention types. For example, min(52, 10)=10 layers per group in Gemma-3-27b. Then the grouping result is:
 
 - Group 0: 10 full attention layers (full.0 - full.9)
-- Group 1: 10 sliding attention layers (sw.0 - sw.9)
-- Group 2: 10 sliding attention layers (sw.10 - sw.19)
+- Group 1: 10 sliding window attention layers (sw.0 - sw.9)
+- Group 2: 10 sliding window attention layers (sw.10 - sw.19)
 - ...
-- Group 6: 10 sliding attention layers (sw.40 - sw.49)
-- Group 7: 2 sliding attention layers (sw.50 - sw.51, and 8 padding layers)
+- Group 6: 10 sliding window attention layers (sw.40 - sw.49)
+- Group 7: 2 sliding window attention layers (sw.50 - sw.51) and 8 padding layers
 
 We will update this algorithm if this heuristic leads to a bad result when a new model comes out (e.g., 20 full + 30 sw, the group size should be 10 instead of 20).
 
@@ -171,9 +171,9 @@ To find the longest cache hit prefix of a request, we enumerate from left (the f
 
 ![Prefix Caching of Full Attention](../assets/design/hybrid_kv_cache_manager/full_attn.png)
 
-### Case 1: sliding attention only models
+### Case 1: sliding window attention only models
 
-For sliding attention layers, a naive implementation for memory allocation is to allocate `sliding_window_size` blocks and fill in the blocks in a round-robin way. But this naive implementation is not compatible with prefix caching so we didn't pick this design. In vLLM,  we allocate different blocks for different tokens and free blocks that are outside the sliding window.
+For sliding window attention layers, a naive implementation for memory allocation is to allocate `sliding_window_size` blocks and fill in the blocks in a round-robin way. But this naive implementation is not compatible with prefix caching so we didn't pick this design. In vLLM,  we allocate different blocks for different tokens and free blocks that are outside the sliding window.
 
 For a new request, the cache hit prefix only requires the last `sliding_window_size - 1` tokens being cached.
 Let's say `sliding_window_size = 4` and `block_size = 1`, and the request is a 15-token prompt (blue blocks are cached):
@@ -188,14 +188,14 @@ There are 3 possible cache hit prefixes:
 
 We can check the cache hit from right to left, and early exit when we find a match.This is opposite from full attention, where we check from left to right and early exit when the match fails. One potential cons (compared to full attention) is that we end up iterating over the entire list of tokens when there's no match, which is often a common case. This could potentially cause non-negligible overheads, but fine with full + swa, as discussed below.
 
-### Case 2: sliding window and full attention models
+### Case 2: sliding window attention + full attention models
 
 The first problem is how to find the cache hit prefix. We need to "intersect" the cache hits of global and sliding window attention layers by:
 
 1. Get the longest cache hit for full attention (scanning from left to right)
-2. Get the longest cache hit for sliding attention that is within that length. Implemented by checking cache hits from right to left starting from the cache hit length of full attention.
+2. Get the longest cache hit for sliding window attention that is within that length. Implemented by checking cache hits from right to left starting from the cache hit length of full attention.
 
-It can be ensured that the resulting cache hit of sliding attention layers is also a cache hit of full attention layers. This is more efficient than finding all possible prefixes of each group and doing the intersection, because our approach can exit early if there is no cache hit.
+It can be ensured that the resulting cache hit of sliding window attention layers is also a cache hit of full attention layers. This is more efficient than finding all possible prefixes of each group and doing the intersection, because our approach can exit early if there is no cache hit.
 
 The algorithm applies to models with exactly two attention types full attention + X, where X can be an arbitrary efficient attention algorithm like sliding window, llama 4 local attention, and mamba. It doesn't support models without full attention layers, and models with more than 2 types of attention. This is enough for most hybrid models at the moment of writing this doc.
 
@@ -213,27 +213,27 @@ The prefix caching support of the mamba model is work in progress. Once implemen
 
 The [KVCacheManager][vllm.v1.core.kv_cache_manager.KVCacheManager] is organized into 3 layers:
 
-- **KVCacheManager**: The interface between the scheduler and kv cache management system.
-- **KVCacheCoordinator**: coordinate per-group SingleTypeKVCacheManagers to generate the allocation result of a request. Depending on the model's configuration, one of these coordinators is chosen:
-    - **KVCacheCoordinatorNoPrefixCache**: Used when prefix caching is disabled.
-    - **UnitaryKVCacheCoordinator**: If only one KV cache group. The prefix caching logic is simplified as no intersection is needed.
-    - **HybridKVCacheCoordinator**: Handles exactly two KV cache groups (must include one full‑attention group plus one other efficient‑attention group). Other cases are not implemented. You can disable prefix caching to use the KVCacheCoordinatorNoPrefixCache.
-- **SingleTypeKVCacheManager**: Each instance manages allocation and prefix caching for one KV cache group, implementing the attention‑type–specific logic (e.g., full attention, sliding window, Mamba).
+- **[KVCacheManager][vllm.v1.core.kv_cache_manager.KVCacheManager]**: The interface between the scheduler and kv cache management system.
+- **[KVCacheCoordinator][vllm.v1.core.kv_cache_coordinator.KVCacheCoordinator]**: coordinate per-group SingleTypeKVCacheManagers to generate the allocation result of a request. Depending on the model's configuration, one of these coordinators is chosen:
+    - **[KVCacheCoordinatorNoPrefixCache][vllm.v1.core.kv_cache_coordinator.KVCacheCoordinatorNoPrefixCache]**: Used when prefix caching is disabled.
+    - **[UnitaryKVCacheCoordinator][vllm.v1.core.kv_cache_coordinator.UnitaryKVCacheCoordinator]**: If only one KV cache group. The prefix caching logic is simplified as no intersection is needed.
+    - **[HybridKVCacheCoordinator][vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator]**: Handles exactly two KV cache groups (must include one full‑attention group plus one other efficient‑attention group). Other cases are not implemented. You can disable prefix caching to use the KVCacheCoordinatorNoPrefixCache.
+- **[SingleTypeKVCacheManager][vllm.v1.core.single_type_kv_cache_manager.SingleTypeKVCacheManager]**: Each instance manages allocation and prefix caching for one KV cache group, implementing the attention‑type–specific logic (e.g., full attention, sliding window, Mamba).
 
-The blue box in the above figure shows the case with 10 full attention layers and 20 sliding attention layers, thus:
+The blue box in the above figure shows the case with 10 full attention layers and 20 sliding window attention layers, thus:
 
 - use `HybridKVCacheCoordinator`
-- use 1 `FullAttentionManager` and 2 `SlidingWindowManager` for the 3 `KVCacheGroupSpec`s.
+- use 1 `FullAttentionManager` and 2 `SlidingWindowManager` for the 3 `KVCacheGroup`s.
 
 ### Memory Layout
 
-For a model with n `KVCacheGroupSpec`s, each with m layers, we allocate m buffers. Each buffer is shared by n layers, one from each group.
+For a model with n `KVCacheGroup`s, each with m layers, we allocate m buffers. Each buffer is shared by n layers, one from each group.
 
-The following figure is for a model with 10 full attention layers (full.0 - full.9) and 20 sliding attention layers (sw.0-sw.19). It follows "case 2" in "Allocation" section and is divided into 3 groups:
+The following figure is for a model with 10 full attention layers (full.0 - full.9) and 20 sliding window attention layers (sw.0-sw.19). It follows "case 2" in "Allocation" section and is divided into 3 groups:
 
 - Group 0: 10 full attention layers (full.0 - full.9)
-- Group 1: 10 sliding attention layers (sw.0 - sw.9)
-- Group 2: 10 sliding attention layers (sw.10 - sw.19)
+- Group 1: 10 sliding window attention layers (sw.0 - sw.9)
+- Group 2: 10 sliding window attention layers (sw.10 - sw.19)
 
 And for a request, we allocate 11 blocks with `block_id` 0-6 to group 0, 7-8 to group 1, and 9-10 to group 2.
 
