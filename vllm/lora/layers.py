@@ -76,6 +76,7 @@ def _not_fully_sharded_can_replace(can_replace):
 @dataclass
 class LoRAMapping(AdapterMapping):
     is_prefill: bool = False
+    is_prompt_logprobs: bool = False
 
 
 class BaseLayerWithLoRA(nn.Module):
