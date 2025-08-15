@@ -8,7 +8,9 @@ import torch._dynamo
 
 from tests.compile.backend import TestBackend
 from tests.models.utils import check_outputs_equal
-from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from tests.v1.attention.utils import (BatchSpec, _Backend,
+                                      create_common_attn_metadata,
+                                      get_attention_backend)
 from vllm import LLM, SamplingParams
 from vllm.attention import Attention
 from vllm.compilation.fusion import QUANT_OPS, QuantKey, kFp8StaticTensorSym
@@ -24,7 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp)
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -151,15 +153,10 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
 class TestAttentionStaticQuantPatternModel(torch.nn.Module):
     """Test model for AttentionStaticQuantPattern fusion."""
 
-    def __init__(self,
-                 num_qo_heads: int,
-                 num_kv_heads: int,
-                 head_size: int,
-                 kv_cache_dtype: torch.dtype,
-                 device: torch.device,
-                 vllm_config: VllmConfig,
-                 w: Optional[torch.Tensor] = None,
-                 kv_cache: Optional[torch.Tensor] = None):
+    def __init__(self, num_qo_heads: int, num_kv_heads: int, head_size: int,
+                 kv_cache_dtype: torch.dtype, device: torch.device,
+                 attn_builder: type[AttentionMetadataBuilder],
+                 vllm_config: VllmConfig):
         super().__init__()
         self.num_qo_heads = num_qo_heads
         self.num_kv_heads = num_kv_heads
@@ -179,53 +176,13 @@ class TestAttentionStaticQuantPatternModel(torch.nn.Module):
 
         self.fp8_linear = Fp8LinearOp(
             act_quant_static=True, act_quant_group_shape=GroupShape.PER_TENSOR)
-
-        hidden_size = num_qo_heads * head_size
-        if w is not None:
-            self.w = w
-        else:
-            self.w = torch.randn(hidden_size, hidden_size).to(FP8_DTYPE).t()
         self.wscale = torch.tensor([1.0], dtype=torch.float32)
         self.scale = torch.tensor([1.0], dtype=torch.float32)
 
         self.block_size = 16
-        self.kv_cache = None
-        if kv_cache is not None:
-            self.kv_cache = kv_cache
 
-    def build_attn_metadata(self, batch_size: int):
-        """Initialize Flashinfer attention metadata."""
-
-        # Create common attn metadata
-        batch_spec = BatchSpec(seq_lens=[1] * batch_size,
-                               query_lens=[1] * batch_size)
-        common_attn_metadata = create_common_attn_metadata(
-            batch_spec,
-            self.block_size,
-            self.device,
-            arange_block_indices=True)
-
-        # Create kv cache
-        if self.kv_cache is None:
-            max_blocks = (max(batch_spec.seq_lens) + self.block_size -
-                          1) // self.block_size
-            num_blocks = batch_size * max_blocks
-
-            # Create dummy KV cache for FlashInfer TRTLLM
-            #   - NHD: [num_blocks, 2, block_size, num_kv_heads, head_size]
-            #   - HND: [num_blocks, 2,  num_kv_heads, block_size, head_size]
-            # Create kv_cache in HND layout and permute to NHD layout
-            # (later will be permuted back to HND layout in forward pass)
-            self.kv_cache = torch.randn(num_blocks, 2, self.num_kv_heads,
-                                        self.block_size, self.head_size).to(
-                                            dtype=self.kv_cache_dtype,
-                                            device=self.device)
-            self.kv_cache = self.kv_cache.permute(0, 1, 3, 2, 4)
-
-        self.attn.kv_cache = [self.kv_cache]
-
-        # Initialize FlashInferMetadataBuilder
-        builder = FlashInferMetadataBuilder(
+        # Initialize attn MetadataBuilder
+        self.builder = attn_builder(
             kv_cache_spec=AttentionSpec(
                 block_size=self.block_size,
                 num_kv_heads=self.num_kv_heads,
@@ -238,17 +195,49 @@ class TestAttentionStaticQuantPatternModel(torch.nn.Module):
             device=self.device,
         )
 
-        # Build FlashInferMetadata
-        self.attn_metadata = builder.build(
+    def build_attn_metadata(self, batch_size: int):
+        """Initialize attention metadata."""
+
+        # Create common attn metadata
+        batch_spec = BatchSpec(seq_lens=[1] * batch_size,
+                               query_lens=[1] * batch_size)
+        common_attn_metadata = create_common_attn_metadata(
+            batch_spec,
+            self.block_size,
+            self.device,
+            arange_block_indices=True)
+
+        max_blocks = (max(batch_spec.seq_lens) + self.block_size -
+                      1) // self.block_size
+        num_blocks = batch_size * max_blocks
+
+        # Create dummy KV cache for FlashInfer TRTLLM
+        #   - NHD: [num_blocks, 2, block_size, num_kv_heads, head_size]
+        #   - HND: [num_blocks, 2, num_kv_heads, block_size, head_size]
+        # Create kv_cache in HND layout and permute to NHD layout
+        # (later will be permuted back to HND layout in forward pass)
+        kv_cache = torch.zeros(num_blocks,
+                               2,
+                               self.num_kv_heads,
+                               self.block_size,
+                               self.head_size,
+                               dtype=self.kv_cache_dtype,
+                               device=self.device)
+        kv_cache = kv_cache.permute(0, 1, 3, 2, 4)
+        self.attn.kv_cache = [kv_cache]
+
+        # Build attn metadata
+        self.attn_metadata = self.builder.build(
             common_prefix_len=0, common_attn_metadata=common_attn_metadata)
 
         return self.attn_metadata
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                w: torch.Tensor):
         """Forward pass that creates the pattern to be fused."""
         attn_output = self.attn(q, k, v)
         return self.fp8_linear.apply(input=attn_output,
-                                     weight=self.w,
+                                     weight=w,
                                      weight_scale=self.wscale,
                                      input_scale=self.scale)
 
@@ -260,7 +249,7 @@ class TestAttentionStaticQuantPatternModel(torch.nn.Module):
 @pytest.mark.parametrize(
     "model_quant_dtype",
     [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", FP8_DTYPE)])
-@pytest.mark.parametrize("test_backend", ["FLASHINFER"])
+@pytest.mark.parametrize("backend", ["FLASHINFER"])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
 @pytest.mark.skipif(not current_platform.is_device_capability((10, 0)),
@@ -268,11 +257,11 @@ class TestAttentionStaticQuantPatternModel(torch.nn.Module):
 def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
                                  batch_size: int, dtype: torch.dtype,
                                  model_quant_dtype: tuple[str, torch.dtype],
-                                 test_backend, monkeypatch, dist_init):
+                                 backend: str, monkeypatch, dist_init):
     """Test AttentionStaticQuantPattern fusion pass"""
 
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", test_backend)
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
 
     device = torch.device("cuda:0")
     torch.manual_seed(42)
@@ -280,10 +269,14 @@ def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
     num_qo_heads, num_kv_heads = num_heads
     model_name, quant_dtype = model_quant_dtype
 
+    if backend == "FLASHINFER":
+        attn_builder, _ = get_attention_backend(_Backend.FLASHINFER_VLLM_V1)
+    else:
+        raise ValueError(f"Unsupported backend: {backend}")
+
     # The quant op to check the fusion happenes or not
-    quant_op = None
     if quant_dtype == FP8_DTYPE:
-        quant_op = QUANT_OPS[kFp8StaticTensorSym]
+        quant_key = kFp8StaticTensorSym
     else:
         raise ValueError(f"Unsupported quant_dtype: {quant_dtype}")
 
@@ -296,15 +289,12 @@ def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
         compilation_config=CompilationConfig(
             level=CompilationLevel.PIECEWISE,
             custom_ops=["+quant_fp8"],
-            full_cuda_graph=True,
         ),
         cache_config=CacheConfig(cache_dtype="fp8"))
 
     # Create test inputs
-    q = torch.randn(batch_size,
-                    num_qo_heads * head_size,
-                    dtype=dtype,
-                    device=device)
+    hidden_size = num_qo_heads * head_size
+    q = torch.randn(batch_size, hidden_size, dtype=dtype, device=device)
     k = torch.randn(batch_size,
                     num_kv_heads * head_size,
                     dtype=dtype,
@@ -313,6 +303,7 @@ def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
                     num_kv_heads * head_size,
                     dtype=dtype,
                     device=device)
+    linear_w = torch.randn(hidden_size, hidden_size).to(FP8_DTYPE).t()
 
     # Mark first dimension as dynamic for realistic testing
     torch._dynamo.mark_dynamic(q, 0)
@@ -325,7 +316,7 @@ def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
             attn_metadata=None, vllm_config=vllm_config_unfused):
         model_unfused = TestAttentionStaticQuantPatternModel(
             num_qo_heads, num_kv_heads, head_size, FP8_DTYPE, device,
-            vllm_config_unfused)
+            attn_builder, vllm_config_unfused)
         model_unfused = model_unfused.to(device)
 
         forward_ctx = get_forward_context()
@@ -333,7 +324,7 @@ def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
             batch_size)
 
         # Run model directly without compilation and fusion
-        result_unfused = model_unfused(q, k, v)
+        result_unfused = model_unfused(q, k, v, linear_w)
 
     # Run model with attn fusion enabled
     vllm_config.compilation_config.pass_config = PassConfig(
@@ -342,7 +333,7 @@ def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
             attn_metadata=None, vllm_config=vllm_config):
         model_fused = TestAttentionStaticQuantPatternModel(
             num_qo_heads, num_kv_heads, head_size, FP8_DTYPE, device,
-            vllm_config, model_unfused.w, model_unfused.kv_cache)
+            attn_builder, vllm_config)
         model_fused = model_fused.to(device)
 
         forward_ctx = get_forward_context()
@@ -352,20 +343,38 @@ def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
         noop_pass = NoOpEliminationPass(vllm_config)
         attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw
                                                                     )
-        backend = TestBackend(noop_pass, attn_pass)
+        test_backend = TestBackend(noop_pass, attn_pass)
 
         # Compile model with fusion enabled
         model_compiled = torch.compile(model_fused,
-                                       backend=backend,
+                                       backend=test_backend,
                                        fullgraph=True)
-        result_fused = model_compiled(q, k, v)
+        assert model_compiled.attn._o_scale_float is None
+        result_fused_1 = model_compiled(q, k, v, linear_w)
 
-    # Check quantization ops in the graph before and after fusion
-    backend.check_before_ops([quant_op], fully_replaced=True)
+        # After the 1st round of the forward pass, output quant scale should be
+        # loaded into the attn layer's _o_scale_float, the 2nd round should
+        # reuse the loaded _o_scale_float
+        assert model_compiled.attn._o_scale_float is not None
+        result_fused_2 = model_compiled(q, k, v, linear_w)
+        assert model_compiled.attn._o_scale_float is not None
+
+    # Check attn fusion support
+    attn_fusion_supported = [
+        layer.impl.fused_output_quant_supported(quant_key.dtype,
+                                                quant_key.static,
+                                                quant_key.group_shape) for key,
+        layer in vllm_config.compilation_config.static_forward_context.items()
+    ]
+    if any(attn_fusion_supported):
+        # Check quantization ops in the graph before and after fusion
+        test_backend.check_before_ops([QUANT_OPS[quant_key]],
+                                      fully_replaced=True)
 
     # Check attention ops in the graph before and after fusion
-    attn_nodes_pre = list(find_op_nodes(ATTN_OP, backend.graph_pre_pass))
-    attn_nodes_post = list(find_op_nodes(ATTN_OP, backend.graph_post_pass))
+    attn_nodes_pre = list(find_op_nodes(ATTN_OP, test_backend.graph_pre_pass))
+    attn_nodes_post = list(find_op_nodes(ATTN_OP,
+                                         test_backend.graph_post_pass))
 
     assert len(attn_nodes_pre) > 0, "Should have attention nodes before fusion"
     assert len(attn_nodes_pre) == len(attn_nodes_post), \
@@ -376,7 +385,11 @@ def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
         "Attention should have output_scale after fusion"
 
     # Check that results are closed
-    torch.testing.assert_close(result_unfused.to(dtype),
-                               result_fused.to(dtype),
+    torch.testing.assert_close(result_unfused,
+                               result_fused_1,
+                               atol=1e-2,
+                               rtol=1e-2)
+    torch.testing.assert_close(result_unfused,
+                               result_fused_2,
                                atol=1e-2,
                                rtol=1e-2)
