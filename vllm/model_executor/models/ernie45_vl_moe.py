@@ -404,8 +404,8 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
                 and layer_idx >= min_moe_layer_start_index
                 and layer_idx <= max_moe_layer_end_index):
             self.mlp = Ernie4_5_VLMoeMoE(config=config,
-                                      quant_config=quant_config,
-                                      prefix=f"{prefix}.mlp")
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.mlp")
         else:
             self.mlp = Ernie4_5_VLMoeMLP(
                 hidden_size=config.hidden_size,
@@ -491,10 +491,11 @@ class Ernie4_5_VLMoeModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Ernie4_5_VLMoeDecoderLayer(config=config,
-                                                   cache_config=cache_config,
-                                                   quant_config=quant_config,
-                                                   prefix=prefix),
+            lambda prefix: Ernie4_5_VLMoeDecoderLayer(
+                config=config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 
@@ -546,6 +547,7 @@ class Ernie4_5_VLMoeModel(nn.Module):
 
         return hidden_states
 
+
 # only used as text backbone for ernie4.5-vl
 class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
     packed_modules_mapping = {
@@ -569,7 +571,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
         self.config = config
         self.quant_config = quant_config
         self.model = Ernie4_5_VLMoeModel(vllm_config=vllm_config,
-                                      prefix=maybe_prefix(prefix, "model"))
+                                         prefix=maybe_prefix(prefix, "model"))
 
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(config.vocab_size,
@@ -710,7 +712,8 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
                                   expert_id=expert_id)
                     break
                 else:
-                    # Distinguish between vision expert gate and text expert gate
+                    # Distinguish between vision expert gate
+                    # and text expert gate
                     if name.endswith("mlp.gate.weight"):
                         name = name.replace("gate.weight",
                                             "text_experts_gate.weight")
