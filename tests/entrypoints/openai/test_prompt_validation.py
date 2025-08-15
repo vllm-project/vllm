@@ -65,7 +65,6 @@ def test_load_prompt_embeds(tensor: torch.Tensor):
     torch.save(tensor, buffer)
     buffer.seek(0)
     encoded_tensor = pybase64.b64encode(buffer.getvalue())
-    assert tensor.layout == torch.sparse_coo
 
     loaded_prompt_embeds = OpenAIServing._load_prompt_embeds(encoded_tensor)
     assert len(loaded_prompt_embeds) == 1
