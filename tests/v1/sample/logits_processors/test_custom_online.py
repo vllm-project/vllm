@@ -4,14 +4,14 @@
 import os
 import random
 import sys
-from multiprocessing import Process
 from typing import Any, Optional
 
 import openai
 import pytest
 import pytest_asyncio
 
-from tests.utils import RemoteOpenAIServer
+from tests.utils import (RemoteOpenAIServer,
+                         RemoteOpenAIServerCustomChildProcess)
 # yapf: disable
 from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
                                                      DUMMY_LOGITPROC_FQCN,
@@ -24,40 +24,44 @@ from tests.v1.sample.logits_processors.utils import prompts
 # yapf: enable
 
 
-class RemoteOpenAIServerWithEntrypoint(RemoteOpenAIServer):
-    """Launch test server, inject logitproc entrypoint"""
+def _server_with_logitproc_entrypoint(
+    env_dict: Optional[dict[str, str]],
+    model: str,
+    vllm_serve_args: list[str],
+) -> None:
+    # Patch `entry_points` to inject logitproc entrypoint
+    import importlib.metadata
+    importlib.metadata.entry_points = fake_entry_points
+    from vllm.entrypoints.cli import main
 
-    def _start_server(self, model: str, vllm_serve_args: list[str],
-                      env_dict: Optional[dict[str, str]]) -> None:
+    # fork is required for workers to see entrypoint patch
+    os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = "fork"
+    if env_dict is not None:
+        os.environ.update(env_dict)
 
-        def _child_process() -> None:
-            # Patch `entry_points` to inject logitproc entrypoint
-            import importlib.metadata
-            importlib.metadata.entry_points = fake_entry_points
-            from vllm.entrypoints.cli import main
+    # Emulate `vllm serve <model> <CLI args>`
+    sys.argv = ["vllm", "serve", model] + vllm_serve_args
+    main.main()
 
-            # fork is required for workers to see entrypoint patch
-            os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = "fork"
-            if env_dict is not None:
-                os.environ.update(env_dict)
 
-            # Emulate `vllm serve <model> <CLI args>`
-            sys.argv = ["vllm", "serve", model] + vllm_serve_args
-            main.main()
+def _server_with_logitproc_module(
+    env_dict: Optional[dict[str, str]],
+    model: str,
+    vllm_serve_args: list[str],
+) -> None:
+    # Patch `entry_points` to inject logitproc entrypoint
+    import importlib.metadata
+    importlib.metadata.entry_points = fake_entry_points
+    from vllm.entrypoints.cli import main
 
-        self.proc: Process = Process(
-            target=_child_process)  # type: ignore[assignment]
-        self.proc.start()
+    # fork is required for workers to see entrypoint patch
+    os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = "fork"
+    if env_dict is not None:
+        os.environ.update(env_dict)
 
-    def _poll(self) -> Optional[int]:
-        return self.proc.exitcode
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.proc.terminate()
-        self.proc.join(8)
-        if self.proc.is_alive():
-            # force kill if needed
-            self.proc.kill()
+    # Emulate `vllm serve <model> <CLI args>`
+    sys.argv = ["vllm", "serve", model] + vllm_serve_args
+    main.main()
 
 
 @pytest.fixture(scope="module")
@@ -93,8 +97,9 @@ def server(default_server_args, request, monkeypatch):
             yield remote_server
     else:
         # Launch server, inject dummy logitproc
-        with RemoteOpenAIServerWithEntrypoint(
-                MODEL_NAME, default_server_args) as remote_server:
+        with RemoteOpenAIServerCustomChildProcess(
+                MODEL_NAME, default_server_args,
+                _server_with_logitproc_entrypoint) as remote_server:
             yield remote_server
 
 
