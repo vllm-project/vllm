@@ -1064,26 +1064,6 @@ def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-def load_siglip_so400m(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=2048,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    prompt = f"{'<image>' * len(image_urls)}\n{question}\n"
-    image_data = [fetch_image(url) for url in image_urls]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
-    )
-
-
 model_example_map = {
     "aria": load_aria,
     "aya_vision": load_aya_vision,
@@ -1116,7 +1096,6 @@ model_example_map = {
     "step3": load_step3,
     "tarsier": load_tarsier,
     "tarsier2": load_tarsier2,
-    "siglip_so400m": load_siglip_so400m,
 }
 
 
