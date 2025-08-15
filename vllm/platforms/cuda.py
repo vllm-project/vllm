@@ -185,7 +185,7 @@ class CudaPlatformBase(Platform):
                 and parallel_config.data_parallel_size > 1
                 and compilation_config.cudagraph_mode != CUDAGraphMode.NONE):
             logger.info(
-                "Data Parallel: Forcing enforce eager to be True since DP "
+                "Data Parallel: disabling cudagraphs since DP "
                 "with DeepEP high-throughput kernels are not CUDA Graph "
                 "compatible. The DeepEP low-latency kernels are CUDA Graph "
                 "compatible. Set the all_to_all backend to deepep_low_latency "

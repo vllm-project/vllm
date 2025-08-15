@@ -91,6 +91,11 @@ class CudagraphDispatcher:
     def dispatch(
         self, batch_descriptor: BatchDescriptor
     ) -> tuple[CUDAGraphMode, Optional[BatchDescriptor]]:
+        """
+        Given a batch descriptor, dispatch to a cudagraph mode.
+        A new batch descriptor is returned as we might dispatch a uniform batch 
+        to a graph that supports a more general batch (uniform to non-uniform).
+        """
         # if not initialized, just skip dispatching.
         if not self.keys_initialized:
             logger.warning_once("cudagraph dispatching keys are not "

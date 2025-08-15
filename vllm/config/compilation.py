@@ -561,5 +561,5 @@ class CompilationConfig:
             self.splitting_ops = []
 
     def splitting_ops_contain_attention(self) -> bool:
-        return False if self.splitting_ops is None else all(
+        return self.splitting_ops is not None and all(
             op in self.splitting_ops for op in self._attention_ops)
