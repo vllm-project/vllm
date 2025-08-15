@@ -1062,31 +1062,30 @@ def inplace_fused_experts(
                        a2_scale, block_shape, w1_bias, w2_bias)
 
 
-def inplace_fused_experts_fake(hidden_states: torch.Tensor,
-                               w1: torch.Tensor,
-                               w2: torch.Tensor,
-                               topk_weights: torch.Tensor,
-                               topk_ids: torch.Tensor,
-                               activation: str = "silu",
-                               is_act_and_mul: bool = True,
-                               apply_router_weight_on_input: bool = False,
-                               use_fp8_w8a8: bool = False,
-                               use_int8_w8a8: bool = False,
-                               use_int8_w8a16: bool = False,
-                               use_int4_w4a16: bool = False,
-                               use_mxfp4_w4a4: bool = False,
-                               per_channel_quant: bool = False,
-                               global_num_experts: int = -1,
-                               expert_map: Optional[torch.Tensor] = None,
-                               w1_scale: Optional[torch.Tensor] = None,
-                               w2_scale: Optional[torch.Tensor] = None,
-                               w1_zp: Optional[torch.Tensor] = None,
-                               w2_zp: Optional[torch.Tensor] = None,
-                               a1_scale: Optional[torch.Tensor] = None,
-                               a2_scale: Optional[torch.Tensor] = None,
-                               block_shape: Optional[list[int]] = None,
-                               w1_bias: Optional[torch.Tensor] = None,
-                               w2_bias: Optional[torch.Tensor] = None) -> None:
+def inplace_fused_experts_fake(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str = "silu",
+        is_act_and_mul: bool = True,
+        apply_router_weight_on_input: bool = False,
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        use_int4_w4a16: bool = False,
+        use_mxfp4_w4a4: bool = False,
+        per_channel_quant: bool = False,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        w1_zp: Optional[torch.Tensor] = None,
+        w2_zp: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None,
+        block_shape: Optional[list[int]] = None) -> None:
     pass
 
 
@@ -1452,10 +1451,7 @@ def fused_experts(hidden_states: torch.Tensor,
             w2_zp=w2_zp,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
-            block_shape=block_shape,
-            w1_bias=w1_bias,
-            w2_bias=w2_bias,
-        )
+            block_shape=block_shape)
 
 
 def fused_experts_impl(
@@ -1884,29 +1880,18 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         output = (M, K)
         return (workspace1, workspace2, output, a.dtype)
 
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str,
-        global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-        apply_router_weight_on_input: bool,
-        extra_expert_args: Optional[dict[str, Any]],
-    ):
+    def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
+              w1: torch.Tensor, w2: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor, activation: str, global_num_experts: int,
+              expert_map: Optional[torch.Tensor],
+              w1_scale: Optional[torch.Tensor],
+              w2_scale: Optional[torch.Tensor], w1_zp: Optional[torch.Tensor],
+              w2_zp: Optional[torch.Tensor], a1q_scale: Optional[torch.Tensor],
+              a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
+              workspace2: torch.Tensor,
+              expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+              apply_router_weight_on_input: bool,
+              extra_expert_args: Optional[dict[str, Any]]):
         # Check constraints.
         if self.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), (
@@ -1967,10 +1952,21 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                             (num_tokens, top_k_num, K))
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
+            # The code `moe_align_block_size` appears to be a variable or
+            # function name in Python. Without additional context or code,
+            # it is not possible to determine exactly what it is doing.
+            # The name suggests that it may be related to aligning blocks
+            # of code or data to a specific size.
             moe_align_block_size(topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
 
         invoke_fused_moe_kernel(
+            # The code `hidden_states` is not performing any specific action in
+            # the provided snippet. It seems to be a variable name or
+            # placeholder without any associated code or context.
+            # The code `hidden_states` is not performing any specific action in
+            # the provided snippet. It seems to be a variable or placeholder
+            # that has been declared but not used or assigned any value.
             hidden_states,
             w1,
             intermediate_cache1,
@@ -2027,7 +2023,11 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             B_bias=None  # TODO support B_bias
         )
 
-        ops.moe_sum(intermediate_cache3, output)
+        # ops.moe_sum(intermediate_cache3, output)
+        self.moe_sum(intermediate_cache3, output)
+
+    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+        ops.moe_sum(input, output)
 
 
 def modular_triton_fused_moe(
