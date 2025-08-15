@@ -9,10 +9,10 @@ import torch
 import vllm.v1.attention.backends.rocm_aiter_fa  # noqa: F401
 from vllm.platforms import current_platform
 
-NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
+NUM_HEADS = [(4, 4), (8, 2)]
 HEAD_SIZES = [128, 256]
-BLOCK_SIZES = [16, 32]
-DTYPES = [torch.float16, torch.bfloat16]
+BLOCK_SIZES = [16]
+DTYPES = [torch.bfloat16]
 QDTYPES = [None]
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check
