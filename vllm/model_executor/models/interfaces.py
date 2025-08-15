@@ -209,7 +209,7 @@ def supports_multimodal_pruning(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsMultiModalPruning]],
            TypeIs[SupportsMultiModalPruning]]:
-    return getattr(model, "supports_multimodal_pruning", True)
+    return getattr(model, "supports_multimodal_pruning", False)
 
 
 @runtime_checkable
