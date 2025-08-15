@@ -307,13 +307,17 @@ hydra-core==1.3.2
     #   lightning
 hypothesis==6.131.0
     # via
+    #   -r requirements/test.in
     #   hypothesis-graphql
     #   hypothesis-jsonschema
+    #   hypothesis-torch
     #   schemathesis
 hypothesis-graphql==0.11.1
     # via schemathesis
 hypothesis-jsonschema==0.23.1
     # via schemathesis
+hypothesis-torch==1.1.0
+    # via -r requirements/test.in
 idna==3.10
     # via
     #   anyio
@@ -1074,6 +1078,7 @@ torch==2.7.1+cu128
     #   efficientnet-pytorch
     #   encodec
     #   fastsafetensors
+    #   hypothesis-torch
     #   kornia
     #   lightly
     #   lightning

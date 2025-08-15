@@ -1,10 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
+
+import hypothesis
+import hypothesis_torch
 # imports for guided decoding tests
 import openai
+import pybase64
 import pytest
 import regex as re
+import torch
+from hypothesis import strategies as st
+
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
 
 from ...utils import RemoteOpenAIServer
 
@@ -42,3 +51,28 @@ async def test_out_of_vocab_token_ids():
                                             prompt=[999999],
                                             max_tokens=5,
                                             temperature=0.0)
+
+
+@hypothesis.settings(max_examples=10000)
+@hypothesis.given(tensor=hypothesis_torch.tensor_strategy(
+    dtype=hypothesis_torch.dtype_strategy(
+        [torch.float32, torch.bfloat16, torch.float16]),
+    shape=st.tuples(st.integers(min_value=2, max_value=10),
+                    st.integers(min_value=2, max_value=10)),
+    device=hypothesis_torch.device_strategy(),
+    layout=st.just(torch.sparse_coo)))
+def test_load_prompt_embeds(tensor: torch.Tensor):
+    buffer = io.BytesIO()
+    torch.save(tensor, buffer)
+    buffer.seek(0)
+    encoded_tensor = pybase64.b64encode(buffer.getvalue())
+    assert tensor.layout == torch.sparse_coo
+
+    loaded_prompt_embeds = OpenAIServing._load_prompt_embeds(encoded_tensor)
+    assert len(loaded_prompt_embeds) == 1
+    loaded_tensor = loaded_prompt_embeds[0]["prompt_embeds"]
+    assert loaded_tensor.device.type == "cpu"
+    assert loaded_tensor.layout == torch.strided
+    torch.testing.assert_close(loaded_tensor,
+                               tensor.to("cpu").to_dense(),
+                               equal_nan=True)

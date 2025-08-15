@@ -37,6 +37,8 @@ mteb[bm25s]>=1.38.11, <2 # required for mteb test
 transformers==4.55.0
 tokenizers==0.21.1
 schemathesis>=3.39.15 # Required for openai schema test.
+hypothesis>=6.131.0  # Required for prompt embeds tests and openai schema test.
+hypothesis-torch>=1.1.0  # Required for prompt embeds tests
 # quantization
 bitsandbytes==0.46.1
 buildkite-test-collector==0.1.9
