@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import types
 from enum import Enum, auto
 from typing import Optional
 
@@ -18,8 +19,7 @@ DUMMY_LOGITPROC_ARG = "target_token"
 TEMP_GREEDY = 0.0
 MAX_TOKENS = 20
 DUMMY_LOGITPROC_ENTRYPOINT = "dummy_logitproc"
-DUMMY_LOGITPROC_FQCN = ("tests.v1.sample.logits_processors.utils:"
-                        "DummyLogitsProcessor")
+DUMMY_LOGITPROC_FQCN = "DummyModule:DummyLogitsProcessor"
 
 
 class CustomLogitprocSource(Enum):
@@ -95,6 +95,11 @@ class DummyLogitsProcessor(LogitsProcessor):
         return logits
 
 
+"""Dummy module with dummy logitproc class"""
+dummy_module = types.ModuleType("DummyModule")
+dummy_module.DummyLogitsProcessor = DummyLogitsProcessor
+
+
 class EntryPoint:
     """Dummy entrypoint class for logitsprocs testing"""
 
@@ -117,4 +122,5 @@ class EntryPoints(list):
         self.names = [ep.name for ep in eps]
 
 
+"""Fake version of importlib.metadata.entry_points"""
 entry_points = lambda group: EntryPoints(group)

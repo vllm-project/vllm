@@ -216,12 +216,11 @@ class RemoteOpenAIServer:
                                   **kwargs)
 
 
-class RemoteOpenAIServerCustomChildProcess(RemoteOpenAIServer):
-    """Launch test server with user-provided child process"""
+class RemoteOpenAIServerCustom(RemoteOpenAIServer):
+    """Launch test server with custom child process"""
 
     def _start_server(self, model: str, vllm_serve_args: list[str],
                       env_dict: Optional[dict[str, str]]) -> None:
-        """Start user-provided child process"""
         self.proc: Process = Process(
             target=self.child_process_fxn,
             args=(env_dict, model,

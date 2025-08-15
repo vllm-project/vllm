@@ -10,13 +10,12 @@ import openai
 import pytest
 import pytest_asyncio
 
-from tests.utils import (RemoteOpenAIServer,
-                         RemoteOpenAIServerCustomChildProcess)
+from tests.utils import RemoteOpenAIServerCustom
 # yapf: disable
 from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
                                                      DUMMY_LOGITPROC_FQCN,
                                                      MAX_TOKENS, MODEL_NAME,
-                                                     TEMP_GREEDY)
+                                                     TEMP_GREEDY, dummy_module)
 from tests.v1.sample.logits_processors.utils import (
     entry_points as fake_entry_points)
 from tests.v1.sample.logits_processors.utils import prompts
@@ -29,6 +28,8 @@ def _server_with_logitproc_entrypoint(
     model: str,
     vllm_serve_args: list[str],
 ) -> None:
+    """Start vLLM server, inject dummy logitproc entrypoint"""
+
     # Patch `entry_points` to inject logitproc entrypoint
     import importlib.metadata
     importlib.metadata.entry_points = fake_entry_points
@@ -49,10 +50,11 @@ def _server_with_logitproc_module(
     model: str,
     vllm_serve_args: list[str],
 ) -> None:
-    # Patch `entry_points` to inject logitproc entrypoint
-    import importlib.metadata
-    importlib.metadata.entry_points = fake_entry_points
+    """Start vLLM server, inject module with dummy logitproc"""
+
+    # Patch `modules` to inject dummy logitproc module
     from vllm.entrypoints.cli import main
+    sys.modules["DummyModule"] = dummy_module
 
     # fork is required for workers to see entrypoint patch
     os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = "fork"
@@ -82,7 +84,7 @@ def default_server_args():
 def server(default_server_args, request, monkeypatch):
     """Consider two server configurations:
     (1) --logits-processors cli arg specifies dummy logits processor via fully-
-    qualified class name (FQCN)
+    qualified class name (FQCN); patch in a dummy logits processor module
     (2) No --logits-processors cli arg; patch in a dummy logits processor
     entrypoint
     """
@@ -91,16 +93,17 @@ def server(default_server_args, request, monkeypatch):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
 
     if request.param:
-        # Append FQCN argument
-        with RemoteOpenAIServer(MODEL_NAME, default_server_args +
-                                request.param) as remote_server:
-            yield remote_server
+        # Launch server, append FQCN argument, inject dummy logitproc module
+        args = default_server_args + request.param
+        _server_fxn = _server_with_logitproc_module
     else:
-        # Launch server, inject dummy logitproc
-        with RemoteOpenAIServerCustomChildProcess(
-                MODEL_NAME, default_server_args,
-                _server_with_logitproc_entrypoint) as remote_server:
-            yield remote_server
+        # Launch server, inject dummy logitproc entrypoint
+        args = default_server_args
+        _server_fxn = _server_with_logitproc_entrypoint
+
+    with RemoteOpenAIServerCustom(MODEL_NAME, args,
+                                  _server_fxn) as remote_server:
+        yield remote_server
 
 
 @pytest_asyncio.fixture
