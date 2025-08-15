@@ -33,6 +33,9 @@ def check_implementation(
     args = (example_prompts, max_tokens, num_logprobs)
 
     with runner_test(model, **kwargs_test, **kwargs) as model_test:
+        model_config = model_test.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
+
         outputs_test = model_test.generate_greedy_logprobs(*args)
 
     with runner_ref(model, **kwargs_ref) as model_ref:
@@ -56,7 +59,7 @@ def check_implementation(
     "model,model_impl",
     [
         ("meta-llama/Llama-3.2-1B-Instruct", "transformers"),
-        ("ArthurZ/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
+        ("hmellor/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
     ])  # trust_remote_code=True by default
 def test_models(
     hf_runner: type[HfRunner],
@@ -130,14 +133,37 @@ def test_quantization(
             model_impl="transformers",
             enforce_eager=True,
             **quantization_kwargs) as vllm_model:  # type: ignore[arg-type]
+        model_config = vllm_model.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
+
         transformers_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs)
+
     check_logprobs_close(
         outputs_0_lst=transformers_outputs,
         outputs_1_lst=vllm_outputs,
         name_0="transformers",
         name_1="vllm",
     )
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        # Layers live in `layers`
+        "Qwen/Qwen3-Embedding-0.6B",
+        # Layers live in `model.layers`
+        "meta-llama/Llama-3.2-1B-Instruct"
+    ],
+)
+def test_embed_loading(vllm_runner, model):
+    with vllm_runner(model,
+                     max_model_len=1024,
+                     enforce_eager=True,
+                     runner="pooling",
+                     model_impl="transformers") as model_test:
+        model_config = model_test.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
 
 
 @pytest.mark.parametrize(
@@ -151,7 +177,6 @@ def test_classify(
     example_prompts,
     model: str,
     dtype: str,
-    monkeypatch,
 ) -> None:
     import torch
     from transformers import AutoModelForSequenceClassification
@@ -160,6 +185,9 @@ def test_classify(
                      max_model_len=512,
                      dtype=dtype,
                      model_impl="transformers") as vllm_model:
+        model_config = vllm_model.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
+
         vllm_outputs = vllm_model.classify(example_prompts)
 
     with hf_runner(model,

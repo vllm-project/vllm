@@ -2,17 +2,24 @@
 
 vLLM provides first-class support for generative models, which covers most of LLMs.
 
-In vLLM, generative models implement the [VllmModelForTextGeneration][vllm.model_executor.models.VllmModelForTextGeneration] interface.
+In vLLM, generative models implement the[VllmModelForTextGeneration][vllm.model_executor.models.VllmModelForTextGeneration] interface.
 Based on the final hidden states of the input, these models output log probabilities of the tokens to generate,
-which are then passed through [Sampler][vllm.model_executor.layers.Sampler] to obtain the final text.
+which are then passed through [Sampler][vllm.model_executor.layers.sampler.Sampler] to obtain the final text.
 
-For generative models, the only supported `--task` option is `"generate"`.
-Usually, this is automatically inferred so you don't have to specify it.
+## Configuration
+
+### Model Runner (`--runner`)
+
+Run a model in generation mode via the option `--runner generate`.
+
+!!! tip
+    There is no need to set this option in the vast majority of cases as vLLM can automatically
+    detect the model runner to use via `--runner auto`.
 
 ## Offline Inference
 
 The [LLM][vllm.LLM] class provides various methods for offline inference.
-See [configuration][configuration] for a list of options when initializing the model.
+See [configuration](../api/summary.md#configuration) for a list of options when initializing the model.
 
 ### `LLM.generate`
 

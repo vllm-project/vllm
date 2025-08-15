@@ -22,19 +22,16 @@ TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 RTOL = 0.03
 EXPECTED_VALUE = 0.54
-DEFAULT_ARGS = ["--max-model-len", "4096", "--disable-log-requests"]
+DEFAULT_ARGS = ["--max-model-len", "4096"]
 MORE_ARGS_LIST = [
     [],  # Default
     ["--enable-chunked-prefill"],  # Chunked
-    ["--num-scheduler-steps", "8"],  # MS
-    ["--num-scheduler-steps", "8", "--multi-step-stream-outputs"]  # MS+Stream
 ]
 MAX_WAIT_SECONDS = None
 
 if current_platform.is_tpu():
     MORE_ARGS_LIST = [
         [],  # Default
-        # ["--num-scheduler-steps", "8"], # Multi-step << currently fails
     ]
     MAX_WAIT_SECONDS = 600
 
@@ -69,8 +66,9 @@ def run_test(more_args):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda()
-                    and not current_platform.is_tpu(),
-                    reason="V1 currently only supported on CUDA and TPU")
+                    and not current_platform.is_tpu()
+                    and not current_platform.is_xpu(),
+                    reason="V1 currently only supported on CUDA, XPU and TPU")
 def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch):
     """Run with the V1 Engine."""
 

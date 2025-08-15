@@ -276,7 +276,7 @@ class BlockPool:
                 # candidate), so remove it.
                 if block.ref_cnt == 0 and not block.is_null:
                     self.free_block_queue.remove(block)
-                block.incr_ref()
+                block.ref_cnt += 1
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their

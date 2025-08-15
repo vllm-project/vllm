@@ -8,6 +8,28 @@ import torch
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op
+
+
+def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
+    # Shuffle weight along the last dimension so that
+    # we folded the weights to adjance location
+    # Example:
+    # input:
+    #       [[1, 2, 3, 4, 5, 6],
+    #        [7, 8, 9, 10, 11, 12]]
+    # output:
+    #       [[1, 4, 2, 5, 3, 6],
+    #        [7, 10, 8, 11, 9, 12]]
+    # This will be used together with triton swiglu kernel
+    shape = w.shape
+    N = shape[-1]
+    first = w[..., :N // 2]
+    second = w[..., N // 2:]
+
+    stacked = torch.stack((first, second), dim=-1)
+    w_shuffled = stacked.reshape(shape)
+    return w_shuffled
 
 
 def get_token_bin_counts_and_mask(
@@ -70,10 +92,10 @@ def default_unquantized_gemm(layer: torch.nn.Module,
     return torch.nn.functional.linear(x, weight, bias)
 
 
-def rocm_unquantized_gemm(layer: torch.nn.Module,
-                          x: torch.Tensor,
-                          weight: torch.Tensor,
-                          bias: Optional[torch.Tensor] = None):
+def rocm_unquantized_gemm_impl(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     from vllm.platforms.rocm import on_gfx9
     k = weight.shape[1]
     use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and on_gfx9() and \
@@ -95,6 +117,29 @@ def rocm_unquantized_gemm(layer: torch.nn.Module,
         out = ops.LLMM1(weight, x_view, 4)
         return out.view(*x.shape[:-1], weight.shape[0])
     return torch.nn.functional.linear(x, weight, bias)
+
+
+def rocm_unquantized_gemm_impl_fake(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
+
+
+def rocm_unquantized_gemm(layer: torch.nn.Module,
+                          x: torch.Tensor,
+                          weight: torch.Tensor,
+                          bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    return torch.ops.vllm.rocm_unquantized_gemm_impl(x, weight, bias)
+
+
+direct_register_custom_op(
+    op_name="rocm_unquantized_gemm_impl",
+    op_func=rocm_unquantized_gemm_impl,
+    mutates_args=[],
+    fake_impl=rocm_unquantized_gemm_impl_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
 
 
 def cpu_unquantized_gemm(layer: torch.nn.Module,
