@@ -33,7 +33,7 @@ def _server_with_logitproc_entrypoint(
 
     # Patch `entry_points` to inject logitproc entrypoint
     import importlib.metadata
-    importlib.metadata.entry_points = fake_entry_points
+    importlib.metadata.entry_points = fake_entry_points  # type: ignore
     from vllm.entrypoints.cli import main
 
     # fork is required for workers to see entrypoint patch
