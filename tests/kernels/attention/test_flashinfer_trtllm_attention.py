@@ -113,7 +113,7 @@ def test_flashinfer_trtllm_decode_with_baseline(
     kv_indices = torch.tensor(kv_indices, dtype=torch.int32)
     kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32)
 
-    workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
+    workspace_buffer = torch.zeros(128 * 1024 * 1024, dtype=torch.int8)
     wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
         workspace_buffer,
         kv_layout,
@@ -247,7 +247,7 @@ def test_flashinfer_trtllm_prefill_with_baseline(
     kv_indices = torch.tensor(kv_indices, dtype=torch.int32)
     kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32)
 
-    workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
+    workspace_buffer = torch.zeros(128 * 1024 * 1024, dtype=torch.int8)
     wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
         workspace_buffer, kv_layout)
     wrapper.plan(q_indptr,
