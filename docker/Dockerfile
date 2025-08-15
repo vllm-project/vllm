@@ -371,14 +371,6 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-# TODO (huydhn): Remove this once xformers is released for 2.8.0, official xformers wheel only support these
-# compute capability atm
-RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
-    . /etc/environment
-    export TORCH_CUDA_ARCH_LIST='7.5 8.0+PTX 9.0a'
-    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.32"
-BASH
-
 # If we need to build FlashInfer wheel before its release:
 # $ # Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
 # $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a 12.0'
