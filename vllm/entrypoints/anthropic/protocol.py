@@ -5,9 +5,9 @@
 """Pydantic models for Anthropic API protocol"""
 
 import time
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, field_validator
 
 
 class AnthropicError(BaseModel):
@@ -35,26 +35,26 @@ class AnthropicContentBlock(BaseModel):
     type: Literal["text", "image", "tool_use", "tool_result"]
     text: Optional[str] = None
     # For image content
-    source: Optional[Dict[str, Any]] = None
+    source: Optional[dict[str, Any]] = None
     # For tool use/result
     id: Optional[str] = None
     name: Optional[str] = None
-    input: Optional[Dict[str, Any]] = None
-    content: Optional[Union[str, List[Dict[str, Any]]]] = None
+    input: Optional[dict[str, Any]] = None
+    content: Optional[Union[str, list[dict[str, Any]]]] = None
     is_error: Optional[bool] = None
 
 
 class AnthropicMessage(BaseModel):
     """Message structure"""
     role: Literal["user", "assistant"]
-    content: Union[str, List[AnthropicContentBlock]]
+    content: Union[str, list[AnthropicContentBlock]]
 
 
 class AnthropicTool(BaseModel):
     """Tool definition"""
     name: str
     description: Optional[str] = None
-    input_schema: Dict[str, Any]
+    input_schema: dict[str, Any]
 
     @field_validator("input_schema")
     @classmethod
@@ -75,15 +75,15 @@ class AnthropicToolChoice(BaseModel):
 class AnthropicMessagesRequest(BaseModel):
     """Anthropic Messages API request"""
     model: str
-    messages: List[AnthropicMessage]
+    messages: list[AnthropicMessage]
     max_tokens: int
-    metadata: Optional[Dict[str, Any]] = None
-    stop_sequences: Optional[List[str]] = None
+    metadata: Optional[dict[str, Any]] = None
+    stop_sequences: Optional[list[str]] = None
     stream: Optional[bool] = False
     system: Optional[str] = None
     temperature: Optional[float] = None
     tool_choice: Optional[AnthropicToolChoice] = None
-    tools: Optional[List[AnthropicTool]] = None
+    tools: Optional[list[AnthropicTool]] = None
     top_k: Optional[int] = None
     top_p: Optional[float] = None
 
@@ -110,7 +110,8 @@ class AnthropicDelta(BaseModel):
 
     # Message delta
     stop_reason: Optional[
-        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal"]] = None
+        Literal["end_turn", "max_tokens", "stop_sequence",
+                "tool_use", "pause_turn", "refusal"]] = None
     stop_sequence: Optional[str] = None
     usage: AnthropicUsage = None
 
@@ -134,9 +135,10 @@ class AnthropicMessagesResponse(BaseModel):
     id: str
     type: Literal["message"] = "message"
     role: Literal["assistant"] = "assistant"
-    content: List[AnthropicContentBlock]
+    content: list[AnthropicContentBlock]
     model: str
-    stop_reason: Optional[Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"]] = None
+    stop_reason: Optional[Literal["end_turn", "max_tokens",
+                                  "stop_sequence", "tool_use"]] = None
     stop_sequence: Optional[str] = None
     usage: AnthropicUsage = None
 

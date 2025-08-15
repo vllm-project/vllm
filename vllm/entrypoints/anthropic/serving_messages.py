@@ -7,7 +7,7 @@
 import json
 import logging
 import time
-from typing import AsyncGenerator, List, Optional, Union
+from typing import AsyncGenerator, Optional, Union
 
 from fastapi import Request
 
@@ -23,9 +23,10 @@ from vllm.entrypoints.anthropic.protocol import (
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import ErrorResponse, ChatCompletionRequest, \
-    ChatCompletionNamedToolChoiceParam, ChatCompletionToolsParam, ChatCompletionResponse, ChatCompletionStreamResponse, \
-    StreamOptions
+from vllm.entrypoints.openai.protocol import ErrorResponse, \
+    ChatCompletionRequest, ChatCompletionNamedToolChoiceParam, \
+    ChatCompletionToolsParam, ChatCompletionResponse, \
+    ChatCompletionStreamResponse, StreamOptions
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 
@@ -85,7 +86,8 @@ class AnthropicServingMessages(OpenAIServingChat):
 
         # Add system message if provided
         if anthropic_request.system:
-            openai_messages.append({"role": "system", "content": anthropic_request.system})
+            openai_messages.append(
+                {"role": "system", "content": anthropic_request.system})
 
         for msg in anthropic_request.messages:
             openai_msg = {"role": msg.role}
@@ -99,7 +101,8 @@ class AnthropicServingMessages(OpenAIServingChat):
 
                 for block in msg.content:
                     if block.type == "text" and block.text:
-                        content_parts.append({"type": "text", "text": block.text})
+                        content_parts.append(
+                            {"type": "text", "text": block.text})
                     elif block.type == "image" and block.source:
                         content_parts.append({
                             "type": "image_url",
@@ -117,20 +120,20 @@ class AnthropicServingMessages(OpenAIServingChat):
                         }
                         tool_calls.append(tool_call)
                     elif block.type == "tool_result":
-                        # For tool results, we need to create a tool message
-                        # This will be handled separately as a tool response message
                         if msg.role == "user":
-                            # Tool result from user should be converted to tool message
                             openai_messages.append({
                                 "role": "tool",
                                 "tool_call_id": block.id,
-                                "content": str(block.content) if block.content else ""
+                                "content": str(
+                                    block.content) if block.content else ""
                             })
                         else:
                             # Assistant tool result becomes regular text
+                            tool_result_text = str(
+                                block.content) if block.content else ''
                             content_parts.append({
                                 "type": "text",
-                                "text": f"Tool result: {str(block.content) if block.content else ''}"
+                                "text": f"Tool result: {tool_result_text}"
                             })
 
                 # Add tool calls to the message if any
@@ -139,7 +142,8 @@ class AnthropicServingMessages(OpenAIServingChat):
 
                 # Add content parts if any
                 if content_parts:
-                    if len(content_parts) == 1 and content_parts[0]["type"] == "text":
+                    if len(content_parts) == 1 \
+                            and content_parts[0]["type"] == "text":
                         openai_msg["content"] = content_parts[0]["text"]
                     else:
                         openai_msg["content"] = content_parts
@@ -171,12 +175,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         elif anthropic_request.tool_choice.type == "any":
             req.tool_choice = "required"
         elif anthropic_request.tool_choice.type == "tool":
-            req.tool_choice = ChatCompletionNamedToolChoiceParam.model_validate({
-                "type": "function",
-                "function": {
-                    "name": anthropic_request.tool_choice.get("name")
-                }
-            })
+            req.tool_choice = ChatCompletionNamedToolChoiceParam.model_validate(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": anthropic_request.tool_choice.get("name")
+                    }
+                })
 
         tools = []
         if anthropic_request.tools is None:
@@ -201,8 +206,11 @@ class AnthropicServingMessages(OpenAIServingChat):
             self,
             request: AnthropicMessagesRequest,
             raw_request: Optional[Request] = None,
-    ) -> Union[AsyncGenerator[str, None], AnthropicMessagesResponse,
-    ErrorResponse]:
+    ) -> Union[
+            AsyncGenerator[str, None],
+            AnthropicMessagesResponse,
+            ErrorResponse
+    ]:
         """
         Messages API similar to Anthropic's API.
 
@@ -240,7 +248,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         elif generator.choices[0].finish_reason == "tool_calls":
             result.stop_reason = "tool_use"
 
-        content: List[AnthropicContentBlock] = [
+        content: list[AnthropicContentBlock] = [
             AnthropicContentBlock(
                 type="text",
                 text=generator.choices[0].message.content
@@ -277,11 +285,13 @@ class AnthropicServingMessages(OpenAIServingChat):
                         stop_message = AnthropicStreamEvent(
                             type="message_stop",
                         )
-                        data = stop_message.model_dump_json(exclude_unset=True, exclude_none=True)
+                        data = stop_message.model_dump_json(exclude_unset=True,
+                                                            exclude_none=True)
                         yield wrap_data_with_event(data, "message_stop")
                         yield "data: [DONE]\n\n"
                     else:
-                        origin_chunk = ChatCompletionStreamResponse.model_validate_json(data_str)
+                        origin_chunk = ChatCompletionStreamResponse. \
+                            model_validate_json(data_str)
 
                         if first_item:
                             chunk = AnthropicStreamEvent(
@@ -304,15 +314,20 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     index=content_block_index,
                                     type="content_block_stop",
                                 )
-                                data = stop_chunk.model_dump_json(exclude_unset=True)
-                                yield wrap_data_with_event(data, "content_block_stop")
+                                data = stop_chunk.model_dump_json(
+                                    exclude_unset=True)
+                                yield wrap_data_with_event(data,
+                                                           "content_block_stop")
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
                                 delta=AnthropicDelta(
-                                    stop_reason=self.stop_reason_map.get(finish_reason, "end_turn"),
+                                    stop_reason=self.stop_reason_map.get(
+                                        finish_reason, "end_turn"),
                                     usage=AnthropicUsage(
-                                        input_tokens=origin_chunk.usage.prompt_tokens or 0,
-                                        output_tokens=origin_chunk.usage.completion_tokens or 0
+                                        input_tokens=origin_chunk.usage.
+                                                     prompt_tokens or 0,
+                                        output_tokens=origin_chunk.usage.
+                                                     completion_tokens or 0
                                     )
                                 )
                             )
@@ -321,7 +336,8 @@ class AnthropicServingMessages(OpenAIServingChat):
                             continue
 
                         if origin_chunk.choices[0].finish_reason is not None:
-                            finish_reason = origin_chunk.choices[0].finish_reason
+                            finish_reason = origin_chunk.choices[
+                                0].finish_reason
                             continue
 
                         # content
@@ -336,7 +352,10 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     )
                                 )
                                 data = chunk.model_dump_json(exclude_unset=True)
-                                yield wrap_data_with_event(data, "content_block_start")
+                                yield wrap_data_with_event(
+                                    data,
+                                    "content_block_start"
+                                )
                                 content_block_started = True
 
                             if origin_chunk.choices[0].delta.content == "":
@@ -350,20 +369,26 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 )
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
-                            yield wrap_data_with_event(data, "content_block_delta")
+                            yield wrap_data_with_event(data,
+                                                       "content_block_delta")
                             continue
 
                         # tool calls
                         elif len(origin_chunk.choices[0].delta.tool_calls) > 0:
-                            tool_call = origin_chunk.choices[0].delta.tool_calls[0]
+                            tool_call = \
+                                origin_chunk.choices[0].delta.tool_calls[0]
                             if tool_call.id is not None:
                                 if content_block_started:
                                     stop_chunk = AnthropicStreamEvent(
                                         index=content_block_index,
                                         type="content_block_stop",
                                     )
-                                    data = stop_chunk.model_dump_json(exclude_unset=True)
-                                    yield wrap_data_with_event(data, "content_block_stop")
+                                    data = stop_chunk.model_dump_json(
+                                        exclude_unset=True)
+                                    yield wrap_data_with_event(
+                                        data,
+                                        "content_block_stop"
+                                    )
                                     content_block_started = False
                                     content_block_index += 1
 
@@ -373,12 +398,16 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     content_block=AnthropicContentBlock(
                                         type="tool_use",
                                         id=tool_call.id,
-                                        name=tool_call.function.name if tool_call.function else None,
+                                        name=tool_call.function.name
+                                        if tool_call.function else None,
                                         input={},
                                     )
                                 )
                                 data = chunk.model_dump_json(exclude_unset=True)
-                                yield wrap_data_with_event(data, "content_block_start")
+                                yield wrap_data_with_event(
+                                    data,
+                                    "content_block_start"
+                                )
                                 content_block_started = True
 
                             else:
@@ -387,11 +416,15 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     type="content_block_delta",
                                     delta=AnthropicDelta(
                                         type="input_json_delta",
-                                        partial_json=tool_call.function.arguments
+                                        partial_json=tool_call.function.
+                                        arguments
                                     )
                                 )
                                 data = chunk.model_dump_json(exclude_unset=True)
-                                yield wrap_data_with_event(data, "content_block_delta")
+                                yield wrap_data_with_event(
+                                    data,
+                                    "content_block_delta"
+                                )
                             continue
                 else:
                     error_response = AnthropicStreamEvent(

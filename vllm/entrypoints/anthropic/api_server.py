@@ -20,7 +20,8 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.anthropic.protocol import AnthropicErrorResponse, AnthropicMessagesRequest, \
+from vllm.entrypoints.anthropic.protocol import AnthropicErrorResponse, \
+    AnthropicMessagesRequest, \
     AnthropicMessagesResponse
 from vllm.entrypoints.anthropic.serving_messages import AnthropicServingMessages
 from vllm.entrypoints.chat_utils import (load_chat_template,
@@ -28,12 +29,14 @@ from vllm.entrypoints.chat_utils import (load_chat_template,
                                          resolve_mistral_chat_template)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.api_server import validate_api_server_args, create_server_socket, load_log_config, \
+from vllm.entrypoints.openai.api_server import validate_api_server_args, \
+    create_server_socket, load_log_config, \
     lifespan, build_async_engine_client, validate_json_request
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
 from vllm.entrypoints.openai.protocol import ErrorResponse
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels, BaseModelPath, LoRAModulePath
+from vllm.entrypoints.openai.serving_models import OpenAIServingModels, \
+    BaseModelPath, LoRAModulePath
 #
 # yapf: enable
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
