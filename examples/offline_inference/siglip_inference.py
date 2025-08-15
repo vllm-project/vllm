@@ -31,11 +31,8 @@ image_embedding = image_outputs[0].outputs.data.squeeze()
 
 text_outputs = llm.encode(text_inputs)
 
-cat_text_embeddings_all_tokens = text_outputs[0].outputs.data.squeeze()
-dog_text_embeddings_all_tokens = text_outputs[1].outputs.data.squeeze()
-
-cat_text_embedding = cat_text_embeddings_all_tokens[-1]
-dog_text_embedding = dog_text_embeddings_all_tokens[-1]
+cat_text_embedding = text_outputs[0].outputs.data.squeeze()
+dog_text_embedding = text_outputs[1].outputs.data.squeeze()
 
 sim_cat = torch.nn.functional.cosine_similarity(
     image_embedding, cat_text_embedding, dim=0
