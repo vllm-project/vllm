@@ -151,7 +151,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.uses_mrope = model_config.uses_mrope
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config)
-        self.skip_mm_profiling = model_config.multimodal_config.skip_mm_profiling  # noqa: E501
+        self.skip_mm_profiling = (model_config.multimodal_config.skip_mm_profiling
+                                  if self.supports_mm_inputs else False)
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
