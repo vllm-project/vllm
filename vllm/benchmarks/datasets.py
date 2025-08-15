@@ -454,6 +454,7 @@ class ShareGPTDataset(BenchmarkDataset):
                                      skip_min_output_len_check=output_len
                                      is not None):
                 continue
+            # TODO: Also support ShareGPT4Video.
             if image_path := entry.get("image"): 
                 mm_content = process_image(image_path) 
             else: 
