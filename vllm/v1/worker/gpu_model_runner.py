@@ -151,6 +151,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.uses_mrope = model_config.uses_mrope
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config)
+        self.skip_mm_profiling = model_config.multimodal_config.skip_mm_profiling  # noqa: E501
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
@@ -2478,7 +2479,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
-        if self.supports_mm_inputs:
+        if self.skip_mm_profiling:
+            logger.info("Skipping memory profiling for multimodal encoder and "
+                        "encoder cache.")
+
+        if self.supports_mm_inputs and not self.skip_mm_profiling:
             mm_budget = self.mm_budget
             assert mm_budget is not None
 

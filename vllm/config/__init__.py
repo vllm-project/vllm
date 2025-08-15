@@ -2511,6 +2511,11 @@ class MultiModalConfig:
     Enable fully interleaved support for multimodal prompts.
     """
 
+    skip_mm_profiling: bool = False
+    """
+    Skip multimodal profiling during engine initialization.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

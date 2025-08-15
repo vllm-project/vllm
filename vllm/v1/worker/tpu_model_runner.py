@@ -196,6 +196,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             model_config)
         # TODO: Support M-RoPE (e.g, Qwen2-VL)
         assert not self.uses_mrope, "TPU does not support M-RoPE yet."
+        self.skip_mm_profiling = model_config.multimodal_config.skip_mm_profiling  # noqa: E501
 
         self._num_slices_per_kv_cache_update_block = \
             _get_num_slices_per_kv_cache_update_block(get_page_size_bytes(
@@ -1528,7 +1529,11 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_tokens: int,
     ) -> None:
         # Profile with multimodal encoder & encoder cache.
-        if self.supports_mm_inputs:
+        if self.skip_mm_profiling:
+            logger.info("Skipping memory profiling for multimodal encoder and "
+                        "encoder cache.")
+
+        if self.supports_mm_inputs and not self.skip_mm_profiling:
             mm_budget = self.mm_budget
             assert mm_budget is not None
 

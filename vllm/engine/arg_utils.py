@@ -350,6 +350,7 @@ class EngineArgs:
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: int = MultiModalConfig.mm_processor_cache_gb
+    skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -716,6 +717,8 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--interleave-mm-strings",
             **multimodal_kwargs["interleave_mm_strings"])
+        multimodal_group.add_argument("--skip-mm-profiling",
+                                      **multimodal_kwargs["skip_mm_profiling"])
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
