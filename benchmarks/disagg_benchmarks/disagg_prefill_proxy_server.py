@@ -18,25 +18,52 @@ logger = logging.getLogger(__name__)
 
 def parse_args():
     """parse command line arguments"""
-    parser = argparse.ArgumentParser(description='vLLM P/D disaggregation proxy server')
+    parser = argparse.ArgumentParser(description="vLLM P/D disaggregation proxy server")
 
-    # 添加命令行参数
-    parser.add_argument('--timeout', type=float, default=300,
-                        help='Timeout for backend service requests in seconds (default: 300)')
-    parser.add_argument('--max-concurrent', type=int, default=100,
-                        help='Maximum concurrent requests to backend services (default: 100)')
-    parser.add_argument('--queue-size', type=int, default=500,
-                        help='Maximum number of requests in the queue (default: 500)')
-    parser.add_argument('--rate-limit', type=int, default=40,
-                        help='Maximum requests per second (default: 40)')
-    parser.add_argument('--port', type=int, default=8000,
-                        help='Port to run the server on (default: 8000)')
-    parser.add_argument('--prefill-url', type=str,
-                        default="http://localhost:8100/v1/completions",
-                        help='Prefill service endpoint URL')
-    parser.add_argument('--decode-url', type=str,
-                        default="http://localhost:8200/v1/completions",
-                        help='Decode service endpoint URL')
+
+    # Add args
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=300,
+        help="Timeout for backend service requests in seconds (default: 300)",
+    )
+    parser.add_argument(
+    "--max-concurrent",
+        type=int,
+        default=100,
+        help="Maximum concurrent requests to backend services (default: 100)",
+    )
+    parser.add_argument(
+        "--queue-size",
+        type=int,
+        default=500,
+        help="Maximum number of requests in the queue (default: 500)",
+    )
+    parser.add_argument(
+        "--rate-limit",
+        type=int,
+        default=40,
+        help="Maximum requests per second (default: 40)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port to run the server on (default: 8000)",
+    )
+    parser.add_argument(
+        "--prefill-url",
+        type=str,
+        default="http://localhost:8100/v1/completions",
+        help="Prefill service endpoint URL",
+    )
+    parser.add_argument(
+        "--decode-url",
+        type=str,
+        default="http://localhost:8200/v1/completions",
+        help="Decode service endpoint URL",
+    )
 
     return parser.parse_args()
 
@@ -45,7 +72,7 @@ def main():
     """parse command line arguments"""
     args = parse_args()
 
-    # 使用命令行参数初始化配置
+    #Initialize configuration using command line parameters
     AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=args.timeout)
     MAX_CONCURRENT_REQUESTS = args.max_concurrent
     REQUEST_QUEUE_SIZE = args.queue_size
@@ -56,18 +83,20 @@ def main():
 
     app = Quart(__name__)
 
-    # 初始化速率限制器和请求队列
+    # Initialize the rate limiter and request queue
     rate_limiter = RateLimiter(RATE_LIMIT)
     request_queue = RequestQueue(MAX_CONCURRENT_REQUESTS, REQUEST_QUEUE_SIZE)
 
-    # 将配置对象附加到应用实例
-    app.config.update({
-        'AIOHTTP_TIMEOUT': AIOHTTP_TIMEOUT,
-        'rate_limiter': rate_limiter,
-        'request_queue': request_queue,
-        'PREFILL_SERVICE_URL': PREFILL_SERVICE_URL,
-        'DECODE_SERVICE_URL': DECODE_SERVICE_URL
-    })
+    # Attach the configuration object to the application instance
+    app.config.update(
+        {
+            "AIOHTTP_TIMEOUT": AIOHTTP_TIMEOUT,
+            "rate_limiter": rate_limiter,
+            "request_queue": request_queue,
+            "PREFILL_SERVICE_URL": PREFILL_SERVICE_URL,
+            "DECODE_SERVICE_URL": DECODE_SERVICE_URL,
+        }
+    )
 
     # Start queue processing on app startup
     @app.before_serving
@@ -83,12 +112,11 @@ def main():
         # Use rate limiter as context manager
         async with (
             rate_limiter,
-            aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session):
+            aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session,
+        ):
             try:
                 async with session.post(
-                        url=url,
-                        json=data,
-                        headers=headers
+                        url=url, json=data, headers=headers
                 ) as response:
                     if response.status == 200:
                         # Stream response chunks
@@ -166,8 +194,10 @@ def main():
                 status=503,
                 content_type="application/json",
             )
+
     # Start the Quart server with host can be set to 0.0.0.0
     app.run(port=PORT)
+
 
 if __name__ == "__main__":
     main()
