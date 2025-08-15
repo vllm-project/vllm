@@ -296,7 +296,7 @@ def make_test_quant_config(
     k: int,
     in_dtype: torch.dtype,
     quant_dtype: Union[torch.dtype, str, None] = None,
-    per_act_token_quant:bool = False,
+    per_act_token_quant: bool = False,
     #per_out_ch_quant:bool = False,
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, FusedMoEQuantConfig]:
@@ -306,7 +306,7 @@ def make_test_quant_config(
         k,
         in_dtype,
         quant_dtype,
-        per_out_ch_quant=per_act_token_quant, # TODO: fix
+        per_out_ch_quant=per_act_token_quant,  # TODO: fix
         block_shape=block_shape,
     )
 
@@ -314,8 +314,8 @@ def make_test_quant_config(
     a1_gscale: Optional[torch.Tensor] = None
     a2_gscale: Optional[torch.Tensor] = None
     if quant_dtype == "nvfp4":
-        a1_gscale = torch.ones((e,), device="cuda", dtype=torch.float32)
-        a2_gscale = torch.ones((e,), device="cuda", dtype=torch.float32)
+        a1_gscale = torch.ones((e, ), device="cuda", dtype=torch.float32)
+        a2_gscale = torch.ones((e, ), device="cuda", dtype=torch.float32)
 
     return w1, w2, FusedMoEQuantConfig.make(
         quant_dtype,
@@ -342,16 +342,16 @@ def fused_moe(
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    topk_weights, topk_ids, _ = fused_topk(hidden_states, score.float(), topk, renormalize)
-    return fused_experts(
-        hidden_states,
-        w1,
-        w2,
-        topk_weights,
-        topk_ids,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
-        quant_config=quant_config)
+    topk_weights, topk_ids, _ = fused_topk(hidden_states, score.float(), topk,
+                                           renormalize)
+    return fused_experts(hidden_states,
+                         w1,
+                         w2,
+                         topk_weights,
+                         topk_ids,
+                         global_num_experts=global_num_experts,
+                         expert_map=expert_map,
+                         quant_config=quant_config)
 
 
 # CustomOp?

@@ -56,14 +56,14 @@ def test_flashinfer_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
         quant_blocksize = 16
 
         w1_q, w2_q, quant_config = make_test_quant_config(
-             e,
-             n,
-             k,
-             in_dtype=dtype,
-             quant_dtype="nvfp4",
-             block_shape=None,  # use quant_blocksize?
-             per_act_token_quant=False,
-         )
+            e,
+            n,
+            k,
+            in_dtype=dtype,
+            quant_dtype="nvfp4",
+            block_shape=None,  # use quant_blocksize?
+            per_act_token_quant=False,
+        )
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids, _ = fused_topk(a,

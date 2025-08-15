@@ -188,21 +188,14 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
             block_size,
         )
 
-        out = fused_experts(
-            a,
-            w1,
-            w2,
-            topk_weights,
-            topk_ids,
-            quant_config=quant_config)
+        out = fused_experts(a,
+                            w1,
+                            w2,
+                            topk_weights,
+                            topk_ids,
+                            quant_config=quant_config)
 
-        m_out = m_fused_moe(
-            a,
-            w1,
-            w2,
-            topk_weights,
-            topk_ids
-        )
+        m_out = m_fused_moe(a, w1, w2, topk_weights, topk_ids)
 
     # 0.039 only needed for M >= 8192
     tol = 0.035 if M < 8192 else 0.039

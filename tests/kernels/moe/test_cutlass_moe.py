@@ -10,12 +10,12 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig, fp8_w8a8_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     cutlass_moe_fp8, run_cutlass_moe_fp8)
 from vllm.model_executor.layers.fused_moe.fused_moe import (fused_experts,
                                                             fused_topk)
-from vllm.model_executor.layers.fused_moe.config import (
-    fp8_w8a8_moe_quant_config, FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 from vllm.platforms import current_platform
@@ -216,7 +216,7 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
         w2_scale=moe_tensors.w2_scale,
         per_act_token_quant=per_act_token,
         per_out_ch_quant=per_out_ch,
-        a1_scale=None, # moe_tensors.a_scale, # iff static scales + per tensor
+        a1_scale=None,  # moe_tensors.a_scale, # iff static scales + per tensor
     )
 
     kwargs = {
@@ -280,8 +280,12 @@ def test_cutlass_moe_8_bit_no_graph(
         # Using a, w1 and w2 directly results in minor output differences.
 
         quant_config = FusedMoEQuantConfig.make()
-        triton_output = fused_experts(mt.a_d, mt.w1_d, mt.w2_d, topk_weights,
-                                      topk_ids, quant_config=quant_config)
+        triton_output = fused_experts(mt.a_d,
+                                      mt.w1_d,
+                                      mt.w2_d,
+                                      topk_weights,
+                                      topk_ids,
+                                      quant_config=quant_config)
 
         if ep_size is not None:
             assert e % ep_size == 0, "Cannot distribute experts evenly"
@@ -289,8 +293,8 @@ def test_cutlass_moe_8_bit_no_graph(
         else:
             number_local_experts = None
 
-        cutlass_output = run_8_bit(mt, topk_weights, topk_ids, per_act_token, per_out_ch,
-                                   number_local_experts)
+        cutlass_output = run_8_bit(mt, topk_weights, topk_ids, per_act_token,
+                                   per_out_ch, number_local_experts)
 
         # Note 5.5 only needed for larger problem sizes, 5 works ok for
         # the rest.
@@ -336,8 +340,12 @@ def test_cutlass_moe_8_bit_cuda_graph(
         # Note that we are using the dequantized versions of the tensors.
         # Using a, w1 and w2 directly results in minor output differences.
         quant_config = FusedMoEQuantConfig.make()
-        triton_output = fused_experts(mt.a_d, mt.w1_d, mt.w2_d, topk_weights,
-                                      topk_ids, quant_config=quant_config)
+        triton_output = fused_experts(mt.a_d,
+                                      mt.w1_d,
+                                      mt.w2_d,
+                                      topk_weights,
+                                      topk_ids,
+                                      quant_config=quant_config)
 
         stream = torch.cuda.Stream()
         graph = torch.cuda.CUDAGraph()
