@@ -1248,6 +1248,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # We are done with all mm_embeds for a given request
             # Now it's time to recompute mrope
             should_update_mrope = not getattr(self.requests[req_id], "_evs_mrope_taint_applied", False)
+            print(f"{should_update_mrope=} {req_id=}")
+
             if supports_multimodal_pruning(self.model) and should_update_mrope:
                 print("Recomputing mrope")
                 should_calc_mrope_positions = True
@@ -1256,7 +1258,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     )
                 mm_embeds_req = new_embeds
                 self.requests[req_id].mrope_positions.copy_(new_mrope_positions)
-                #self.requests[req_id].mrope_position_delta = new_delta
 
                 setattr(self.requests[req_id], "_evs_mrope_taint_applied", True)
                 print("Replaced mm_embeds_req")
@@ -1270,12 +1271,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             mm_embeds.extend(mm_embeds_req)
 
-            if should_calc_mrope_positions:
-                self._calc_mrope_positions(scheduler_output)
-                total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-                self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
-                    self.mrope_positions_cpu[:, :total_num_scheduled_tokens],
-                    non_blocking=False)
+        if should_calc_mrope_positions:
+            print(f"Calling _calc_mrope_positions because {should_calc_mrope_positions=}")
+            self._calc_mrope_positions(scheduler_output)
+            total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+            self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
+                self.mrope_positions_cpu[:, :total_num_scheduled_tokens],
+                non_blocking=False)
 
         return mm_embeds
 
