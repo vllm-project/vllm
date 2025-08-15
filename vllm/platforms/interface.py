@@ -560,4 +560,4 @@ class Platform:
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
-    device_type = ""
+    device_type = "cpu"  # Default to CPU when platform cannot be detected
