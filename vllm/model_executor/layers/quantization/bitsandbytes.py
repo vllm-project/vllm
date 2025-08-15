@@ -497,12 +497,10 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
-
         if self.quant_config.load_in_8bit:
             w13, w2 = self._apply_8bit_dequant(layer)
         else:
             w13, w2 = self._apply_4bit_dequnt(layer)
-
         return fused_experts(
             hidden_states=x,
             w1=w13,
