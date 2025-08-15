@@ -22,7 +22,7 @@ from vllm.model_executor.custom_op import CustomOp
 # yapf: disable
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEParallelConfig, FusedMoEQuantConfig,
-    biased_moe_quant_config)
+    biased_moe_quant_config, FUSED_MOE_UNQUANTIZED_CONFIG)
 # yapf: enable
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat, FusedMoEModularKernel,
@@ -104,7 +104,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     @staticmethod
     def _maybe_make_prepare_finalize(
         moe: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: Optional[FusedMoEQuantConfig],
     ) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
@@ -115,6 +115,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             "Must be created in modelopt.py"
 
         if moe.use_pplx_kernels:
+            assert quant_config is not None
+
             hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(
                 moe.max_num_tokens,
                 moe.hidden_dim,
@@ -167,6 +169,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             )
 
         elif moe.use_deepep_ll_kernels:
+            assert quant_config is not None
             all_to_all_args = dict(
                 max_num_tokens_per_dp_rank=moe.max_num_tokens,
                 token_hidden_size=moe.hidden_dim,
@@ -176,8 +179,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 all2all_manager.world_size)
             handle = all2all_manager.get_handle(all_to_all_args)
 
-            # Note : We may want to use FP8 dispatch even otherwise just to
-            # reduce datamovement
+            # Note: We may want to use FP8 dispatch just to reduce
+            # data movement
             use_fp8_dispatch = (
                 quant_config.quant_dtype == current_platform.fp8_dtype()
                 and quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE)
@@ -201,7 +204,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     def init_prepare_finalize(self):
         assert self.moe is not None
-        assert self.moe_quant_config is not None
         prepare_finalize = self.maybe_make_prepare_finalize()
 
         if prepare_finalize is not None:
@@ -281,10 +283,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             return BatchedTritonExperts(
                 max_num_tokens=self.moe.max_num_tokens,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
+                quant_config=self.moe_quant_config,
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
-            return TritonExperts()
+            return TritonExperts(self.moe_quant_config)
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -438,7 +441,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 layer.w2_bias,
             )
         else:
-            return None
+            return FUSED_MOE_UNQUANTIZED_CONFIG
 
     def forward_cuda(
         self,
@@ -492,7 +495,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         elif self.fused_experts is not None:
-            if self.has_bias:
+            if self.moe.has_bias:
                 raise ValueError(
                     "FusedMoEModularKernel does not support bias.")
             return self.fused_experts(
@@ -860,7 +863,7 @@ class FusedMoE(CustomOp):
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
-        self.moe_quant_config = quant_method.get_fused_moe_quant_config(self)
+        self.quant_method.moe_quant_config = quant_method.get_fused_moe_quant_config(self)
 
         if self.enable_eplb:
             from vllm.model_executor.layers.quantization.fp8 import (

@@ -12,7 +12,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig, fp8_w8a8_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
-    compute_aligned_M, deepgemm_moe_permute, deepgemm_unpermute_and_reduce)
+    compute_aligned_M, deepgemm_moe_permute, deepgemm_unpermute_and_reduce,
+    deep_gemm_block_shape)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -24,14 +25,6 @@ from vllm.utils import has_deep_gemm, run_once
 from vllm.utils.deep_gemm import m_grouped_fp8_gemm_nt_contiguous
 
 logger = init_logger(__name__)
-
-
-@functools.cache
-def deep_gemm_block_shape() -> list[int]:
-    # Lazy import to avoid CUDA initialization problems.
-    import deep_gemm as dg
-    block = dg.get_m_alignment_for_contiguous_layout()
-    return [block, block]
 
 
 def _valid_deep_gemm_shape(M: int, N: int, K: int) -> bool:
