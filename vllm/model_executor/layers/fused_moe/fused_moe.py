@@ -727,8 +727,6 @@ def get_moe_configs(
     logger.warning(
         ("Using default MoE config. Performance might be sub-optimal! "
          "Config file not found at %s"), config_file_paths)
-    import traceback
-    traceback.print_stack()
     return None
 
 
