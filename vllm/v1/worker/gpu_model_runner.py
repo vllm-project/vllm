@@ -1246,12 +1246,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             for mm in mm_embeds_req:
                 print("  ", mm.shape)
 
-            # We are done with all mm_embeds for a given request
-            # Now it's time to recompute mrope
-            #should_update_mrope = not getattr(self.requests[req_id], "_evs_mrope_taint_applied", False)
-            #print(f"{should_update_mrope=} {req_id=}")
-
-            if supports_multimodal_pruning(self.model) and should_update_mrope:
+            if supports_multimodal_pruning(self.model):
                 print("Recomputing mrope")
                 should_calc_mrope_positions = True
                 mm_embeds_req, new_mrope_positions, new_delta = self.model.recompute_mrope_positions(
