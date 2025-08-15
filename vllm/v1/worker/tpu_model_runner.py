@@ -1529,60 +1529,66 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> None:
         # Profile with multimodal encoder & encoder cache.
         if self.supports_mm_inputs:
-            mm_budget = self.mm_budget
-            assert mm_budget is not None
-
-            # TODO: handle encoder-decoder models once we support them.
-            if (encoder_budget := mm_budget.get_encoder_budget()) > 0:
-                # NOTE: Currently model is profiled with a single non-text
-                # modality with the max possible input tokens even when
-                # it supports multiple.
-                (
-                    dummy_modality,
-                    max_tokens,
-                ) = mm_budget.get_modality_with_max_tokens()
-                (
-                    max_mm_items_per_prompt,
-                    max_mm_items_per_batch,
-                ) = mm_budget.get_max_items(dummy_modality, max_tokens)
-
+            if self.model_config.multimodal_config.skip_mm_profiling:
                 logger.info(
-                    "Encoder cache will be initialized with a budget of "
-                    "%s tokens, and profiled with %s %s items of the maximum "
-                    "feature size.",
-                    encoder_budget,
-                    max_mm_items_per_batch,
-                    dummy_modality,
-                )
+                    "Skipping memory profiling for multimodal encoder and "
+                    "encoder cache.")
+            else:
+                mm_budget = self.mm_budget
+                assert mm_budget is not None
 
-                # Create dummy batch of multimodal inputs.
-                batched_dummy_mm_inputs = self._get_mm_dummy_batch(
-                    dummy_modality,
-                    max_mm_items_per_batch,
-                )
+                # TODO: handle encoder-decoder models once we support them.
+                if (encoder_budget := mm_budget.get_encoder_budget()) > 0:
+                    # NOTE: Currently model is profiled with a single non-text
+                    # modality with the max possible input tokens even when
+                    # it supports multiple.
+                    (
+                        dummy_modality,
+                        max_tokens,
+                    ) = mm_budget.get_modality_with_max_tokens()
+                    (
+                        max_mm_items_per_prompt,
+                        max_mm_items_per_batch,
+                    ) = mm_budget.get_max_items(dummy_modality, max_tokens)
 
-                # Run multimodal encoder.
-                # Isolate encoder graph from post-processing to minimize
-                # impact of recompilation until it's fixed.
-                start = time.perf_counter()
-                xm.mark_step()
-                dummy_encoder_outputs = self.model.get_multimodal_embeddings(
-                    **batched_dummy_mm_inputs)
-                xm.mark_step()
-                xm.wait_device_ops()
-                end = time.perf_counter()
-                logger.info(
-                    "Multimodal Encoder profiling finished in in %.2f [secs].",
-                    end - start)
+                    logger.info(
+                        "Encoder cache will be initialized with a budget of "
+                        "%s tokens, and profiled with %s %s items of the "
+                        "maximum feature size.",
+                        encoder_budget,
+                        max_mm_items_per_batch,
+                        dummy_modality,
+                    )
 
-                sanity_check_mm_encoder_outputs(
-                    dummy_encoder_outputs,
-                    expected_num_items=max_mm_items_per_batch,
-                )
+                    # Create dummy batch of multimodal inputs.
+                    batched_dummy_mm_inputs = self._get_mm_dummy_batch(
+                        dummy_modality,
+                        max_mm_items_per_batch,
+                    )
 
-                # Cache the dummy encoder outputs.
-                self.encoder_cache["tmp"] = dict(
-                    enumerate(dummy_encoder_outputs))
+                    # Run multimodal encoder.
+                    # Isolate encoder graph from post-processing to minimize
+                    # impact of recompilation until it's fixed.
+                    start = time.perf_counter()
+                    xm.mark_step()
+                    dummy_encoder_outputs = \
+                        self.model.get_multimodal_embeddings(
+                        **batched_dummy_mm_inputs)
+                    xm.mark_step()
+                    xm.wait_device_ops()
+                    end = time.perf_counter()
+                    logger.info(
+                        "Multimodal Encoder profiling finished in %.2f [secs].",
+                        end - start)
+
+                    sanity_check_mm_encoder_outputs(
+                        dummy_encoder_outputs,
+                        expected_num_items=max_mm_items_per_batch,
+                    )
+
+                    # Cache the dummy encoder outputs.
+                    self.encoder_cache["tmp"] = dict(
+                        enumerate(dummy_encoder_outputs))
 
         # Trigger compilation for general shape.
         self._dummy_run(num_tokens, self.num_reqs_max_model_len,
