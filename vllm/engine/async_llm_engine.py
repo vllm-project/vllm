@@ -1059,6 +1059,10 @@ class AsyncLLMEngine(EngineClient):
         """Get the model configuration of the vLLM engine."""
         return self.engine.get_model_config()
 
+    async def get_total_kv_cache_tokens(self) -> int:
+        """Get the total number of KV cache tokens."""
+        return self.engine.get_total_kv_cache_tokens()
+
     async def get_parallel_config(self) -> ParallelConfig:
         """Get the parallel configuration of the vLLM engine."""
         return self.engine.get_parallel_config()

@@ -417,9 +417,16 @@ class LLMEngine:
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
         self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+
+        self.total_kv_cache_tokens = num_gpu_blocks * self.cache_config.block_size
+
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
+
+    def get_total_kv_cache_tokens(self) -> int:
+        """Returns the total number of KV cache tokens."""
+        return self.total_kv_cache_tokens
 
     @classmethod
     def _get_executor_cls(cls,
