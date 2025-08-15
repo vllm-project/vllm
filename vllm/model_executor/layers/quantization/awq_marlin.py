@@ -10,7 +10,8 @@ import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
+    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported,
+    UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
                                                set_weight_attrs)
@@ -24,7 +25,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
     check_marlin_supports_layer, check_moe_marlin_supports_layer,
     marlin_make_empty_g_idx, marlin_make_workspace_new,
-    marlin_moe_permute_scales, marlin_permute_scales,
+    marlin_moe_permute_scales, marlin_permute_bias, marlin_permute_scales,
     moe_awq_to_marlin_zero_points, verify_marlin_supported,
     verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -141,6 +142,9 @@ class AWQMarlinConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             from vllm.model_executor.layers.quantization.moe_wna16 import (
                 MoeWNA16Config)
+            if is_layer_skipped_awq(
+                    prefix, getattr(self, "modules_to_not_convert", [])):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
             if not check_moe_marlin_supports_layer(layer, self.group_size):
                 logger.warning_once(
                     f"Layer '{prefix}' is not supported by AWQMoeMarlin. "
@@ -298,6 +302,9 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         # Not-used
         layer.g_idx = marlin_make_empty_g_idx(device)
         layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
+
+        if hasattr(layer, "bias") and layer.bias is not None:
+            layer.bias.data = marlin_permute_bias(layer.bias)
 
     def apply(
         self,
@@ -465,6 +472,12 @@ class AWQMoEMethod(FusedMoEMethodBase):
             num_bits=self.quant_config.weight_bits)
         replace_parameter(layer, "w2_qzeros", marlin_w2_zp)
 
+        if hasattr(layer, "w13_bias") and layer.w13_bias is not None:
+            layer.w13_bias.data = marlin_permute_bias(layer.w13_bias)
+
+        if hasattr(layer, "w2_bias") and layer.w2_bias is not None:
+            layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -509,6 +522,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
             x,
             layer.w13_qweight,
             layer.w2_qweight,
+            getattr(layer, "w13_bias", None),
+            getattr(layer, "w2_bias", None),
             layer.w13_scales,
             layer.w2_scales,
             router_logits,

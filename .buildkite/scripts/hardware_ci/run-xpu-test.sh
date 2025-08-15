@@ -31,4 +31,13 @@ docker run \
     VLLM_USE_V1=1 python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager -tp 2 --distributed-executor-backend mp
     cd tests
     pytest -v -s v1/core
+    pytest -v -s v1/engine
+    pytest -v -s v1/sample --ignore=v1/sample/test_logprobs.py --ignore=v1/sample/test_logprobs_e2e.py
+    pytest -v -s v1/worker --ignore=v1/worker/test_gpu_model_runner.py
+    pytest -v -s v1/structured_output
+    pytest -v -s v1/spec_decode --ignore=v1/spec_decode/test_max_len.py --ignore=v1/spec_decode/test_eagle.py
+    pytest -v -s v1/kv_connector/unit --ignore=v1/kv_connector/unit/test_multi_connector.py --ignore=v1/kv_connector/unit/test_nixl_connector.py
+    pytest -v -s v1/test_serial_utils.py
+    pytest -v -s v1/test_utils.py
+    pytest -v -s v1/test_metrics_reader.py
 '

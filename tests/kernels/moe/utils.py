@@ -5,8 +5,7 @@ from typing import Optional
 import torch
 
 import vllm._custom_ops as ops
-from tests.kernels.quant_utils import (per_block_cast_to_fp8,
-                                       per_block_cast_to_int8)
+from tests.kernels.quant_utils import per_block_cast_to_int8
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize, BatchedTritonExperts, NaiveBatchedExperts)
@@ -15,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 from vllm.utils import round_up
+from vllm.utils.deep_gemm import per_block_cast_to_fp8
 
 
 def triton_moe(

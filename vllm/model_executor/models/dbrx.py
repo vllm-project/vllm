@@ -6,6 +6,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+from transformers import DbrxConfig
 
 from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
@@ -24,7 +25,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.dbrx import DbrxConfig
 
 from .interfaces import SupportsPP
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,

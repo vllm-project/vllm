@@ -39,8 +39,8 @@ async def test_basic_audio(foscolo):
             # TODO remove once language detection is implemented
             extra_body=dict(language="it"),
             temperature=0.0)
-        out = json.loads(translation)['text'].strip()
-        assert "Nor will I ever touch the sacred" in out
+        out = json.loads(translation)['text'].strip().lower()
+        assert "greek sea" in out
 
 
 @pytest.mark.asyncio
@@ -73,8 +73,9 @@ async def test_non_asr_model(foscolo):
         res = await client.audio.translations.create(model=model_name,
                                                      file=foscolo,
                                                      temperature=0.0)
-        assert res.code == 400 and not res.text
-        assert res.message == "The model does not support Translations API"
+        err = res.error
+        assert err["code"] == 400 and not res.text
+        assert err["message"] == "The model does not support Translations API"
 
 
 @pytest.mark.asyncio
@@ -168,5 +169,4 @@ async def test_long_audio_request(foscolo):
             response_format="text",
             temperature=0.0)
         out = json.loads(translation)['text'].strip().lower()
-        # TODO investigate higher model uncertainty in for longer translations.
-        assert out.count("nor will i ever") == 2
+        assert out.count("greek sea") == 2

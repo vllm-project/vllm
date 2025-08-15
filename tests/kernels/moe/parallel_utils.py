@@ -4,7 +4,6 @@
 DeepEP test utilities
 """
 import dataclasses
-import importlib
 import os
 import traceback
 from typing import Callable, Optional
@@ -15,10 +14,9 @@ from torch.multiprocessing import (
     spawn)  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import Concatenate, ParamSpec
 
-from vllm.utils import get_open_port
+from vllm.utils import get_open_port, has_deep_ep
 
-has_deep_ep = importlib.util.find_spec("deep_ep") is not None
-if has_deep_ep:
+if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
         DeepEPHTPrepareAndFinalize)
     from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501

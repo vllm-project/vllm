@@ -4,8 +4,8 @@
 from typing import Any, Callable, Optional, Union
 
 import torch
+from packaging import version
 
-from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -14,6 +14,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 
@@ -169,7 +170,8 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: BitsAndBytesConfig):
         try:
             import bitsandbytes
-            if bitsandbytes.__version__ < "0.46.1":
+            if version.parse(
+                    bitsandbytes.__version__) < version.parse("0.46.1"):
                 raise ImportError("bitsandbytes version is wrong. Please "
                                   "install bitsandbytes>=0.46.1.")
         except ImportError as err:
@@ -391,12 +393,11 @@ def _apply_bnb_4bit_fake(
 
 
 try:
-    direct_register_custom_op(
-        op_name="apply_bnb_4bit",
-        op_func=_apply_bnb_4bit,
-        mutates_args=["out"],
-        fake_impl=_apply_bnb_4bit_fake,
-    )
+    direct_register_custom_op(op_name="apply_bnb_4bit",
+                              op_func=_apply_bnb_4bit,
+                              mutates_args=["out"],
+                              fake_impl=_apply_bnb_4bit_fake,
+                              dispatch_key=current_platform.dispatch_key)
     apply_bnb_4bit = torch.ops.vllm.apply_bnb_4bit
 
 except AttributeError as error:
@@ -413,12 +414,13 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: BitsAndBytesConfig):
         try:
             import bitsandbytes
-            if bitsandbytes.__version__ < "0.45.3":
+            if version.parse(
+                    bitsandbytes.__version__) < version.parse("0.46.1"):
                 raise ImportError("bitsandbytes version is wrong. Please "
-                                  "install bitsandbytes>=0.45.3.")
+                                  "install bitsandbytes>=0.46.1.")
         except ImportError as err:
-            raise ImportError("Please install bitsandbytes>=0.45.3 via "
-                              "`pip install bitsandbytes>=0.45.3` to use "
+            raise ImportError("Please install bitsandbytes>=0.46.1 via "
+                              "`pip install bitsandbytes>=0.46.1` to use "
                               "bitsandbytes quantizer.") from err
         self.topk_indices_dtype = None
         self.quant_config = quant_config
@@ -467,6 +469,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe import fused_experts
 
         if enable_eplb:
             raise NotImplementedError(

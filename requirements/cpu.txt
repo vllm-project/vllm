@@ -10,7 +10,8 @@ setuptools>=77.0.3,<80.0.0
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.6.0+cpu; platform_machine == "x86_64" # torch>2.6.0+cpu has performance regression on x86 platform, see https://github.com/pytorch/pytorch/pull/151218
 torch==2.7.0; platform_system == "Darwin"
-torch==2.7.0; platform_machine == "ppc64le" or platform_machine == "aarch64"
+torch==2.7.0; platform_machine == "ppc64le"
+torch==2.6.0; platform_machine == "aarch64" # for arm64 CPUs, torch 2.7.0 has a issue: https://github.com/vllm-project/vllm/issues/17960
 
 # required for the image processor of minicpm-o-2_6, this must be updated alongside torch
 torchaudio; platform_machine != "ppc64le" and platform_machine != "s390x"
@@ -24,6 +25,7 @@ datasets # for benchmark scripts
 # Intel Extension for PyTorch, only for x86_64 CPUs
 intel-openmp==2024.2.1; platform_machine == "x86_64"
 intel_extension_for_pytorch==2.6.0; platform_machine == "x86_64" # torch>2.6.0+cpu has performance regression on x86 platform, see https://github.com/pytorch/pytorch/pull/151218
-py-libnuma; platform_system != "Darwin"
-psutil; platform_system != "Darwin"
 triton==3.2.0; platform_machine == "x86_64" # Triton is required for torch 2.6+cpu, as it is imported in torch.compile.
+
+# Use this to gather CPU info and optimize based on ARM Neoverse cores
+py-cpuinfo; platform_machine == "aarch64"

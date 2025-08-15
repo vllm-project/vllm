@@ -7,9 +7,11 @@ from typing import Optional, cast
 
 import numpy as np
 import torch
+from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.inputs import (MultiModalKwargs, MultiModalKwargsItem,
+                                    PlaceholderRange)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
@@ -29,7 +31,7 @@ class CachedRequestState:
 
     req_id: str
     prompt_token_ids: list[int]
-    mm_inputs: list[MultiModalKwargs]
+    mm_kwargs: list[MultiModalKwargsItem]
     mm_positions: list[PlaceholderRange]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
@@ -51,6 +53,13 @@ class CachedRequestState:
     def num_tokens(self) -> int:
         return self.num_prompt_tokens + len(self.output_token_ids)
 
+    # Temporary back-compatibility for plugins that define model runner
+    @property
+    @deprecated("`mm_inputs` is superseded by `mm_kwargs` and will be "
+                "removed in v0.13. Please use `mm_kwargs` instead.")
+    def mm_inputs(self) -> list[MultiModalKwargs]:
+        return [MultiModalKwargs.from_items([item]) for item in self.mm_kwargs]
+
     def get_token_id(self, idx: int) -> int:
         if idx < self.num_prompt_tokens:
             return self.prompt_token_ids[idx]
@@ -70,7 +79,6 @@ class InputBatch:
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
         is_spec_decode: bool = False,
-        logits_processing_needs_token_ids: bool = False,
     ):
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
@@ -79,8 +87,6 @@ class InputBatch:
         self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
-        self.logits_processing_needs_token_ids = (
-            logits_processing_needs_token_ids)
 
         self._req_ids: list[Optional[str]] = []
         self.req_id_to_index: dict[str, int] = {}
@@ -233,6 +239,9 @@ class InputBatch:
         # req_index -> bad_words_token_ids
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
 
+        self.logits_processing_needs_token_ids = np.zeros(max_num_reqs,
+                                                          dtype=bool)
+
         self.req_output_token_ids: list[Optional[list[int]]] = []
 
         # This is updated each time the batch constituents change.
@@ -337,7 +346,9 @@ class InputBatch:
                 self.generators[req_index] = request.generator
 
             if sampling_params.logprobs is not None:
-                self.num_logprobs[req_id] = sampling_params.logprobs
+                self.num_logprobs[req_id] = (self.vocab_size
+                                             if sampling_params.logprobs == -1
+                                             else sampling_params.logprobs)
             if sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[
                     req_id] = sampling_params.prompt_logprobs
@@ -365,9 +376,12 @@ class InputBatch:
             if sampling_params.bad_words_token_ids:
                 self.bad_words_token_ids[
                     req_index] = sampling_params.bad_words_token_ids
+        elif pooling_params := request.pooling_params:
+            self.pooling_params[req_id] = pooling_params
+            self.logits_processing_needs_token_ids[req_index] = (
+                pooling_params.requires_token_ids)
         else:
-            assert request.pooling_params is not None
-            self.pooling_params[req_id] = request.pooling_params
+            raise NotImplementedError(request)
 
         # Add request lora ID
         if request.lora_request:
@@ -386,7 +400,7 @@ class InputBatch:
 
     def remove_request(self, req_id: str) -> Optional[int]:
         """This method must always be followed by a call to condense().
-        
+
         Args:
           req_id: request to remove
 
@@ -587,7 +601,7 @@ class InputBatch:
 
     def refresh_metadata(self):
         """Apply batch updates, reset input batch at end of step
-        
+
         * Apply batch add/remove/permute to logits procs' states
         * If batch state is modified, update sampling metadata
         """
@@ -620,9 +634,9 @@ class InputBatch:
             copy_slice(self.repetition_penalties_cpu_tensor,
                        self.repetition_penalties, num_reqs)
 
-        needs_prompt_token_ids = (not self.no_penalties or
-                                  (self.num_reqs > 0
-                                   and self.logits_processing_needs_token_ids))
+        needs_prompt_token_ids = (
+            not self.no_penalties
+            or self.logits_processing_needs_token_ids[:num_reqs].any())
         if needs_prompt_token_ids:
             # The prompt tokens are used only for applying penalties or
             # step pooling during the sampling/pooling process.

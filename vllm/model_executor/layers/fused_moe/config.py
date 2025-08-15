@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.utils import cdiv
+from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
 logger = init_logger(__name__)
 
@@ -188,72 +189,84 @@ class FusedMoEParallelConfig:
         return (self.use_all2all_kernels
                 and envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency")
 
+    @property
+    def use_flashinfer_cutlass_kernels(self):
+        return (envs.VLLM_USE_FLASHINFER_MOE_FP4
+                and has_flashinfer_cutlass_fused_moe()
+                and envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput")
+
     @staticmethod
     def make(tp_size_: int, dp_size_: int,
              vllm_parallel_config: ParallelConfig) -> "FusedMoEParallelConfig":
         """
-        Determine MoE parallel configuration. Based on the input tp_size_,
-        dp_size_, ep_size_ and vllm's parallel config, determine what
+        Determine MoE parallel configuration. Based on the input `tp_size_`,
+        `dp_size_` and vllm's parallel config, determine what
         level's of parallelism to use in the fused moe layer.
 
         Args:
-            tp_size_ (int): tp_size passed into the FusedMoE constructor.
-            dp_size_ (int): dp_size passed into the FusedMoE constructor.
-            ep_size_ (int): ep_size passed into the FusedMoE constructor.
-            vllm_parallel_config (ParallelConfig): vllm's parallel config
-            object.
+            tp_size_ (int): `tp_size` passed into the FusedMoE constructor.
+            dp_size_ (int): `dp_size` passed into the FusedMoE constructor.
+            vllm_parallel_config (ParallelConfig): vLLM's parallel config
+                object which contains the `enable_expert_parallel` flag.
 
         Examples:
-        When there is no parallelism requested, i.e. tp_size_ = dp_size_ = 1,
-        we simply return the sizes unaltered and the ranks set to 0.
+            When there is no parallelism requested,
+            i.e. `tp_size_` = `dp_size_` = 1, we simply return the sizes
+            unaltered and the ranks set to 0.
 
-        Expert Parallelism is considered only when either dp_size_ or tp_size_
-        is non trivial.
+            Expert Parallelism is considered only when either `dp_size_` or
+            `tp_size_` is non trivial.
 
-        When TP = 2, DP = 1 and EP = False, the configuration on different
-        devices,
+            When TP = 2, DP = 1 and EP = False, the configuration on different
+            devices:
+
             - device 0 : TP = {2, 0} DP = {1, 0} EP = {1, 0} //
-                         legend : {size, rank}
+                legend : {size, rank}
             - device 1 : TP = {2, 1} DP = {1, 0} EP = {1, 0}
             - Comment : Tensors are sharded across 2 devices.
 
-        When TP = 1, DP = 2 and EP = False, the configuration on different
-        devices,
+            When TP = 1, DP = 2 and EP = False, the configuration on different
+                devices:
+
             - device 0 : TP = {2, 0} DP = {2, 0} EP = {1, 0}
             - device 1 : TP = {2, 1} DP = {2, 1} EP = {1, 0}
             - Comment: There are 2 engine instances and the tensors are sharded
-              across 2 decvices.
+                across 2 decvices.
 
-        When TP = 2, DP = 2 and EP = False, the configuration on different
-        devices,
+            When TP = 2, DP = 2 and EP = False, the configuration on different
+                devices:
+
             - device 0: TP = {4, 0} DP = {2, 0} EP = {1, 0}
             - device 1: TP = {4, 1} DP = {2, 0} EP = {1, 0}
             - device 2: TP = {4, 2} DP = {2, 1} EP = {1, 0}
             - device 3: TP = {4, 3} DP = {2, 1} EP = {1, 0}
             - Comment: There are 2 engine instances and the tensors are sharded
-              across 4 devices.
+                across 4 devices.
 
-        When, TP = 2, DP = 1 and EP = True, the configuration on different
-        devices,
+            When, TP = 2, DP = 1 and EP = True, the configuration on different
+                devices:
+
             - device 0: TP = {1, 0} DP = {1, 0} EP = {2, 0}
             - device 1: TP = {1, 0} DP = {1, 0} EP = {2, 1}
             - Comment: The experts are split between the 2 devices.
 
-        When, TP = 1, DP = 2 and EP = True, the configuration on different
-        devices,
+            When, TP = 1, DP = 2 and EP = True, the configuration on different
+                devices:
+
             - device 0: TP = {1, 0} DP = {2, 0} EP = {2, 0}
             - device 1: TP = {1, 0} DP = {2, 1} EP = {2, 1}
             - Comment: There are 2 engine instances and the experts are split
-              between the 2 devices.
+                between the 2 devices.
 
-        When TP = 2, DP = 2 and EP = True, the configuration on different
-        devices,
+            When TP = 2, DP = 2 and EP = True, the configuration on different
+                devices:
+
             - device 0: TP = {1, 0} DP = {2, 0} EP = {4, 0}
             - device 1: TP = {1, 0} DP = {2, 0} EP = {4, 1}
             - device 2: TP = {1, 0} DP = {2, 1} EP = {4, 2}
             - device 3: TP = {1, 0} DP = {2, 1} EP = {4, 3}
             - Comment: There are 2 engine instances and the experts are split
-              between the 4 devices.
+                between the 4 devices.
         """
 
         def flatten_tp_across_dp(dp_rank: int):
@@ -311,10 +324,12 @@ class FusedMoEConfig:
 
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
 
+    has_bias: bool = False
+
     def __post_init__(self):
         if self.dp_size > 1:
-            logger.debug("Using FusedMoEConfig::max_num_tokens=%d",
-                         self.max_num_tokens)
+            logger.debug_once("Using FusedMoEConfig::max_num_tokens=%d",
+                              self.max_num_tokens)
 
         assert self.max_num_tokens > 0
 
@@ -386,6 +401,10 @@ class FusedMoEConfig:
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
 
+    @property
+    def use_flashinfer_cutlass_kernels(self):
+        return self.moe_parallel_config.use_flashinfer_cutlass_kernels
+
     @staticmethod
     def make(
         num_experts: int,
@@ -396,7 +415,8 @@ class FusedMoEConfig:
         in_dtype: torch.dtype,
         max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE,
         quant_config: Optional[Union[FusedMoEQuantConfig,
-                                     QuantizationConfig]] = None
+                                     QuantizationConfig]] = None,
+        has_bias: bool = False,
     ) -> "FusedMoEConfig":
 
         _quant_config: Optional[FusedMoEQuantConfig] = None
@@ -429,6 +449,12 @@ class FusedMoEConfig:
             if quant_dtype is None and isinstance(quant_config, Fp8Config):
                 quant_dtype = torch.float8_e4m3fn
 
+            from vllm.model_executor.layers.quantization.modelopt import (
+                ModelOptNvFp4Config)
+            if quant_dtype is None and isinstance(quant_config,
+                                                  ModelOptNvFp4Config):
+                quant_dtype = torch.uint8
+
             if weight_quant is not None:
                 per_out_ch_quant = (
                     weight_quant.strategy == QuantizationStrategy.CHANNEL)
@@ -442,10 +468,11 @@ class FusedMoEConfig:
                 )
             else:
                 _quant_config = FusedMoEQuantConfig()
-                logger.warning_once("MoE DP setup unable to determine "
-                                    "quantization scheme or unsupported "
-                                    "quantization type. This model will "
-                                    "not run with DP enabled.")
+                if moe_parallel_config.dp_size > 1:
+                    logger.warning_once("MoE DP setup unable to determine "
+                                        "quantization scheme or unsupported "
+                                        "quantization type. This model will "
+                                        "not run with DP enabled.")
         else:
             _quant_config = quant_config
 
@@ -458,4 +485,5 @@ class FusedMoEConfig:
             in_dtype=in_dtype,
             quant_config=_quant_config,
             max_num_tokens=max_num_tokens,
+            has_bias=has_bias,
         )

@@ -17,6 +17,11 @@ from vllm.assets.audio import AudioAsset
 
 from ...utils import RemoteOpenAIServer
 
+MISTRAL_FORMAT_ARGS = [
+    "--tokenizer_mode", "mistral", "--config_format", "mistral",
+    "--load_format", "mistral"
+]
+
 
 @pytest.fixture
 def mary_had_lamb():
@@ -33,9 +38,15 @@ def winning_call():
 
 
 @pytest.mark.asyncio
-async def test_basic_audio(mary_had_lamb):
-    model_name = "openai/whisper-large-v3-turbo"
+@pytest.mark.parametrize(
+    "model_name",
+    ["openai/whisper-large-v3-turbo", "mistralai/Voxtral-Mini-3B-2507"])
+async def test_basic_audio(mary_had_lamb, model_name):
     server_args = ["--enforce-eager"]
+
+    if model_name.startswith("mistralai"):
+        server_args += MISTRAL_FORMAT_ARGS
+
     # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
@@ -65,8 +76,8 @@ async def test_bad_requests(mary_had_lamb):
 
 
 @pytest.mark.asyncio
-async def test_long_audio_request(mary_had_lamb):
-    model_name = "openai/whisper-large-v3-turbo"
+@pytest.mark.parametrize("model_name", ["openai/whisper-large-v3-turbo"])
+async def test_long_audio_request(mary_had_lamb, model_name):
     server_args = ["--enforce-eager"]
 
     mary_had_lamb.seek(0)
@@ -87,7 +98,8 @@ async def test_long_audio_request(mary_had_lamb):
             response_format="text",
             temperature=0.0)
         out = json.loads(transcription)['text']
-        assert out.count("Mary had a little lamb") == 10
+        counts = out.count("Mary had a little lamb")
+        assert counts == 10, counts
 
 
 @pytest.mark.asyncio
@@ -101,8 +113,10 @@ async def test_non_asr_model(winning_call):
                                                        file=winning_call,
                                                        language="en",
                                                        temperature=0.0)
-        assert res.code == 400 and not res.text
-        assert res.message == "The model does not support Transcriptions API"
+        err = res.error
+        assert err["code"] == 400 and not res.text
+        assert err[
+            "message"] == "The model does not support Transcriptions API"
 
 
 @pytest.mark.asyncio
@@ -118,12 +132,15 @@ async def test_completion_endpoints():
                 "role": "system",
                 "content": "You are a helpful assistant."
             }])
-        assert res.code == 400
-        assert res.message == "The model does not support Chat Completions API"
+        err = res.error
+        assert err["code"] == 400
+        assert err[
+            "message"] == "The model does not support Chat Completions API"
 
         res = await client.completions.create(model=model_name, prompt="Hello")
-        assert res.code == 400
-        assert res.message == "The model does not support Completions API"
+        err = res.error
+        assert err["code"] == 400
+        assert err["message"] == "The model does not support Completions API"
 
 
 @pytest.mark.asyncio
@@ -154,7 +171,8 @@ async def test_streaming_response(winning_call):
                 file=winning_call,
                 language="en",
                 temperature=0.0,
-                extra_body=dict(stream=True))
+                extra_body=dict(stream=True),
+                timeout=30)
             # Reconstruct from chunks and validate
             async for chunk in res:
                 # just a chunk
@@ -184,7 +202,8 @@ async def test_stream_options(winning_call):
                 temperature=0.0,
                 extra_body=dict(stream=True,
                                 stream_include_usage=True,
-                                stream_continuous_usage_stats=True))
+                                stream_continuous_usage_stats=True),
+                timeout=30)
             final = False
             continuous = True
             async for chunk in res:

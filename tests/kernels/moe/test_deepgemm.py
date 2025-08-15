@@ -13,16 +13,12 @@ import torch
 
 # vLLM fused-expert reference (Triton fallback + DeepGEMM option)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import (calc_diff, per_block_cast_to_fp8,
-                                  per_token_group_cast_to_fp8)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8)
+from vllm.utils.deep_gemm import (calc_diff, is_deep_gemm_supported,
+                                  per_block_cast_to_fp8)
 
 BLOCK_SIZE = [128, 128]
-
-requires_deep_gemm = pytest.mark.skipif(
-    not has_deep_gemm(),
-    reason="Requires deep_gemm kernels",
-)
 
 
 def make_block_quant_fp8_weights(
@@ -68,8 +64,12 @@ def make_block_quant_fp8_weights(
                        dtype=torch.float32)
 
     for i in range(e):
-        w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i])
-        w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i])
+        w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i],
+                                               block_size=block_size,
+                                               use_ue8m0=True)
+        w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i],
+                                               block_size=block_size,
+                                               use_ue8m0=True)
 
     return w1, w2, w1_s, w2_s
 
@@ -81,7 +81,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
     """
     tokens_bf16 = torch.randn(
         m, k, device="cuda", dtype=torch.bfloat16).clamp_min_(-1).clamp_max_(1)
-    _, a1_scale = per_token_group_cast_to_fp8(tokens_bf16, block_size[1])
+    _, a1_scale = per_token_group_quant_fp8(tokens_bf16, block_size[1])
 
     # expert weight tensors
     w1, w2, w1_s, w2_s = make_block_quant_fp8_weights(num_experts, n, k,
@@ -94,7 +94,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
     topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1)
     topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
 
-    # triton referrence
+    # triton reference
     out_triton = fused_experts(
         hidden_states=tokens_bf16,
         w1=w1,
@@ -147,7 +147,8 @@ NUM_EXPERTS = [32]
 @pytest.mark.parametrize("mnk", MNKs)
 @pytest.mark.parametrize("topk", TOPKS)
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
-@requires_deep_gemm
+@pytest.mark.skipif(not is_deep_gemm_supported(),
+                    reason="Requires deep_gemm kernels")
 def test_deepgemm_vs_triton(mnk, topk, num_experts, monkeypatch):
 
     with monkeypatch.context() as m:

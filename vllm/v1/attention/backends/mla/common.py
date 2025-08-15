@@ -190,10 +190,11 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar, Union
+from typing import ClassVar, Generic, Optional, TypeVar, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
@@ -201,18 +202,20 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
 from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import get_flash_attn_version
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
+from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
                                               get_per_layer_parameters,
-                                              infer_global_hyperparameters)
+                                              infer_global_hyperparameters,
+                                              split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.block_table import BlockTable
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -225,16 +228,15 @@ except ImportError:
 
 try:
     from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
+    from flashinfer.prefill import (  # noqa: F401
+        cudnn_batch_prefill_with_kv_cache)
     flashinfer_available = True
 except ImportError:
     flashinfer_available = False
 
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-
 logger = init_logger(__name__)
+
+CUDNN_WORKSPACE_SIZE = 12800
 
 
 class MLACommonBackend(AttentionBackend):
@@ -261,6 +263,10 @@ class MLACommonBackend(AttentionBackend):
         head_size: int,
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -290,6 +296,7 @@ class MLACommonPrefillMetadata:
         starts: torch.Tensor
         seq_tot: list[int]
         max_seq_lens: list[int]
+        seq_lens: torch.Tensor
         workspace: torch.Tensor
 
     block_table: torch.Tensor
@@ -303,6 +310,17 @@ class FlashInferPrefillMetadata(MLACommonPrefillMetadata):
     prefill_main: Optional['BatchPrefillWithRaggedKVCacheWrapper'] = None
     prefill_chunks: list['BatchPrefillWithRaggedKVCacheWrapper'] = field(
         default_factory=list)
+
+
+@dataclass
+class CudnnPrefillMetadata(MLACommonPrefillMetadata):
+
+    class ChunkedContextMetadata(
+            MLACommonPrefillMetadata.ChunkedContextMetadata):
+        seq_lens: torch.Tensor
+
+    query_seq_lens: Optional[torch.Tensor] = None
+    cudnn_workspace: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -329,6 +347,9 @@ class MLACommonMetadata(Generic[D]):
     # |-------------------- seq_len ---------------------|
     #                                   |-- query_len ---|
 
+    num_reqs: int
+    max_query_len: int
+
     num_actual_tokens: int  # Number of tokens excluding padding.
     query_start_loc: torch.Tensor
     slot_mapping: torch.Tensor
@@ -344,7 +365,8 @@ class MLACommonMetadata(Generic[D]):
 
     decode: Optional[D] = None
     prefill: Optional[Union[MLACommonPrefillMetadata,
-                            FlashInferPrefillMetadata]] = None
+                            FlashInferPrefillMetadata,
+                            CudnnPrefillMetadata]] = None
 
     def __post_init__(self):
         if self.head_dim is not None:
@@ -355,15 +377,20 @@ M = TypeVar("M", bound=MLACommonMetadata)
 
 
 def use_flashinfer_prefill() -> bool:
-    if flashinfer_available:
-        # For blackwell default to flashinfer prefill if its available since
-        #  its faster than FA2.
-        return current_platform.has_device_capability(100)
-    return False
+    # For blackwell default to flashinfer prefill if its available since
+    # it is faster than FA2.
+    return (flashinfer_available and not envs.VLLM_USE_CUDNN_PREFILL
+            and current_platform.is_device_capability(100))
+
+
+def use_cudnn_prefill() -> bool:
+    return (flashinfer_available and envs.VLLM_USE_CUDNN_PREFILL
+            and current_platform.is_device_capability(100)
+            and has_nvidia_artifactory())
 
 
 # Currently 394MB, this can be tuned based on GEMM sizes used.
-# Choosen to be the same as sglang:
+# Chosen to be the same as sglang:
 #  https://github.com/sgl-project/sglang/blob/766392c6bda2558b61ce6d1c1bfd8081a549e1f1/python/sglang/global_config.py#L37
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 394 * 1024 * 1024
 
@@ -373,24 +400,27 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+    reorder_batch_threshold: ClassVar[int] = 1
 
     def __init__(self,
-                 runner: "GPUModelRunner",
                  kv_cache_spec: AttentionSpec,
-                 block_table: BlockTable,
+                 layer_names: list[str],
+                 vllm_config: VllmConfig,
+                 device: torch.device,
                  metadata_cls: Optional[type[M]] = None):
         self.metadata_cls = metadata_cls \
             if metadata_cls is not None else MLACommonMetadata
-        self.runner = runner
-        scheduler_config = runner.scheduler_config
-        model_config = runner.model_config
-        cache_config = runner.cache_config
-        self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
-        self.num_heads = model_config.get_num_attention_heads(
-            runner.parallel_config)
-        self.mla_dims = get_mla_dims(model_config)
-        self.aot_schedule = current_platform.is_cuda()
         self.kv_cache_spec = kv_cache_spec
+        self.device = device
+        scheduler_config = vllm_config.scheduler_config
+        self.model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+        parallel_config = vllm_config.parallel_config
+        self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
+        self.num_heads = self.model_config.get_num_attention_heads(
+            parallel_config)
+        self.mla_dims = get_mla_dims(self.model_config)
+        self.aot_schedule = current_platform.is_cuda()
 
         # Dont try to access the runner on AMD
         if self.aot_schedule:
@@ -401,7 +431,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 # Max sure there is enough for 8 full length request or at least
                 # 4 pages of cache per request
                 max(
-                    8 * model_config.max_model_len, 4 *
+                    8 * self.model_config.max_model_len, 4 *
                     scheduler_config.max_num_seqs * cache_config.block_size),
                 # For long-context models try not to over-allocate limiting
                 # kv-cache space, limiting it to 64k tokens,
@@ -416,21 +446,23 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 scheduler_config.max_num_seqs * cache_config.block_size
             self.chunked_prefill_workspace = torch.empty(
                 (self.chunked_prefill_workspace_size,
-                 model_config.get_head_size()),
-                dtype=model_config.dtype,
-                device=runner.device,
+                 self.model_config.get_head_size()),
+                dtype=self.model_config.dtype,
+                device=device,
             )
-        self.block_table = block_table
 
+        self._use_cudnn_prefill = use_cudnn_prefill()
         self._use_fi_prefill = use_flashinfer_prefill()
-        self.prefill_metadata_cls = FlashInferPrefillMetadata \
-            if self._use_fi_prefill else MLACommonPrefillMetadata
+        self.prefill_metadata_cls = (
+            FlashInferPrefillMetadata
+            if self._use_fi_prefill else CudnnPrefillMetadata
+            if self._use_cudnn_prefill else MLACommonPrefillMetadata)
 
         if self._use_fi_prefill:
             self._workspace_buffer = torch.empty(
                 FLASHINFER_WORKSPACE_BUFFER_SIZE,
                 dtype=torch.uint8,
-                device=runner.device)
+                device=device)
 
             self._fi_prefill_main: Optional[
                 BatchPrefillWithRaggedKVCacheWrapper] = None
@@ -438,7 +470,15 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 BatchPrefillWithRaggedKVCacheWrapper] = []
 
             self._global_hyperparameters = infer_global_hyperparameters(
-                get_per_layer_parameters(runner.vllm_config, MLACommonImpl))
+                get_per_layer_parameters(vllm_config, layer_names,
+                                         MLACommonImpl))
+
+        if self._use_cudnn_prefill:
+            self.cudnn_workspace = torch.empty(
+                CUDNN_WORKSPACE_SIZE * scheduler_config.max_num_seqs,
+                dtype=torch.int8,
+                device=device,
+            )
 
     def _build_fi_prefill_wrappers(self, prefill: FlashInferPrefillMetadata):
         qo_indptr = prefill.query_start_loc
@@ -463,7 +503,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             assert num_chunks <= len(self._fi_prefill_chunks)
 
         # In MLA, the non-latent num_qo_heads == num_kv_heads
-        num_qo_heads = self.runner.num_query_heads
+        num_qo_heads = self.num_heads
         num_kv_heads = num_qo_heads
 
         # Sanity: Verify that num_kv_heads == 1 since it is latent space
@@ -489,7 +529,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             sm_scale=self._global_hyperparameters.sm_scale,
             window_left=self._global_hyperparameters.window_left,
             logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
-            q_data_type=self.runner.dtype,
+            q_data_type=self.model_config.dtype,
             kv_data_type=self.kv_cache_spec.dtype,
         )
 
@@ -510,72 +550,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     window_left=self._global_hyperparameters.window_left,
                     logits_soft_cap=self._global_hyperparameters.
                     logits_soft_cap,
-                    q_data_type=self.runner.dtype,
+                    q_data_type=self.model_config.dtype,
                     kv_data_type=self.kv_cache_spec.dtype,
                 )
 
         prefill.prefill_main = self._fi_prefill_main
         prefill.prefill_chunks = self._fi_prefill_chunks
-
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        # We now want to reorder the batch so that the "decode" requests are and
-        # the front and the "prefill" requests are at the using the least amount
-        # swaps possible. (NOTE for now we loosely use "decode" to mean requests
-        # where attention is likely memory-bound and "prefill" to mean requests
-        # where attention is likely compute-bound, TODO(lucas): figure out a
-        # better naming here)
-        decodes = []
-        prefills = []
-        num_decode_tokens = 0
-        num_prefill_tokens = 0
-
-        for i, req_id in enumerate(input_batch.req_ids):
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            # for now treat 1 scheduled token as "decode" even if its not,
-            # we should update this to something like < 8 in the future but
-            # currently the TritonMLA._forward_decode only supports
-            # num_tokens = 1
-            if num_tokens == 1:
-                decodes.append(i)
-                num_decode_tokens += num_tokens
-            else:
-                prefills.append(i)
-                num_prefill_tokens += num_tokens
-
-        # We hope that this is fairly minimal since decodes
-        # should be around for a number of iterations so hopefully they are
-        # relatively stationary (and new request are generally appended to the
-        # persistent batch so already should be at the back)
-        # To achieve this we loop over the decodes in descending order and
-        # the prefills in ascending order. We swap decodes from the  "back"
-        # i.e. past where the last decode should be in the reodorered with
-        # prefills from the front of the batch.
-        # `decodes` and `prefills` are already in ascending order just based on
-        # the above loop
-        num_decodes = len(decodes)
-        num_prefills = len(prefills)
-        modified_batch = False
-
-        for i in range(1, min(num_decodes, num_prefills) + 1):
-            # If the decode is at the "back" of the batch, i, we can swap it
-            # with the prefill closest to the front of the batch
-            decode_idx = decodes[num_decodes - i]
-            if decode_idx < num_decodes:
-                break
-
-            input_batch.swap_states(prefills[i - 1], decode_idx)
-            modified_batch = True
-
-        # Save for next `build` call
-        # TODO(lucas): this is a bit of a hack, we should probably have a
-        # better way of doing this
-        self._num_decodes = num_decodes
-        self._num_prefills = num_prefills
-        self._num_decode_tokens = num_decode_tokens
-        self._num_prefill_tokens = num_prefill_tokens
-
-        return modified_batch
 
     def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor):
@@ -595,51 +575,52 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             "MLA only supports decode-only full CUDAGraph capture. " \
             "Make sure all cudagraph capture sizes <= max_num_seq."
 
-        m.max_query_len = 1  # decode-only
+        assert m.max_query_len == 1  # decode-only
 
-        # Update state usually set in reorder_batch.
-        self._num_decodes = m.num_reqs
-        self._num_decode_tokens = m.num_actual_tokens
-        self._num_prefills = 0
-        self._num_prefill_tokens = 0
         return self.build(0, m)
 
-    def build(self, common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata) -> M:
+    def build(self,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
+              fast_build: bool = False) -> M:
         num_reqs = common_attn_metadata.num_reqs
-        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
-
-        assert self._num_decodes + self._num_prefills == num_reqs
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
         # it blocks on all previous kernels.
-        device = self.runner.device
-        block_table = self.block_table
-        block_table_tensor = block_table.get_device_tensor()[:num_reqs]
-        block_table.slot_mapping[:num_actual_tokens].copy_(
-            block_table.slot_mapping_cpu[:num_actual_tokens],
-            non_blocking=True)
-        block_table.slot_mapping[num_actual_tokens:].fill_(-1)
-        slot_mapping = block_table.slot_mapping[:num_actual_tokens]
+        device = self.device
+        block_table_tensor = common_attn_metadata.block_table_tensor
+        slot_mapping = common_attn_metadata.slot_mapping
 
         query_start_loc = common_attn_metadata.query_start_loc
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
 
-        prefill_metadata = None
-        if self._num_prefills > 0:
-            reqs_start = self._num_decodes  # prefill_start
+        query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
-            context_lens_cpu = self.runner.input_batch.\
-                num_computed_tokens_cpu_tensor[reqs_start:num_reqs]
+        num_computed_tokens_cpu = (common_attn_metadata.seq_lens_cpu -
+                                   query_seq_lens_cpu)
+
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
+            split_decodes_and_prefills(common_attn_metadata)
+
+        assert num_decodes + num_prefills == num_reqs
+        assert num_decode_tokens + num_prefill_tokens == num_tokens
+
+        prefill_metadata = None
+        if num_prefills > 0:
+            reqs_start = num_decodes  # prefill_start
+
+            context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
             max_context_len_cpu = context_lens_cpu.max().item()
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
             prefill_query_start_loc = query_start_loc[
                 reqs_start:] - query_start_loc[reqs_start]
 
             chunked_context_metadata = None
-            if self.chunked_prefill_enabled and self._num_prefills > 0 \
+            if self.chunked_prefill_enabled and num_prefills > 0 \
                 and max_context_len_cpu > 0:
                 # NOTE: it is recommend you read the `Chunked Prefill` section
                 # in the comment at the top of the file before trying to
@@ -670,14 +651,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 # of `to_list`.
                 chunk_starts = \
                     torch.arange(num_chunks, dtype=torch.int32) \
-                    .unsqueeze(1).expand(-1, self._num_prefills) \
+                    .unsqueeze(1).expand(-1, num_prefills) \
                     * max_context_chunk
                 chunk_ends = torch.min(context_lens_cpu.unsqueeze(0),
                                        chunk_starts + max_context_chunk)
                 chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
 
                 cu_seq_lens_cpu = torch.zeros(num_chunks,
-                                              self._num_prefills + 1,
+                                              num_prefills + 1,
                                               dtype=torch.int32,
                                               pin_memory=True)
                 torch.cumsum(chunk_seq_lens,
@@ -685,14 +666,23 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                              out=cu_seq_lens_cpu[:, 1:],
                              dtype=torch.int32)
 
+                chunked_context_metadata_cls = \
+                    CudnnPrefillMetadata.ChunkedContextMetadata \
+                    if self._use_cudnn_prefill else \
+                        MLACommonPrefillMetadata.ChunkedContextMetadata
+
                 chunked_context_metadata = \
-                    MLACommonPrefillMetadata.ChunkedContextMetadata(
+                    chunked_context_metadata_cls(
                     cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
                     starts=chunk_starts.to(device, non_blocking=True),
                     seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                     max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
+                    seq_lens=chunk_seq_lens,
                     workspace=self.chunked_prefill_workspace,
                 )
+
+                if self._use_cudnn_prefill:
+                    chunked_context_metadata.seq_lens = chunk_seq_lens
 
                 assert max(chunked_context_metadata.max_seq_lens) <= \
                     self.chunked_prefill_workspace_size
@@ -704,35 +694,39 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 chunked_context=chunked_context_metadata,
             )
 
+            if self._use_cudnn_prefill:
+                assert isinstance(prefill_metadata, CudnnPrefillMetadata)
+                prefill_metadata.query_seq_lens = prefill_query_start_loc[1:] \
+                    - prefill_query_start_loc[:-1]
+                prefill_metadata.cudnn_workspace = self.cudnn_workspace
+
         decode_metadata = None
-        if self._num_decodes > 0:
+        if num_decodes > 0:
             decode_metadata = self._build_decode(
-                block_table_tensor=block_table_tensor[:self._num_decodes, ...],
-                seq_lens=seq_lens[:self._num_decodes],
+                block_table_tensor=block_table_tensor[:num_decodes, ...],
+                seq_lens=seq_lens[:num_decodes],
             )
 
         attn_metadata = self.metadata_cls(
-            num_actual_tokens=num_actual_tokens,
+            num_reqs=common_attn_metadata.num_reqs,
+            max_query_len=common_attn_metadata.max_query_len,
+            num_actual_tokens=num_tokens,
             query_start_loc=query_start_loc,
             slot_mapping=slot_mapping,
-            head_dim=self.runner.model_config.get_head_size(),
+            head_dim=self.model_config.get_head_size(),
             # MLACommonMetadata Chunk prefill specific
-            num_decodes=self._num_decodes,
-            num_decode_tokens=self._num_decode_tokens,
-            num_prefills=self._num_prefills,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            num_prefills=num_prefills,
             prefill=prefill_metadata,
             decode=decode_metadata,
         )
 
-        if self._use_fi_prefill and self._num_prefills > 0:
+        if self._use_fi_prefill and num_prefills > 0:
             assert isinstance(attn_metadata.prefill, FlashInferPrefillMetadata)
             self._build_fi_prefill_wrappers(attn_metadata.prefill)
 
         return attn_metadata
-
-    def can_run_in_cudagraph(
-            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        return common_attn_metadata.max_query_len == 1
 
 
 class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
@@ -750,7 +744,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]],
         logits_soft_cap: Optional[float],
         attn_type: str,
         kv_sharing_target_layer_name: Optional[str],
@@ -784,6 +777,12 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             logger.debug_once("Using FlashInfer prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
+            self._pad_v = False
+        elif use_cudnn_prefill():
+            logger.debug_once("Using CUDNN prefill for MLA")
+            self._run_prefill_context_chunk = \
+                self._run_prefill_context_chunk_cudnn
+            self._run_prefill_new_tokens = self._run_prefill_new_tokens_cudnn
             self._pad_v = False
         else:  # Use FlashAttention
             logger.debug_once("Using FlashAttention prefill for MLA")
@@ -873,6 +872,29 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             return_lse=return_softmax_lse,
         )
 
+    def _run_prefill_new_tokens_cudnn(self, prefill: MLACommonPrefillMetadata,
+                                      q, k, v, return_softmax_lse):
+        assert isinstance(prefill, CudnnPrefillMetadata)
+        assert prefill.query_seq_lens is not None
+        output, lse = cudnn_batch_prefill_with_kv_cache(
+            q=q,
+            k_cache=k,
+            v_cache=v,
+            scale=self.scale,
+            workspace_buffer=prefill.cudnn_workspace,
+            max_token_per_sequence=prefill.max_query_len,
+            max_sequence_kv=prefill.max_query_len,
+            actual_seq_lens_q=prefill.query_seq_lens.view(-1, 1, 1, 1),
+            actual_seq_lens_kv=prefill.query_seq_lens.view(-1, 1, 1, 1),
+            causal=True,
+            return_lse=True,  # do not support False for now
+            is_cuda_graph_compatible=
+            True,  #Indicates actual_seq_lens are on GPU or CPU.
+        )
+        if return_softmax_lse:
+            return output, lse
+        return output
+
     def _run_prefill_context_chunk_fa(self, prefill: MLACommonPrefillMetadata,
                                       chunk_idx: int, q, k, v):
         assert prefill.chunked_context is not None
@@ -897,6 +919,30 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             k=k,
             v=v,
             return_lse=True,
+        )
+
+    def _run_prefill_context_chunk_cudnn(self,
+                                         prefill: MLACommonPrefillMetadata,
+                                         chunk_idx: int, q, k, v):
+        assert isinstance(prefill, CudnnPrefillMetadata)
+        assert prefill.chunked_context is not None
+        assert prefill.chunked_context.seq_lens[chunk_idx] is not None
+        assert prefill.query_seq_lens is not None
+        return cudnn_batch_prefill_with_kv_cache(
+            q=q,
+            k_cache=k,
+            v_cache=v,
+            scale=self.scale,
+            workspace_buffer=prefill.cudnn_workspace,
+            max_token_per_sequence=prefill.max_query_len,
+            max_sequence_kv=prefill.chunked_context.max_seq_lens[chunk_idx],
+            actual_seq_lens_q=prefill.query_seq_lens.view(-1, 1, 1, 1),
+            actual_seq_lens_kv=prefill.chunked_context.seq_lens[chunk_idx].
+            view(-1, 1, 1, 1),
+            causal=False,
+            return_lse=True,
+            is_cuda_graph_compatible=
+            True,  #Indicates actual_seq_lens are on GPU or CPU.
         )
 
     def _v_up_proj(self, x):

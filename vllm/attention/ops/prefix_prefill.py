@@ -38,6 +38,7 @@ def _fwd_kernel(Q,
                 V,
                 K_cache,
                 V_cache,
+                sink_ptr,
                 B_Loc,
                 sm_scale,
                 k_scale,
@@ -80,6 +81,7 @@ def _fwd_kernel(Q,
                 num_unroll_cache: tl.constexpr,
                 num_unroll_request: tl.constexpr,
                 SKIP_DECODE: tl.constexpr,
+                USE_SINKS: tl.constexpr,
                 MAX_Q_LEN: tl.constexpr = 0,
                 MAX_CTX_LEN: tl.constexpr = 0):
 
@@ -126,7 +128,15 @@ def _fwd_kernel(Q,
                 other=0.0)  # [M,D]
 
     # initialize pointer to m and l
-    m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    if not USE_SINKS:
+        m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    else:
+        m_i = tl.load(
+            sink_ptr + tl.full([BLOCK_M], cur_head, dtype=tl.int64),
+            mask=(offs_m < cur_batch_query_len),
+            other=float("-inf"),
+        ).to(dtype=tl.float32)
+
     l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)  # [M,D]
 
@@ -732,7 +742,8 @@ def context_attention_fwd(q,
                           alibi_slopes=None,
                           sliding_window=None,
                           sm_scale=None,
-                          skip_decode=False):
+                          skip_decode=False,
+                          sinks=None):
 
     q_dtype_is_f32 = q.dtype is torch.float32
 
@@ -781,6 +792,7 @@ def context_attention_fwd(q,
         sliding_window = 0
 
     if alibi_slopes is not None:
+        assert sinks is None, "Sinks arg is not supported with alibi"
         # need to reduce num. blocks when using fp32
         # due to increased use of GPU shared memory
         # if q.dtype is torch.float32:
@@ -843,7 +855,7 @@ def context_attention_fwd(q,
     max_seq_len = 0 if max_seq_len is None else max_seq_len
     extra_kargs = {}
     if current_platform.is_rocm():
-        extra_kargs = {"kpack": 2, "waves_per_eu": 2}
+        extra_kargs = {"kpack": 1, "waves_per_eu": 2}
 
     grid = lambda META: (batch, head,
                          triton.cdiv(max_input_len, META["BLOCK_M"]))
@@ -853,6 +865,7 @@ def context_attention_fwd(q,
         v,
         k_cache,
         v_cache,
+        sinks,
         b_loc,
         sm_scale,
         k_scale,
@@ -898,5 +911,6 @@ def context_attention_fwd(q,
         num_unroll_request=1,
         num_warps=4,
         num_stages=1,
+        USE_SINKS=sinks is not None,
         **extra_kargs)
     return

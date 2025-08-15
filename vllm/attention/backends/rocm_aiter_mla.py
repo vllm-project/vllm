@@ -3,11 +3,10 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Type, Union
+from typing import TYPE_CHECKING, Optional, Type, Union
 
 import torch
 
-import vllm._custom_ops as ops
 import vllm.envs as envs
 from vllm.attention.backends.mla.common import (MLACommonBackend,
                                                 MLACommonImpl,
@@ -106,26 +105,6 @@ class AiterMLAMetadata(MLACommonMetadata):
                 **decode_metadata.__dict__)
 
         return self._cached_decode_metadata
-
-    def _ops_advance_step(self, num_seqs: int, num_queries: int,
-                          block_size: int, input_tokens: torch.Tensor,
-                          sampled_token_ids: torch.Tensor,
-                          input_positions: torch.Tensor) -> None:
-
-        ops.advance_step_flashinfer(
-            num_seqs=num_seqs,
-            num_queries=num_queries,
-            block_size=block_size,
-            input_tokens=input_tokens,
-            sampled_token_ids=sampled_token_ids,
-            input_positions=input_positions,
-            seq_lens=self.seq_lens_tensor,
-            slot_mapping=self.slot_mapping,
-            block_tables=self.block_tables,
-            paged_kv_indices=self.paged_kv_indices,
-            paged_kv_indptr=self.paged_kv_indptr,
-            paged_kv_last_page_lens=self.paged_kv_last_page_lens,
-            block_table_bound=self.block_table_bound)
 
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
@@ -367,7 +346,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             alibi_slopes: Optional[list[float]],
             sliding_window: Optional[int],
             kv_cache_dtype: str,
-            blocksparse_params: Optional[dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
             kv_sharing_target_layer_name: Optional[str],
@@ -375,17 +353,14 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             **mla_args) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
-                         blocksparse_params, logits_soft_cap, attn_type,
+                         logits_soft_cap, attn_type,
                          kv_sharing_target_layer_name, **mla_args)
 
-        unsupported_features = [
-            alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
-        ]
+        unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
                 "Aiter MLA does not support one of the following: "
-                "alibi_slopes, sliding_window, blocksparse_params, "
-                "logits_soft_cap")
+                "alibi_slopes, sliding_window, logits_soft_cap")
 
         from aiter import flash_attn_varlen_func
         self.flash_attn_varlen_func = flash_attn_varlen_func

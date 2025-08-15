@@ -62,8 +62,8 @@ class TestSetting:
         TestSetting(
             model="BAAI/bge-multilingual-gemma2",
             model_args=[
-                "--task", "embed", "--dtype", "bfloat16", "--max-model-len",
-                "2048"
+                "--runner", "pooling", "--dtype", "bfloat16",
+                "--max-model-len", "2048"
             ],
             pp_size=1,
             tp_size=1,
@@ -75,7 +75,7 @@ class TestSetting:
         # # encoder-based embedding model (BERT)
         # TestSetting(
         #     model="BAAI/bge-base-en-v1.5",
-        #     model_args=["--task", "embed"],
+        #     model_args=["--runner", "pooling"],
         #     pp_size=1,
         #     tp_size=1,
         #     attn_backend="XFORMERS",

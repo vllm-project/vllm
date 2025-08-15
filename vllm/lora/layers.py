@@ -28,8 +28,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 # yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.rotary_embedding import (
-    LinearScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.platforms import current_platform
@@ -240,17 +238,19 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = torch.where(x > self.base_layer.org_vocab_size - 1,
                                         1, 0)
-        embeddings_indices = torch.narrow(
-            self.punica_wrapper._embeddings_indices, 1, 0, x.size(0))
 
-        indices = embeddings_indices[1]
+        # NB: Don't use torch.narrow here. torch.narrow triggers some
+        # Dynamic Shape specialization in torch.compile
+        num_tokens = x.shape[0]
+        indices_1 = self.punica_wrapper._embeddings_indices[1][:num_tokens]
+        indices_0 = self.punica_wrapper._embeddings_indices[0][:num_tokens]
+
         full_lora_a_embeddings = F.embedding(
-            x + indices,
+            x + indices_1,
             self.lora_a_stacked_2d,
         )
-        indices = embeddings_indices[0]
         full_output = self.base_layer.forward(x +
-                                              (indices * added_tokens_mask))
+                                              (indices_0 * added_tokens_mask))
 
         full_output_org = full_output
         if full_output.ndim == 3:
@@ -682,12 +682,14 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def slice_lora_b(
         self, lora_b: list[Union[torch.Tensor, None]]
     ) -> list[Union[torch.Tensor, None]]:
+        sliced_lora_b = [None] * self.n_slices
         for i, (shard_id, shard_size) in enumerate(
                 zip(self.output_ids, self.output_slices)):
             if (lora_b_i := lora_b[i]) is not None:
-                lora_b[i] = lora_b_i[:, shard_size * shard_id:shard_size *
-                                     (shard_id + 1)]
-        return lora_b
+                sliced_lora_b[i] = lora_b_i[:,
+                                            shard_size * shard_id:shard_size *
+                                            (shard_id + 1)]
+        return sliced_lora_b
 
     def slice_bias(
         self, bias: list[Union[torch.Tensor,
@@ -1162,10 +1164,6 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                                                       posinf=pos_inf,
                                                       neginf=neg_inf))
 
-        # HPU needs special handling to prune out dummy samples.
-        if current_platform.is_hpu():
-            lora_logits = lora_logits[:logits.shape[0], :]
-
         logits[:,
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
                lora_logits.shape[1]] = lora_logits
@@ -1195,91 +1193,3 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     ) -> bool:
         # Special handling for the LogitsProcessor.
         return False
-
-
-class LinearScalingRotaryEmbeddingWithLoRA(BaseLayerWithLoRA):
-    """Implements RoPE-scaled embeddings with linear scaling for
-    multiple LoRA adapters with a specialized kernel.
-
-    Replace LinearScalingRotaryEmbedding with MultiLinearScalingRotaryEmbedding
-    which can handle multi lora adapters in a specialized kernel.
-    """
-
-    def __init__(self, base_layer: RotaryEmbedding) -> None:
-        super().__init__()
-        self.base_layer = base_layer
-
-    @property
-    def scaling_factors(self):
-        return self.base_layer.scaling_factors
-
-    @property
-    def rotary_dim(self):
-        return self.base_layer.rotary_dim
-
-    def create_lora_weights(
-        self,
-        max_loras: int,
-        lora_config: LoRAConfig,
-        model_config: Optional[PretrainedConfig] = None,
-    ) -> None:
-        scaling_factors = (list(lora_config.long_lora_scaling_factors)
-                           if lora_config.long_lora_scaling_factors else [])
-        base_scaling_factor = (self.base_layer.scaling_factor if isinstance(
-            self.base_layer, LinearScalingRotaryEmbedding) else 1.0)
-        scaling_factors = sorted(
-            list(set([base_scaling_factor] + scaling_factors)))
-        self.base_layer = LinearScalingRotaryEmbedding(
-            self.base_layer.head_size,
-            self.base_layer.rotary_dim,
-            self.base_layer.max_position_embeddings,
-            self.base_layer.base,
-            self.base_layer.is_neox_style,
-            scaling_factors,
-            self.base_layer.dtype,
-        )
-
-    def reset_lora(self, index: int):
-        ...
-
-    def set_lora(
-        self,
-        index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
-    ):
-        ...
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.base_layer(
-            positions,
-            query,
-            key,
-            offsets=self.punica_wrapper.long_lora_indices,
-        )
-
-    @property
-    def scaling_factor_to_offset(self) -> dict[float, int]:
-        return self.base_layer.scaling_factor_to_offset
-
-    @classmethod
-    def can_replace_layer(
-        cls,
-        source_layer: nn.Module,
-        lora_config: LoRAConfig,
-        packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
-    ) -> bool:
-        """Returns True if the layer can be replaced by this LoRA layer."""
-        return (type(source_layer) is LinearScalingRotaryEmbedding
-                or type(source_layer) is RotaryEmbedding)
-
-    def extra_repr(self) -> str:
-        return self.base_layer.extra_repr()

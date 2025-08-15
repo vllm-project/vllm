@@ -1,21 +1,17 @@
 # Summary
 
-[](){ #configuration }
-
 ## Configuration
 
 API documentation for vLLM's configuration classes.
 
 - [vllm.config.ModelConfig][]
 - [vllm.config.CacheConfig][]
-- [vllm.config.TokenizerPoolConfig][]
 - [vllm.config.LoadConfig][]
 - [vllm.config.ParallelConfig][]
 - [vllm.config.SchedulerConfig][]
 - [vllm.config.DeviceConfig][]
 - [vllm.config.SpeculativeConfig][]
 - [vllm.config.LoRAConfig][]
-- [vllm.config.PromptAdapterConfig][]
 - [vllm.config.MultiModalConfig][]
 - [vllm.config.PoolerConfig][]
 - [vllm.config.DecodingConfig][]

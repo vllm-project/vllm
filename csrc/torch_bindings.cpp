@@ -20,13 +20,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
   //
 
-  // The default behavior in PyTorch 2.6 is "requires_contiguous", so we need
+  // The default behavior in PyTorch 2.6 was changed to "requires_contiguous",
+  // so we need
   // to override this for many GEMMs with the following tag. Otherwise,
   // torch.compile will force all input tensors to be contiguous(), which
   // will break many custom ops that require column-major weight matrices.
-  // TODO: remove this for PyTorch 2.8, when the default is planned to switch
-  // to match exact eager-mode strides.
-  at::Tag stride_tag = at::Tag::needs_fixed_stride_order;
+  // This was a bug and PyTorch 2.7 has since fixed this.
+#if TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 6
+  #define stride_tag at::Tag::needs_fixed_stride_order
+#else
+  #define stride_tag
+#endif
 
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
@@ -137,25 +141,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Quick GELU implementation.
   ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_quick", torch::kCUDA, &gelu_quick);
-
-  // prepare_inputs advance_step
-  ops.def(
-      "advance_step_flashattn(int num_seqs, int num_queries, int block_size, "
-      "Tensor! input_tokens, Tensor sampled_token_ids, "
-      "Tensor! input_positions, Tensor! seq_lens, Tensor! slot_mapping, "
-      "Tensor block_tables) -> ()");
-  ops.impl("advance_step_flashattn", torch::kCUDA, &advance_step_flashattn);
-
-  ops.def(
-      "advance_step_flashinfer("
-      "    int num_seqs, int num_queries, int block_size,"
-      "    Tensor! input_tokens, Tensor sampled_token_ids,"
-      "    Tensor! input_positions, Tensor! seq_lens, Tensor! slot_mapping,"
-      "    Tensor block_tables, Tensor! paged_kv_indices,"
-      "    Tensor! paged_kv_indptr, Tensor! paged_kv_last_page_len,"
-      "    Tensor! block_table_bounds"
-      ") -> ()");
-  ops.impl("advance_step_flashinfer", torch::kCUDA, &advance_step_flashinfer);
 
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
@@ -322,6 +307,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // gptq_marlin Optimized Quantized GEMM for GPTQ.
   ops.def(
       "gptq_marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
+      "Tensor? b_bias_or_none,"
       "Tensor b_scales, Tensor? global_scale, Tensor? b_zeros_or_none, Tensor? "
       "g_idx_or_none, Tensor? perm_or_none, Tensor workspace, int b_q_type, "
       "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
@@ -514,6 +500,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                   Tensor page_table, float scale) -> ()");
   ops.impl("cutlass_mla_decode", torch::kCUDA, &cutlass_mla_decode);
 
+  // SM100 CUTLASS MLA decode
+  ops.def(
+      "sm100_cutlass_mla_decode(Tensor! out, Tensor q_nope, Tensor q_pe,"
+      "                         Tensor kv_c_and_k_pe_cache, Tensor seq_lens,"
+      "                         Tensor page_table, Tensor workspace, float "
+      "scale,"
+      "                         int num_kv_splits) -> ()");
+  // conditionally compiled so impl in source file
+
+  // SM100 CUTLASS MLA workspace
+  ops.def(
+      "sm100_cutlass_mla_get_workspace_size(int max_seq_len, int num_batches,"
+      "                                     int sm_count, int num_kv_splits) "
+      "-> int");
+  // conditionally compiled so impl in source file
+
   // Compute NVFP4 block quantized tensor.
   ops.def(
       "scaled_fp4_quant(Tensor! output, Tensor input,"
@@ -595,6 +597,23 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 
 #ifndef USE_ROCM
+  // Compute per-token-group FP8 quantized tensor and scaling factor.
+  ops.def(
+      "per_token_group_fp8_quant(Tensor input, Tensor! output_q, Tensor! "
+      "output_s, "
+      "int group_size, float eps, float fp8_min, float fp8_max, bool "
+      "scale_ue8m0) -> ()");
+  ops.impl("per_token_group_fp8_quant", torch::kCUDA,
+           &per_token_group_quant_fp8);
+
+  // Compute per-token-group INT8 quantized tensor and scaling factor.
+  ops.def(
+      "per_token_group_quant_int8(Tensor input, Tensor! output_q, Tensor! "
+      "output_s, int group_size, float eps, float int8_min, float int8_max) -> "
+      "()");
+  ops.impl("per_token_group_quant_int8", torch::kCUDA,
+           &per_token_group_quant_int8);
+
   // reorder weight for AllSpark Ampere W8A16 Fused Gemm kernel
   ops.def(
       "rearrange_kn_weight_as_n32k16_order(Tensor b_qweight, Tensor b_scales, "
