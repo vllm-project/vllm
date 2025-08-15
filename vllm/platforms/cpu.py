@@ -187,6 +187,7 @@ class CpuPlatform(Platform):
 
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationLevel
+        from vllm.config.compilation import CUDAGraphMode
         vllm_config.compilation_config.cudagraph_capture_sizes = []
 
         compilation_config = vllm_config.compilation_config
@@ -218,6 +219,7 @@ class CpuPlatform(Platform):
             })
             if compilation_config.use_inductor:
                 compilation_config.custom_ops = ["none"]
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if vllm_config.lora_config is not None:
             compilation_config.level = CompilationLevel.NO_COMPILATION
