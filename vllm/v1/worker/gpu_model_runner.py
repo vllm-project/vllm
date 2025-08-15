@@ -1018,8 +1018,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 src_end = num_computed_tokens + prompt_part_len
 
                 print("_calc_mrope_positions (prompt_part_len > 0)")
+                print("src_start", src_start, "src_end", src_end)
+                print("dst_start", dst_start, "dst_end", dst_end)
                 print(f"{req.mrope_positions[0,src_start:src_end].tolist()}")
-                print(f"{req.mrope_positions[1,dst_start:dst_end].tolist()}")
+                print(f"{req.mrope_positions[1,src_start:src_end].tolist()}")
                 print(f"{req.mrope_positions[2,src_start:src_end].tolist()}")
 
                 self.mrope_positions_cpu[:, dst_start:dst_end] = \
