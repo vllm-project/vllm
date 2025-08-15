@@ -57,20 +57,20 @@ steps:
   - vllm/
   - tests/mq_llm_engine
   - tests/async_engine
-  - tests/test_inputs
+  - tests/test_inputs.py
+  - tests/test_outputs.py
   - tests/multimodal
-  - tests/test_utils
+  - tests/utils_
   - tests/worker
   - tests/standalone_tests/lazy_imports.py
   commands:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
-  - NUM_SCHEDULER_STEPS=4 pytest -v -s async_engine/test_async_llm_engine.py
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s multimodal
-  - pytest -v -s test_utils.py # Utils
+  - pytest -v -s utils_ # Utils
   - pytest -v -s worker # Worker
 
 - label: Python-only Installation Test
@@ -426,7 +426,6 @@ steps:
 
 - label: Tensorizer Test # 11min
   mirror_hardwares: [amdexperimental]
-  soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
   - tests/tensorizer_loader
@@ -670,6 +669,7 @@ steps:
     - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
     - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
     - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
+    - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
     # Fusion
     - pytest -v -s tests/compile/test_fusion_all_reduce.py
@@ -772,27 +772,6 @@ steps:
   - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
   - pytest -v -s models/test_oot_registration.py # it needs a clean process
   - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
-
-- label: Multi-step Tests (4 GPUs) # 36min
-  mirror_hardwares: [amdexperimental]
-  working_dir: "/vllm-workspace/tests"
-  num_gpus: 4
-  source_file_dependencies:
-  - vllm/model_executor/layers/sampler.py
-  - vllm/sequence.py
-  - vllm/worker/worker_base.py
-  - vllm/worker/worker.py
-  - vllm/worker/multi_step_worker.py
-  - vllm/worker/model_runner_base.py
-  - vllm/worker/model_runner.py
-  - vllm/worker/multi_step_model_runner.py
-  - vllm/engine
-  - tests/multi_step
-  commands:
-  # this test is quite flaky
-  # TODO: investigate and fix.
-  # - pytest -v -s multi_step/test_correctness_async_llm.py
-  - pytest -v -s multi_step/test_correctness_llm.py
 
 - label: Pipeline Parallelism Test # 45min
   mirror_hardwares: [amdexperimental]

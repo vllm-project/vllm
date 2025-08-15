@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
+    VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MM_INPUT_CACHE_GIB: int = 4
@@ -70,6 +71,7 @@ if TYPE_CHECKING:
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
+    VLLM_DOCKER_BUILD_CONTEXT: bool = False
     VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
@@ -120,12 +122,14 @@ if TYPE_CHECKING:
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
+    VLLM_MXFP4_USE_MARLIN: Optional[bool] = None
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = False
+    VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
@@ -156,6 +160,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
+    VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -176,6 +181,12 @@ def maybe_convert_int(value: Optional[str]) -> Optional[int]:
     if value is None:
         return None
     return int(value)
+
+
+def maybe_convert_bool(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    return bool(int(value))
 
 
 def get_vllm_port() -> Optional[int]:
@@ -234,8 +245,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, vllm will use precompiled binaries (*.so)
     "VLLM_USE_PRECOMPILED":
-    lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")) or bool(
-        os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
+    lambda: os.environ.get("VLLM_USE_PRECOMPILED", "").strip().lower() in
+    ("1", "true") or bool(os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
+
+    # Used to mark that setup.py is running in a Docker build context,
+    # in order to force the use of precompiled binaries.
+    "VLLM_DOCKER_BUILD_CONTEXT":
+    lambda: os.environ.get("VLLM_DOCKER_BUILD_CONTEXT", "").strip().lower() in
+    ("1", "true"),
 
     # Whether to force using nightly wheel in python build.
     # This is used for testing the nightly wheel in python build.
@@ -545,6 +562,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 10 seconds
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
+
+    # Max number of workers for the thread pool handling
+    # media bytes loading. Set to 1 to disable parallel processing.
+    # Default is 8
+    "VLLM_MEDIA_LOADING_THREAD_COUNT":
+    lambda: int(os.getenv("VLLM_MEDIA_LOADING_THREAD_COUNT", "8")),
 
     # Maximum filesize in MB for a single audio file when processing
     # speech-to-text requests. Files larger than this will be rejected.
@@ -890,6 +913,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MARLIN_USE_ATOMIC_ADD":
     lambda: os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1",
 
+    # Whether to use marlin kernel in mxfp4 quantization method
+    "VLLM_MXFP4_USE_MARLIN":
+    lambda: maybe_convert_bool(os.environ.get("VLLM_MXFP4_USE_MARLIN", None)),
+
     # Whether to turn on the outlines cache for V0
     # This cache is unbounded and on disk, so it's not safe to use in
     # an environment with potentially malicious users.
@@ -918,6 +945,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_DEEP_GEMM":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
 
+    # Whether to use E8M0 scaling when DeepGEMM is used on Blackwell GPUs.
+    # E8M0 is faster on B200 but may reduce accuracy.
+    "VLLM_USE_DEEP_GEMM_E8M0":
+    lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM_E8M0", "1"))),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
     # JIT'ing in the hot-path. However, this warmup increases the engine
@@ -1070,6 +1101,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRTLLM_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
 
+    # If set to 1, force the use of TRTLLM FP4 GEMM backend in flashinfer.
+    # Otherwise, uses the first available of: flashinfer cutlass GEMM,
+    # vllm cutlass GEMM, marlin GEMM.
+    "VLLM_USE_TRTLLM_FP4_GEMM":
+    lambda: bool(int(os.getenv("VLLM_USE_TRTLLM_FP4_GEMM", "0"))),
+
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
     # If set to 1, allows GC to run during capture.
@@ -1108,6 +1145,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #    never removed from memory until the server terminates.
     "VLLM_ENABLE_RESPONSES_API_STORE":
     lambda: bool(int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))),
+
+    # Allows vllm to find tuned config under customized folder
+    "VLLM_TUNED_CONFIG_FOLDER":
+    lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
+
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1172,6 +1214,7 @@ def compute_hash() -> str:
         "VLLM_DP_SIZE",
         "VLLM_USE_STANDALONE_COMPILE",
         "VLLM_FUSED_MOE_CHUNK_SIZE",
+        "VLLM_USE_TRTLLM_FP4_GEMM",
     ]
     for key in environment_variables_to_hash:
         if key in environment_variables:

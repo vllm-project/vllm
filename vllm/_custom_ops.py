@@ -311,7 +311,7 @@ def apply_repetition_penalties(logits: torch.Tensor, prompt_mask: torch.Tensor,
         output_mask: A boolean tensor indicating which tokens appear in the output.
         repetition_penalties: The repetition penalties of shape (num_seqs, ).
     """
-    if current_platform.is_cuda() and logits.is_contiguous():
+    if logits.is_cuda and logits.is_contiguous():
         apply_repetition_penalties_cuda(logits, prompt_mask, output_mask,
                                         repetition_penalties)
     else:
@@ -452,6 +452,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     def _gptq_marlin_gemm_fake(a: torch.Tensor,
                                c: Optional[torch.Tensor],
                                b_q_weight: torch.Tensor,
+                               b_bias: Optional[torch.Tensor],
                                b_scales: torch.Tensor,
                                global_scale: Optional[torch.Tensor],
                                b_zeros: Optional[torch.Tensor],
@@ -1048,6 +1049,7 @@ def awq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
 def gptq_marlin_gemm(a: torch.Tensor,
                      c: Optional[torch.Tensor],
                      b_q_weight: torch.Tensor,
+                     b_bias: Optional[torch.Tensor],
                      b_scales: torch.Tensor,
                      global_scale: Optional[torch.Tensor],
                      b_zeros: Optional[torch.Tensor],
@@ -1062,7 +1064,7 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      use_atomic_add: bool = False,
                      use_fp32_reduce: bool = False,
                      is_zp_float: bool = False) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_scales,
+    return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_bias, b_scales,
                                          global_scale, b_zeros, g_idx, perm,
                                          workspace, b_q_type.id, size_m,
                                          size_n, size_k, is_k_full,
@@ -1540,7 +1542,9 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
 
 
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
-                          b_qweight: torch.Tensor, b_scales: torch.Tensor,
+                          b_qweight: torch.Tensor,
+                          b_bias: Optional[torch.Tensor],
+                          b_scales: torch.Tensor,
                           global_scale: Optional[torch.Tensor],
                           b_qzeros: Optional[torch.Tensor],
                           g_idx: Optional[torch.Tensor],
@@ -1556,11 +1560,11 @@ def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
                           use_fp32_reduce: bool,
                           is_zp_float: bool) -> torch.Tensor:
     return torch.ops._moe_C.moe_wna16_marlin_gemm(
-        input, output, b_qweight, b_scales, global_scale, b_qzeros, g_idx,
-        perm, workspace, sorted_token_ids, expert_ids, num_tokens_past_padded,
-        topk_weights, moe_block_size, top_k, mul_topk_weights, is_ep,
-        b_q_type.id, size_m, size_n, size_k, is_k_full, use_atomic_add,
-        use_fp32_reduce, is_zp_float)
+        input, output, b_qweight, b_bias, b_scales, global_scale, b_qzeros,
+        g_idx, perm, workspace, sorted_token_ids, expert_ids,
+        num_tokens_past_padded, topk_weights, moe_block_size, top_k,
+        mul_topk_weights, is_ep, b_q_type.id, size_m, size_n, size_k,
+        is_k_full, use_atomic_add, use_fp32_reduce, is_zp_float)
 
 
 if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
