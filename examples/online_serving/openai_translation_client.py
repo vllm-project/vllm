@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import asyncio
 import json
 
 import httpx
@@ -68,7 +67,7 @@ def main():
     )
     sync_openai(foscolo, client)
     # Run the asynchronous function
-    asyncio.run(stream_openai_response(foscolo, openai_api_base, openai_api_key))
+    # asyncio.run(stream_openai_response(foscolo, openai_api_base, openai_api_key))
 
 
 if __name__ == "__main__":

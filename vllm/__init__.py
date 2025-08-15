@@ -19,7 +19,6 @@ MODULE_ATTRS = {
     "AsyncLLMEngine": ".engine.async_llm_engine:AsyncLLMEngine",
     "LLMEngine": ".engine.llm_engine:LLMEngine",
     "LLM": ".entrypoints.llm:LLM",
-    "LLMForImageTiling": ".entrypoints.llm_for_image_tiling:LLMForImageTiling",
     "initialize_ray_cluster": ".executor.ray_utils:initialize_ray_cluster",
     "PromptType": ".inputs:PromptType",
     "TextPrompt": ".inputs:TextPrompt",
@@ -44,7 +43,6 @@ if typing.TYPE_CHECKING:
     from vllm.engine.async_llm_engine import AsyncLLMEngine
     from vllm.engine.llm_engine import LLMEngine
     from vllm.entrypoints.llm import LLM
-    from vllm.entrypoints.llm_for_image_tiling import LLMForImageTiling
     from vllm.executor.ray_utils import initialize_ray_cluster
     from vllm.inputs import PromptType, TextPrompt, TokensPrompt
     from vllm.model_executor.models import ModelRegistry
@@ -74,7 +72,6 @@ __all__ = [
     "__version__",
     "__version_tuple__",
     "LLM",
-    "LLMForImageTiling",
     "ModelRegistry",
     "PromptType",
     "TextPrompt",

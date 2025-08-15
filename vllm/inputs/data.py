@@ -79,12 +79,12 @@ class EmbedsPrompt(TypedDict):
 
 class ImagePrompt(TypedDict):
 
-    type: Literal["url", "path", "object"]
+    data_format: Literal["b64_json", "bytes", "url"]
     """
     This is the data type for the input image
     """
 
-    format: str
+    image_format: str
     """
     This is the image format (e.g., jpeg, png, etc.)
     """
