@@ -18,9 +18,11 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from vllm.benchmarks.datasets import (AIMODataset, BurstGPTDataset,
                                       ConversationDataset,
-                                      InstructCoderDataset, RandomDataset,
-                                      SampleRequest, ShareGPTDataset,
-                                      SonnetDataset, VisionArenaDataset)
+                                      InstructCoderDataset,
+                                      PrefixRepetitionRandomDataset,
+                                      RandomDataset, SampleRequest,
+                                      ShareGPTDataset, SonnetDataset,
+                                      VisionArenaDataset)
 from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
                                        write_to_json)
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
@@ -327,6 +329,20 @@ def get_requests(args, tokenizer):
             dataset_cls = AIMODataset
             common_kwargs['dataset_subset'] = None
             common_kwargs['dataset_split'] = "train"
+    elif args.dataset_name == "prefix_repetition":
+        dataset_cls = PrefixRepetitionRandomDataset
+        sample_kwargs["prefix_len"] = getattr(
+            args, "prefix_repetition_prefix_len", None
+        )
+        sample_kwargs["suffix_len"] = getattr(
+            args, "prefix_repetition_suffix_len", None
+        )
+        sample_kwargs["num_prefixes"] = getattr(
+            args, "prefix_repetition_num_prefixes", None
+        )
+        sample_kwargs["output_len"] = getattr(
+            args, "prefix_repetition_output_len", None
+        )
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
     # Remove None values
@@ -356,7 +372,11 @@ def validate_args(args):
         raise ValueError(f"Unsupported backend: {args.backend}")
 
     # === Dataset Configuration ===
-    if not args.dataset and not args.dataset_path:
+    if (
+        not args.dataset
+        and not args.dataset_path
+        and args.dataset_name not in {"prefix_repetition"}
+    ):
         print(
             "When dataset path is not set, it will default to random dataset")
         args.dataset_name = 'random'
@@ -432,7 +452,10 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--dataset-name",
         type=str,
-        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf"],
+        choices=[
+            "sharegpt", "random", "sonnet", "burstgpt", "hf",
+            "prefix_repetition"
+        ],
         help="Name of the dataset to benchmark on.",
         default="sharegpt")
     parser.add_argument(
