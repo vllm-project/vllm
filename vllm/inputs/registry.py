@@ -141,6 +141,40 @@ class InputProcessingContext(InputContext):
             **kwargs,
         )
 
+    def _postprocess_output(
+        self,
+        output: JSONTree,
+    ) -> JSONTree:
+        mm_config = self.model_config.get_multimodal_config()
+        is_mm_processing_gpu = mm_config.mm_processing_device != "cpu"
+
+        def _postprocess_one(x: object):
+            if isinstance(x, torch.Tensor):
+                # This mimics the behavior of transformers.BatchFeature
+                if x.is_floating_point():
+                    x = x.to(dtype=self.model_config.dtype)
+
+                # This is required because we need to transfer the data
+                # to engine core, and the serialization process expects
+                # CPU tensors.
+                # The dtype of model config is usually lower precision
+                # so we call this last to transfer less data to CPU
+                if is_mm_processing_gpu:
+                    x = x.to(device="cpu", non_blocking=True)
+
+            return x
+
+        output = json_map_leaves(_postprocess_one, output)
+
+        # Async GPU -> CPU requires explicit synchronization
+        if is_mm_processing_gpu:
+            from vllm.platforms import current_platform
+            synchronize = current_platform.synchronize
+            if synchronize is not None:
+                synchronize()
+
+        return output
+
     def call_hf_processor(
         self,
         hf_processor: ProcessorMixin,
@@ -163,34 +197,28 @@ class InputProcessingContext(InputContext):
             allow_var_kwargs=True,
         )
 
-        def maybe_cast_dtype(x):
-            # This mimics the behavior of transformers.BatchFeature
-            if isinstance(x, torch.Tensor) and x.is_floating_point():
-                return x.to(dtype=self.model_config.dtype)
-            return x
-
         try:
             output = hf_processor(**data,
                                   **allowed_kwargs,
                                   return_tensors="pt")
-            # this emulates output.to(dtype=self.model_config.dtype)
-            if isinstance(output, BatchFeature):
-                cast_output = json_map_leaves(maybe_cast_dtype, output.data)
-                return BatchFeature(cast_output)
-
-            cast_output = json_map_leaves(maybe_cast_dtype, output)
-
-            logger.warning_once(
-                f"{type(hf_processor).__name__} did not return `BatchFeature`. "
-                "Make sure to match the behaviour of `ProcessorMixin` when "
-                "implementing custom processors.")
-            return cast_output
-
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={allowed_kwargs}")
 
             raise ValueError(msg) from exc
+
+        if isinstance(output, BatchFeature):
+            output_ = self._postprocess_output(output.data)
+            return BatchFeature(output_)
+
+        logger.warning_once(
+            "%s did not return `BatchFeature`. "
+            "Make sure to match the behaviour of `ProcessorMixin` when "
+            "implementing custom processors.",
+            type(hf_processor).__name__,
+        )
+
+        return self._postprocess_output(output)
 
 
 class DummyData(NamedTuple):

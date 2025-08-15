@@ -6,8 +6,10 @@ import pytest
 
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.platforms import current_platform
 
-from ..openai.test_vision import TEST_IMAGE_URLS
+from ..openai.test_audio import TEST_AUDIO_URLS, dummy_messages_from_audio_url
+from ..openai.test_vision import TEST_IMAGE_URLS, dummy_messages_from_image_url
 
 
 @pytest.fixture(scope="function")
@@ -195,3 +197,68 @@ def test_chat_extra_kwargs(thinking_llm, enable_thinking):
     else:
         # The chat template includes dummy thinking process
         assert think_id in prompt_token_ids
+
+
+@pytest.mark.parametrize(("model_id", "modality", "mm_init_kwargs"), [
+    ("Qwen/Qwen2.5-VL-3B-Instruct", "image", {
+        "use_fast": True
+    }),
+    ("Qwen/Qwen2-Audio-7B-Instruct", "audio", {}),
+])
+def test_mm_processing_gpu(model_id, modality, mm_init_kwargs):
+    device = current_platform.device_name
+
+    num_items = 2
+    if modality == "image":
+        messages = dummy_messages_from_image_url(TEST_IMAGE_URLS[:num_items])
+    elif modality == "audio":
+        messages = dummy_messages_from_audio_url(TEST_AUDIO_URLS[:num_items])
+    else:
+        raise NotImplementedError(modality)
+
+    llm = LLM(
+        model=model_id,
+        max_model_len=6144,
+        max_num_seqs=2,
+        enforce_eager=True,
+        seed=0,
+        limit_mm_per_prompt={modality: num_items},
+        mm_processor_kwargs=mm_init_kwargs | {"device": device},
+    )
+
+    outputs = llm.chat(messages)
+    assert len(outputs) == 1
+
+
+@pytest.mark.parametrize(("model_id", "modality", "mm_init_kwargs"), [
+    ("Qwen/Qwen2.5-VL-3B-Instruct", "image", {
+        "use_fast": True
+    }),
+    ("Qwen/Qwen2-Audio-7B-Instruct", "audio", {}),
+])
+def test_mm_processing_gpu_bad_device(model_id, modality, mm_init_kwargs):
+    device = current_platform.device_name
+    if device == "cpu":
+        pytest.skip("Not applicable to CPU")
+
+    num_items = 1
+    if modality == "image":
+        messages = dummy_messages_from_image_url(TEST_IMAGE_URLS[:num_items])
+    elif modality == "audio":
+        messages = dummy_messages_from_audio_url(TEST_AUDIO_URLS[:num_items])
+    else:
+        raise NotImplementedError(modality)
+
+    llm = LLM(
+        model=model_id,
+        max_model_len=6144,
+        max_num_seqs=2,
+        enforce_eager=True,
+        seed=0,
+        limit_mm_per_prompt={modality: num_items},
+        mm_processor_kwargs=mm_init_kwargs,
+    )
+
+    match = "cannot override the device for multi-modal preprocessing"
+    with pytest.raises(ValueError, match=match):
+        llm.chat(messages, mm_processor_kwargs={"device": device})

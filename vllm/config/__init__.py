@@ -842,10 +842,22 @@ class ModelConfig:
         return None
 
     def set_mm_processor_cache_gb(self, value: int) -> None:
-        mm_config = self.get_multimodal_config()
-
         self.mm_processor_cache_gb = value
-        mm_config.mm_processor_cache_gb = value
+
+        if mm_config := self.multimodal_config:
+            mm_config.mm_processor_cache_gb = value
+
+    def update_mm_processor_kwargs(self, value: dict[str, Any]) -> None:
+        if self.mm_processor_kwargs is None:
+            self.mm_processor_kwargs = {}
+
+        self.mm_processor_kwargs.update(value)
+
+        if mm_config := self.multimodal_config:
+            if mm_config.mm_processor_kwargs is None:
+                mm_config.mm_processor_kwargs = {}
+
+            mm_config.mm_processor_kwargs.update(value)
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -2511,6 +2523,11 @@ class MultiModalConfig:
     Enable fully interleaved support for multimodal prompts.
     """
 
+    @property
+    def mm_processing_device(self) -> str:
+        kwargs = self.mm_processor_kwargs or {}
+        return str(kwargs.get("device", "cpu"))
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2549,6 +2566,15 @@ class MultiModalConfig:
         according to the extra arguments passed during inference.
         """
         kwargs = self.mm_processor_kwargs or {}
+
+        # This is to avoid breaking assumptions in memory profiling
+        init_device = kwargs.get("device", "cpu")
+        inference_device = inference_kwargs.get("device", init_device)
+        if init_device != inference_device:
+            raise ValueError(
+                "You cannot override the device for multi-modal preprocessing "
+                f"at runtime! Found: {init_device=} vs. {inference_device=}")
+
         return kwargs | dict(inference_kwargs)
 
 

@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import argparse
-import dataclasses
 import json
 import logging
 import os
@@ -327,12 +325,7 @@ def main():
 
 
     if args.command == "serialize":
-        eng_args_dict = {f.name: getattr(args, f.name) for f in
-                        dataclasses.fields(EngineArgs)}
-
-        engine_args = EngineArgs.from_cli_args(
-            argparse.Namespace(**eng_args_dict)
-        )
+        engine_args = EngineArgs.from_cli_args(args)
 
         input_dir = tensorizer_dir.rstrip('/')
         suffix = args.suffix if args.suffix else uuid.uuid4().hex

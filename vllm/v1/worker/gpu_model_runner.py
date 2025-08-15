@@ -330,10 +330,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.model_config,
             self.scheduler_config,
             self.mm_registry,
-            max_model_len=self.max_model_len,
-            max_num_reqs=self.max_num_reqs,
-        ) if self.supports_mm_inputs \
-            else None)
+        ) if self.supports_mm_inputs else None)
 
         self.reorder_batch_threshold: Optional[int] = None
 
@@ -624,6 +621,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
     ) -> BatchedTensorInputs:
         if self.is_multimodal_raw_input_supported:  # noqa: SIM102
+            # This model requires the raw multimodal data in input.
             if scheduler_output:
                 mm_kwargs = list[MultiModalKwargsItem]()
                 for req in scheduler_output.scheduled_new_reqs:
@@ -651,7 +649,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert mm_budget is not None
 
             dummy_modality, _ = mm_budget.get_modality_with_max_tokens()
-
             return self._get_mm_dummy_batch(dummy_modality, num_seqs)
 
         return {}

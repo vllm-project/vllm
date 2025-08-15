@@ -3,7 +3,8 @@
 
 import argparse
 import signal
-from typing import Optional
+from copy import deepcopy
+from typing import Any, Optional
 
 import uvloop
 
@@ -135,23 +136,20 @@ def run_headless(args: argparse.Namespace):
 def run_multi_api_server(args: argparse.Namespace):
 
     assert not args.headless
-    num_api_servers = args.api_server_count
+    num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
-    orig_mm_processor_cache_gb = args.mm_processor_cache_gb
+    # No need to set api_process_rank for EngineCore processes
+    args.api_process_count = args.api_server_count
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
-
-        # Not compatible with API server scale-out
-        args.mm_processor_cache_gb = 0
 
     listen_address, sock = setup_server(args)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
-    model_config = vllm_config.model_config
 
     if num_api_servers > 1:
         if not envs.VLLM_USE_V1:
@@ -160,10 +158,6 @@ def run_multi_api_server(args: argparse.Namespace):
         if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
             raise ValueError("VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used "
                              "with api_server_count > 1")
-
-        if model_config.is_multimodal_model and orig_mm_processor_cache_gb > 0:
-            logger.warning("Multi-modal processor cache is disabled because "
-                           "it is not compatible with `api_server_count > 1`.")
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats
@@ -174,6 +168,10 @@ def run_multi_api_server(args: argparse.Namespace):
     hybrid_dp_lb = parallel_config.data_parallel_hybrid_lb
     assert external_dp_lb or hybrid_dp_lb or dp_rank == 0
 
+    args_per_server = [deepcopy(args) for _ in range(num_api_servers)]
+    for server_idx in range(num_api_servers):
+        args_per_server[server_idx].api_process_rank = server_idx
+
     api_server_manager: Optional[APIServerProcessManager] = None
 
     with launch_core_engines(vllm_config, executor_class, log_stats,
@@ -181,12 +179,12 @@ def run_multi_api_server(args: argparse.Namespace):
                                                   coordinator, addresses):
 
         # Construct common args for the APIServerProcessManager up-front.
-        api_server_manager_kwargs = dict(
+        api_server_manager_kwargs = dict[str, Any](
             target_server_fn=run_api_server_worker_proc,
             listen_address=listen_address,
             sock=sock,
-            args=args,
             num_servers=num_api_servers,
+            args_per_server=args_per_server,
             input_addresses=addresses.inputs,
             output_addresses=addresses.outputs,
             stats_update_address=coordinator.get_stats_publish_address()
