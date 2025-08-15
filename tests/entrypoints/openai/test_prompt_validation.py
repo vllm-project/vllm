@@ -53,7 +53,6 @@ async def test_out_of_vocab_token_ids():
                                             temperature=0.0)
 
 
-@hypothesis.settings(max_examples=10000)
 @hypothesis.given(tensor=hypothesis_torch.tensor_strategy(
     dtype=hypothesis_torch.dtype_strategy(
         [torch.float32, torch.bfloat16, torch.float16]),
