@@ -430,6 +430,77 @@ class MultiHeadAttention(nn.Module):
         return out.reshape(bsz, q_len, -1)
 
 
+class TorchAttention(nn.Module):
+
+    def __init__(self, num_heads: int, head_dim: int, scaling: float,
+                 num_kv_heads: int):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.scaling = scaling
+        self.num_kv_heads = num_kv_heads
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> torch.Tensor:
+        """Input shape: batch_size x seq_len x hidden_size"""
+        if query.dim() == 2:
+            # Handle 2D input [seq_len, hidden_size]
+            seq_len, hidden_size = query.size()
+
+            # Reshape to [seq_len, num_heads, head_dim]
+            query = query.view(seq_len, self.num_heads, self.head_dim)
+            key = key.view(seq_len, self.num_kv_heads, self.head_dim)
+            value = value.view(seq_len, self.num_kv_heads, self.head_dim)
+
+            # Handle MQA/GQA if needed
+            if (num_repeat := self.num_heads // self.num_kv_heads) > 1:
+                key = torch.repeat_interleave(key, num_repeat, dim=1)
+                value = torch.repeat_interleave(value, num_repeat, dim=1)
+
+            # Add batch dimension and transpose for SDPA:
+            #  [1, num_heads, seq_len, head_dim]
+            query = query.transpose(0, 1).unsqueeze(
+                0)  # [1, num_heads, seq_len, head_dim]
+            key = key.transpose(0, 1).unsqueeze(0)
+            value = value.transpose(0, 1).unsqueeze(0)
+
+            out = F.scaled_dot_product_attention(query,
+                                                 key,
+                                                 value,
+                                                 scale=self.scaling)
+            # Remove batch dim and transpose back:
+            #  [seq_len, num_heads, head_dim] -> [seq_len, hidden_size]
+            out = out.squeeze(0).transpose(0, 1).reshape(seq_len, hidden_size)
+            return out
+        else:
+            # Handle 3D input [batch_size, seq_len, hidden_size]
+            bsz, q_len, _ = query.size()
+            kv_len = key.size(1)
+
+            query = query.view(bsz, q_len, self.num_heads, self.head_dim)
+            key = key.view(bsz, kv_len, self.num_kv_heads, self.head_dim)
+            value = value.view(bsz, kv_len, self.num_kv_heads, self.head_dim)
+
+            if (num_repeat := self.num_heads // self.num_kv_heads) > 1:
+                # Handle MQA and GQA
+                key = torch.repeat_interleave(key, num_repeat, dim=2)
+                value = torch.repeat_interleave(value, num_repeat, dim=2)
+
+            query, key, value = (x.transpose(1, 2)
+                                 for x in (query, key, value))
+            out = F.scaled_dot_product_attention(query,
+                                                 key,
+                                                 value,
+                                                 scale=self.scaling)
+            out = out.transpose(1, 2)
+
+            return out.reshape(bsz, q_len, -1)
+
+
 def wait_for_kv_layer_from_connector(layer_name: str):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return

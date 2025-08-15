@@ -14,9 +14,8 @@ from transformers import (BatchFeature, WhisperConfig, WhisperFeatureExtractor,
 from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.attention import Attention, AttentionType
-from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.layer import MultiHeadAttention, TorchAttention
 from vllm.attention.layers.cross_attention import CrossAttention
-from vllm.attention.layers.encoder_attention import EncoderAttention
 from vllm.config import (CacheConfig, ModelConfig, SpeechToTextConfig,
                          VllmConfig)
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -189,16 +188,13 @@ class WhisperAttention(nn.Module):
                 self.scaling,
                 num_kv_heads=self.num_kv_heads,
             )
-        elif self.attn_type == AttentionType.ENCODER:
-            self.attn = EncoderAttention(
+        elif attn_type == AttentionType.ENCODER:
+            # Simple attention with pytorch, no cache
+            self.attn = TorchAttention(
                 self.num_heads,
                 self.head_dim,
                 self.scaling,
                 num_kv_heads=self.num_kv_heads,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.attn",
-                attn_type=self.attn_type,
             )
         elif self.attn_type == AttentionType.ENCODER_DECODER:
             self.attn = CrossAttention(
