@@ -319,7 +319,7 @@ class CudaPlatformBase(Platform):
 
             # FlashAttention is the default for SM 8.0+ GPUs
             if cls.has_device_capability(80):
-                if has_sink:
+                if has_sink and not cls.is_device_capability(90):
                     logger.info_once("Using Triton backend on V1 engine.")
                     return TRITON_ATTN_VLLM_V1
                 if is_default_backend_supported := is_attn_backend_supported(

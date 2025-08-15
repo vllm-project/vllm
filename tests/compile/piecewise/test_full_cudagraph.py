@@ -61,6 +61,21 @@ backend_configs = {
                       "cudagraph_mode": "FULL_AND_PIECEWISE",
                   },
                   specific_gpu_arch=(9, 0)),
+    # Cutlass MLA on Blackwell
+    "CutlassMLA":
+    BackendConfig(
+        name="CutlassMLA",
+        env_vars={
+            "VLLM_USE_V1": "1",
+            "VLLM_ATTENTION_BACKEND": "CUTLASS_MLA",
+            "FORCE_NUM_KV_SPLITS":
+            "1",  # TODO: remove this when hang issue is fixed
+        },
+        comp_config={
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
+            "cudagraph_capture_sizes": [16, 32, 64, 128, 256, 512],
+        },
+        specific_gpu_arch=(10, 0)),
     # FA2
     "FA2":
     BackendConfig(name="FA2",
@@ -86,14 +101,16 @@ backend_configs = {
 
 test_params_full_cudagraph = []
 
-# deepseek-ai/DeepSeek-V2-Lite with FlashMLA
-test_params_full_cudagraph.append(
-    pytest.param(
-        ("deepseek-ai/DeepSeek-V2-Lite", backend_configs["FlashMLA"])))
+# deepseek-ai/DeepSeek-V2-Lite with MLA
+MLA_backends = ["FlashMLA", "CutlassMLA"]
+for mla_backend in MLA_backends:
+    test_params_full_cudagraph.append(
+        pytest.param(
+            ("deepseek-ai/DeepSeek-V2-Lite", backend_configs[mla_backend])))
 
 # Qwen/Qwen2-1.5B-Instruct with other backends
 other_backend_configs = [
-    backend_configs[c] for c in backend_configs if c != "FlashMLA"
+    backend_configs[c] for c in backend_configs if c not in MLA_backends
 ]
 for backend_config in other_backend_configs:
     test_params_full_cudagraph.append(
@@ -107,7 +124,10 @@ def llm_pair(request):
     # Dynamically skip test if GPU capability is not met
     if backend_config.specific_gpu_arch and backend_config.specific_gpu_arch\
         != current_platform.get_device_capability():
-        pytest.skip("Only Hopper GPUs support FA3 and FlashMLA")
+        if backend_config.specific_gpu_arch == (9, 0):
+            pytest.skip("Only Hopper GPUs support FA3 and FlashMLA")
+        elif backend_config.specific_gpu_arch == (10, 0):
+            pytest.skip("Only Blackwell GPUs support Cutlass MLA")
 
     env_vars = {
         "VLLM_USE_V1": "1",
