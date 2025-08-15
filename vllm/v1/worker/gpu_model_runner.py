@@ -1227,6 +1227,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
                 mm_embeds_req.append(mm_embeds_item)
 
+            print("Request", req_id)
+            for mm in mm_embeds_req:
+                print("  ", mm.shape)
+
             # We are done with all mm_embeds for a given request
             # Now it's time to recompute mrope
             if supports_multimodal_pruning(self.model):
