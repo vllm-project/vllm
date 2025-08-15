@@ -1602,9 +1602,6 @@ class EngineArgs:
                 self.enable_prefix_caching = incremental_prefill_supported
                 logger.info("(%s) prefix caching by default", action)
 
-        if not self.enable_chunked_prefill and not self.max_num_batched_tokens:
-            self.max_num_batched_tokens = model_config.max_model_len
-
         # V1 should use the new scheduler by default.
         # Swap it only if this arg is set to the original V0 default
         if self.scheduler_cls == EngineArgs.scheduler_cls:
@@ -1692,8 +1689,14 @@ class EngineArgs:
                     self.max_num_batched_tokens = \
                         default_max_num_batched_tokens[usage_context]
             else:
-                self.max_num_batched_tokens = default_max_num_batched_tokens[
-                    usage_context]
+                if not self.enable_chunked_prefill:
+                    tentative_max_seqs = self.max_num_seqs or \
+                        default_max_num_seqs.get(usage_context, 1)
+                    self.max_num_batched_tokens = model_config.max_model_len *\
+                                                    tentative_max_seqs
+                else:
+                    self.max_num_batched_tokens = \
+                        default_max_num_batched_tokens[usage_context]
             logger.debug(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, use_context_value)
