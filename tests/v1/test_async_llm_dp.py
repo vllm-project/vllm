@@ -25,7 +25,6 @@ DP_SIZE = int(os.getenv("DP_SIZE", 2))
 engine_args = AsyncEngineArgs(
     model="ibm-research/PowerMoE-3b",
     enforce_eager=True,
-    disable_log_requests=True,
     tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
     data_parallel_size=DP_SIZE,
 )

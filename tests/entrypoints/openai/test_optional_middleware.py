@@ -27,8 +27,8 @@ def server(request: pytest.FixtureRequest):
         passed_params = [passed_params]
 
     args = [
-        "--task",
-        "embed",
+        "--runner",
+        "pooling",
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "float16",

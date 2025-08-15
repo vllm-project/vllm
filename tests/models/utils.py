@@ -7,8 +7,9 @@ from typing import Any, NamedTuple, Optional, Union
 
 import torch
 import torch.nn.functional as F
+from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig, TaskOption
+from vllm.config import ModelConfig, ModelDType, RunnerOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
@@ -255,12 +256,12 @@ def check_logprobs_close(
 
 def build_model_context(
     model_id: str,
-    task: TaskOption = "auto",
-    dtype: Union[str, torch.dtype] = "auto",
+    runner: RunnerOption = "auto",
+    dtype: ModelDType = "auto",
     model_config_kwargs: Optional[dict[str, Any]] = None,
     mm_processor_kwargs: Optional[dict[str, Any]] = None,
     limit_mm_per_prompt: Optional[dict[str, int]] = None,
-    disable_mm_preprocessor_cache: bool = True,
+    mm_processor_cache_gb: int = 0,
 ):
     """Creates an InputContext for a given model.
 
@@ -278,17 +279,19 @@ def build_model_context(
     model_info.check_transformers_version(on_fail="skip")
 
     model_config_kwargs = model_config_kwargs or {}
+    limit_mm_per_prompt = limit_mm_per_prompt or {}
     model_config = ModelConfig(
         model_id,
-        task=task,
+        runner=runner,
         tokenizer=model_info.tokenizer or model_id,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         dtype=dtype,
         seed=0,
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt=limit_mm_per_prompt,
-        disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
+        mm_processor_cache_gb=mm_processor_cache_gb,
         hf_overrides=model_info.hf_overrides,
         **model_config_kwargs,
     )
@@ -329,17 +332,114 @@ def matryoshka_fy(tensor: torch.Tensor, dimensions: int):
     return tensor
 
 
+def softmax(data):
+    if data.shape[-1] == 1:
+        return F.sigmoid(data)
+    else:
+        return F.softmax(data, dim=-1)
+
+
 class EmbedModelInfo(NamedTuple):
     name: str
     is_matryoshka: bool = False
     matryoshka_dimensions: Optional[list[int]] = None
     architecture: str = ""
     dtype: str = "auto"
+    default_pooling_type: str = ""
     enable_test: bool = True
+
+
+class CLSPoolingEmbedModelInfo(EmbedModelInfo):
+    default_pooling_type: str = "CLS"
+
+
+class LASTPoolingEmbedModelInfo(EmbedModelInfo):
+    default_pooling_type: str = "LAST"
 
 
 class RerankModelInfo(NamedTuple):
     name: str
     architecture: str = ""
     dtype: str = "auto"
+    default_pooling_type: str = ""
     enable_test: bool = True
+
+
+class CLSPoolingRerankModelInfo(RerankModelInfo):
+    default_pooling_type: str = "CLS"
+
+
+class LASTPoolingRerankModelInfo(RerankModelInfo):
+    default_pooling_type: str = "LAST"
+
+
+def dummy_hf_overrides(
+    hf_config: PretrainedConfig,
+    *,
+    model_arch: str = "",
+    exist_overrides: Optional[dict[str, Any]] = None,
+) -> PretrainedConfig:
+    """
+    Dummy HF overrides function used to create dummy model
+    with only minimum nums of layer.
+    """
+    hf_config.update(exist_overrides or {})
+
+    text_config = hf_config.get_text_config()
+
+    # Ensure at least 2 expert per group
+    # Since `grouped_topk` assumes top-2
+    n_group = getattr(text_config, 'n_group', None)
+    num_experts = n_group * 2 if n_group is not None else 2
+
+    # we use three layers for Gemma-3n to check
+    # both normal layer and kv_shared_layer
+    num_hidden_layers = (3 if model_arch == "Gemma3nForConditionalGeneration"
+                         else 1)
+    text_config.update({
+        "num_layers": 1,
+        "num_hidden_layers": num_hidden_layers,
+        "num_experts": num_experts,
+        "num_experts_per_tok": 2,
+        "num_local_experts": num_experts,
+        # Otherwise there will not be any expert layers
+        "first_k_dense_replace": 0,
+        # To avoid OOM on DeepSeek-V3
+        "n_routed_experts": num_experts,
+        # For Gemma-3n
+        "num_kv_shared_layers": 1,
+    })
+
+    if hasattr(hf_config, "vision_config"):
+        hf_config.vision_config.update({
+            "num_layers": 1,
+            "num_hidden_layers": 1,
+        })
+
+    # e.g.: ibm-granite/granite-speech-3.3-2b
+    if hasattr(hf_config, "encoder_config"):
+        hf_config.encoder_config.update({
+            "num_layers": 1,
+            "num_hidden_layers": 1,
+        })
+
+    # e.g.: Qwen/Qwen2-Audio-7B-Instruct
+    if hasattr(hf_config, "audio_config"):
+        hf_config.audio_config.update({
+            "num_layers": 1,
+            "num_hidden_layers": 1,
+            "encoder_layers": 1,
+        })
+
+    return hf_config
+
+
+def check_transformers_version(model: str,
+                               min_transformers_version: Optional[str] = None,
+                               max_transformers_version: Optional[str] = None):
+    from .registry import _HfExamplesInfo
+
+    return _HfExamplesInfo(model,
+                           min_transformers_version=min_transformers_version,
+                           max_transformers_version=max_transformers_version
+                           ).check_transformers_version(on_fail="skip")

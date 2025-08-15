@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
+from typing import Optional
 
 import pytest
 import torch
 
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.inputs import (MultiModalBatchedField,
+                                    MultiModalFieldElem, MultiModalKwargsItem,
+                                    PlaceholderRange)
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes, sha256, sha256_cbor_64bit
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -17,7 +20,7 @@ from vllm.v1.core.kv_cache_utils import (
     estimate_max_model_len, generate_block_hash_extra_keys,
     get_kv_cache_config, get_max_concurrency_for_kv_cache_config,
     hash_block_tokens, hash_request_tokens, init_none_hash,
-    unify_kv_cache_configs)
+    is_kv_cache_type_uniform, unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
                                         SlidingWindowSpec)
@@ -27,20 +30,29 @@ from vllm.v1.request import Request
 # yapf: enable
 
 
-def make_request(request_id,
-                 prompt_token_ids,
-                 mm_positions=None,
-                 mm_hashes=None,
-                 cache_salt=None):
+def make_request(
+    request_id: str,
+    prompt_token_ids: list[int],
+    mm_positions: Optional[list[PlaceholderRange]] = None,
+    mm_hashes: Optional[list[str]] = None,
+    cache_salt: Optional[str] = None,
+):
     if mm_positions is None:
-        multi_modal_inputs = None
+        mm_kwargs = None
     else:
-        multi_modal_inputs = [MultiModalKwargs({})] * len(mm_positions)
+        mm_elem = MultiModalFieldElem(
+            modality="dummy_m",
+            key="dummy_k",
+            data=None,
+            field=MultiModalBatchedField(),
+        )
+        mm_item = MultiModalKwargsItem.from_elems([mm_elem])
+        mm_kwargs = [mm_item] * len(mm_positions)
 
     return Request(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
-        multi_modal_inputs=multi_modal_inputs,
+        multi_modal_kwargs=mm_kwargs,
         multi_modal_hashes=mm_hashes,
         multi_modal_placeholders=mm_positions,
         sampling_params=SamplingParams(max_tokens=17),
@@ -112,9 +124,9 @@ def test_kv_cache_block():
     assert block.block_hash is None
 
     # Test reference count manipulation
-    block.incr_ref()
+    block.ref_cnt += 1
     assert block.ref_cnt == 1
-    block.decr_ref()
+    block.ref_cnt -= 1
     assert block.ref_cnt == 0
 
     # Test block hash setting and resetting
@@ -184,6 +196,111 @@ def test_free_kv_cache_block_queue_operations():
     assert str(e.value) == "No free blocks available"
 
 
+def test_free_kv_cache_block_queue_append_n():
+    # Create an empty FreeKVCacheBlockQueue with these blocks
+    queue = FreeKVCacheBlockQueue([])
+    blocks = [KVCacheBlock(block_id=i) for i in range(6)]
+    # Append 0 block
+    # fake_head->fake_tail
+    queue.append_n([])
+    assert queue.num_free_blocks == 0
+    assert (queue.fake_free_list_head.next_free_block
+            is queue.fake_free_list_tail)
+    assert (queue.fake_free_list_tail.prev_free_block
+            is queue.fake_free_list_head)
+    # Append 1 block
+    # fake_head->b0->fake_tail
+    queue.append_n(blocks[0:1])
+    assert queue.num_free_blocks == 1
+    assert queue.fake_free_list_head.next_free_block is blocks[0]
+    assert blocks[0].prev_free_block is queue.fake_free_list_head
+    assert blocks[0].next_free_block is queue.fake_free_list_tail
+    assert queue.fake_free_list_tail.prev_free_block is blocks[0]
+    # Append 2 blocks
+    # fake_head->b0->b4->b5->fake_tail
+    queue.append_n(blocks[4:6])
+    assert queue.num_free_blocks == 3
+    assert queue.fake_free_list_head.next_free_block is blocks[0]
+    assert blocks[0].prev_free_block is queue.fake_free_list_head
+    assert blocks[0].next_free_block is blocks[4]
+    assert blocks[4].prev_free_block is blocks[0]
+    assert blocks[4].next_free_block is blocks[5]
+    assert blocks[5].prev_free_block is blocks[4]
+    assert blocks[5].next_free_block is queue.fake_free_list_tail
+    assert queue.fake_free_list_tail.prev_free_block is blocks[5]
+    # Append 3 blocks
+    # fake_head->b0->b4->b5->b1->b2->b3->fake_tail
+    queue.append_n(blocks[1:4])
+    assert queue.num_free_blocks == 6
+    assert queue.fake_free_list_head.next_free_block is blocks[0]
+    assert blocks[0].prev_free_block is queue.fake_free_list_head
+    assert blocks[0].next_free_block is blocks[4]
+    assert blocks[4].prev_free_block is blocks[0]
+    assert blocks[4].next_free_block is blocks[5]
+    assert blocks[5].prev_free_block is blocks[4]
+    assert blocks[5].next_free_block is blocks[1]
+    assert blocks[1].prev_free_block is blocks[5]
+    assert blocks[1].next_free_block is blocks[2]
+    assert blocks[2].prev_free_block is blocks[1]
+    assert blocks[2].next_free_block is blocks[3]
+    assert blocks[3].prev_free_block is blocks[2]
+    assert blocks[3].next_free_block is queue.fake_free_list_tail
+    assert queue.fake_free_list_tail.prev_free_block is blocks[3]
+
+
+def test_free_kv_cache_block_queue_popleft_n():
+    blocks = [KVCacheBlock(block_id=i) for i in range(6)]
+    # Create a empty FreeKVCacheBlockQueue with these blocks
+    queue = FreeKVCacheBlockQueue(
+        [blocks[1], blocks[3], blocks[5], blocks[4], blocks[0], blocks[2]])
+    assert queue.num_free_blocks == 6
+    assert queue.fake_free_list_head.next_free_block is blocks[1]
+    assert blocks[1].prev_free_block is queue.fake_free_list_head
+    assert blocks[1].next_free_block is blocks[3]
+    assert blocks[3].prev_free_block is blocks[1]
+    assert blocks[3].next_free_block is blocks[5]
+    assert blocks[5].prev_free_block is blocks[3]
+    assert blocks[5].next_free_block is blocks[4]
+    assert blocks[4].prev_free_block is blocks[5]
+    assert blocks[4].next_free_block is blocks[0]
+    assert blocks[0].prev_free_block is blocks[4]
+    assert blocks[0].next_free_block is blocks[2]
+    assert blocks[2].prev_free_block is blocks[0]
+    assert blocks[2].next_free_block is queue.fake_free_list_tail
+    assert queue.fake_free_list_tail.prev_free_block is blocks[2]
+
+    # Pop 0 block
+    # fake_head->b1->b3->b5->b4->b0->b2->fake_tail
+    assert len(queue.popleft_n(0)) == 0
+    # Pop 1 block
+    # fake_head->b3->b5->b4->b0->b2->fake_tail
+    result_blocks = queue.popleft_n(1)
+    assert len(result_blocks) == 1
+    assert result_blocks[0] is blocks[1]
+    for block in result_blocks:
+        assert block.prev_free_block is None
+        assert block.next_free_block is None
+    # Pop 2 blocks
+    # fake_head->b4->b0->b2->fake_tail
+    result_blocks = queue.popleft_n(2)
+    assert len(result_blocks) == 2
+    assert result_blocks[0] is blocks[3]
+    assert result_blocks[1] is blocks[5]
+    for block in result_blocks:
+        assert block.prev_free_block is None
+        assert block.next_free_block is None
+    # Pop 3 blocks
+    # fake_head->fake_tail
+    result_blocks = queue.popleft_n(3)
+    assert len(result_blocks) == 3
+    assert result_blocks[0] is blocks[4]
+    assert result_blocks[1] is blocks[0]
+    assert result_blocks[2] is blocks[2]
+    for block in result_blocks:
+        assert block.prev_free_block is None
+        assert block.next_free_block is None
+
+
 def test_free_kv_cache_block_queue_get_all_free_blocks():
     # Create a list of KVCacheBlock objects
     blocks = [KVCacheBlock(block_id=i) for i in range(5)]
@@ -211,7 +328,7 @@ def test_free_kv_cache_block_queue_get_all_free_blocks():
 
 def test_generate_block_hash_extra_keys():
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(20)],
         mm_positions=[
             PlaceholderRange(offset=0, length=5),
@@ -243,7 +360,7 @@ def test_generate_block_hash_extra_keys():
 
 def test_generate_block_hash_extra_keys_no_mm_inputs():
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=None,
         mm_hashes=None,
@@ -256,7 +373,7 @@ def test_generate_block_hash_extra_keys_no_mm_inputs():
 
 def test_generate_block_hash_extra_keys_cache_salt():
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=None,
         mm_hashes=None,
@@ -277,7 +394,7 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # works together with other extra keys
     request_mm = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(20)],
         mm_positions=[
             PlaceholderRange(offset=0, length=5),
@@ -315,7 +432,7 @@ def test_hash_request_tokens(hash_fn):
     import vllm.v1.core.kv_cache_utils
     init_none_hash(hash_fn)
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=[
             PlaceholderRange(offset=0, length=3),
@@ -345,7 +462,7 @@ def test_hash_tokens_different_mm_input(hash_fn):
     init_none_hash(hash_fn)
 
     request1 = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=[
             PlaceholderRange(offset=0, length=3),
@@ -354,7 +471,7 @@ def test_hash_tokens_different_mm_input(hash_fn):
         mm_hashes=["hash1", "hash2"],
     )
     request2 = make_request(
-        request_id=1,
+        request_id="1",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=[
             PlaceholderRange(offset=0, length=3),
@@ -374,7 +491,7 @@ def test_hash_request_tokens_no_mm_inputs(hash_fn):
     init_none_hash(hash_fn)
 
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=None,
         mm_hashes=None,
@@ -580,6 +697,38 @@ def test_merge_kv_cache_spec():
     assert merged_layer_spec.sliding_window == 1
 
 
+def test_is_kv_cache_type_uniform():
+    kv_cache_spec = {
+        "layer_1": new_kv_cache_spec(num_kv_heads=32),
+        "layer_2": new_kv_cache_spec(num_kv_heads=32),
+    }
+    assert is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_kv_cache_spec(num_kv_heads=32),
+        "layer_2": new_kv_cache_spec(num_kv_heads=32, sliding_window=1),
+    }
+    assert is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_kv_cache_spec(num_kv_heads=32),
+        "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+    }
+    assert not is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+        "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+    }
+    assert is_kv_cache_type_uniform(kv_cache_spec)
+
+    kv_cache_spec = {
+        "layer_1": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
+        "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=2),
+    }
+    assert not is_kv_cache_type_uniform(kv_cache_spec)
+
+
 @pytest.mark.parametrize(
     ("model_id", "max_model_len", "want_estimated_max_len"), [
         ("Qwen/Qwen1.5-7B", 16385, 16384),
@@ -590,11 +739,7 @@ def test_estimate_max_model_len(model_id, max_model_len,
     # Create a VllmConfig
     model_config = ModelConfig(
         model_id,
-        task="generate",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
+        runner="generate",
         dtype="float16",
         max_model_len=max_model_len,
     )
@@ -628,11 +773,7 @@ def test_get_max_concurrency_for_kv_cache_config():
     max_model_len = 16384
     model_config = ModelConfig(
         model_id,
-        task="generate",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
+        runner="generate",
         dtype="float16",
         max_model_len=max_model_len,
     )
@@ -715,7 +856,7 @@ def test_allocate_with_lookahead():
     )
 
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[],
         mm_positions=None,
         mm_hashes=None,

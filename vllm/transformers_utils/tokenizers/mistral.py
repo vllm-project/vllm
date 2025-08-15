@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import huggingface_hub
 import regex as re
 from huggingface_hub import HfApi, hf_hub_download
+from transformers.tokenization_utils_base import BatchEncoding
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_base import TokenizerBase
@@ -25,11 +25,6 @@ if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class Encoding:
-    input_ids: Union[list[int], list[list[int]]]
 
 
 def maybe_serialize_tool_calls(request: "ChatCompletionRequest"):
@@ -145,6 +140,21 @@ def find_tokenizer_file(files: list[str]):
     return matched_files[0]
 
 
+def _aggregate_content(content: list) -> list[dict[str, Any]]:
+    aggregated_content: list[dict[str, Any]] = []
+    for chunk in content:
+        if chunk.get("type"
+                     ) == "text" and aggregated_content and aggregated_content[
+                         -1].get("type") == "text":
+            aggregated_content[-1]["text"] += "\n\n" + chunk.get("text")
+        else:
+            aggregated_content.append(chunk)
+    if len(aggregated_content) == 1 and aggregated_content[0].get(
+            "type") == "text":
+        content = aggregated_content[0]["text"]
+    return content
+
+
 def make_mistral_chat_completion_request(
         messages: list["ChatCompletionMessageParam"],
         tools: Optional[list[dict[str,
@@ -162,13 +172,14 @@ def make_mistral_chat_completion_request(
 
         # Convert list text content to string
         if message.get("role") in ("assistant", "tool"):
-            content = message.get("content")
+            content: Any = message.get("content")
             if isinstance(content, list):
-                content = "\n".join(chunk.get("text") for chunk in content)
-                message["content"] = content
+                content = _aggregate_content(content)
+            message["content"] = content
 
     # The Mistral client, in comparison to the OpenAI client, requires the
-    # "parameters" dict to be present, even if it's empty.
+    # "parameters" dict and the "description" string to be present
+    # even if they are empty.
     if tools:
         for function in [
                 tool["function"] for tool in tools
@@ -176,6 +187,8 @@ def make_mistral_chat_completion_request(
         ]:
             if function.get("parameters") is None:
                 function["parameters"] = {}
+            if function.get("description") is None:
+                function["description"] = ""
 
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
     return ChatCompletionRequest(messages=messages,
@@ -341,7 +354,7 @@ class MistralTokenizer(TokenizerBase):
         # For str, single prompt text
         else:
             input_ids = self.encode_one(text, truncation, max_length)
-        return Encoding(input_ids=input_ids)
+        return BatchEncoding({"input_ids": input_ids})
 
     def get_vocab(self) -> dict[str, int]:
         # NB: the dictionary form of the vocabulary collapses token ids that map
@@ -465,6 +478,8 @@ class MistralTokenizer(TokenizerBase):
         skip_special_tokens: bool = True,
     ) -> list[str]:
         from mistral_common.tokens.tokenizers.base import SpecialTokens
+        from mistral_common.tokens.tokenizers.instruct import (
+            InstructTokenizerV13)
 
         # TODO(Patrick) - potentially allow special tokens to not be skipped
         assert (
@@ -474,10 +489,18 @@ class MistralTokenizer(TokenizerBase):
         assert self.is_tekken or self.is_spm, type(self.tokenizer)
 
         if self.is_tekken:
-            # skip special tokens except tool call
-            ids = [
-                i for i in ids if i > self.tokenizer.num_special_tokens or i ==
+            # skip special tokens except tool call and think tokens
+            non_skip_special_tokens = {
                 self.tokenizer.get_control_token(SpecialTokens.tool_calls)
+            }
+            if isinstance(self.instruct, InstructTokenizerV13):
+                if self.instruct.BEGIN_THINK:
+                    non_skip_special_tokens.add(self.instruct.BEGIN_THINK)
+                if self.instruct.END_THINK:
+                    non_skip_special_tokens.add(self.instruct.END_THINK)
+            ids = [
+                i for i in ids if i > self.tokenizer.num_special_tokens
+                or i in non_skip_special_tokens
             ]
 
         tokens = [self.tokenizer.id_to_piece(id) for id in ids]

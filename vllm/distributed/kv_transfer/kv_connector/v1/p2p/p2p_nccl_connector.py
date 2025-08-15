@@ -192,8 +192,16 @@ class P2pNcclConnector(KVConnectorBase_V1):
         # Load the KV for each request each layer
         for request in metadata.requests:
             for layer_name in forward_context.no_compile_layers:
-                attn_layer = forward_context.no_compile_layers[layer_name]
-                kv_cache_layer = attn_layer.kv_cache[ \
+                layer = forward_context.no_compile_layers[layer_name]
+
+                # Only process layers that have kv_cache
+                # attribute (attention layers) Skip non-attention
+                # layers like FusedMoE
+                kv_cache = getattr(layer, 'kv_cache', None)
+                if kv_cache is None:
+                    continue
+
+                kv_cache_layer = kv_cache[ \
                     forward_context.virtual_engine]
 
                 kv_cache = self.p2p_nccl_engine.recv_tensor(

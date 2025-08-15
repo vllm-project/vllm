@@ -6,6 +6,7 @@ from collections.abc import Generator
 import gguf
 import torch
 import torch.nn as nn
+from huggingface_hub import hf_hub_download
 from transformers import AutoModelForCausalLM
 
 from vllm.config import LoadConfig, ModelConfig, VllmConfig
@@ -32,8 +33,18 @@ class GGUFModelLoader(BaseModelLoader):
     def _prepare_weights(self, model_name_or_path: str):
         if os.path.isfile(model_name_or_path):
             return model_name_or_path
+        # for raw HTTPS link
+        if model_name_or_path.startswith(
+            ("http://", "https://")) and model_name_or_path.endswith(".gguf"):
+            return hf_hub_download(url=model_name_or_path)
+        # repo id/filename.gguf
+        if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
+            repo_id, filename = model_name_or_path.rsplit("/", 1)
+            return hf_hub_download(repo_id=repo_id, filename=filename)
         else:
-            raise ValueError(f"{model_name_or_path} is not a file.")
+            raise ValueError(
+                f"Unrecognised GGUF reference: {model_name_or_path} "
+                "(expected local file, raw URL, or <repo_id>/<filename>.gguf)")
 
     def _get_gguf_weights_map(self, model_config: ModelConfig):
         """
@@ -57,6 +68,17 @@ class GGUFModelLoader(BaseModelLoader):
             for idx in range(config.num_hidden_layers):
                 gguf_to_hf_name_map[f"blk.{idx}.exp_probs_b.bias"] = \
                         f"model.layers.{idx}.mlp.gate.e_score_correction_bias"
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.0.down_proj.weight"
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.0.gate_proj.weight"
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
+        if model_type in ("qwen2_moe", "qwen3_moe"):
+            model_type = model_type.replace("_", "")
+            # GGUF layer map assumes that we will have a merged expert weights
+            # so we need to map them manually
+            for idx in range(config.num_hidden_layers):
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = \
                         f"model.layers.{idx}.mlp.experts.0.down_proj.weight"
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = \

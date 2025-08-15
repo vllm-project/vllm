@@ -127,7 +127,8 @@ def use_rocm_custom_paged_attention(
         max_seq_len: int,
         sliding_window: int,
         kv_cache_dtype: str,
-        alibi_slopes: Optional[torch.Tensor] = None) -> bool:
+        alibi_slopes: Optional[torch.Tensor] = None,
+        sinks: Optional[torch.Tensor] = None) -> bool:
 
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
@@ -145,7 +146,7 @@ def use_rocm_custom_paged_attention(
                 and max_seq_len <= 128 * 1024
                 and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
                 and not (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
-                         and envs.VLLM_ROCM_USE_AITER))
+                         and envs.VLLM_ROCM_USE_AITER) and sinks is None)
 
     else:
         return (ON_GFX11_GFX12 and (not envs.VLLM_USE_V1 or sliding_window == 0
@@ -155,7 +156,7 @@ def use_rocm_custom_paged_attention(
                 and (gqa_ratio >= 3 and gqa_ratio <= 16)
                 and max_seq_len <= 128 * 1024 and alibi_slopes is None
                 and kv_cache_dtype == "auto"
-                and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
+                and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN and sinks is None)
 
 
 class RocmPlatform(Platform):
@@ -170,13 +171,25 @@ class RocmPlatform(Platform):
 
     supported_quantization: list[str] = [
         "awq", "gptq", "fp8", "compressed-tensors", "fbgemm_fp8", "gguf",
-        "quark", "ptpc_fp8"
+        "quark", "ptpc_fp8", "mxfp4"
     ]
 
     @classmethod
+    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
+        if support_fa:
+            if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
+                    and on_gfx9()):
+                # Note: AITER FA is only supported for Qwen-VL models.
+                # TODO: Add support for other VL models in their model class.
+                return _Backend.ROCM_AITER_FA
+            if on_gfx9():
+                return _Backend.FLASH_ATTN
+        return _Backend.TORCH_SDPA
+
+    @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1,
-                             use_mla) -> str:
+                             kv_cache_dtype, block_size, use_v1, use_mla,
+                             has_sink) -> str:
         if use_mla:
             from vllm.attention.backends.rocm_aiter_mla import (
                 is_aiter_mla_enabled)
@@ -314,18 +327,8 @@ class RocmPlatform(Platform):
             cache_config.block_size = 16
 
         parallel_config = vllm_config.parallel_config
-        scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
-            if scheduler_config.is_multi_step:
-                if envs.VLLM_USE_V1:
-                    raise NotImplementedError(
-                        "Multi-step scheduling is not supported (and not "
-                        "needed) on vLLM V1. Please launch without "
-                        "--num-scheduler-steps.")
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.worker.multi_step_worker.MultiStepWorker"
-            elif vllm_config.speculative_config:
+            if vllm_config.speculative_config:
                 if not envs.VLLM_USE_V1:
                     raise NotImplementedError(
                         "Speculative decoding is not supported on vLLM V0.")
@@ -333,7 +336,7 @@ class RocmPlatform(Platform):
             else:
                 if envs.VLLM_USE_V1:
                     parallel_config.worker_cls = \
-                            "vllm.v1.worker.gpu_worker.Worker"
+                        "vllm.v1.worker.gpu_worker.Worker"
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
 
@@ -454,3 +457,7 @@ class RocmPlatform(Platform):
     @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+        return True
