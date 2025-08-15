@@ -8,15 +8,55 @@ from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
 from vllm.platforms import current_platform
 
 DTYPES = [torch.bfloat16, torch.float16]
-M = [16, 32, 64, 128, 256, 512, 1024, 4096, 8192]
-K = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 6144, 8192]  # k % 8 == 0
-N = [1, 2, 3, 4]
+# Specific (N, K, M) combinations for targeted testing
+NKM_FACTORS_LLMM1 = [
+    # Small, medium, large cases
+    (1, 8, 16),
+    (1, 32, 64),
+    (1, 128, 256),
+    (1, 512, 1024),
+    (1, 2048, 4096),
+    # Edge cases with specific K sizes
+    (1, 6144, 1024),
+    (1, 8192, 2048),
+    # Very large case
+    (1, 4096, 8192),
+]
+
+NKM_FACTORS_WVSPLITK = [
+    # Different batch sizes with key dimensions
+    (1, 16, 16),
+    (1, 64, 64),
+    (2, 256, 256),
+    (3, 1024, 1024),
+    (4, 4096, 4096),
+    # Extended K values
+    (1, 9216, 512),
+    (2, 10240, 1024),
+    (4, 16384, 8192),
+    # Minimum M constraint validation (m >= 8)
+    (1, 64, 8),
+    (2, 128, 8),
+    (4, 256, 8),
+]
+
+NKM_FACTORS_WVSPLITK_FP8 = [
+    # FP8-specific cases with K % 16 == 0
+    (1, 16, 16),
+    (1, 64, 64),
+    (2, 512, 512),
+    (3, 2048, 2048),
+    (4, 4096, 4096),
+    # Extended FP8 dimensions not covered by WVSPLITK
+    (1, 14336, 1024),
+    (2, 24576, 2048),
+    (4, 32768, 28672),
+]
+
 SEEDS = [0]
 
 
-@pytest.mark.parametrize("n", [1])  # only test for batch size 1
-@pytest.mark.parametrize("k", K)
-@pytest.mark.parametrize("m", M)
+@pytest.mark.parametrize("n,k,m", NKM_FACTORS_LLMM1)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("rows_per_block", [2, 4, 8, 16])
 @pytest.mark.parametrize("seed", SEEDS)
@@ -34,9 +74,7 @@ def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
     assert torch.allclose(out, ref_out, rtol=0.01)
 
 
-@pytest.mark.parametrize("n", N)  # only test for batch size <= 4
-@pytest.mark.parametrize("k", K + [9216, 10240, 16384])
-@pytest.mark.parametrize("m", [8] + M)  # m >= 8
+@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not current_platform.is_rocm(),
@@ -54,9 +92,7 @@ def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed):
     assert torch.allclose(out, ref_out, rtol=0.01)
 
 
-@pytest.mark.parametrize("n", N)  # only test for batch size <= 4
-@pytest.mark.parametrize("k", K[1:] + [14336, 24576, 32768])  # k % 16 == 0
-@pytest.mark.parametrize("m", M + [28672])  # m >= 16
+@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(

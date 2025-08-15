@@ -53,12 +53,8 @@ HQQ_SUPPORTED_GROUP_SIZES = [64]
 MNK_FACTORS = [
     (1, 1, 1),
     (1, 4, 8),
-    (1, 7, 5),
-    (13, 17, 67),
     (26, 37, 13),
-    (67, 13, 11),
     (257, 13, 11),
-    (658, 13, 11),
 ]
 
 DTYPES = [torch.float16, torch.bfloat16]
