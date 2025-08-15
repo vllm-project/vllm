@@ -127,19 +127,17 @@ class SupportsMultiModalPruning(Protocol):
     """
     supports_multimodal_pruning: ClassVar[Literal[True]] = True
 
-    def get_input_embeddings_and_positions(
+    def recompute_mrope_positions(
         self,
-        input_ids: Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-        # Only necessary so that the v0 overload is valid
-        # TODO: Remove attn_metadata once v0 is deprecated
-        attn_metadata: Optional["AttentionMetadata"] = None,
-    ) -> tuple[Tensor, Tensor]:
+        input_ids: List[int],
+        multimodal_embeddings: MultiModalEmbeddings,
+    ) -> tuple[MultiModalEmbeddings, Tensor, int]:
         """
-        Returns a tuple of (input_embeddings, positions) where:
-        - input_embeddings: The input embeddings merged from the text embeddings from 
+        Returns a tuple of (multimodal_embeddings, mrope_positions, mrope_position_delta) where:
+        - multimodal_embeddings: The output mm-embeddings
           input_ids and the multimodal embeddings generated from multimodal kwargs.
-        - positions: The positions tensor for the input embeddings.
+        - mrope_positions: The positions tensor for the input embeddings.
+        - mrope_position_delta:
         """
         ...
 
