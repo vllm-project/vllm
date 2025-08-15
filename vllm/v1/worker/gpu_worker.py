@@ -518,6 +518,9 @@ class Worker(WorkerBase):
             parallel_config.num_redundant_experts = (
                 new_physical_experts -
                 self.model_runner.eplb_state.logical_replica_count.shape[1])
+            self.model_runner.model.update_physical_experts_metadata(
+                num_physical_experts=new_physical_experts,
+                num_local_physical_experts=num_local_physical_experts)
             global_expert_load = None
         else:
             num_local_physical_experts = torch.tensor([num_local_experts],
@@ -528,15 +531,15 @@ class Worker(WorkerBase):
                                         group_src=0)
             num_local_physical_experts = num_local_physical_experts.item()
             new_physical_experts = num_local_physical_experts * new_ep_size
+            self.model_runner.model.update_physical_experts_metadata(
+                num_physical_experts=new_physical_experts,
+                num_local_physical_experts=num_local_physical_experts)
             assert self.model_runner.eplb_state is not None
             global_expert_load = self.model_runner.eplb_state.rearrange(
                 self.model_runner.model, execute_shuffle=False)
             parallel_config.num_redundant_experts = (
                 new_physical_experts - global_expert_load.shape[1])
         prepare_communication_buffer_for_model(self.model_runner.model)
-        self.model_runner.model.update_physical_experts_metadata(
-            num_physical_experts=new_physical_experts,
-            num_local_physical_experts=num_local_physical_experts)
         return global_expert_load
 
     def reinitialize_distributed(

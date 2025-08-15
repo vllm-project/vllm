@@ -1370,6 +1370,23 @@ class FusedMoE(CustomOp):
         self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
         self.logical_replica_count = logical_replica_count[moe_layer_idx]
 
+    def update_expert_load_view(
+        self,
+        moe_layer_idx: int,
+        expert_load_view: torch.Tensor,
+    ) -> None:
+        """
+        Update the expert load view tensor for this layer.
+        
+        Args:
+            moe_layer_idx (int): The index of this MoE layer.
+            expert_load_view (torch.Tensor): The new expert load view tensor.
+                                Shape: (num_moe_layers, num_physical_experts)
+        """
+        if (expert_load_view is not None
+                and moe_layer_idx < expert_load_view.size(0)):
+            self.expert_load_view = expert_load_view[moe_layer_idx]
+
     @staticmethod
     def select_experts(
         hidden_states: torch.Tensor,

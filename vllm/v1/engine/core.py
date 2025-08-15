@@ -865,6 +865,9 @@ class EngineCoreProc(EngineCore):
                     # (RequestType, RequestData)
                     type_frame, *data_frames = input_socket.recv_multipart(
                         copy=False)
+                    if type_frame.buffer == b"READY":
+                        # This may occur when dp scale-up, so just ignore it.
+                        continue
                     request_type = EngineCoreRequestType(
                         bytes(type_frame.buffer))
 

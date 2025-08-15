@@ -652,6 +652,20 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
                 moe.n_redundant_experts = self.num_redundant_experts
                 moe.experts.update_expert_map()
 
+    def update_expert_load_view(
+        self,
+        expert_load_view: torch.Tensor,
+    ) -> None:
+        """
+        Update the expert load view tensor in the MoE model.
+        
+        Args:
+            expert_load_view: A tensor containing expert load metrics.
+                            Shape: (num_moe_layers, num_physical_experts)
+        """
+        for layer_idx, layer in enumerate(self.moe_layers):
+            layer.update_expert_load_view(layer_idx, expert_load_view)
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 

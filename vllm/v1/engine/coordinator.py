@@ -189,6 +189,7 @@ class DPCoordinatorProc:
             poller = zmq.Poller()
             poller.register(publish_front, zmq.POLLIN)
             poller.register(output_back, zmq.POLLIN)
+            poller.register(publish_back, zmq.POLLIN)
             last_publish_time = 0
             while True:
                 elapsed = int(time.time() * 1000) - last_publish_time
@@ -220,6 +221,11 @@ class DPCoordinatorProc:
 
                 events = dict(events)
                 wave_state_changed = False
+
+                if publish_back in events:
+                    buffer = publish_back.recv()
+                    if buffer == b"\x01":
+                        publish_back.send(b"READY")
 
                 if publish_front in events:
                     buffer = publish_front.recv()
