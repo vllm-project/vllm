@@ -35,7 +35,7 @@ def test_gpu_memory_profiling():
     )
 
     # Set 10GiB as the total gpu ram to be device-agnostic
-    def mock_mem_info():
+    def mock_mem_info(device: torch.types.Device = None):
         current_usage = torch.cuda.memory_stats(
         )["allocated_bytes.all.current"]
         mock_total_bytes = 10 * 1024**3
