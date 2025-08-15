@@ -22,9 +22,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Erine VL model compatible with HuggingFace weights."""
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Any, Callable, Literal, Optional, TypedDict
+from typing import Any, Callable, Literal, Optional, TypedDict, Union
 
 import numpy as np
 import torch
@@ -57,8 +58,6 @@ from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import (
     cached_image_processor_from_config)
-from vllm.transformers_utils.processors.ernie45_vl import (
-    Ernie4_5_VLProcessor, smart_resize)
 
 from .ernie45_vl_moe import Ernie4_5_VLMoeForCausalLM
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -618,6 +617,54 @@ Ernie4_5_VLVideoInputs = Ernie4_5_VLImagePixelInputs
 # === Vision Processor === #
 
 
+def round_by_factor(number: Union[int, float], factor: int) -> int:
+    return round(number / factor) * factor
+
+
+def ceil_by_factor(number: Union[int, float], factor: int) -> int:
+    return math.ceil(number / factor) * factor
+
+
+def floor_by_factor(number: Union[int, float], factor: int) -> int:
+    return math.floor(number / factor) * factor
+
+
+def smart_resize(
+    height: int,
+    width: int,
+    factor: int = 28,
+    min_pixels: int = 4 * 28 * 28,
+    max_pixels: int = 16384 * 28 * 28,
+):
+    MAX_RATIO = 200
+    if max(height, width) / min(height, width) > MAX_RATIO:
+        if height > width:
+            new_width = max(factor, round_by_factor(width, factor))
+            new_height = floor_by_factor(new_width * MAX_RATIO, factor)
+        else:
+            new_height = max(factor, round_by_factor(height, factor))
+            new_width = floor_by_factor(new_height * MAX_RATIO, factor)
+
+        height = new_height
+        width = new_width
+
+    h_bar = max(factor, round_by_factor(height, factor))
+    w_bar = max(factor, round_by_factor(width, factor))
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = floor_by_factor(height / beta, factor)
+        w_bar = floor_by_factor(width / beta, factor)
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = ceil_by_factor(height * beta, factor)
+        w_bar = ceil_by_factor(width * beta, factor)
+
+    if min_pixels > h_bar * w_bar or h_bar * w_bar > max_pixels:
+        raise ValueError(f"encounter invalid h_bar: {h_bar}, w_bar: {w_bar}")
+
+    return h_bar, w_bar
+
+
 class VariableResolutionResamplerModel(nn.Module):
 
     def __init__(self,
@@ -801,11 +848,8 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.model_config.hf_config
 
-    def get_hf_processor(self, **kwargs: object) -> Ernie4_5_VLProcessor:
-        return self.ctx.get_hf_processor(
-            Ernie4_5_VLProcessor,
-            #  use_fast=True,
-            **kwargs)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(use_fast=True, **kwargs)
 
     def _get_image_processor_kwargs(
         self,
@@ -853,7 +897,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int = 1,
         do_resize: bool = True,
-        image_processor: Optional[Ernie4_5_VLProcessor],
+        image_processor: Optional[Any],
     ) -> tuple[ImageSize, int]:
         if image_processor is None:
             image_processor = self.get_image_processor()
@@ -892,7 +936,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        image_processor: Optional[Ernie4_5_VLProcessor],
+        image_processor: Optional[Any],
     ) -> int:
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
@@ -907,7 +951,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         num_frames: int,
-        image_processor: Optional[Ernie4_5_VLProcessor],
+        image_processor: Optional[Any],
     ) -> int:
         _, num_video_tokens = self._get_vision_info(
             image_width=image_width,
