@@ -1956,7 +1956,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             global_expert_load, old_global_expert_indices = (
                 EplbState.recv_state())
             num_logical_experts = global_expert_load.shape[1]
-            self.parallel_config.num_redundant_experts = (
+            self.parallel_config.eplb_config.num_redundant_experts = (
                 num_local_physical_experts * new_ep_size - num_logical_experts)
             assert old_global_expert_indices.shape[
                 1] % num_local_physical_experts == 0
