@@ -59,6 +59,7 @@ class OpenAIServingCompletion(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        log_error_stack: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -67,6 +68,7 @@ class OpenAIServingCompletion(OpenAIServing):
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             enable_force_include_usage=enable_force_include_usage,
+            log_error_stack=log_error_stack,
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.default_sampling_params = (

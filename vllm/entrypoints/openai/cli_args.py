@@ -172,6 +172,8 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     enable_log_outputs: bool = False
     """If set to True, enable logging of model outputs (generations) 
     in addition to the input logging that is enabled by default."""
+    log_error_stack: bool = False
+    """If set to True, log the stack trace of error responses"""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
