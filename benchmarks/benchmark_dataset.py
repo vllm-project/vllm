@@ -430,7 +430,10 @@ class ShareGPTDataset(BenchmarkDataset):
                 skip_min_output_len_check=output_len is not None,
             ):
                 continue
-            mm_content = process_image(entry["image"]) if "image" in entry else None
+            if image_path := entry.get("image"):
+                mm_content = process_image(image_path)
+            else:
+                mm_content = None
             if enable_multimodal_chat:
                 prompt = self.apply_multimodal_chat_transformation(prompt, mm_content)
             samples.append(
