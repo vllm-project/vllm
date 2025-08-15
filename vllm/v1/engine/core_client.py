@@ -576,20 +576,20 @@ def _process_utility_output(output: UtilityOutput,
                             utility_results: dict[int, AnyFuture]):
     """Set the result from a utility method in the waiting future."""
     future = utility_results.pop(output.call_id)
-    if future.done():
-        # The future may be canceled here if the original calling task
-        # was canceled.
-        assert future.cancelled()
-        if output.failure_message is not None:
+    failure_message = output.failure_message
+    try:
+        if failure_message is not None:
+            future.set_exception(Exception(failure_message))
+        else:
+            assert output.result is not None
+            future.set_result(output.result.result)
+    except asyncio.InvalidStateError:
+        # This can happen if the future is cancelled due to the
+        # original calling task being cancelled.
+        if failure_message is not None:
             logger.error(
-                "Canceled call to utility method failed "
-                "with error: %s", output.failure_message)
-        return
-    if output.failure_message is not None:
-        future.set_exception(Exception(output.failure_message))
-    else:
-        assert output.result is not None
-        future.set_result(output.result.result)
+                "Cancelled call to utility method failed "
+                "with error: %s", failure_message)
 
 
 class SyncMPClient(MPClient):
