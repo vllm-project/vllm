@@ -14,11 +14,14 @@ from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+torch.manual_seed(42)  # For reproducibility
+
 # BACKENDS_TO_TEST = [
 #     _Backend.CUTLASS_MLA, _Backend.FLASHMLA_VLLM_V1,
 #     _Backend.TRITON_MLA_VLLM_V1
 # ]
 BACKENDS_TO_TEST = [_Backend.FLASHMLA_VLLM_V1]
+# BACKENDS_TO_TEST = [_Backend.TRITON_MLA_VLLM_V1]
 
 
 def _convert_dtype_to_torch(dtype):
@@ -296,8 +299,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     head_size = vllm_config.model_config.get_head_size()
     dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
     block_size = vllm_config.cache_config.block_size
-
-    # Use dimensions that satisfy attention backend constraints:
     kv_lora_rank = 512
     qk_rope_head_dim = 64
     qk_nope_head_dim = 128
@@ -305,8 +306,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     total_head_size = kv_lora_rank + qk_rope_head_dim
     assert kv_lora_rank + qk_rope_head_dim == head_size, \
         f"MLA dimensions don't match: {total_head_size} != {head_size}"
-
-    scale = 1.0 / ((qk_nope_head_dim + qk_rope_head_dim)**0.5)
+    scale = 1.0 / (kv_lora_rank**0.5)
 
     # 2. Generate data and compute SDPA reference output for MLA
     all_q_vllm, all_kv_c_vllm, all_k_pe_vllm = [], [], []
@@ -352,32 +352,32 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
                                 device=device)
 
         # For MLA reference implementation:
-        # 1. Simulate the MLA uprojection from kv_c to actual K and V
-        # 2. Use standard SDPA with the uprojected tensors
+        # Transform Q nope to latent space: ql_nope = q_nope @ W_UK
+        q_nope, q_pe_part = q.split([qk_nope_head_dim, qk_rope_head_dim],
+                                    dim=-1)
+        # [q_len, num_heads, qk_nope_head_dim] @
+        # [kv_lora_rank, num_heads, qk_nope_head_dim]
+        # -> [q_len, num_heads, kv_lora_rank]
+        ql_nope = torch.einsum("qnh,lnh->qnl", q_nope, W_UK)
 
-        # Upproject kv_c to get k_nope and v for all sequence positions
-        k_nope_full = (kv_c_full @ W_UK.view(
-            kv_lora_rank, num_q_heads * qk_nope_head_dim)).view(
-                s_len, num_q_heads, qk_nope_head_dim)
-        v_full = (kv_c_full @ W_UV.view(kv_lora_rank,
-                                        num_q_heads * v_head_dim)).view(
-                                            s_len, num_q_heads, v_head_dim)
+        # Q for attention: [q_len, num_heads, kv_lora_rank + qk_rope_head_dim]
+        q_attn = torch.cat([ql_nope, q_pe_part], dim=-1)
 
-        # Broadcast k_pe to all heads:
-        # [s_len, qk_rope_head_dim] -> [s_len, num_heads, qk_rope_head_dim]
-        k_pe_broadcasted = k_pe_full.unsqueeze(1).expand(-1, num_q_heads, -1)
+        # K for attention: [s_len, kv_lora_rank + qk_rope_head_dim]
+        # No head dimension - this is MQA (multi-query attention)
+        k_attn = torch.cat([kv_c_full, k_pe_full], dim=-1)
 
-        # Concatenate k_nope and k_pe:
-        # [s_len, num_heads, qk_nope_head_dim + qk_rope_head_dim]
-        k_full = torch.cat([k_nope_full, k_pe_broadcasted], dim=-1)
+        # V for attention: kv_c (latent space) [s_len, kv_lora_rank]
+        v_attn = kv_c_full
 
-        # SDPA expects (N, H, L, D), so unsqueeze batch and permute
-        q_sdpa_in = q.unsqueeze(0).transpose(
-            1, 2)  # [1, num_heads, q_len, qk_head_dim]
-        k_sdpa_in = k_full.unsqueeze(0).transpose(
-            1, 2)  # [1, num_heads, s_len, qk_head_dim]
-        v_sdpa_in = v_full.unsqueeze(0).transpose(
-            1, 2)  # [1, num_heads, s_len, v_head_dim]
+        # SDPA expects (N, H, L, D), so reshape appropriately
+        q_sdpa_in = q_attn.unsqueeze(0).transpose(
+            1, 2)  # [1, num_heads, q_len, kv_lora_rank + qk_rope_head_dim]
+        k_sdpa_in = k_attn.unsqueeze(0).unsqueeze(1).expand(
+            -1, num_q_heads, -1,
+            -1)  # [1, num_heads, s_len, kv_lora_rank + qk_rope_head_dim]
+        v_sdpa_in = v_attn.unsqueeze(0).unsqueeze(1).expand(
+            -1, num_q_heads, -1, -1)  # [1, num_heads, s_len, kv_lora_rank]
 
         # Create causal mask: query token i attends to
         # positions 0 to (context_len + i)
@@ -391,10 +391,17 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
             attn_mask[j, :offset + j + 1] = 0.0
 
         sdpa_out_i = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=scale)
-        # Convert back to (L, H, D) where D is v_head_dim,
-        # then flatten to (L, H*D)
+            q_sdpa_in,
+            k_sdpa_in,
+            v_sdpa_in,
+            attn_mask=attn_mask,
+            scale=scale,
+            enable_gqa=True)
+        # Convert back to (L, H, D) where D depends on approach
         sdpa_out_i = sdpa_out_i.transpose(1, 2).squeeze(0)  # (L, H, D)
+        sdpa_out_i = torch.einsum("qnl,lnv->qnv", sdpa_out_i, W_UV)
+
+        # Flatten to (L, H*D) where D is v_head_dim
         sdpa_out_i = sdpa_out_i.flatten(start_dim=-2)  # (L, H*D)
         all_sdpa_outputs.append(sdpa_out_i)
 
@@ -446,8 +453,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         randomize_blocks=True)
 
     # 4. Run vLLM backends and compare
-    # Note: flex_attention has known Triton kernel compatibility issues
-    # with test infrastructures
     for backend_name in BACKENDS_TO_TEST:
         backend_output = run_attention_backend(
             backend_name, kv_cache_spec, ["placeholder"], vllm_config, device,
@@ -469,11 +474,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         # Check numerical similarity
         rtol = 1e-2
         atol = 5e-3
-
-        if backend_name == _Backend.FLEX_ATTENTION:
-            atol = 5e-1  # TODO: figure out why flex_attention has such large
-            # numerical differences for medium_decode, medium_prefill,
-            # mixed_medium
 
         max_diff = torch.max(torch.abs(backend_output - sdpa_output)).item()
         max_rel_diff = torch.max(
