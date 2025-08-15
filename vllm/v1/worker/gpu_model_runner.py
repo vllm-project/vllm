@@ -2625,6 +2625,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         gc.collect()
 
     def capture_model(self, specific_token_num: Optional[int] = None) -> None:
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL and\
+            specific_token_num:
+            logger.warning(
+                "Lazy CUDA graph capture with FULL mode not implemented")
+            return
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
