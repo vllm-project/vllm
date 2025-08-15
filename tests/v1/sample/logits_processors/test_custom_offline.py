@@ -9,6 +9,7 @@ import pytest
 # yapf: disable
 from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
                                                      DUMMY_LOGITPROC_FQCN,
+                                                     DUMMY_LOGITPROC_MODULE,
                                                      MAX_TOKENS, MODEL_NAME,
                                                      POOLING_MODEL_NAME,
                                                      TEMP_GREEDY,
@@ -150,7 +151,7 @@ def test_custom_logitsprocs(monkeypatch,
     kwargs: dict[str, list[Union[str, type[LogitsProcessor]]]] = {}
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_FQCN:
         # Scenario: load logitproc based on fully-qualified class name (FQCN)
-        sys.modules["DummyModule"] = dummy_module
+        sys.modules[DUMMY_LOGITPROC_MODULE] = dummy_module
         kwargs["logits_processors"] = [DUMMY_LOGITPROC_FQCN]
     elif logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_CLASS:
         # Scenario: load logitproc from provided class object

@@ -14,6 +14,7 @@ from tests.utils import RemoteOpenAIServerCustom
 # yapf: disable
 from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
                                                      DUMMY_LOGITPROC_FQCN,
+                                                     DUMMY_LOGITPROC_MODULE,
                                                      MAX_TOKENS, MODEL_NAME,
                                                      TEMP_GREEDY, dummy_module)
 from tests.v1.sample.logits_processors.utils import (
@@ -54,7 +55,7 @@ def _server_with_logitproc_module(
 
     # Patch `modules` to inject dummy logitproc module
     from vllm.entrypoints.cli import main
-    sys.modules["DummyModule"] = dummy_module
+    sys.modules[DUMMY_LOGITPROC_MODULE] = dummy_module
 
     # fork is required for workers to see entrypoint patch
     os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = "fork"

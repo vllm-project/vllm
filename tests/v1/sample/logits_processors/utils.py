@@ -19,7 +19,8 @@ DUMMY_LOGITPROC_ARG = "target_token"
 TEMP_GREEDY = 0.0
 MAX_TOKENS = 20
 DUMMY_LOGITPROC_ENTRYPOINT = "dummy_logitproc"
-DUMMY_LOGITPROC_FQCN = "DummyModule:DummyLogitsProcessor"
+DUMMY_LOGITPROC_MODULE = "DummyModule"
+DUMMY_LOGITPROC_FQCN = f"{DUMMY_LOGITPROC_MODULE}:DummyLogitsProcessor"
 
 
 class CustomLogitprocSource(Enum):
@@ -96,7 +97,7 @@ class DummyLogitsProcessor(LogitsProcessor):
 
 
 """Dummy module with dummy logitproc class"""
-dummy_module = types.ModuleType("DummyModule")
+dummy_module = types.ModuleType(DUMMY_LOGITPROC_MODULE)
 dummy_module.DummyLogitsProcessor = DummyLogitsProcessor
 
 
