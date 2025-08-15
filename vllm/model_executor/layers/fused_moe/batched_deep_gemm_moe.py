@@ -224,6 +224,36 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return False
 
+    def _get_effective_num_dispatchers(self) -> int:
+        """
+        Calculate effective number of dispatchers for optimized token dispatch.
+        
+        When TP > 1, only leader ranks (rank 0 in each TP group) should dispatch
+        tokens to reduce cross-rank communication overhead.
+        
+        Returns:
+            Effective number of dispatchers, always at least 1.
+        """
+        from vllm.distributed import (get_tensor_model_parallel_world_size,
+                                      get_tensor_model_parallel_rank)
+        
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        
+        if tp_size > 1:
+            # Only leader ranks (rank 0 in each TP group) dispatch tokens
+            if tp_rank == 0:
+                # Leader rank: use reduced number of dispatchers
+                effective_dispatchers = self.num_dispatchers // tp_size
+            else:
+                # Non-leader rank: no dispatch
+                effective_dispatchers = 0
+        else:
+            # Single TP rank: use all dispatchers
+            effective_dispatchers = self.num_dispatchers
+            
+        return max(1, effective_dispatchers)  # Ensure at least 1 dispatcher
+
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
@@ -241,10 +271,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_metadata: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        # FIXME (varun): We should be able to dispatch only from the leader
-        # DP ranks in the case of TP > 1. At the moment, all the Ranks
-        # end up sending their tokens. This needs to be fixed.
-        num_dispatchers = self.num_dispatchers
+        # Optimize token dispatch: only leader DP ranks dispatch tokens when TP > 1
+        # This reduces cross-rank communication overhead in distributed MoE models
+        num_dispatchers = self._get_effective_num_dispatchers()
         num_experts = local_num_experts
         max_num_tokens = a.size(
             0) if self.max_num_tokens is None else self.max_num_tokens
