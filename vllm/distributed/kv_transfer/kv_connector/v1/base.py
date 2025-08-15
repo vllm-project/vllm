@@ -325,4 +325,8 @@ class KVConnectorBase_V1(ABC):
             str: the required KV cache layout. e.g. HND, or NHD.
             None if the connector does not require a specific layout.
         """
+
+        if cls is KVConnectorBase_V1:
+            raise TypeError("get_required_kvcache_layout should not be called "
+                            "on the abstract base class")
         return None
