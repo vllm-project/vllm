@@ -39,7 +39,8 @@ ARCH_NEEDS_EXTRAS = [
 REPO_ID_TO_SKIP = {"nm-testing/pixtral-12b-FP8-dynamic": "duplicated test"}
 
 ImageInput = list[Image.Image]
-VideoInput = Union[list[np.ndarray], list[tuple[np.ndarray, dict[str, Any]]]]
+VideoInput = Union[list[Image.Image], list[np.ndarray],
+                   list[tuple[np.ndarray, dict[str, Any]]]]
 AudioInput = list[tuple[np.ndarray, int]]
 
 
@@ -50,6 +51,11 @@ def _resize_data(_data: Union[Image.Image, np.ndarray],
         W, H = _data.width, _data.height
         W, H = map(lambda x: int(x * size_factor), (W, H))
         return _data.resize((W, H))
+    elif is_list_of(_data, Image.Image):
+        W, H = next(iter(_data)).width, next(iter(_data)).height
+        T = len(_data)
+        T, W, H = map(lambda x: max(int(x * size_factor), 1), (T, W, H))
+        return [d.resize((W, H)) for d in _data[:T]]
     elif isinstance(_data, np.ndarray) and _data.ndim == 1:
         return _data[:int(len(_data) * size_factor)]
     elif _data.ndim >= 4:
@@ -64,7 +70,7 @@ def resize_mm_data(
     size_factors: tuple[float,
                         ...]) -> Union[ImageInput, VideoInput, AudioInput]:
     size_factors = size_factors[:len(data)]
-    if is_list_of(data, (Image.Image, np.ndarray)):
+    if is_list_of(data, (Image.Image, np.ndarray, list)):
         return [_resize_data(d, s) for d, s in zip(data, size_factors)]
     elif is_list_of(data, tuple):
         return [(_resize_data(d, s), meta)
@@ -100,7 +106,7 @@ def create_batched_mm_kwargs(
         tokenization_kwargs=processor_inputs.tokenization_kwargs,
     )["mm_kwargs"]
     items = [
-        item for modality in supported_mm_limits.keys()
+        item for modality in supported_mm_limits
         for item in mm_kwargs.get_items(modality)
     ]
     return group_mm_kwargs_by_modality(items)
@@ -130,8 +136,7 @@ def test_model_tensor_schema(model_arch: str, model_id: str,
     if model_arch in ARCH_TO_SKIP:
         pytest.skip(f"Skipping {model_arch} due to {ARCH_TO_SKIP[model_arch]}")
     if model_id in REPO_ID_TO_SKIP:
-        pytest.skip(
-            f"Skipping {model_id} due to {REPO_ID_TO_SKIP[model_id]}")
+        pytest.skip(f"Skipping {model_id} due to {REPO_ID_TO_SKIP[model_id]}")
 
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
