@@ -179,8 +179,9 @@ def use_trtllm_attention(
     num_tokens: int,
     max_seq_len: int,
     kv_cache_dtype: str,
+    q_dtype: torch.dtype,
+    is_prefill: bool,
     has_sinks: bool = False,
-    enable_fusion: bool = False,
 ) -> bool:
     use_trtllm, env_value = supports_trtllm_attention()
     if not use_trtllm:
@@ -189,26 +190,15 @@ def use_trtllm_attention(
     if num_qo_heads % num_kv_heads != 0:
         return False
 
-    if kv_cache_dtype.startswith("fp8"):
-        if enable_fusion:
-            logger.info_once("Using TRTLLM attention (FP8 kv cache required).")
-            return True
-        else:
-            # Remove this when TRTLLM attn kernel supports FP8 kv cache
-            # without attn+quant fusion.
-            raise ValueError("Flashinfer TRTLLM attention does not support "
-                             "FP8 kv cache without attn+quant fusion. "
-                             "Suggested the following configs: "
-                             "(1) set kv_cache_dtype to 'auto', or "
-                             "(2) turn on enable_attn_fusion, or "
-                             "(3) disable Flashinfer backend")
-    elif kv_cache_dtype == "auto" and enable_fusion:
-        raise ValueError("Flashinfer TRTLLM attention does not support "
-                         "auto kv cache dtype with attn+quant fusion. "
-                         "Suggested the following configs: "
-                         "(1) set kv_cache_dtype to 'fp8', or "
-                         "(2) turn off enable_attn_fusion, or "
-                         "(3) disable Flashinfer backend")
+    # Must use TRTLLM attention if query is FP8 quantized
+    if q_dtype == current_platform.fp8_dtype():
+        logger.info_once("Using TRTLLM attention (query is quantized).")
+        return True
+
+    # TRTLLM prefill attention does not support FP8 kv cache with
+    # non-quantized query
+    if is_prefill and kv_cache_dtype.startswith("fp8"):
+        return False
 
     # If sinks are being used, we must use TRTLLM attention as it's
     # the only backend that supports them

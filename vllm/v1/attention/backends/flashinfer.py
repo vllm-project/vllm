@@ -532,18 +532,21 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_kv_heads = self.kv_cache_spec.num_kv_heads
         head_dim = self.kv_cache_spec.head_size
 
-        # Check if attn+quant fusion is enabled (requires TRTLLM attention)
-        enable_fusion = config.compilation_config.pass_config.enable_attn_fusion
-
         # Check if any layer uses sinks (requires TRTLLM attention)
         has_sinks = self.global_hyperparameters.has_sinks
 
+        # Insert FP8 quant for query if FP8 kv cache and attn fusion enabled
+        q_dtype = self.vllm_config.model_config.dtype
+        enable_fusion = config.compilation_config.pass_config.enable_attn_fusion
+        if cache_dtype.startswith("fp8") and enable_fusion:
+            q_dtype = kv_cache_dtype
+
         prefill_use_trtllm = use_trtllm_attention(
-            num_qo_heads, num_kv_heads, num_prefill_tokens,
-            max_seq_len, cache_dtype, has_sinks, enable_fusion)
+            num_qo_heads, num_kv_heads, num_prefill_tokens, max_seq_len,
+            cache_dtype, q_dtype, is_prefill=True, has_sinks=has_sinks)
         decode_use_trtllm = use_trtllm_attention(
-            num_qo_heads, num_kv_heads, num_decode_tokens,
-            max_seq_len, cache_dtype, has_sinks, enable_fusion)
+            num_qo_heads, num_kv_heads, num_decode_tokens, max_seq_len,
+            cache_dtype, q_dtype, is_prefill=False, has_sinks=has_sinks)
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -557,7 +560,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             head_dim=head_dim,
             page_size=page_size,
             kv_data_type=kv_cache_dtype,
-            q_data_type=kv_cache_dtype,
+            q_data_type=q_dtype,
             slot_mapping=common_attn_metadata.slot_mapping,
             max_q_len=max_q_len,
             max_seq_len=max_seq_len,
@@ -709,16 +712,25 @@ class FlashInferImpl(AttentionImpl):
 
         # The attn+quant fusion happens when output_scale is provided.
         if output_scale is not None:
+            assert attn_metadata.q_data_type == FP8_DTYPE, \
+                "Planned q_dtype must be FP8 when attn+quant fusion applied"
             assert (attn_metadata.prefill_use_trtllm and
                     attn_metadata.decode_use_trtllm), "Must use TRT-LLM attn"
             assert output.dtype == FP8_DTYPE, \
-                "output must be fp8 quantized when the attn fusion applied"
+                "output dtype must be FP8 when attn+quant fusion applied"
 
             # TRTLLM attn kernel requires o scale as a host scalar, store the
             # o scale to host scalar in warmup run with cuda graph not enabled
             if layer._o_scale_float is None:
                 layer._o_scale_float = output_scale.cpu().item()
                 self.bmm2_scale = self.bmm2_scale / layer._o_scale_float
+
+            # Insert FP8 quant for query
+            num_tokens, num_heads, head_size = query.shape
+            query, _ = ops.scaled_fp8_quant(
+                query.reshape((num_tokens, num_heads * head_size)).contiguous(),
+                layer._q_scale)
+            query = query.reshape((num_tokens, num_heads, head_size))
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
@@ -767,14 +779,6 @@ class FlashInferImpl(AttentionImpl):
             assert attn_metadata.cascade_wrapper is not None
             output.copy_(attn_metadata.cascade_wrapper.run(query, kv_cache))
             return output
-
-        # Insert quant op for query
-        if attn_metadata.q_data_type == FP8_DTYPE:
-            num_tokens, num_heads, head_size = query.shape
-            query, _ = ops.scaled_fp8_quant(
-                query.reshape((num_tokens, num_heads * head_size)).contiguous(),
-                layer._q_scale)
-            query = query.reshape((num_tokens, num_heads, head_size))
 
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_prefill_tokens = attn_metadata.num_prefill_tokens
