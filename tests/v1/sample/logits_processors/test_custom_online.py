@@ -12,10 +12,16 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
+# yapf: disable
 from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
+                                                     DUMMY_LOGITPROC_FQCN,
                                                      MAX_TOKENS, MODEL_NAME,
-                                                     TEMP_GREEDY, prompts)
-from vllm.test_utils import DUMMY_LOGITPROC_FQCN
+                                                     TEMP_GREEDY)
+from tests.v1.sample.logits_processors.utils import (
+    entry_points as fake_entry_points)
+from tests.v1.sample.logits_processors.utils import prompts
+
+# yapf: enable
 
 
 class RemoteOpenAIServerWithEntrypoint(RemoteOpenAIServer):
@@ -27,8 +33,6 @@ class RemoteOpenAIServerWithEntrypoint(RemoteOpenAIServer):
         def _child_process() -> None:
             # Patch `entry_points` to inject logitproc entrypoint
             import importlib.metadata
-
-            from vllm.test_utils import entry_points as fake_entry_points
             importlib.metadata.entry_points = fake_entry_points
             from vllm.entrypoints.cli import main
 

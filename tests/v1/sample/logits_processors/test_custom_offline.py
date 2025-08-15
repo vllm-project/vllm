@@ -7,14 +7,17 @@ import pytest
 
 # yapf: disable
 from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
+                                                     DUMMY_LOGITPROC_FQCN,
                                                      MAX_TOKENS, MODEL_NAME,
                                                      POOLING_MODEL_NAME,
                                                      TEMP_GREEDY,
                                                      CustomLogitprocSource,
-                                                     prompts)
+                                                     DummyLogitsProcessor)
+from tests.v1.sample.logits_processors.utils import (
+    entry_points as fake_entry_points)
+from tests.v1.sample.logits_processors.utils import prompts
 # yapf: enable
 from vllm import LLM, SamplingParams
-from vllm.test_utils import DUMMY_LOGITPROC_FQCN, DummyLogitsProcessor
 from vllm.v1.sample.logits_processor import (STR_POOLING_REJECTS_LOGITSPROCS,
                                              LogitsProcessor)
 
@@ -135,8 +138,6 @@ def test_custom_logitsprocs(monkeypatch,
         # Scenario: vLLM loads a logitproc from a preconfigured entrypoint
         # To that end, mock a dummy logitproc entrypoint
         import importlib.metadata
-
-        from vllm.test_utils import entry_points as fake_entry_points
         importlib.metadata.entry_points = fake_entry_points
 
         # fork is required for workers to see entrypoint patch
@@ -192,8 +193,6 @@ def test_pooling_rejects_custom_logitsprocs(
 
         # Patch in dummy logitproc entrypoint
         import importlib.metadata
-
-        from vllm.test_utils import entry_points as fake_entry_points
         importlib.metadata.entry_points = fake_entry_points
 
         # fork is required for entrypoint patch to be visible to workers,
