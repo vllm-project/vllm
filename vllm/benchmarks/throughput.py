@@ -331,18 +331,10 @@ def get_requests(args, tokenizer):
             common_kwargs['dataset_split'] = "train"
     elif args.dataset_name == "prefix_repetition":
         dataset_cls = PrefixRepetitionRandomDataset
-        sample_kwargs["prefix_len"] = getattr(
-            args, "prefix_repetition_prefix_len", None
-        )
-        sample_kwargs["suffix_len"] = getattr(
-            args, "prefix_repetition_suffix_len", None
-        )
-        sample_kwargs["num_prefixes"] = getattr(
-            args, "prefix_repetition_num_prefixes", None
-        )
-        sample_kwargs["output_len"] = getattr(
-            args, "prefix_repetition_output_len", None
-        )
+        sample_kwargs["prefix_len"] = args.prefix_repetition_prefix_len
+        sample_kwargs["suffix_len"] = args.prefix_repetition_suffix_len
+        sample_kwargs["num_prefixes"] = args.prefix_repetition_num_prefixes
+        sample_kwargs["output_len"] = args.prefix_repetition_output_len
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
     # Remove None values
@@ -543,6 +535,38 @@ def add_cli_args(parser: argparse.ArgumentParser):
                         type=str,
                         default=None,
                         help="Split of the HF dataset.")
+
+    # prefix repetition dataset
+    prefix_repetition_group = parser.add_argument_group(
+        "prefix repetition dataset options")
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-prefix-len",
+        type=int,
+        default=None,
+        help="Number of prefix tokens per request, used only for prefix "
+        "repetition dataset.",
+    )
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-suffix-len",
+        type=int,
+        default=None,
+        help="Number of suffix tokens per request, used only for prefix "
+        "repetition dataset. Total input length is prefix_len + suffix_len.",
+    )
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-num-prefixes",
+        type=int,
+        default=None,
+        help="Number of prefixes to generate, used only for prefix repetition "
+        "dataset. Prompts per prefix is num_requests // num_prefixes.",
+    )
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-output-len",
+        type=int,
+        default=None,
+        help="Number of output tokens per request, used only for prefix "
+        "repetition dataset.",
+    )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
 
