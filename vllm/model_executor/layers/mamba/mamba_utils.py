@@ -6,7 +6,7 @@ import torch
 
 from vllm.config import MambaDType, ModelDType
 from vllm.distributed import divide
-from vllm.utils import get_kv_cache_torch_dtype
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_kv_cache_torch_dtype
 
 
 class MambaStateDtypeCalculator:
@@ -49,7 +49,8 @@ class MambaStateDtypeCalculator:
         if mamba_ssm_cache_dtype == "auto":
             temporal_state_dtype = conv_state_dtype
         else:
-            temporal_state_dtype = mamba_ssm_cache_dtype
+            temporal_state_dtype = (
+                STR_DTYPE_TO_TORCH_DTYPE[mamba_ssm_cache_dtype])
 
         return (conv_state_dtype, temporal_state_dtype)
 
