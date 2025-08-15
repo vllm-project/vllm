@@ -571,7 +571,6 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
-
         return fused_moe_gguf(x, layer.w13_qweight, layer.w2_qweight,
                               topk_weights, topk_ids,
                               layer.w13_qweight_type.weight_type,

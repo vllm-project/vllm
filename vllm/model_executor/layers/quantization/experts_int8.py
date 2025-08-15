@@ -166,9 +166,10 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
             topk_ids=topk_ids,
             inplace=True,
             activation=activation,
-            global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
             expert_map=expert_map,
+            quant_config=self.moe_quant_config,
         )
 
     @staticmethod

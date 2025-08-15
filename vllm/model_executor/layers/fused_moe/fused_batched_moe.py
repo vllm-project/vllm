@@ -620,7 +620,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         max_num_tokens: int,
         num_dispatchers: int,
-        quant_config: Optional[FusedMoEQuantConfig] = None,
+        quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(quant_config)
         assert not self.quant_config.use_int8_w8a8, "NYI"
@@ -693,9 +693,13 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
+        print("GOT HERE")
+
         assert hidden_states.dim() == 3
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
+
+        assert torch.isnan(hidden_states).sum() == 0
 
         num_local_experts = w1.size(0)
         assert num_local_experts == w1.size(0), (
@@ -735,6 +739,10 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 w2_dq = w2[expert]
 
             output[expert, :num, :] = tmp @ w2_dq.transpose(0, 1).to(tmp.dtype)
+
+        assert torch.isnan(output).sum() == 0
+
+        print("GOT HERE END")
 
 
 def batched_moe_kernel_quantize_input(
@@ -817,7 +825,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         max_num_tokens: int,
         num_dispatchers: int,
-        quant_config: Optional[FusedMoEQuantConfig] = None,
+        quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(quant_config)
         assert not self.quant_config.use_int8_w8a8, "NYI"

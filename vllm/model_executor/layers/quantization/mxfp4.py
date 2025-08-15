@@ -11,6 +11,8 @@ from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEQuantConfig,
+                                                         mxfp4_w4a4_moe_quant_config)
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
 from vllm.model_executor.layers.linear import (LinearBase,
@@ -629,10 +631,23 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         return tile_tokens_dim
 
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+
+        if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+            or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+            return None
+
+        return mxfp4_w4a4_moe_quant_config(
+            w1_bias=layer.w13_bias,
+            w2_bias=layer.w2_bias,
+            w1_scale=self.w13_precision_config,
+            w2_scale=self.w2_precision_config,
+        )
+
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
-        moe: FusedMoEConfig,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         if (prepare_finalize.activation_format ==
@@ -651,7 +666,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     "w2_bias": layer.w2_bias,
                     "max_capture_size": self.max_capture_size,
                 }
-                return TrtLlmGenExperts(moe, **kwargs)
+                return TrtLlmGenExperts(self.moe, **kwargs)
             else:
                 # Use matmul_ogs from triton_kernels here!
                 raise NotImplementedError(
@@ -710,8 +725,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             activation=activation,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
-            w1_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
@@ -941,10 +954,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 renormalize=renormalize,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
-                w1_bias=layer.w13_bias,
-                w2_bias=layer.w2_bias,
-                w1_precision=self.w13_precision_config,
-                w2_precision=self.w2_precision_config,
+                quant_config=self.moe_quant_config,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
         else:

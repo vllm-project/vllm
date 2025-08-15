@@ -290,24 +290,17 @@ class MoeWNA16Method(FusedMoEMethodBase):
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         weight_bits = self.quant_config.weight_bits
         has_zp = self.quant_config.has_zp
+        assert weight_bits == 4 or weight_bits == 8
+        config_builder = (int4_w4a16_moe_quant_config if weight_bits == 4 else
+                          int8_w8a16_moe_quant_confg)
 
-        if weight_bits == 4:
-            return int4_w4a16_moe_quant_config(
-                w1_scale=layer.w13_scales,
-                w2_scale=layer.w2_scales,
-                w1_zp=layer.w13_qzeros if has_zp else None,
-                w2_zp=layer.w2_qzeros if has_zp else None,
-                block_shape=[0, layer.group_size],
-            )
-        else:
-            assert weight_bits == 8
-            return int8_w8a16_moe_quant_config(
-                w1_scale=layer.w13_scales,
-                w2_scale=layer.w2_scales,
-                w1_zp=layer.w13_qzeros if has_zp else None,
-                w2_zp=layer.w2_qzeros if has_zp else None,
-                block_shape=[0, layer.group_size],
-            )
+        return config_builder(
+            w1_scale=layer.w13_scales,
+            w2_scale=layer.w2_scales,
+            w1_zp=layer.w13_qzeros if has_zp else None,
+            w2_zp=layer.w2_qzeros if has_zp else None,
+            block_shape=[0, layer.group_size],
+        )
 
     def apply(
         self,
@@ -360,8 +353,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
-            global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
             expert_map=expert_map,
             quant_config=self.moe_quant_config,
         )

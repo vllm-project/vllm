@@ -7,7 +7,8 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-    DeepGemmExperts, _valid_deep_gemm, _valid_deep_gemm_shape,
+    DeepGemmExperts, _valid_deep_gemm, _valid_deep_gemm_shape)
+from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     deep_gemm_block_shape)
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
@@ -17,7 +18,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
-        quant_config: Optional[FusedMoEQuantConfig] = None,
+        quant_config: FusedMoEQuantConfig,
         allow_deep_gemm: bool = False,
     ):
         super().__init__(quant_config)
