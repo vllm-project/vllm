@@ -196,15 +196,24 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         appended to.
         """
         # TODO: Add proper implementation which runs profiling on TT devices
+        data_parallel = 1
+        if (self.model_config.override_tt_config
+                and "data_parallel" in self.model_config.override_tt_config):
+            data_parallel = self.model_config.override_tt_config[
+                "data_parallel"]
+
+        is_wormhole = "wormhole_b0" in ttnn.get_arch_name()
+        num_devices_per_model = (self.device_config.device.get_num_devices() //
+                                 data_parallel)
+
         if (("Llama-3.1-8B" in self.model_config.model
              or "Mistral-7B" in self.model_config.model)
-                and self.device_config.device.get_num_devices() == 1
-                and "wormhole_b0" in ttnn.get_arch_name()
-            ):  # Llama8B on N150 and Mistral7B on N150
+                and num_devices_per_model == 1
+                and is_wormhole):  # Llama8B on N150 and Mistral7B on N150
             max_tokens_all_users = 65536
         elif ("Llama-3.2-90B" in self.model_config.model
-              and self.device_config.device.get_num_devices() == 8
-              and "wormhole_b0" in ttnn.get_arch_name()):  # Llama90B on WH T3K
+              and num_devices_per_model == 8
+              and is_wormhole):  # Llama90B on WH T3K
             max_tokens_all_users = 65536  # [INFO] avoid OOM for Llama-3.2-90B
         else:
             # Note: includes num vision tokens for multi-modal
