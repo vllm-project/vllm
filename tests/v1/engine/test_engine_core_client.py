@@ -309,7 +309,7 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
             # until the cancelled sleeping one is complete.
             result = await asyncio.wait_for(core_client.call_utility_async(
                 "echo", "testarg3"),
-                                      timeout=1.0)
+                                            timeout=1.0)
             assert result == "testarg3"
         finally:
             client.shutdown()
