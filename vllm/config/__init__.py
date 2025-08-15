@@ -1869,10 +1869,8 @@ class DeviceConfig:
             from vllm.platforms import current_platform
             self.device_type = current_platform.device_type
             if not self.device_type:
-                raise RuntimeError(
-                    "Failed to infer device type, please set "
-                    "the environment variable `VLLM_LOGGING_LEVEL=DEBUG` "
-                    "to turn on verbose logging to help debug the issue.")
+                # Default to CPU if device type cannot be inferred
+                self.device_type = "cpu"
         else:
             # Device type is assigned explicitly
             if isinstance(self.device, str):
