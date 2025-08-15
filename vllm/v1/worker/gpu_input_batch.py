@@ -244,7 +244,7 @@ class InputBatch:
         self.logitsprocs = logitsprocs or LogitsProcessors()
 
         # This is updated each time the batch constituents change.
-        self.sampling_metadata = self.make_sampling_metadata()
+        self.sampling_metadata = self._make_sampling_metadata()
 
         self.pooling_params: dict[str, PoolingParams] = {}
 
@@ -624,7 +624,7 @@ class InputBatch:
 
         if self.is_pooling_model:
             # Batch changes every step for pooling models.
-            self.sampling_metadata = self.make_sampling_metadata()
+            self.sampling_metadata = self._make_sampling_metadata()
             return
 
         # For non-pooling models - generate and apply logitsprocs update;
@@ -634,9 +634,9 @@ class InputBatch:
         for logit_proc in self.logitsprocs.all:
             logit_proc.update_state(batch_update)
         if batch_update:
-            self.sampling_metadata = self.make_sampling_metadata()
+            self.sampling_metadata = self._make_sampling_metadata()
 
-    def make_sampling_metadata(self) -> SamplingMetadata:
+    def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
         if not self.all_greedy:
             temperature = copy_slice(self.temperature_cpu_tensor,
