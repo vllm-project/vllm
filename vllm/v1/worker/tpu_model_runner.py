@@ -196,8 +196,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             model_config)
         # TODO: Support M-RoPE (e.g, Qwen2-VL)
         assert not self.uses_mrope, "TPU does not support M-RoPE yet."
-        self.skip_mm_profiling = (model_config.multimodal_config.skip_mm_profiling
-                                  if self.supports_mm_inputs else False)
+        self.skip_mm_profiling = (
+            model_config.multimodal_config.skip_mm_profiling
+            if self.supports_mm_inputs else False)
 
         self._num_slices_per_kv_cache_update_block = \
             _get_num_slices_per_kv_cache_update_block(get_page_size_bytes(
