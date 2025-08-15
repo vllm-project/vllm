@@ -490,7 +490,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         audio_feature_lengths=audio_feature_lengths,
                         use_audio_in_video=use_audio_in_video,
                     )
-
+                print(f"Adding new request {req_id} with {self.requests[req_id].mrope_position_delta=}")
             req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
