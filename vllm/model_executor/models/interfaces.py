@@ -131,6 +131,8 @@ class SupportsMultiModalPruning(Protocol):
         self,
         input_ids: list[int],
         multimodal_embeddings: MultiModalEmbeddings,
+        mrope_positions: torch.LongTensor,
+        num_computed_tokens: int
     ) -> tuple[MultiModalEmbeddings, Tensor, int]:
         """
         Returns a tuple of (multimodal_embeddings, mrope_positions, mrope_position_delta) where:
