@@ -3,7 +3,7 @@
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.v1.attention.backends.linear_attn import LinearAttentionBackend
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionBackend
-from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionBackend
 
 
 def get_mamba_attn_backend(mamba_type: str) -> type[AttentionBackend]:
