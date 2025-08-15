@@ -1024,6 +1024,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 dst_start = mrope_pos_ptr
                 dst_end = mrope_pos_ptr + completion_part_len
 
+                print("_calc_mrope_positions")
+                print(f"{dst_start=}")
+                print(f"{num_computed_tokens=}")
+                print(f"{prompt_part_len=}")
+                print(f"{completion_part_len=}")
+                print(f"{req.mrope_position_delta=}")
+
                 MRotaryEmbedding.get_next_input_positions_tensor(
                     out=self.mrope_positions_np,
                     out_offset=dst_start,
@@ -1502,6 +1509,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             
             # Check if the model supports the new mixin for getting both embeddings and positions
             if supports_input_embeddings_and_positions(self.model):
+                print(f"Before get_input_embeddings_and_positions")
+                print(f"{num_scheduled_tokens=}")
+                print(f"{num_input_tokens=}")
+                print(f"{self.input_batch.req_ids=}")
+
                 inputs_embeds_scheduled, positions_scheduled, mrope_position_delta = self.model.get_input_embeddings_and_positions(
                     input_ids=self.input_ids[:num_scheduled_tokens],
                     multimodal_embeddings=mm_embeds or None,
