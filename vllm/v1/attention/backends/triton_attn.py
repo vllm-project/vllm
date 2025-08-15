@@ -393,7 +393,6 @@ class TritonAttentionImpl(AttentionImpl):
                 alibi_slopes=self.alibi_slopes,
                 sliding_window=self.sliding_window[0],
                 sm_scale=self.scale,
-                output_scale=output_scale,
                 sinks=self.sinks,
             )
 
@@ -419,6 +418,6 @@ class TritonAttentionImpl(AttentionImpl):
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
                 sinks=self.sinks,
-                output_scale=output_scale)
+            )
 
         return output
