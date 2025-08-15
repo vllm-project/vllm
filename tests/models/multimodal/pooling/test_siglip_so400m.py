@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Optional, list
+from typing import List, Optional
 
 import pytest
 import requests
@@ -26,8 +26,8 @@ INCORRECT_TEXT = "a photo of a dog"
 os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
 
 
-def encode_multimodal(llm: LLM, prompts: Optional[list[Optional[str]]],
-                      images: Optional[list[Optional[Image.Image]]]):
+def encode_multimodal(llm: LLM, prompts: Optional[List[Optional[str]]],
+                      images: Optional[List[Optional[Image.Image]]]):
     batch_size = 0
     if prompts is not None:
         batch_size = len(prompts)
