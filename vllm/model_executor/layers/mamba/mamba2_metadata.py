@@ -11,7 +11,7 @@ from vllm.attention.backends.placeholder_attn import (
     PlaceholderAttentionMetadata)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.mamba_attn import (
+from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadata, _query_start_loc_to_chunk_indices_offsets)
 
 
