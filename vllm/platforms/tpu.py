@@ -133,18 +133,13 @@ class TpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
-            if scheduler_config.is_multi_step:
-                raise NotImplementedError(
-                    "Multi-step scheduling is not supported (and not "
-                    "needed) on vLLM V1. Please launch without "
-                    "--num-scheduler-steps.")
             parallel_config.worker_cls = "vllm.v1.worker.tpu_worker.TPUWorker"
 
         assert not vllm_config.speculative_config, (
             "Speculative decoding is not yet supported for TPU backend")
 
         if scheduler_config.is_multimodal_model and not \
-            scheduler_config.disable_chunked_mm_input:
+                scheduler_config.disable_chunked_mm_input:
             logger.warning("TPU does not support running Multimodal models"\
             " without setting `--disable_chunked_mm_input`. " \
             "Forcing --disable_chunked_mm_input.")

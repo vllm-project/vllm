@@ -33,6 +33,31 @@ def test_tensor_schema_constant_dim_failure():
         )
 
 
+def test_tensor_schema_invalid_types_in_list():
+    with pytest.raises(ValueError, match="is not a torch.Tensor"):
+        Phi3VImagePixelInputs(
+            data=[
+                torch.randn(64, 3, 32, 32),
+                "not_a_tensor",
+                torch.randn(64, 3, 32, 32),
+            ],
+            image_sizes=torch.randint(0, 256, (3, 2)),
+        )
+
+
+def test_tensor_schema_rank_mismatch():
+    with pytest.raises(ValueError, match="has rank 3 but expected 5"):
+        Phi3VImagePixelInputs(
+            data=torch.randn(16, 64, 3),
+            image_sizes=torch.randint(0, 256, (16, 2)),
+        )
+
+
+def test_tensor_schema_missing_required_field():
+    with pytest.raises(ValueError, match="Required field 'data' is missing"):
+        Phi3VImagePixelInputs(image_sizes=torch.randint(0, 256, (16, 2)), )
+
+
 def test_tensor_schema_symbolic_dim_mismatch():
     with pytest.raises(ValueError, match="expected 'bn'=12, got 16"):
         Phi3VImagePixelInputs(

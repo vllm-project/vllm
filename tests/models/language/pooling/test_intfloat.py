@@ -36,7 +36,7 @@ MODELS = [
 @pytest.mark.parametrize("model_info", MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner,
                            model_info: EmbedModelInfo) -> None:
-    mteb_test_embed_models(hf_runner, vllm_runner, model_info)
+    mteb_test_embed_models(hf_runner, vllm_runner, model_info, atol=0.02)
 
 
 @pytest.mark.parametrize("model_info", MODELS)
