@@ -13,6 +13,7 @@ from vllm.assets.image import ImageAsset
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import PromptType
+from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils import set_default_torch_num_threads
@@ -398,3 +399,89 @@ async def test_check_health(monkeypatch: pytest.MonkeyPatch):
 
         # Test 3: Verify healthy engine still works after mock
         await engine.check_health()
+
+
+@pytest.mark.parametrize(
+    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+@pytest.mark.asyncio
+async def test_abort_final_output(
+    monkeypatch: pytest.MonkeyPatch,
+    output_kind: RequestOutputKind,
+):
+    """Test that abort() returns a final output with correct information."""
+
+    with monkeypatch.context() as m, ExitStack() as after:
+        m.setenv("VLLM_USE_V1", "1")
+
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        request_id = "test-abort-final-output"
+
+        # Start a long-running request
+        sampling_params = SamplingParams(
+            max_tokens=3000,  # Long enough to allow abort
+            ignore_eos=True,
+            output_kind=output_kind,
+            temperature=0.5,
+            seed=42,
+        )
+
+        outputs: list[RequestOutput] = []
+        generated = asyncio.create_task(
+            collect_outputs(engine, request_id, TEXT_PROMPT, sampling_params,
+                            outputs))
+
+        # Let it generate some tokens
+        await asyncio.sleep(0.5)
+
+        # Abort the request
+        await engine.abort(request_id)
+
+        # Wait for generation to complete and return final output
+        final_output = await generated
+
+        # Verify we got a final output
+        assert final_output is not None
+        assert final_output.finished
+        assert len(final_output.outputs) == 1
+
+        assert final_output.outputs[0].finish_reason == "abort"
+        assert final_output.outputs[0].stop_reason is None
+
+        # Verify num_cached_tokens is set correctly
+        assert hasattr(final_output, 'num_cached_tokens')
+        assert final_output.num_cached_tokens >= 0
+
+        # If we got intermediate outputs, verify they are consistent
+        if output_kind == RequestOutputKind.DELTA:
+            # For DELTA, sum all intermediate tokens should <= final tokens
+            token_count = sum(
+                len(output.outputs[0].token_ids) for output in outputs)
+            assert token_count > 0
+            assert len(final_output.outputs[0].token_ids) == 0
+        else:
+            # For FINAL_ONLY, we should only get the final output
+            assert len(outputs) == 0
+            assert len(final_output.outputs[0].token_ids) > 0
+
+        assert not engine.output_processor.has_unfinished_requests()
+
+
+async def collect_outputs(
+    engine: AsyncLLM,
+    request_id: str,
+    prompt: PromptType,
+    sampling_params: SamplingParams,
+    outputs_list: list[RequestOutput],
+) -> Optional[RequestOutput]:
+    """Helper to collect outputs and return the final one."""
+    final_output: Optional[RequestOutput] = None
+    async for output in engine.generate(request_id=request_id,
+                                        prompt=prompt,
+                                        sampling_params=sampling_params):
+        if not output.finished:
+            outputs_list.append(output)
+        final_output = output
+    return final_output

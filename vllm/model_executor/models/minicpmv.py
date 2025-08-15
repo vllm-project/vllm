@@ -91,7 +91,7 @@ class MiniCPMVImagePixelInputs(TensorSchema):
     # batched tensor.
     pixel_values: Annotated[
         list[torch.Tensor],
-        TensorShape("bns", "c", "h", "w"),
+        TensorShape("bns", "c", "h", "w", dynamic_dims={"h", "w"}),
     ]
     tgt_sizes: Annotated[
         torch.Tensor,

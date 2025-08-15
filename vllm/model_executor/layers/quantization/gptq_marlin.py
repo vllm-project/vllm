@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override, get_linear_quant_method, override_config)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported, check_moe_marlin_supports_layer,
-    marlin_make_workspace_new, marlin_moe_permute_scales,
+    marlin_make_workspace_new, marlin_moe_permute_scales, marlin_permute_bias,
     marlin_repeat_scales_on_all_ranks, verify_marlin_supported)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
@@ -618,6 +618,12 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         replace_parameter(layer, "w2_scales", marlin_w2_scales)
 
+        if hasattr(layer, "w13_bias") and layer.w13_bias is not None:
+            layer.w13_bias.data = marlin_permute_bias(layer.w13_bias)
+
+        if hasattr(layer, "w2_bias") and layer.w2_bias is not None:
+            layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -662,6 +668,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             x,
             layer.w13_qweight,
             layer.w2_qweight,
+            getattr(layer, "w13_bias", None),
+            getattr(layer, "w2_bias", None),
             layer.w13_scales,
             layer.w2_scales,
             router_logits,
