@@ -131,11 +131,6 @@ class TritonAttentionMetadataBuilder(
         )
         return attn_metadata
 
-    def can_run_in_cudagraph(
-            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        # Full CUDA Graph always supported
-        return True
-
 
 class TritonAttentionBackend(AttentionBackend):
 

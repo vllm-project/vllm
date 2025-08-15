@@ -62,10 +62,6 @@ class CUDAGraphMode(enum.Enum):
     def has_full_cudagraphs(self) -> bool:
         return self.max_cudagraph_mode() == CUDAGraphMode.FULL
 
-    def has_piecewise_cudagraphs(self) -> bool:
-        return (self.decode_mode() == CUDAGraphMode.PIECEWISE
-                or self.mixed_mode() == CUDAGraphMode.PIECEWISE)
-
     def separate_routine(self) -> bool:
         return isinstance(self.value, tuple)
 
@@ -259,6 +255,9 @@ class CompilationConfig:
     compilation logic. While piecewise cudagraphs require piecewise 
     compilation (level=PIECEWISE and non-empty splitting_ops), full
     cudagraphs are supported with and without compilation.
+    
+    Warning: This flag is new and subject to change in addition 
+    more modes may be added.
     """
     use_cudagraph: bool = True
     """Whether to use cudagraph inside compilation.

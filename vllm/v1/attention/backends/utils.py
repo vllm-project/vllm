@@ -202,13 +202,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         """
         raise NotImplementedError
 
-    def can_run_in_cudagraph(
-            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        """
-        Can this batch (with given metadata) use CUDA Graphs for attention.
-        """
-        return False
-
     def build_for_cudagraph_capture(
             self, common_attn_metadata: CommonAttentionMetadata) -> M:
         """

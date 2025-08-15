@@ -728,10 +728,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         return attn_metadata
 
-    def can_run_in_cudagraph(
-            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        return common_attn_metadata.max_query_len == 1
-
 
 class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     """

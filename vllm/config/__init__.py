@@ -3613,7 +3613,7 @@ class VllmConfig:
                 self.model_config.disable_cascade_attn = True
 
             if self.compilation_config.cudagraph_mode\
-                .has_piecewise_cudagraphs():
+                .requires_piecewise_compilation():
                 assert self.compilation_config.level == \
                     CompilationLevel.PIECEWISE, \
                     "Compilation level should be CompilationLevel.PIECEWISE "\

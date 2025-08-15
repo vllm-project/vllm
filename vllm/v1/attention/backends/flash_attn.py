@@ -154,14 +154,24 @@ def _get_sliding_window_configs(
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
-    # FA3 supports full cudagraphs for all cases, while FA2 has some nuances.
+    # FA3:
+    # Supports full cudagraphs for all cases.
+    #
+    # FA2:
     # For FA2, a graph is captured with max_query_len=1, (which is what we
     # capture by default for num_tokens <= max_num_seqs when there is no
     # spec-decode) then these graphs will not work for mixed prefill-decode
-    # (unlike FA3). This is due to special max_query_len=1 packed-GQA handing in
-    # FA2. Theres probably a better way to describe this using
-    # `AttentionCGSupport` but for now just set it to `UNIFORM_BATCH` to get
-    # use to drop down to FULL_AND_PIECEWISE.
+    # (unlike FA3). This is due to special max_query_len=1 packed-GQA handling
+    # in FA2.
+    # In summary if we are running with spec decodes the graphs would
+    # work for mixed prefill-decode and uniform-decode. But for non-spec decodes
+    # the graphs would not work for mixed prefill-decode; sorta the inverse
+    # of UNIFORM_SINGLE_TOKEN_DECODE.
+    # Theres probably a better way to describe this using `AttentionCGSupport`
+    # but for now just set it to `UNIFORM_BATCH` to get use to drop down
+    # to FULL_AND_PIECEWISE.
+    # TODO(luka, lucas): audit FA2 as part of:
+    #  https://github.com/vllm-project/vllm/issues/22945
     cudagraph_support = AttentionCGSupport.ALWAYS \
         if get_flash_attn_version() == 3 else AttentionCGSupport.UNIFORM_BATCH
 
@@ -350,11 +360,6 @@ class FlashAttentionMetadataBuilder(
             max_num_splits=max_num_splits,
             causal=causal)
         return attn_metadata
-
-    def can_run_in_cudagraph(
-            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        # Full CUDA Graph always supported
-        return True
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return use_cascade_attention(*args, **kwargs)

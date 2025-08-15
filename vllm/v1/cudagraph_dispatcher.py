@@ -38,7 +38,7 @@ class CudagraphDispatcher:
             CUDAGraphMode.FULL: set(),
         }
 
-        assert not self.cudagraph_mode.has_piecewise_cudagraphs() or \
+        assert not self.cudagraph_mode.requires_piecewise_compilation() or \
             (self.compilation_config.level == CompilationLevel.PIECEWISE and
              self.compilation_config.splitting_ops_contain_attention()), \
             "Compilation level should be CompilationLevel.PIECEWISE when "\

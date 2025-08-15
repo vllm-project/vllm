@@ -683,13 +683,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[dict[str,
-                    Any], bool, torch.Tensor, Optional[SpecDecodeMetadata],
+    ) -> tuple[dict[str, Any], torch.Tensor, Optional[SpecDecodeMetadata],
                np.ndarray, Optional[CommonAttentionMetadata], int]:
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
-            attention_cuda_graphs: whether attention can run in cudagraph
             logits_indices, spec_decode_metadata
         ]
         """
@@ -929,17 +927,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         continue
                     attn_metadata[layer_name] = attn_metadata_i
 
-        attention_cuda_graphs = all(
-            g.metadata_builder.can_run_in_cudagraph(common_attn_metadata)
-            for g in self._attn_group_iterator())
-
         # Hot-Swap lora model
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
-        return (attn_metadata, attention_cuda_graphs, logits_indices,
-                spec_decode_metadata, num_scheduled_tokens,
-                spec_decode_common_attn_metadata, max_num_scheduled_tokens)
+        return (attn_metadata, logits_indices, spec_decode_metadata,
+                num_scheduled_tokens, spec_decode_common_attn_metadata,
+                max_num_scheduled_tokens)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1515,9 +1509,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                 self.vllm_config)
 
         # Prepare the decoder inputs.
-        (attn_metadata, attention_cuda_graphs, logits_indices,
-         spec_decode_metadata, num_scheduled_tokens_np,
-         spec_decode_common_attn_metadata,
+        (attn_metadata, logits_indices, spec_decode_metadata,
+         num_scheduled_tokens_np, spec_decode_common_attn_metadata,
          max_query_len) = (self._prepare_inputs(scheduler_output))
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1595,10 +1588,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                            uniform_decode=uniform_decode)
         cudagraph_runtime_mode, batch_descriptor = \
             self.cudagraph_dispatcher.dispatch(batch_descriptor)
-
-        # attention_cuda_graphs needed to capture full cudagraphs
-        assert (cudagraph_runtime_mode != CUDAGraphMode.FULL
-                or attention_cuda_graphs)
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
