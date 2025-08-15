@@ -5,7 +5,6 @@
 import asyncio
 import hashlib
 import json
-import logging
 import pickle
 import socket
 from collections.abc import AsyncIterator
@@ -29,7 +28,7 @@ from vllm.utils import (CacheInfo, FlexibleArgumentParser, LRUCache,
                         merge_async_iterators, sha256, split_host_port,
                         split_zmq_path, supports_kw, swap_dict_values)
 
-from .utils import create_new_process_for_each_test, error_on_warning
+from ..utils import create_new_process_for_each_test, error_on_warning
 
 
 @pytest.mark.asyncio
@@ -162,7 +161,6 @@ def parser_with_config():
     parser.add_argument('--port', type=int)
     parser.add_argument('--tensor-parallel-size', type=int)
     parser.add_argument('--trust-remote-code', action='store_true')
-    parser.add_argument('--multi-step-stream-outputs', action=StoreBoolean)
     return parser
 
 
@@ -237,7 +235,6 @@ def test_config_args(parser_with_config, cli_config_file):
         ['serve', 'mymodel', '--config', cli_config_file])
     assert args.tensor_parallel_size == 2
     assert args.trust_remote_code
-    assert not args.multi_step_stream_outputs
 
 
 def test_config_file(parser_with_config):
@@ -829,7 +826,6 @@ def test_model_specification(parser_with_config, cli_config_file,
     ])
     assert args.tensor_parallel_size == 2
     assert args.trust_remote_code is True
-    assert args.multi_step_stream_outputs is False
     assert args.port == 12312
 
 

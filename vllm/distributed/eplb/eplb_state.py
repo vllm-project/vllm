@@ -259,7 +259,6 @@ class EplbState:
 
         if global_expert_load is not None:
             ep_group = get_ep_group().device_group
-            assert ep_group is not None
             assert global_expert_load.shape == (model.num_moe_layers,
                                                 model.num_logical_experts)
             assert global_expert_load.dtype == torch.int64
@@ -366,7 +365,6 @@ class EplbState:
 
             # Collect load metrics from all ranks
             ep_group = get_ep_group().device_group
-            assert ep_group is not None
             all_reduce(total_expert_load_pass, group=ep_group)
 
             # num_tokens_per_rank: (num_moe_layers, num_ranks)
@@ -422,7 +420,6 @@ class EplbState:
         """
 
         ep_group = get_ep_group().device_group
-        assert ep_group is not None
         ep_rank = ep_group.rank()
 
         time_start = None

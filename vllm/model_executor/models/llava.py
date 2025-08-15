@@ -3,7 +3,7 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import (Final, Literal, Optional, Protocol, TypedDict, TypeVar,
+from typing import (Annotated, Final, Literal, Optional, Protocol, TypeVar,
                     Union, cast)
 
 import torch
@@ -16,7 +16,6 @@ from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
 from vllm.inputs import InputProcessingContext
-from vllm.jsontree import json_map_leaves
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -33,6 +32,8 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.jsontree import json_map_leaves
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -44,35 +45,47 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
 from .vision import get_vision_encoder_info
 
 
-class LlavaImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    pixel_values: torch.Tensor
+class LlavaImagePixelInputs(TensorSchema):
     """
-    Shape: `(batch_size * num_images, num_channels, height, width)`
-
+    Dimensions:
+        - bn: Batch size * number of images
+        - c: Number of channels (3)
+        - h: Height
+        - w: Width
+    
     Note that `height` or `width` may be different per batch and image,
     in which case the data is passed as a list instead of a batched tensor.
     """
+    type: Literal["pixel_values"] = "pixel_values"
+    pixel_values: Annotated[torch.Tensor, TensorShape("bn", 3, "h", "w")]
 
 
-class PixtralHFImagePixelInputs(TypedDict):
-    type: Literal["pixel_values_pixtral"]
-    pixel_values: Union[torch.Tensor, list[torch.Tensor]]
+class PixtralHFImagePixelInputs(TensorSchema):
     """
-    Shape: `(batch_size * num_images, num_channels, height, width)`
-
+    Dimensions:
+        - bn: Batch size * number of images
+        - c: Number of channels
+        - h: Height
+        - w: Width
+    
     Note that `height` or `width` may be different per batch and image,
     in which case the data is passed as a list instead of a batched tensor.
     """
+    type: Literal["pixel_values_pixtral"] = "pixel_values_pixtral"
+    pixel_values: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "c", "h", "w", dynamic_dims={"h", "w"})]
 
 
-class LlavaImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    data: torch.Tensor
-    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
+class LlavaImageEmbeddingInputs(TensorSchema):
     """
+    Dimensions:
+        - bn: Batch size * number of images
+        - ifs: Image feature size
+        - hs: Hidden size (must match language model backbone)
+    """
+    type: Literal["image_embeds"] = "image_embeds"
+    data: Annotated[torch.Tensor, TensorShape("bn", "ifs", "hs")]
 
 
 LlavaImageInputs = Union[LlavaImagePixelInputs, PixtralHFImagePixelInputs,
@@ -521,18 +534,22 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             config.projector_hidden_act = "gelu"
 
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_tower = init_vision_tower_for_llava(
-            config,
-            quant_config,
-            require_post_norm=False,
-            prefix=maybe_prefix(prefix, "vision_tower"))
-        self.multi_modal_projector = LlavaMultiModalProjector(
-            vision_hidden_size=config.vision_config.hidden_size,
-            text_hidden_size=config.text_config.hidden_size,
-            projector_hidden_act=config.projector_hidden_act,
-            multimodal_projector_bias=config.multimodal_projector_bias,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "multi_modal_projector"))
+        if multimodal_config.get_limit_per_prompt("image"):
+            self.vision_tower = init_vision_tower_for_llava(
+                config,
+                quant_config,
+                require_post_norm=False,
+                prefix=maybe_prefix(prefix, "vision_tower"))
+            self.multi_modal_projector = LlavaMultiModalProjector(
+                vision_hidden_size=config.vision_config.hidden_size,
+                text_hidden_size=config.text_config.hidden_size,
+                projector_hidden_act=config.projector_hidden_act,
+                multimodal_projector_bias=config.multimodal_projector_bias,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"))
+        else:
+            self.vision_tower = None
+            self.multi_modal_projector = None
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
@@ -542,19 +559,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        h = w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-        actual_dims = tuple(data.shape[1:])
-
-        if actual_dims != expected_dims:
-            expected_expr = ("batch_size", *map(str, expected_dims))
-            raise ValueError(
-                f"The expected shape of pixel values is {expected_expr}. "
-                f"You supplied {tuple(data.shape)}.")
-
-        return data
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaImageInputs]:
@@ -575,10 +579,14 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                     pixel_values=flatten_bn(pixel_values),
                 )
 
+            expected_h = expected_w = self.config.vision_config.image_size
             return LlavaImagePixelInputs(
                 type="pixel_values",
-                pixel_values=self._validate_pixel_values(
-                    flatten_bn(pixel_values, concat=True)),
+                pixel_values=flatten_bn(pixel_values, concat=True),
+                resolve_bindings={
+                    "h": expected_h,
+                    "w": expected_w
+                },
             )
 
         if image_embeds is not None:
@@ -756,7 +764,11 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        skip_prefixes = []
+        if self.vision_tower is None and self.multi_modal_projector is None:
+            skip_prefixes.extend(["vision_tower.", "multi_modal_projector."])
+
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 

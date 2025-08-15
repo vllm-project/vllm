@@ -605,7 +605,6 @@ class MiniCPMO(MiniCPMV2_6):
                                   max=size)
         # Create column indices for broadcasting
         col_indices = torch.arange(size, device=device).unsqueeze(0)
-        row_indices = row_indices.unsqueeze(1)
         start_indices = start_indices.unsqueeze(1)
         end_indices = end_indices.unsqueeze(1)
         # Vectorized mask creation

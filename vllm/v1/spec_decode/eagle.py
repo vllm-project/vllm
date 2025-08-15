@@ -113,13 +113,6 @@ class EagleProposer:
                                             num_drafts_per_level[level])
             self.child_drafts_per_level.append(num_drafts_per_level[level] //
                                                num_drafts_per_level[level - 1])
-        # Find the first level where the tree branches off into one or more
-        # children.
-        self.first_branching_level = None
-        for level in range(tree_depth):
-            if self.cu_drafts_per_level[level] > level + 1:
-                self.first_branching_level = level
-                break
         # Precompute draft position offsets in flattened tree.
         self.tree_draft_pos_offsets = torch.arange(
             1,
@@ -209,11 +202,10 @@ class EagleProposer:
         logits = self.model.compute_logits(sample_hidden_states, None)
         positions = target_positions[last_token_indices]
         hidden_states = hidden_states[last_token_indices]
-        if self.first_branching_level == 0:
-            # Branching has occurred at the root level. Draft using tree
-            # attention.
+
+        if isinstance(attn_metadata, TreeAttentionMetadata):
+            # Draft using tree attention.
             draft_token_ids_list = self.propose_tree(
-                tree_root_level=0,
                 batch_size=batch_size,
                 logits=logits,
                 positions=positions,
@@ -242,11 +234,10 @@ class EagleProposer:
                 (TritonAttentionMetadata, AiterFlashAttentionMetadata,
                  FlashAttentionMetadata))
         else:
-            # Currently, only FlashAttention and TreeAttention support
-            # multi-token eagle spec decode. This is because the code below
-            # makes assumptions about attn_metadata attributes available.
-            assert isinstance(attn_metadata,
-                              (FlashAttentionMetadata, TreeAttentionMetadata))
+            # Currently, only FlashAttention supports multi-token eagle spec
+            # decode. This is because the code below makes assumptions about
+            # attn_metadata attributes available.
+            assert isinstance(attn_metadata, FlashAttentionMetadata)
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
@@ -259,7 +250,7 @@ class EagleProposer:
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
-        for token_index in range(self.num_speculative_tokens - 1):
+        for _ in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
@@ -327,21 +318,6 @@ class EagleProposer:
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
-
-            if self.first_branching_level == token_index + 1:
-                # Branching has occurred. The remaining tokens are drafted
-                # using tree attention.
-                draft_token_ids_list += self.propose_tree(
-                    tree_root_level=token_index + 1,
-                    batch_size=batch_size,
-                    logits=logits,
-                    positions=positions,
-                    hidden_states=hidden_states,
-                    common_attn_metadata=common_attn_metadata,
-                )
-                # [batch_size, num_tree_tokens]
-                return torch.cat(draft_token_ids_list, dim=1)
-
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
 
@@ -351,7 +327,6 @@ class EagleProposer:
 
     def propose_tree(
         self,
-        tree_root_level: int,
         batch_size: int,
         # [num_tokens, vocab_size]
         logits: torch.Tensor,
@@ -366,10 +341,10 @@ class EagleProposer:
         assert isinstance(tree_attn_metadata_builder,
                           TreeAttentionMetadataBuilder)
 
-        total_num_drafts = self.cu_drafts_per_level[tree_root_level]
+        total_num_drafts = self.cu_drafts_per_level[0]
         level_num_drafts = total_num_drafts
         # Sample a draft token for each child at the tree root level.
-        num_children = self.child_drafts_per_level[tree_root_level]
+        num_children = self.child_drafts_per_level[0]
         if num_children == 1:
             draft_token_ids = logits.argmax(dim=-1).view(batch_size, -1)
         else:
@@ -393,22 +368,23 @@ class EagleProposer:
             positions.view(batch_size, -1) +
             self.tree_draft_pos_offsets[:batch_size, :])
         tree_depth = len(self.cu_drafts_per_level)
-        for level in range(tree_root_level, tree_depth - 1):
+        for level in range(tree_depth - 1):
             # Get draft positions for RoPE.
             draft_positions = positions + (level + 1)
             exceeds_max_model_len = (positions +
                                      total_num_drafts) >= self.max_model_len
             # Mask out the position ids that exceed the max model length.
             # Otherwise, we may get out-of-range error in RoPE.
-            clamped_draft_positions = torch.where(
+            draft_positions = torch.where(
                 exceeds_max_model_len,
                 0,
                 draft_positions,
-            )
+            ).view(batch_size, -1)
+
             if level_num_drafts > 1:
                 # Repeat the positions for each draft at this level.
-                draft_positions = clamped_draft_positions.repeat_interleave(
-                    level_num_drafts).reshape(batch_size, -1)
+                draft_positions = draft_positions.repeat_interleave(
+                    level_num_drafts, dim=1)
 
             if num_children > 1:
                 # Repeat draft hidden states for each child.
@@ -425,7 +401,7 @@ class EagleProposer:
 
             # Build new attention metadata for the next level of drafts.
             # This is necessary to support tree attention.
-            query_len = total_num_drafts - tree_root_level
+            query_len = total_num_drafts
             common_attn_metadata = replace(
                 common_attn_metadata,
                 query_start_loc=query_len * self.arange[:batch_size + 1],
@@ -435,7 +411,7 @@ class EagleProposer:
             )
             attn_metadata = tree_attn_metadata_builder.build_for_drafting(
                 common_attn_metadata=common_attn_metadata,
-                draft_index=tree_root_level + 1,
+                draft_index=level + 1,
             )
 
             # Apply new attention metadata to all layers.
@@ -516,7 +492,6 @@ class EagleProposer:
             level_num_drafts = self.cu_drafts_per_level[level +
                                                         1] - total_num_drafts
             total_num_drafts = self.cu_drafts_per_level[level + 1]
-
         return draft_token_ids_list
 
     def prepare_inputs(

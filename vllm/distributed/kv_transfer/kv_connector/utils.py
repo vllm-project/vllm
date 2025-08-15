@@ -13,8 +13,8 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1)
+from vllm.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory)
 from vllm.logger import init_logger
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
@@ -106,8 +106,9 @@ def get_kv_connector_cache_layout():
     vllm_config = get_current_vllm_config()
     kv_config = vllm_config.kv_transfer_config
     if kv_config is not None:
-        required_kvcache_layout = (
-            KVConnectorBase_V1.get_required_kvcache_layout(vllm_config))
+        connector_cls = KVConnectorFactory.get_connector_class(kv_config)
+        required_kvcache_layout = connector_cls.get_required_kvcache_layout(
+            vllm_config)
         if required_kvcache_layout is not None:
             return required_kvcache_layout
         logger.info_once("Connectors do not specify a " \
@@ -143,6 +144,8 @@ class KVOutputAggregator:
         finished_recving = set[str]()
         for output in outputs:
             output = output.kv_connector_output
+            if not output:
+                continue
             update_finished_set(output.finished_sending,
                                 self._send_remaining_count, finished_sending)
             update_finished_set(output.finished_recving,

@@ -52,7 +52,7 @@ def make_request(
     return EngineCoreRequest(
         request_id=str(uuid.uuid4()),
         prompt_token_ids=prompt_tokens_ids,
-        mm_inputs=None,
+        mm_kwargs=None,
         mm_hashes=None,
         mm_placeholders=None,
         sampling_params=params,
