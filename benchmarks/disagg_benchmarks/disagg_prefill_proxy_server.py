@@ -20,7 +20,6 @@ def parse_args():
     """parse command line arguments"""
     parser = argparse.ArgumentParser(description="vLLM P/D disaggregation proxy server")
 
-
     # Add args
     parser.add_argument(
         "--timeout",
@@ -29,7 +28,7 @@ def parse_args():
         help="Timeout for backend service requests in seconds (default: 300)",
     )
     parser.add_argument(
-    "--max-concurrent",
+        "--max-concurrent",
         type=int,
         default=100,
         help="Maximum concurrent requests to backend services (default: 100)",
@@ -72,7 +71,7 @@ def main():
     """parse command line arguments"""
     args = parse_args()
 
-    #Initialize configuration using command line parameters
+    # Initialize configuration using command line parameters
     AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=args.timeout)
     MAX_CONCURRENT_REQUESTS = args.max_concurrent
     REQUEST_QUEUE_SIZE = args.queue_size
@@ -116,7 +115,7 @@ def main():
         ):
             try:
                 async with session.post(
-                        url=url, json=data, headers=headers
+                    url=url, json=data, headers=headers
                 ) as response:
                     if response.status == 200:
                         # Stream response chunks
@@ -167,7 +166,6 @@ def main():
                 status=500,
                 content_type="application/json",
             )
-
 
     @app.route("/v1/completions", methods=["POST"])
     async def handle_request():
