@@ -1020,9 +1020,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 print("_calc_mrope_positions (prompt_part_len > 0)")
                 print("src_start", src_start, "src_end", src_end)
                 print("dst_start", dst_start, "dst_end", dst_end)
+                print(f"req.mrope_positions {req.mrope_positions.shape=}")
                 print(f"{req.mrope_positions[0,src_start:src_end].tolist()}")
                 print(f"{req.mrope_positions[1,src_start:src_end].tolist()}")
                 print(f"{req.mrope_positions[2,src_start:src_end].tolist()}")
+
+                print(f"self.mrope_positions_cpu {self.mrope_positions_cpu.shape=}")
+                print(f"{self.mrope_positions_cpu[0,dst_start:dst_end].tolist()}")
+                print(f"{self.mrope_positions_cpu[1,dst_start:dst_end].tolist()}")
+                print(f"{self.mrope_positions_cpu[2,dst_start:dst_end].tolist()}")
 
                 self.mrope_positions_cpu[:, dst_start:dst_end] = \
                     req.mrope_positions[:,src_start:src_end]
@@ -1249,7 +1255,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         self.requests[req_id].prompt_token_ids, mm_embeds_req
                     )
                 mm_embeds_req = new_embeds
-                self.requests[req_id].mrope_positions = new_positios
+                self.requests[req_id].mrope_positions.copy_(new_positios)
                 #self.requests[req_id].mrope_position_delta = new_delta
 
                 setattr(self.requests[req_id], "_evs_mrope_taint_applied", True)
