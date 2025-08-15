@@ -22,8 +22,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 # yapf: disable
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig, FusedMoEParallelConfig, FusedMoEQuantConfig,
-    biased_moe_quant_config, FUSED_MOE_UNQUANTIZED_CONFIG)
+    FUSED_MOE_UNQUANTIZED_CONFIG, FusedMoEConfig, FusedMoEParallelConfig,
+    FusedMoEQuantConfig, biased_moe_quant_config)
 # yapf: enable
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat, FusedMoEModularKernel,
@@ -970,7 +970,8 @@ class FusedMoE(CustomOp):
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
-        self.quant_method.moe_quant_config = quant_method.get_fused_moe_quant_config(self)
+        self.quant_method.moe_quant_config = (
+            quant_method.get_fused_moe_quant_config(self))
 
         if self.enable_eplb:
             from vllm.model_executor.layers.quantization.fp8 import (

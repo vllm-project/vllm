@@ -489,7 +489,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
-            per_channel_quant=False,
+            per_act_token_quant=False,
         )
 
     def apply(
@@ -1063,12 +1063,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 == FlashinferMoeBackend.CUTLASS):
             prepare_finalize = (
                 build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-                    moe
+                    self.moe
                 ))
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
 
-        return prepare_finalize
+        return super().maybe_make_prepare_finalize()
 
     def select_gemm_impl(
         self,

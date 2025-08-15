@@ -295,8 +295,10 @@ class WeightTensors:
         e = s + num_local_experts
         w1 = self.w1[s:e, :, :]
         w2 = self.w2[s:e, :, :]
-        w1_scale = self.w1_scale[s:e, :, :] if self.w1_scale is not None else None
-        w2_scale = self.w2_scale[s:e, :, :] if self.w2_scale is not None else None
+        w1_scale = self.w1_scale[
+            s:e, :, :] if self.w1_scale is not None else None
+        w2_scale = self.w2_scale[
+            s:e, :, :] if self.w2_scale is not None else None
         w1_gs = self.w1_gs[s:e] if self.w1_gs is not None else None
         w2_gs = self.w2_gs[s:e] if self.w2_gs is not None else None
 
@@ -311,7 +313,8 @@ class WeightTensors:
             in_dtype=config.dtype,
             quant_dtype=config.quant_dtype,
             block_shape=config.quant_block_shape,
-            per_out_ch_quant=config.is_per_act_token_quant, # or config.is_per_out_ch_quant
+            per_out_ch_quant=config.
+            is_per_act_token_quant,  # or config.is_per_out_ch_quant
         )
         return WeightTensors(w1=w1,
                              w2=w2,
@@ -601,18 +604,26 @@ def run_modular_kernel(
     # impls might update the tensor in place
     hidden_states = rank_tensors.hidden_states.clone()
 
-    topk_ids = rank_tensors.topk_ids.to(mk.prepare_finalize.topk_indices_dtype())
+    topk_ids = rank_tensors.topk_ids.to(
+        mk.prepare_finalize.topk_indices_dtype())
 
     assert torch.isnan(hidden_states).sum() == 0
 
     mk_kwargs = {
-        "hidden_states": hidden_states,
-        "w1": rank_weights.w1,
-        "w2": rank_weights.w2,
-        "topk_weights": rank_tensors.topk_weights,
-        "topk_ids": topk_ids,
-        "expert_map": rank_tensors.expert_map,
-        "global_num_experts": config.E,
+        "hidden_states":
+        hidden_states,
+        "w1":
+        rank_weights.w1,
+        "w2":
+        rank_weights.w2,
+        "topk_weights":
+        rank_tensors.topk_weights,
+        "topk_ids":
+        topk_ids,
+        "expert_map":
+        rank_tensors.expert_map,
+        "global_num_experts":
+        config.E,
         "apply_router_weight_on_input":
         config.topk == 1 and config.supports_apply_weight_on_input(),
     }
@@ -623,10 +634,10 @@ def run_modular_kernel(
                                         dtype=torch.int)
 
     with set_forward_context(
-        None,
-        vllm_config,
-        num_tokens=num_tokens,
-        num_tokens_across_dp=num_tokens_across_dp,
+            None,
+            vllm_config,
+            num_tokens=num_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
     ):
         out = mk.forward(**mk_kwargs)
 

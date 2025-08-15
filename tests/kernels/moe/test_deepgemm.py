@@ -11,9 +11,10 @@ import math
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.config import (
+    fp8_w8a8_moe_quant_config)
 # vLLM fused-expert reference (Triton fallback + DeepGEMM option)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.utils.deep_gemm import (calc_diff, is_deep_gemm_supported,

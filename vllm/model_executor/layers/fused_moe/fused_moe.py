@@ -18,8 +18,8 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 # yapf: disable
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig, _get_config_dtype_str, _get_config_quant_dtype,
-    FUSED_MOE_UNQUANTIZED_CONFIG)
+    FUSED_MOE_UNQUANTIZED_CONFIG, FusedMoEQuantConfig, _get_config_dtype_str,
+    _get_config_quant_dtype)
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     _valid_cutlass_block_scaled_grouped_gemm,
     run_cutlass_block_scaled_fused_experts)
@@ -520,9 +520,9 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
         assert (block_shape is None
-                or triton.cdiv(B.size(-2), block_shape[0]) == B_scale.size(-2)), f"BS {triton.cdiv(B.shape[-2], block_shape[0])} {B_scale.shape[-2]} {B.shape} {B_scale.shape}"
+                or triton.cdiv(B.size(-2), block_shape[0]) == B_scale.size(-2))
         assert (block_shape is None
-                or triton.cdiv(B.size(-1), block_shape[1]) == B_scale.size(-1)), f"BS {triton.cdiv(B.shape[-1], block_shape[1])} {B_scale.shape[-1]} {B.shape} {B_scale.shape}"
+                or triton.cdiv(B.size(-1), block_shape[1]) == B_scale.size(-1))
 
     elif use_int8_w8a16 or use_int4_w4a16:
         assert B_scale is not None
@@ -1320,10 +1320,10 @@ def outplace_fused_experts(
 ) -> torch.Tensor:
     return fused_experts_impl(
         hidden_states, w1, w2, topk_weights, topk_ids, False, activation,
-        apply_router_weight_on_input, use_fp8_w8a8,
-        use_int8_w8a8, use_int8_w8a16, use_int4_w4a16, use_mxfp4_w4a4,
-        per_channel_quant, global_num_experts, expert_map, w1_scale, w2_scale,
-        w1_zp, w2_zp, a1_scale, a2_scale, block_shape, w1_bias, w2_bias)
+        apply_router_weight_on_input, use_fp8_w8a8, use_int8_w8a8,
+        use_int8_w8a16, use_int4_w4a16, use_mxfp4_w4a4, per_channel_quant,
+        global_num_experts, expert_map, w1_scale, w2_scale, w1_zp, w2_zp,
+        a1_scale, a2_scale, block_shape, w1_bias, w2_bias)
 
 
 def outplace_fused_experts_fake(
@@ -1871,8 +1871,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 def modular_triton_fused_moe(
-    quant_config: FusedMoEQuantConfig
-) -> mk.FusedMoEModularKernel:
+        quant_config: FusedMoEQuantConfig) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
         TritonExperts(quant_config),

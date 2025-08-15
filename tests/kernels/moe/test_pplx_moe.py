@@ -822,7 +822,7 @@ def test_pplx_moe_slow(
         k,
         quant_dtype=quant_dtype,
         block_shape=block_shape,
-        per_out_ch_quant=per_act_token_quant, # TODO fix
+        per_out_ch_quant=per_act_token_quant,  # TODO fix
     )
 
     parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk, e,
