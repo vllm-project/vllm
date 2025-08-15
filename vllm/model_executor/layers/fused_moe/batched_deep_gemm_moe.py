@@ -5,6 +5,8 @@ from typing import Any, Optional
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -247,24 +249,19 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             Leader ranks are guaranteed at least 1 dispatcher for stability,
             while non-leader ranks return 0 to eliminate redundant dispatching.
         """
-        from vllm.distributed import (
-            get_tensor_model_parallel_world_size,
-            get_tensor_model_parallel_rank
-        )
-        
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
-        
+
         if tp_size <= 1:
             # No TP or single device - use all dispatchers
             return self.num_dispatchers
-        
+
         # TP > 1 case
         if tp_rank == 0:
             # Leader rank gets a proportional share of dispatchers
             dispatchers_per_group = max(1, self.num_dispatchers // tp_size)
             return dispatchers_per_group
-        
+
         # Non-leader ranks don't dispatch
         return 0
 
