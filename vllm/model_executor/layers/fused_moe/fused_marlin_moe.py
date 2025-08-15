@@ -170,21 +170,9 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         torch.ops._C.silu_and_mul(intermediate_cache2,
                                   intermediate_cache1.view(-1, 2 * N))
     elif activation == "swigluoai":
-        # NOTE: in gpt-oss, the gate_proj and up_proj is interleaved
-        # - interleaved: gate, up = gate_up[..., ::2], gate_up[..., 1::2]
-        # - origin: gate, up = gate_up[..., :N], gate_up[..., N:]
 
-        @torch.compile(dynamic=True)
-        def swiglu_oai(gate_up):
-            alpha = 1.702
-            limit = 7.0
-            gate, up = gate_up[..., ::2], gate_up[..., 1::2]
-            gate = gate.clamp(min=None, max=limit)
-            up = up.clamp(min=-limit, max=limit)
-            glu = gate * torch.sigmoid(gate * alpha)
-            return (up + 1) * glu
-
-        intermediate_cache2 = swiglu_oai(intermediate_cache1)
+        torch.ops._C.swigluoai_and_mul(intermediate_cache2,
+                                       intermediate_cache1.view(-1, 2 * N))
     else:
         raise ValueError(f"Unsupported activation: {activation}. "
                          "Only silu and swigluoai activations are supported.")

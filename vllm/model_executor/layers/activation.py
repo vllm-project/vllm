@@ -442,7 +442,7 @@ _ACTIVATION_AND_MUL_REGISTRY = LazyDict({
     lambda: SiluAndMul(),
     "geglu":
     lambda: GeluAndMul(),
-    "swigluoai_and_mul":
+    "swigluoai":
     lambda *args, **kwargs: SwigluOAIAndMul(*args, **kwargs),
 })
 
