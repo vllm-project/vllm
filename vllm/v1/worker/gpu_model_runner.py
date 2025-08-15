@@ -341,12 +341,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         model_kwargs = dict[str, Any]()
         num_reqs = self.input_batch.num_reqs
 
-        pooling_params = self.input_batch.pooling_metadata.pooling_params
-
-        num_pooling_reqs = len(pooling_params)
+        num_pooling_reqs = len(self.input_batch.pooling_params)
 
         if num_pooling_reqs == 0:
             return model_kwargs
+
+        pooling_params = self.input_batch.pooling_metadata.pooling_params
 
         assert num_pooling_reqs == num_reqs
 
@@ -2480,50 +2480,56 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
         if self.supports_mm_inputs:
-            mm_budget = self.mm_budget
-            assert mm_budget is not None
-
-            # TODO: handle encoder-decoder models once we support them.
-            if (encoder_budget := mm_budget.get_encoder_budget()) > 0:
-                # NOTE: Currently model is profiled with a single non-text
-                # modality with the max possible input tokens even when
-                # it supports multiple.
-                (
-                    dummy_modality,
-                    max_tokens,
-                ) = mm_budget.get_modality_with_max_tokens()
-                (
-                    max_mm_items_per_prompt,
-                    max_mm_items_per_batch,
-                ) = mm_budget.get_max_items(dummy_modality, max_tokens)
-
+            if self.model_config.multimodal_config.skip_mm_profiling:
                 logger.info(
-                    "Encoder cache will be initialized with a budget of "
-                    "%s tokens, and profiled with %s %s items of the maximum "
-                    "feature size.",
-                    encoder_budget,
-                    max_mm_items_per_batch,
-                    dummy_modality,
-                )
+                    "Skipping memory profiling for multimodal encoder and "
+                    "encoder cache.")
+            else:
+                mm_budget = self.mm_budget
+                assert mm_budget is not None
 
-                # Create dummy batch of multimodal inputs.
-                batched_dummy_mm_inputs = self._get_mm_dummy_batch(
-                    dummy_modality,
-                    max_mm_items_per_batch,
-                )
+                # TODO: handle encoder-decoder models once we support them.
+                if (encoder_budget := mm_budget.get_encoder_budget()) > 0:
+                    # NOTE: Currently model is profiled with a single non-text
+                    # modality with the max possible input tokens even when
+                    # it supports multiple.
+                    (
+                        dummy_modality,
+                        max_tokens,
+                    ) = mm_budget.get_modality_with_max_tokens()
+                    (
+                        max_mm_items_per_prompt,
+                        max_mm_items_per_batch,
+                    ) = mm_budget.get_max_items(dummy_modality, max_tokens)
 
-                # Run multimodal encoder.
-                dummy_encoder_outputs = self.model.get_multimodal_embeddings(
-                    **batched_dummy_mm_inputs)
+                    logger.info(
+                        "Encoder cache will be initialized with a budget of "
+                        "%s tokens, and profiled with %s %s items of the "
+                        "maximum feature size.",
+                        encoder_budget,
+                        max_mm_items_per_batch,
+                        dummy_modality,
+                    )
 
-                sanity_check_mm_encoder_outputs(
-                    dummy_encoder_outputs,
-                    expected_num_items=max_mm_items_per_batch,
-                )
+                    # Create dummy batch of multimodal inputs.
+                    batched_dummy_mm_inputs = self._get_mm_dummy_batch(
+                        dummy_modality,
+                        max_mm_items_per_batch,
+                    )
 
-                # Cache the dummy encoder outputs.
-                self.encoder_cache["tmp"] = dict(
-                    enumerate(dummy_encoder_outputs))
+                    # Run multimodal encoder.
+                    dummy_encoder_outputs = \
+                        self.model.get_multimodal_embeddings(
+                        **batched_dummy_mm_inputs)
+
+                    sanity_check_mm_encoder_outputs(
+                        dummy_encoder_outputs,
+                        expected_num_items=max_mm_items_per_batch,
+                    )
+
+                    # Cache the dummy encoder outputs.
+                    self.encoder_cache["tmp"] = dict(
+                        enumerate(dummy_encoder_outputs))
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states \
@@ -2879,23 +2885,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
-                    dtype = kv_cache_spec.dtype
-                    num_element_per_page = (kv_cache_spec.page_size_bytes //
-                                            get_dtype_size(dtype))
                     state_tensors = []
-                    storage_offset = 0
-                    for shape in kv_cache_spec.shapes:
+                    storage_offset_bytes = 0
+                    for (shape, dtype) in zip(kv_cache_spec.shapes,
+                                              kv_cache_spec.dtypes):
+                        dtype_size = get_dtype_size(dtype)
+                        num_element_per_page = (
+                            kv_cache_spec.page_size_bytes // dtype_size)
                         target_shape = (num_blocks, *shape)
                         stride = torch.empty(target_shape).stride()
                         target_stride = (num_element_per_page, *stride[1:])
+                        assert storage_offset_bytes % dtype_size == 0
                         tensor = torch.as_strided(
                             raw_tensor.view(dtype),
                             size=target_shape,
                             stride=target_stride,
-                            storage_offset=storage_offset,
+                            storage_offset=storage_offset_bytes // dtype_size,
                         )
                         state_tensors.append(tensor)
-                        storage_offset += stride[0]
+                        storage_offset_bytes += stride[0] * dtype_size
 
                     kv_caches[layer_name] = state_tensors
                 else:
@@ -3082,7 +3090,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             for layer_name, mamba_module in mamba_layers.items():
                 kv_cache_spec[layer_name] = MambaSpec(
                     shapes=mamba_module.get_state_shape(),
-                    dtype=self.kv_cache_dtype,
+                    dtypes=mamba_module.get_state_dtype(),
                     block_size=max_model_len,
                     page_size_padded=page_size_padded,
                     mamba_type=mamba_module.mamba_type)
