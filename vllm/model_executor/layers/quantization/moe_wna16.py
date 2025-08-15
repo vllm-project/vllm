@@ -216,7 +216,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             2 * intermediate_size_per_partition,
             hidden_size // bit8_pack_factor,
             dtype=torch.uint8),
-                                         requires_grad=False)
+            requires_grad=False)
         layer.register_parameter("w13_qweight", w13_qweight)
         set_weight_attrs(w13_qweight, extra_weight_attrs)
 
@@ -226,7 +226,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             hidden_size,
             intermediate_size_per_partition // bit8_pack_factor,
             dtype=torch.uint8),
-                                        requires_grad=False)
+            requires_grad=False)
         layer.register_parameter("w2_qweight", w2_qweight)
         set_weight_attrs(w2_qweight, extra_weight_attrs)
 
@@ -235,7 +235,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             2 * intermediate_size_per_partition,
             hidden_size // group_size,
             dtype=params_dtype),
-                                        requires_grad=False)
+            requires_grad=False)
         layer.register_parameter("w13_scales", w13_scales)
         set_weight_attrs(w13_scales, extra_weight_attrs)
 
@@ -244,7 +244,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             hidden_size,
             intermediate_size_per_partition // group_size,
             dtype=params_dtype),
-                                       requires_grad=False)
+            requires_grad=False)
         layer.register_parameter("w2_scales", w2_scales)
         set_weight_attrs(w2_scales, extra_weight_attrs)
 
@@ -254,7 +254,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 2 * intermediate_size_per_partition // bit8_pack_factor,
                 hidden_size // group_size,
                 dtype=torch.uint8),
-                                            requires_grad=False)
+                requires_grad=False)
             layer.register_parameter("w13_qzeros", w13_qzeros)
             set_weight_attrs(w13_qzeros, extra_weight_attrs)
 
@@ -263,7 +263,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 hidden_size // bit8_pack_factor,
                 intermediate_size_per_partition // group_size,
                 dtype=torch.uint8),
-                                           requires_grad=False)
+                requires_grad=False)
             layer.register_parameter("w2_qzeros", w2_qzeros)
             set_weight_attrs(w2_qzeros, extra_weight_attrs)
 
