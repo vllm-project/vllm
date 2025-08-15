@@ -113,12 +113,12 @@ class MultiConnector(KVConnectorBase_V1):
         finished_recving: set[str] = set()
         failure_request: set[str] = set()
         for c in self._connectors:
-            sending, recving, failure_request = c.get_finished(
-                finished_req_ids)
-            if not recving and not sending:
+            sending, recving, failure = c.get_finished(finished_req_ids)
+            if not recving and not sending and not failure:
                 continue
             # Aggregate finished recving request ids.
             finished_recving.update(recving or ())
+            failure_request.update(failure or ())
             # Aggregate finished sending request ids - only include
             # once we've drained the "extra" count (for cases where
             # more than one connector is async-saving the same request).

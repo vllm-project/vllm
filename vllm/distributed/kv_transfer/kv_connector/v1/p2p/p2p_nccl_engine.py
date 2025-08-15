@@ -466,8 +466,8 @@ class P2pNcclEngine:
         return True
 
     def get_finished(
-            self, finished_req_ids: set[str], no_compile_layers
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        self, finished_req_ids: set[str], no_compile_layers
+    ) -> tuple[Optional[set[str]], Optional[set[str]], Optional[set[str]]]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.
@@ -500,7 +500,7 @@ class P2pNcclEngine:
         # TODO:Retrieve requests that have already received the KV cache.
         finished_recving: set[str] = set()
 
-        return finished_sending or None, finished_recving or None
+        return finished_sending or None, finished_recving or None, None
 
     def ping(self):
         sock = self.context.socket(zmq.DEALER)
