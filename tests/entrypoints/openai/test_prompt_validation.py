@@ -60,7 +60,7 @@ async def test_out_of_vocab_token_ids():
     shape=st.tuples(st.integers(min_value=2, max_value=10),
                     st.integers(min_value=2, max_value=10)),
     device=hypothesis_torch.device_strategy(),
-    layout=st.just(torch.sparse_coo)))
+    layout=hypothesis_torch.layout_strategy()))
 def test_load_prompt_embeds(tensor: torch.Tensor):
     buffer = io.BytesIO()
     torch.save(tensor, buffer)
