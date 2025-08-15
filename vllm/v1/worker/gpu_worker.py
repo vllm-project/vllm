@@ -359,7 +359,16 @@ class Worker(WorkerBase):
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
 
-        output = self.model_runner.execute_model(scheduler_output,
+        # add trace annotation so that we can easily distinguish new/cached request numbers in each iteration
+        context = nullcontext()
+        if self.profiler:
+            num_new_reqs = len(scheduler_output.scheduled_new_reqs)
+            num_cached_reqs = len(scheduler_output.scheduled_cached_reqs.req_ids)
+            context = torch.profiler.record_function(
+                f"execute_{num_new_reqs}_{num_cached_reqs}")
+
+        with context:
+            output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
 
         parallel_config = self.vllm_config.parallel_config
