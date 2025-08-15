@@ -68,7 +68,7 @@ def _can_support_mxfp4(use_grouped_topk: bool = False,
     return not (use_grouped_topk or topk_group or num_expert_group
                 or expert_map or custom_routing_function
                 or e_score_correction_bias or apply_router_weight_on_input
-                or scoring_func != "softmax" or activation != "swigluoai"
+                or scoring_func != "softmax" or activation != "swiglu_oai"
                 or expert_load_view or logical_to_physical_map
                 or logical_replica_count)
 
