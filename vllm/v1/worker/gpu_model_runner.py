@@ -1188,6 +1188,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         shift_computed_tokens: int = 0,
     ) -> list[torch.Tensor]:
+        should_calc_mrope_positions = False
         mm_embeds: list[torch.Tensor] = []
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
@@ -1241,6 +1242,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             should_update_mrope = not getattr(self.requests[req_id], "_evs_mrope_taint_applied", False)
             if supports_multimodal_pruning(self.model) and should_update_mrope:
                 print("Recomputing mrope")
+                should_calc_mrope_positions = True
                 mm_embeds_req, self.requests[req_id].mrope_positions, \
                     self.requests[req_id].mrope_position_delta = self.model.recompute_mrope_positions(
                         self.requests[req_id].prompt_token_ids, mm_embeds_req
@@ -1257,6 +1259,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 print(f"{self.requests[req_id].mrope_positions[2].tolist()}")
 
             mm_embeds.extend(mm_embeds_req)
+
+            if should_calc_mrope_positions:
+                self._calc_mrope_positions(scheduler_output)
+                total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+                self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
+                    self.mrope_positions_cpu[:, :total_num_scheduled_tokens],
+                    non_blocking=True)
+
         return mm_embeds
 
     def get_model(self) -> nn.Module:
