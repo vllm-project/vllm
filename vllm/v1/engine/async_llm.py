@@ -577,6 +577,7 @@ class AsyncLLM(EngineClient):
         await self.engine_core.reset_prefix_cache_async()
 
     async def sleep(self, level: int = 1) -> None:
+        await self.reset_prefix_cache()
         await self.engine_core.sleep_async(level)
 
     async def wake_up(self, tags: Optional[list[str]] = None) -> None:

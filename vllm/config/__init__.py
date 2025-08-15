@@ -388,6 +388,10 @@ class ModelConfig:
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string. Defaults to False."""
+    skip_mm_profiling: bool = False
+    """When enabled, skips multimodal memory profiling and only profiles with
+    language backbone model during engine initialization.
+    """
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Additional args passed to process media inputs, keyed by modalities.
     For example, to set num_frames for video, set
@@ -837,7 +841,8 @@ class ModelConfig:
                 media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 mm_processor_cache_gb=self.mm_processor_cache_gb,
-                interleave_mm_strings=self.interleave_mm_strings)
+                interleave_mm_strings=self.interleave_mm_strings,
+                skip_mm_profiling=self.skip_mm_profiling)
 
         return None
 
@@ -2509,6 +2514,16 @@ class MultiModalConfig:
     interleave_mm_strings: bool = False
     """
     Enable fully interleaved support for multimodal prompts.
+    """
+
+    skip_mm_profiling: bool = False
+    """
+    When enabled, skips multimodal memory profiling and only profiles with 
+    language backbone model during engine initialization.
+
+    This reduces engine startup time but shifts the responsibility to users for
+    estimating the peak memory usage of the activation of multimodal encoder and
+    embedding cache.
     """
 
     def compute_hash(self) -> str:
