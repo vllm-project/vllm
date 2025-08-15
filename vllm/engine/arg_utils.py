@@ -1602,7 +1602,7 @@ class EngineArgs:
                 self.enable_prefix_caching = incremental_prefill_supported
                 logger.info("(%s) prefix caching by default", action)
 
-        if not self.enable_chunked_prefill:
+        if not self.enable_chunked_prefill and not self.max_num_batched_tokens:
             self.max_num_batched_tokens = model_config.max_model_len
 
         # V1 should use the new scheduler by default.
