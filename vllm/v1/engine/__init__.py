@@ -3,7 +3,7 @@
 
 import enum
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any, Optional, Union
 
 import msgspec
