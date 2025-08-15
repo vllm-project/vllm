@@ -146,17 +146,14 @@ class AttnFusionPass(VllmInductorPass):
 
     def __init__(self, config: VllmConfig):
         super().__init__(config)
-        attn_layers_count = 0
 
         self.patterns = PatternMatcherPass(pass_name="attn_fusion_pass")
 
-        for layer_name, layer in get_layers_from_vllm_config(
-                config, Attention).items():
+        attn_layers = get_layers_from_vllm_config(config, Attention)
+        for layer_name, layer in attn_layers.items():
             pattern = AttentionStaticQuantPattern(layer, FP8_DTYPE)
             pattern.register_if_supported(self.patterns)
-            attn_layers_count += 1
-
-        if attn_layers_count == 0:
+        if len(attn_layers) == 0:
             logger.warning(
                 "Attention + quant fusion is enabled, but no attention layers "
                 "were found in CompilationConfig.static_forward_context "

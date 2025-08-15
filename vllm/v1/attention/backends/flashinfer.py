@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, is_pin_memory_available
-from vllm.utils.flashinfer import (support_trtllm_attention,
+from vllm.utils.flashinfer import (supports_trtllm_attention,
                                    use_trtllm_attention)
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 # yapf conflicts with isort for this block
@@ -536,7 +536,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         has_sinks = self.global_hyperparameters.has_sinks
 
         # Insert FP8 quant for query if FP8 kv cache and attn fusion enabled
-        q_dtype = self.vllm_config.model_config.dtype
+        q_dtype = config.model_config.dtype
         enable_fusion = config.compilation_config.pass_config.enable_attn_fusion
         if cache_dtype.startswith("fp8") and enable_fusion:
             q_dtype = kv_cache_dtype
@@ -658,8 +658,8 @@ class FlashInferImpl(AttentionImpl):
                 )
             self.sinks = sinks
 
-        self.support_trtllm_attn = support_trtllm_attention(num_heads,
-                                                            num_kv_heads)
+        self.support_trtllm_attn = (supports_trtllm_attention() and
+                                    num_heads % num_kv_heads == 0)
         self.bmm1_scale: Optional[float] = None
         self.bmm2_scale: Optional[float] = None
 
@@ -711,13 +711,16 @@ class FlashInferImpl(AttentionImpl):
             self.bmm2_scale = layer._v_scale_float
 
         # The attn+quant fusion happens when output_scale is provided.
-        if output_scale is not None:
+        if output_scale is None:
+            assert attn_metadata.q_data_type != FP8_DTYPE, \
+                "Query can only be FP8 if output fusion happened."
+        else:
             assert attn_metadata.q_data_type == FP8_DTYPE, \
-                "Planned q_dtype must be FP8 when attn+quant fusion applied"
+                "Query must be FP8 when attn+quant fusion happened."
             assert (attn_metadata.prefill_use_trtllm and
                     attn_metadata.decode_use_trtllm), "Must use TRT-LLM attn"
             assert output.dtype == FP8_DTYPE, \
-                "output dtype must be FP8 when attn+quant fusion applied"
+                "Output must be FP8 when attn+quant fusion happened."
 
             # TRTLLM attn kernel requires o scale as a host scalar, store the
             # o scale to host scalar in warmup run with cuda graph not enabled

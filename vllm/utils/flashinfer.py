@@ -299,7 +299,7 @@ __all__ = [
     "has_flashinfer_moe",
     "has_flashinfer_cutlass_fused_moe",
     "has_nvidia_artifactory",
-    "support_trtllm_attention",
+    "supports_trtllm_attention",
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
 ]
