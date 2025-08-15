@@ -119,10 +119,11 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             raise ValueError(f"Unknown quantization strategy {self.strategy}")
 
         # required by torch.compile to be torch.nn.Parameter
-        layer.weight = Parameter(weight, requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        layer.weight = Parameter(weight.data, requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale.data, requires_grad=False)
         if input_scale is not None:
-            layer.input_scale = Parameter(input_scale, requires_grad=False)
+            layer.input_scale = Parameter(input_scale.data,
+                                          requires_grad=False)
 
         # INPUT SCALE
         if self.is_static_input_scheme and hasattr(layer, 'input_scale'):

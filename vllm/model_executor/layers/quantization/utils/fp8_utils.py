@@ -984,11 +984,13 @@ def process_fp8_weight_block_strategy(
 
 
 def maybe_deepgemm_requant(layer: torch.nn.Module) -> None:
-    """On B200, DeepGemm only support E8M0 scale, which means we need to
-    requantize the weight and input to the specific scale at the same time."""
-    from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
+    """On B200, if E8M0 for DeepGemm is used, we need to
+    requantize the weight and input to the specific scale
+    at the same time."""
+    from vllm.utils.deep_gemm import is_blackwell_deep_gemm_e8m0_used
 
-    if is_blackwell_deep_gemm_used() and layer.weight_block_size is not None:
+    if is_blackwell_deep_gemm_e8m0_used():
+        assert layer.weight_block_size is not None
         block_sz = tuple(layer.weight_block_size)
         requant_weight_ue8m0_inplace(layer.weight.data,
                                      layer.weight_scale.data, block_sz)

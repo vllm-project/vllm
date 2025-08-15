@@ -334,8 +334,8 @@ class Fp8LinearMethod(LinearMethodBase):
                                               requires_grad=False)
 
         # Update layer with new values.
-        layer.weight = Parameter(weight, requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        layer.weight = Parameter(weight.data, requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale.data, requires_grad=False)
 
         if self.use_marlin:
             prepare_fp8_layer_for_marlin(layer, size_k_first)
