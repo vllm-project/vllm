@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import Optional
 
 import numpy as np
 import torch
@@ -154,9 +154,26 @@ def _get_sliding_window_configs(
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
-    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.NEVER if get_flash_attn_version() == 2 \
-        else AttentionCGSupport.ALWAYS
+    # FA3:
+    # Supports full cudagraphs for all cases.
+    #
+    # FA2:
+    # For FA2, a graph is captured with max_query_len=1, (which is what we
+    # capture by default for num_tokens <= max_num_seqs when there is no
+    # spec-decode) then these graphs will not work for mixed prefill-decode
+    # (unlike FA3). This is due to special max_query_len=1 packed-GQA handling
+    # in FA2.
+    # In summary if we are running with spec decodes the graphs would
+    # work for mixed prefill-decode and uniform-decode. But for non-spec decodes
+    # the graphs would not work for mixed prefill-decode; sorta the inverse
+    # of UNIFORM_SINGLE_TOKEN_DECODE.
+    # Theres probably a better way to describe this using `AttentionCGSupport`
+    # but for now just set it to `UNIFORM_BATCH` to get use to drop down
+    # to FULL_AND_PIECEWISE.
+    # TODO(luka, lucas): audit FA2 as part of:
+    #  https://github.com/vllm-project/vllm/issues/22945
+    cudagraph_support = AttentionCGSupport.ALWAYS \
+        if get_flash_attn_version() == 3 else AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -177,17 +194,13 @@ class FlashAttentionMetadataBuilder(
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = (get_flash_attn_version() == 3)
-        self.use_full_cuda_graph = self.compilation_config.full_cuda_graph
-        if self.use_full_cuda_graph:
-            if not self.aot_schedule:
-                raise ValueError(
-                    "AoT scheduling is required for full cuda graph.")
-            capture_sizes = self.compilation_config.cudagraph_capture_sizes
-            if not capture_sizes:
-                raise ValueError(
-                    "cudagraph_capture_sizes should not be None when "
-                    "full_cuda_graph is True.")
-            self.max_cudagraph_size = max(capture_sizes)
+
+        self.use_full_cuda_graph = \
+            self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+
+        if self.use_full_cuda_graph and self.aot_schedule:
+            self.max_cudagraph_size = self.compilation_config.max_capture_size
+
             if self.max_cudagraph_size > 992:
                 # This condition derives from FA3's internal heuristic.
                 # TODO(woosuk): Support larger cudagraph sizes.
@@ -310,9 +323,9 @@ class FlashAttentionMetadataBuilder(
                                           seqlens=seq_lens,
                                           max_seq_len=max_seq_len,
                                           causal=causal)
-
-        if self.use_full_cuda_graph:
-            assert scheduler_metadata is not None
+        # For FA3 + full cudagraph
+        max_num_splits = 0
+        if self.use_full_cuda_graph and scheduler_metadata is not None:
             n = scheduler_metadata.shape[0]
             self.scheduler_metadata[:n] = scheduler_metadata
             # NOTE(woosuk): We should zero out the rest of the scheduler
@@ -322,14 +335,12 @@ class FlashAttentionMetadataBuilder(
             self.scheduler_metadata[n:] = 0
             scheduler_metadata = self.scheduler_metadata[:n]
 
-        max_num_splits = 0
-        if (self.use_full_cuda_graph
-                and num_actual_tokens <= self.max_cudagraph_size):
-            # NOTE(woosuk): Setting num_splits > 1 may increase the memory
-            # usage, because the intermediate buffers of size [num_splits,
-            # num_heads, num_tokens, head_size] are allocated. Therefore,
-            # we only set num_splits when using cuda graphs.
-            max_num_splits = self.max_num_splits
+            if num_actual_tokens <= self.max_cudagraph_size:
+                # NOTE(woosuk): Setting num_splits > 1 may increase the memory
+                # usage, because the intermediate buffers of size [num_splits,
+                # num_heads, num_tokens, head_size] are allocated. Therefore,
+                # we only set num_splits when using cuda graphs.
+                max_num_splits = self.max_num_splits
 
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -349,11 +360,6 @@ class FlashAttentionMetadataBuilder(
             max_num_splits=max_num_splits,
             causal=causal)
         return attn_metadata
-
-    def can_run_in_cudagraph(
-            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        # Full CUDA Graph always supported (FA2 support checked separately)
-        return True
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return use_cascade_attention(*args, **kwargs)
