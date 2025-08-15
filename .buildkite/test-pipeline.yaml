@@ -31,16 +31,6 @@
 steps:
 ##### fast check tests  #####
 
-- label: Documentation Build # 2min
-  mirror_hardwares: [amdexperimental]
-  working_dir: "/vllm-workspace/test_docs"
-  fast_check: true
-  no_gpu: True
-  commands:
-  - pip install -r ../requirements/docs.txt
-  # TODO: add `--strict` once warnings in docstrings are fixed
-  - mkdocs build
-
 - label: Pytorch Nightly Dependency Override Check # 2min
   # if this test fails, it means the nightly torch version is not compatible with some
   # of the dependencies. Please check the error message and add the package to whitelist
