@@ -2483,3 +2483,61 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 
     words: Optional[list[TranslationWord]] = None
     """Extracted words and their corresponding timestamps."""
+
+
+class ImageData(OpenAIBaseModel):
+
+    data: Optional[str]
+
+    data_format: Literal["b64_json", "url"] = "b64_json"
+
+
+class ImagesPredictionRequest(OpenAIBaseModel):
+
+    image: ImageData
+    """
+    The image content:  it can be a URL or the base64 encoding of the image.
+    """
+
+    image_format: Literal["jpeg", "png", "tiff"]
+    """
+    The input image format
+    """
+
+    model: Optional[str]
+    """
+    The model to use for image generation
+    """
+
+    response_format: Optional[Literal["b64_json", "url"]] = "b64_json"
+    """
+    The format in which the generated images are returned.
+    Must be one of url or b64_json. URLs are only valid for 60 minutes
+    after the image has been generated.
+    """
+
+    priority: int = Field(default=0)
+    """
+    The priority of the request (lower means earlier handling;
+    default: 0). Any priority other than 0 will raise an error
+    if the served model does not use priority scheduling.
+    """
+
+    def to_pooling_params(self):
+        return PoolingParams(task="encode")
+
+
+class ImagesGenerationResponse(OpenAIBaseModel):
+
+    created: int
+    """
+    The Unix timestamp (in seconds) of when the image was created
+    """
+
+    image: ImageData
+    """
+    The list of generated images
+    """
+
+    image_format: Optional[Literal["jpeg", "png", "tiff"]] = None
+    """The output format of the image generation."""

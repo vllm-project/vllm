@@ -48,9 +48,11 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorInfo,
-                                              ErrorResponse, PoolingResponse,
-                                              RerankRequest, ResponsesRequest,
-                                              ScoreRequest, ScoreResponse,
+                                              ErrorResponse,
+                                              ImagesPredictionRequest,
+                                              PoolingResponse, RerankRequest,
+                                              ResponsesRequest, ScoreRequest,
+                                              ScoreResponse,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
                                               TokenizeResponse,
@@ -88,7 +90,7 @@ ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
                         TokenizeChatRequest]
 SpeechToTextRequest = Union[TranscriptionRequest, TranslationRequest]
 AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest, SpeechToTextRequest,
-                   ResponsesRequest]
+                   ResponsesRequest, ImagesPredictionRequest]
 
 AnyResponse = Union[
     CompletionResponse,

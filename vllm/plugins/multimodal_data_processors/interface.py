@@ -20,13 +20,31 @@ class MultimodalDataProcessor(ABC):
         self,
         prompt: MultiModalPromptType,
         request_id: Optional[str] = None,
+        **kwargs,
     ) -> Sequence[PromptType]:
         ...
 
     @abstractmethod
-    def post_process(
+    async def pre_process_async(
         self,
-        model_out: Sequence[PoolingRequestOutput],
+        prompt: MultiModalPromptType,
         request_id: Optional[str] = None,
+        **kwargs,
+    ) -> Sequence[PromptType]:
+        ...
+
+    @abstractmethod
+    def post_process(self,
+                     model_out: Sequence[Optional[PoolingRequestOutput]],
+                     request_id: Optional[str] = None,
+                     **kwargs) -> MultiModalRequestOutput:
+        ...
+
+    @abstractmethod
+    async def post_process_async(
+        self,
+        model_out: Sequence[Optional[PoolingRequestOutput]],
+        request_id: Optional[str] = None,
+        **kwargs,
     ) -> MultiModalRequestOutput:
         ...

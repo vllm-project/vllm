@@ -3,6 +3,7 @@
 
 import logging
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.plugins import load_plugins_by_group
 from vllm.plugins.multimodal_data_processors.interface import (
@@ -21,9 +22,16 @@ def get_multimodal_data_processor(
 
     # Retrieve the model specific plugin if available
     # This is using a custom field in the hf_config for the model
-    hf_config = vllm_config.model_config.hf_config.to_dict()
-    model_plugin = hf_config.get("multimodal_processor_plugin")
-    logger.debug("MultiModalProcessor plugin to be loaded ", model_plugin)
+
+    if envs.VLLM_USE_MULTIMODAL_DATA_PROCESSOR_PLUGIN:
+        # A plugin is specified ad startup via env variable
+        model_plugin = envs.VLLM_USE_MULTIMODAL_DATA_PROCESSOR_PLUGIN
+    else:
+        # A plugin is specified via the model config
+        hf_config = vllm_config.model_config.hf_config.to_dict()
+        model_plugin = hf_config.get("multimodal_processor_plugin")
+
+    logger.debug("MultiModalProcessor plugin to be loaded %s", model_plugin)
 
     if not model_plugin:
         raise ValueError("The model does not require a MultimodalProcessor"

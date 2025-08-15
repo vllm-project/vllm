@@ -64,6 +64,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorInfo,
                                               ErrorResponse,
+                                              ImagesGenerationResponse,
+                                              ImagesPredictionRequest,
                                               LoadLoRAAdapterRequest,
                                               PoolingRequest, PoolingResponse,
                                               RerankRequest, RerankResponse,
@@ -83,6 +85,7 @@ from vllm.entrypoints.openai.serving_classification import (
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_images import ServingImagesPrediction
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     LoRAModulePath,
                                                     OpenAIServingModels)
@@ -437,6 +440,10 @@ def transcription(request: Request) -> OpenAIServingTranscription:
 
 def translation(request: Request) -> OpenAIServingTranslation:
     return request.app.state.openai_serving_translation
+
+
+def images_prediction(request: Request) -> ServingImagesPrediction:
+    return request.app.state.openai_serving_images_prediction
 
 
 def engine_client(request: Request) -> EngineClient:
@@ -796,6 +803,36 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.error.code)
     elif isinstance(generator, PoolingResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
+
+
+#This entrypoint is not available in the OpenAI API, we define it.
+@router.post("/v1/images/prediction",
+             responses={
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
+@with_cancellation
+@load_aware_call
+async def create_images_prediction(request: ImagesPredictionRequest,
+                                   raw_request: Request):
+    handler = images_prediction(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Images API")
+
+    # image_data = await request.image.read()
+    generator = await handler.create_images_prediction(request, raw_request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.error.code)
+    elif isinstance(generator, ImagesGenerationResponse):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
@@ -1827,6 +1864,12 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger,
     ) if "transcription" in supported_tasks else None
+    state.openai_serving_images_prediction = ServingImagesPrediction(
+        engine_client,
+        vllm_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+    ) if "encode" in supported_tasks else None
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
