@@ -2513,7 +2513,11 @@ class MultiModalConfig:
 
     skip_mm_profiling: bool = False
     """
-    Skip multimodal profiling during engine initialization.
+    When enabled, skips multimodal profiling during engine initialization.
+    
+    This reduces engine startup time but shifts the responsibility to users for 
+    estimating the peak memory usage of the activation of multimodal encoder and
+    embedding cache.
     """
 
     def compute_hash(self) -> str:
