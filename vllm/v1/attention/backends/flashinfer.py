@@ -493,7 +493,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         arange = self.block_table_arange[:max_num_blocks].unsqueeze(0)
         mask = arange < block_table_bounds_cpu.unsqueeze(1)
         if (self.sliding_window is not None and not use_cascade
-                and num_decodes > 0):
+                and num_decodes > 0 and
+                max_num_blocks > self.sliding_window // page_size):
             # NOTE(woosuk): Since FlashInfer's decode kernel doesn't skip the kv
             # outside the sliding window and only do masking, we manually
             # manipulate the seq_lens and block table for skipping.
