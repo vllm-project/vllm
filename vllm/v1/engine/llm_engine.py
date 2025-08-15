@@ -18,6 +18,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.tasks import SupportedTask
 from vllm.transformers_utils.tokenizer_group import (
     TokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
@@ -176,6 +177,9 @@ class LLMEngine:
     def validate_outputs(cls, outputs, output_type):
         return outputs
 
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return self.engine_core.get_supported_tasks()
+
     def abort_request(self, request_ids: list[str]) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
@@ -267,7 +271,7 @@ class LLMEngine:
         self.engine_core.profile(False)
 
     def reset_mm_cache(self):
-        self.processor.mm_registry.reset_processor_cache()
+        self.processor.mm_registry.reset_processor_cache(self.model_config)
         self.processor.mm_input_cache_client.reset()
         self.engine_core.reset_mm_cache()
 

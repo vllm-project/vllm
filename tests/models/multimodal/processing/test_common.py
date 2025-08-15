@@ -41,24 +41,27 @@ def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
 
 
 def _test_processing_correctness(
-    model_id: str,
+    model_id_or_arch: str,
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
 ):
-    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    if model_id_or_arch in HF_EXAMPLE_MODELS.get_supported_archs():
+        # Use model architecture to get the default model id
+        model_info = HF_EXAMPLE_MODELS.get_hf_info(model_id_or_arch)
+        model_id = model_info.default
+    else:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id_or_arch)
+        model_id = model_id_or_arch
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
     model_config = ModelConfig(
         model_id,
-        task="auto",
         tokenizer=model_info.tokenizer or model_id,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
-        seed=0,
-        dtype="auto",
-        revision=None,
         hf_overrides=model_info.hf_overrides,
     )
 
@@ -268,16 +271,19 @@ def _test_processing_correctness_one(
     "microsoft/Florence-2-base",
     "adept/fuyu-8b",
     "google/gemma-3-4b-it",
-    "THUDM/glm-4v-9b",
-    "THUDM/GLM-4.1V-9B-Thinking",
+    "google/gemma-3n-E2B-it",
+    "zai-org/glm-4v-9b",
+    "zai-org/GLM-4.1V-9B-Thinking",
     "ibm-granite/granite-speech-3.3-2b",
     "h2oai/h2ovl-mississippi-800m",
+    "internlm/Intern-S1",
     "OpenGVLab/InternVL2-1B",
     "OpenGVLab/InternVL3-1B",
     "HuggingFaceM4/Idefics3-8B-Llama3",
     "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
     "moonshotai/Kimi-VL-A3B-Instruct",
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
     "llava-hf/llava-1.5-7b-hf",
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "llava-hf/LLaVA-NeXT-Video-7B-hf",
@@ -310,7 +316,7 @@ def _test_processing_correctness_one(
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     "openai/whisper-large-v3",
     "omni-research/Tarsier-7b",
-    "omni-research/Tarsier2-Recap-7b"
+    "omni-research/Tarsier2-Recap-7b",
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
@@ -322,8 +328,32 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
+    if model_id == "google/gemma-3n-E2B-it":
+        pytest.skip("Skipping gemma-3n-E2B-it due to transformers #39911 bug.")
     _test_processing_correctness(
         model_id,
+        hit_rate=hit_rate,
+        num_batches=num_batches,
+        simplify_rate=simplify_rate,
+    )
+
+
+# Phi4MultimodalForCausalLM share same model repo with original format
+# Phi4MMForCausalLM, so we add it as a separate test case
+# Remove this test after conversion PR merged:
+# https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/70
+@pytest.mark.parametrize("model_arch", ["Phi4MultimodalForCausalLM"])
+@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
+@pytest.mark.parametrize("num_batches", [32])
+@pytest.mark.parametrize("simplify_rate", [1.0])
+def test_processing_correctness_phi4_multimodal(
+    model_arch: str,
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+):
+    _test_processing_correctness(
+        model_arch,
         hit_rate=hit_rate,
         num_batches=num_batches,
         simplify_rate=simplify_rate,
