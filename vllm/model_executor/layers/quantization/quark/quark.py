@@ -409,7 +409,11 @@ class QuarkLinearMethod(LinearMethodBase):
         scheme = layer.scheme
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
-        return scheme.apply_weights(layer, x, bias=bias, x_scales=x_scales)
+
+        if x_scales is None:
+            return scheme.apply_weights(layer, x, bias=bias)
+        else:
+            return scheme.apply_weights(layer, x, bias=bias, x_scales=x_scales)
 
 
 class QuarkKVCacheMethod(BaseKVCacheMethod):
