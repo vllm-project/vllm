@@ -41,6 +41,7 @@ class EngineModelData:
                         'fp8_quant': 'quantize',
                         'reduce_kernel': 'reduce',
                         'triton': 'triton_kernel',
+                        'CUDA mem': 'non-gpu-H_D_memops',
                         '.*': 'misc'
                     }
                 }
@@ -255,7 +256,11 @@ class GPUTrace2Graph:
         # Add sum row at bottom
         pivot_df.loc['total_elapsed_sec'] = pivot_df.sum()
         pivot_df.fillna('').to_html('temp.html')
-        os.system(f'cat temp.html >> {output_name}.html; rm temp.html')
+        print('got')
+        with (open(f'{output_name}.html', 'a', encoding='utf-8') as
+              outfile, open('temp.html', encoding='utf-8') as infile):
+            outfile.write(infile.read())
+        os.remove('temp.html')
 
         print(f'Finished generating: \n'
               f' {output_name}.html for stack bar chart \n'
@@ -302,6 +307,7 @@ class GPUTrace2Graph:
             generates sum file from nsys trace with times per kernel and
             returns the name of the sum file
         """
+        import subprocess
         file_dir = os.path.dirname(file)
         file_name = os.path.basename(file)
 
@@ -311,12 +317,19 @@ class GPUTrace2Graph:
         nsys_stats_file = f'{file_dir}/{file_name}_cuda_gpu_trace.csv'
         sum_file = f'{file_dir}/{file_name}_cuda_gpu_kernel_tracesum.csv'
         if self.should_gen_file(nsys_stats_file, file):
-            cmd = (f'{self.nsys_cmd} stats -r cuda_gpu_trace {file} -o '
-                   f'{file_dir}/{file_name} ')
-            logger.info('+ %s', cmd)
-            assert os.system(cmd) == 0, \
-                f'{cmd} failed, specify --nsys_cmd for correct nsys path'
-
+            cmd = [
+                self.nsys_cmd, 'stats', '-r', 'cuda_gpu_trace', file, '-o',
+                f'{file_dir}/{file_name}'
+            ]
+            cmd_str = ' '.join(cmd)
+            logger.info('+ %s', cmd_str)
+            try:
+                subprocess.run(cmd)
+            except Exception:
+                logger.error(
+                    "%s failed, specify --nsys_cmd for correct nsys path",
+                    cmd_str)
+                exit(1)
             logger.info('generating non-overalapped sum %s', sum_file)
             self.gen_nonoverlapped_sum_from_gputrace(nsys_stats_file, sum_file)
         self.is_valid_file(sum_file)
@@ -359,7 +372,7 @@ class GPUTrace2Graph:
         if out_dir is None:
             out_dir = '.'
         else:
-            os.system(f'mkdir -p {out_dir}')
+            os.makedirs(out_dir, exist_ok=True)
         # generate html file
         self.make_html(combined_df, out_dir, title)
 
