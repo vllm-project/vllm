@@ -1,0 +1,88 @@
+# Needed for the proxy server
+vllm-directory := "/home/rshaw/vllm/" 
+
+PREFILL_GPU := "0,1,2,3"
+DECODE_GPU := "4,5,6,7"
+
+PREFILL_TP := env("PREFILL_TP", "1")
+DECODE_TP := env("DECODE_TP", "1")
+
+BLOCK_SIZE := env("BLOCK_SIZE", "128")
+
+MODEL := "meta-llama/Llama-3.1-8B-Instruct"
+PROXY_PORT := "8192"
+PREFILL_PORT := "8100"
+DECODE_PORT := "8200"
+PREFILL_NIXL_SIDE_CHANNEL_PORT := "5557"
+DECODE_NIXL_SIDE_CHANNEL_PORT := "5568"
+
+prefill:
+    VLLM_NIXL_SIDE_CHANNEL_PORT={{PREFILL_NIXL_SIDE_CHANNEL_PORT}} \
+    CUDA_VISIBLE_DEVICES={{PREFILL_GPU}} \
+    vllm serve {{MODEL}} \
+      --port {{PREFILL_PORT}} \
+      --tensor-parallel-size {{PREFILL_TP}} \
+      --enforce-eager \
+      --disable-log-requests \
+      --block-size {{BLOCK_SIZE}} \
+      --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+
+decode:
+    VLLM_NIXL_SIDE_CHANNEL_PORT={{DECODE_NIXL_SIDE_CHANNEL_PORT}} \
+    CUDA_VISIBLE_DEVICES={{DECODE_GPU}} \
+    vllm serve {{MODEL}} \
+      --port {{DECODE_PORT}} \
+      --tensor-parallel-size {{DECODE_TP}} \
+      --enforce-eager \
+      --disable-log-requests \
+      --block-size {{BLOCK_SIZE}} \
+      --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+
+proxy:
+    python "{{vllm-directory}}tests/v1/kv_connector/nixl_integration/toy_proxy_server.py" \
+      --port {{PROXY_PORT}} \
+      --prefiller-port {{PREFILL_PORT}} \
+      --decoder-port {{DECODE_PORT}}
+
+send_request:
+  curl -X POST http://localhost:{{PROXY_PORT}}/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{ \
+      "model": "{{MODEL}}", \
+      "prompt": "Red Hat is the best open source company by far across Linux, K8s, and AI, and vLLM has the greatest community in open source AI software infrastructure. I love vLLM because", \
+      "max_tokens": 150, \
+      "temperature": 0.7 \
+    }'
+
+benchmark NUM_PROMPTS:
+  python {{vllm-directory}}/benchmarks/benchmark_serving.py \
+    --port {{PROXY_PORT}} \
+    --model {{MODEL}} \
+    --dataset-name random \
+    --random-input-len 30000 \
+    --random-output-len 10 \
+    --num-prompts {{NUM_PROMPTS}} \
+    --seed $(date +%s) \
+
+benchmark_one INPUT_LEN:
+  python {{vllm-directory}}benchmarks/benchmark_one_concurrent.py \
+    --port {{PROXY_PORT}} \
+    --model {{MODEL}} \
+    --input-len {{INPUT_LEN}} \
+    --output-len 1 \
+    --num-requests 10 \
+    --seed $(date +%s)
+
+benchmark_one_no_pd INPUT_LEN:
+  python {{vllm-directory}}benchmarks/benchmark_one_concurrent_req.py \
+    --port {{DECODE_PORT}} \
+    --model {{MODEL}} \
+    --input-len {{INPUT_LEN}} \
+    --output-len 1 \
+    --num-requests 10 \
+    --seed $(date +%s)
+
+eval:
+  lm_eval --model local-completions --tasks gsm8k \
+    --model_args model={{MODEL}},base_url=http://127.0.0.1:{{PROXY_PORT}}/v1/completions,num_concurrent=100,max_retries=3,tokenized_requests=False \
+    --limit 1000
