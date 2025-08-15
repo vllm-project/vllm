@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from enum import Enum
 from typing import Any, Callable, Optional, Union
 
 import torch
@@ -25,8 +24,10 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_kernel,
     flashinfer_fp4_cutlass_moe_forward, reorder_w1w3_to_w3w1)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_flashinfer_per_tensor_scale_fp8, rotate_flashinfer_fp8_moe_weights,
-    swap_w13_to_w31)
+    FlashinferMoeBackend, apply_flashinfer_per_tensor_scale_fp8,
+    build_flashinfer_fp8_cutlass_moe_kernel,
+    flashinfer_fp8_cutlass_moe_forward, get_flashinfer_moe_backend,
+    rotate_flashinfer_fp8_moe_weights, swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear, is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin, prepare_moe_fp4_layer_for_marlin)
@@ -45,11 +46,6 @@ logger = init_logger(__name__)
 
 QUANT_ALGOS = ["FP8", "NVFP4"]
 KV_CACHE_QUANT_ALGOS = ["FP8"]
-
-
-class FlashinferMoeBackend(Enum):
-    TENSORRT_LLM = "TensorRT-LLM"
-    CUTLASS = "CUTLASS"
 
 
 class ModelOptFp8Config(QuantizationConfig):
@@ -278,11 +274,19 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
             cutlass_fp8_supported)
         self.cutlass_fp8_supported = cutlass_fp8_supported()
-        self.flashinfer_moe_enabled = False
+        self.flashinfer_moe_backend: Optional[FlashinferMoeBackend] = None
+        self.fused_experts: Optional[
+            mk.FusedMoEModularKernel] = None  # type: ignore
         if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
+            self.flashinfer_moe_backend = get_flashinfer_moe_backend()
             logger.info_once(
-                "Using FlashInfer MoE FP8 kernels for ModelOptFp8MoEMethod.")
-            self.flashinfer_moe_enabled = True
+                f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
+            )
+
+    def maybe_swap_experts_impl(self, moe_parallel_config):
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            self.fused_experts = build_flashinfer_fp8_cutlass_moe_kernel(
+                moe_parallel_config)
 
     def create_weights(
         self,
@@ -426,10 +430,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             layer.w2_input_scale = Parameter(layer.w2_input_scale.max(),
                                              requires_grad=False)
 
-        if self.flashinfer_moe_enabled:
+        if self.flashinfer_moe_backend is not None:
             layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
-            rotate_flashinfer_fp8_moe_weights(layer.w13_weight,
-                                              layer.w2_weight)
+            if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+                rotate_flashinfer_fp8_moe_weights(layer.w13_weight,
+                                                  layer.w2_weight)
 
     def apply(
         self,
@@ -457,8 +462,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptFp8MoEMethod` yet.")
 
-        if self.flashinfer_moe_enabled:
-            assert activation == 'silu'
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+            assert activation == 'silu', (
+                f"Expected 'silu' activation but got {activation}")
             assert not renormalize
             return apply_flashinfer_per_tensor_scale_fp8(
                 layer=layer,
@@ -484,6 +490,24 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
         )
+
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            assert self.fused_experts is not None, (
+                "Expected self.fused_experts to be initialized")
+            assert not renormalize
+            assert activation == 'silu', (
+                f"Expected 'silu' activation but got {activation}")
+            return flashinfer_fp8_cutlass_moe_forward(
+                self.fused_experts,
+                layer,
+                x,
+                topk_weights,
+                topk_ids,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_experts)
         return fused_experts(
@@ -933,20 +957,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.flashinfer_moe_backend = None
 
         if self.allow_flashinfer:
-            flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
-            if flashinfer_moe_backend == "throughput":
-                self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
-                logger.info_once("Using FlashInfer CUTLASS kernels for "
-                                 "ModelOptNvFp4FusedMoE.")
-            elif flashinfer_moe_backend == "latency":
-                self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
-                logger.info_once("Using FlashInfer TensorRT-LLM kernels for "
-                                 "ModelOptNvFp4FusedMoE.")
-            else:
-                allowed_backends = ["throughput", "latency"]
-                raise ValueError(
-                    f"Unknown flashinfer moe backend: {flashinfer_moe_backend}"
-                    f" expected one of {allowed_backends}")
+            self.flashinfer_moe_backend = get_flashinfer_moe_backend()
+            logger.info_once(
+                f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
+                " for ModelOptNvFp4FusedMoE.")
 
         self.fused_experts: Optional[
             mk.FusedMoEModularKernel] = None  # type: ignore[assignment]

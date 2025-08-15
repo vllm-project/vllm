@@ -55,7 +55,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         super().__init__(
             FusedMoEQuantConfig(
-                quant_dtype=torch.uint8,
+                quant_dtype=torch.uint8
+                if not use_fp8_w8a8 else torch.float8_e4m3fn,
                 per_act_token_quant=False,
                 block_shape=None,
             ))
@@ -117,11 +118,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         - Note: in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens.
         """
-        assert self.use_nvfp4_w4a4 is True, ("Only nvfp4 quantization is "
-                                             "currently supported.")
         aq_m, aq_n = aq.shape
         workspace2 = ()
-        output_shape = (aq_m, aq_n * 2)
+        output_shape = (aq_m, aq_n * 2) if not self.use_fp8_w8a8 else (aq_m,
+                                                                       aq_n)
         workspace_dtype = a.dtype
         workspace1 = output_shape
         # The workspace is determined by `aq`, since it comes after any
@@ -153,38 +153,58 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         assert extra_expert_args is not None, \
             "extra_expert_args must be provided"
-        required_keys = [
-            'g1_alphas', 'g2_alphas', 'a1_gscale', 'a2_gscale', 'out_dtype'
-        ]
 
-        g1_alphas, g2_alphas, a1_gscale, a2_gscale, out_dtype = (
-            extract_required_args(extra_expert_args, required_keys))
+        assert w1_scale is not None
+        assert w2_scale is not None
+
+        if hidden_states.dtype == torch.float8_e4m3fn:
+            required_keys = ['out_dtype']
+
+            out_dtype = extract_required_args(extra_expert_args,
+                                              required_keys)[0]
+            assert a1q_scale is not None
+            assert a2_scale is not None
+
+            quant_scales = [
+                w1_scale * a1q_scale, 1.0 / a2_scale, w2_scale * a2_scale,
+                a1q_scale
+            ]
+            a1q_scale = None  # not passing input_sf in fp8
+            fc1_expert_weights = w1
+            fc2_expert_weights = w2
+        else:
+            required_keys = [
+                'g1_alphas', 'g2_alphas', 'a1_gscale', 'a2_gscale', 'out_dtype'
+            ]
+
+            g1_alphas, g2_alphas, a1_gscale, a2_gscale, out_dtype = (
+                extract_required_args(extra_expert_args, required_keys))
+
+            quant_scales = [
+                a1_gscale,
+                w1_scale.view(torch.int32),
+                g1_alphas,
+                a2_gscale,
+                w2_scale.view(torch.int32),
+                g2_alphas,
+            ]
+            # FlashInfer API requires weight to be long for nvfp4
+            fc1_expert_weights = w1.view(torch.long)
+            fc2_expert_weights = w2.view(torch.long)
 
         # Flashinfer CUTLASS kernel takes scalar global scales,
         # min because inv_scale.
-        assert self.use_nvfp4_w4a4 is True, ("Only nvfp4 quantization is "
-                                             "currently supported.")
-
         # Ensure w1_scale and w2_scale are not None before calling view
         assert w1_scale is not None and w2_scale is not None, (
             "w1_scale and w2_scale must not "
             "be None for FlashInferExperts")
 
-        quant_scales = [
-            a1_gscale,
-            w1_scale.view(torch.int32),
-            g1_alphas,
-            a2_gscale,
-            w2_scale.view(torch.int32),
-            g2_alphas,
-        ]
         _ = flashinfer_cutlass_fused_moe(
             input=hidden_states,
             token_selected_experts=topk_ids.to(torch.int),
             token_final_scales=topk_weights,
-            # FlashInfer API requires weight to be long for nvfp4
-            fc1_expert_weights=w1.view(torch.long),
-            fc2_expert_weights=w2.view(torch.long),
+            fc1_expert_weights=fc1_expert_weights,
+            fc2_expert_weights=fc2_expert_weights,
             output_dtype=out_dtype,
             quant_scales=quant_scales,
             input_sf=a1q_scale,

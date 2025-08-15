@@ -10,6 +10,7 @@ from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -24,8 +25,10 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_flashinfer_per_tensor_scale_fp8, rotate_flashinfer_fp8_moe_weights,
-    swap_w13_to_w31)
+    FlashinferMoeBackend, apply_flashinfer_per_tensor_scale_fp8,
+    build_flashinfer_fp8_cutlass_moe_kernel,
+    flashinfer_fp8_cutlass_moe_forward, get_flashinfer_moe_backend,
+    rotate_flashinfer_fp8_moe_weights, swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
@@ -485,11 +488,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
 
-        self.flashinfer_moe_enabled = False
+        self.flashinfer_moe_backend: Optional[FlashinferMoeBackend] = None
+        self.fused_experts: Optional[
+            mk.FusedMoEModularKernel] = None  # type: ignore
         if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
+            self.flashinfer_moe_backend = get_flashinfer_moe_backend()
             logger.info_once(
-                "Using FlashInfer MoE FP8 kernels for Fp8MoEMethod.")
-            self.flashinfer_moe_enabled = True
+                f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
+            )
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
         self.use_marlin = (not current_platform.has_device_capability(89)
@@ -537,6 +543,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             allow_deep_gemm=self.allow_deep_gemm,
             allow_cutlass_block_scaled_grouped_gemm=(
                 self.allow_cutlass_block_scaled_grouped_gemm))
+
+    def maybe_swap_experts_impl(self, moe_parallel_config):
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            self.fused_experts = build_flashinfer_fp8_cutlass_moe_kernel(
+                moe_parallel_config)
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
@@ -685,7 +696,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     normalize_e4m3fn_to_e4m3fnuz(
                         layer.w2_weight, layer.w2_weight_scale_inv,
                         layer.w2_input_scale)
-            elif self.flashinfer_moe_enabled:
+            elif self.flashinfer_moe_backend is not None:
                 # NOTE: weights have to be swapped since the activation is
                 # applied on different half for flashinfer vs vllm
                 w13_weight = swap_w13_to_w31(layer.w13_weight.data)
@@ -693,8 +704,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     layer.w13_weight_scale_inv.data)
                 w2_weight = layer.w2_weight.data
                 w2_weight_scale_inv = layer.w2_weight_scale_inv.data
-                if not self.block_quant:
-                    rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
             else:
                 w13_weight = layer.w13_weight.data
                 w13_weight_scale_inv = layer.w13_weight_scale_inv.data
@@ -840,6 +849,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)
 
+            if self.flashinfer_moe_backend is not None:
+                # NOTE: weights have to be swapped since the activation is
+                # applied on different half for flashinfer vs vllm
+                assert not self.block_quant
+                w13_weight = swap_w13_to_w31(layer.w13_weight.data)
+                if self.flashinfer_moe_backend == \
+                    FlashinferMoeBackend.TENSORRT_LLM:
+                    rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
+                layer.w13_weight.data = w13_weight.data
+
         if self.use_marlin:
             prepare_moe_fp8_layer_for_marlin(layer, False)
             # Activations not quantized for marlin.
@@ -936,25 +955,66 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert logical_to_physical_map is not None
             assert logical_replica_count is not None
             assert isinstance(layer, FusedMoE)
-        if not self.flashinfer_moe_enabled:
-            topk_weights, topk_ids = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
-                indices_type=self.topk_indices_dtype,
-                enable_eplb=enable_eplb,
-                expert_map=expert_map,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
+
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+            assert activation == 'silu', (
+                f"Expected 'silu' activation but got {activation}")
+            assert scoring_func == 'sigmoid', (
+                f"Expected 'sigmoid' scoring func but got {scoring_func}")
+            if self.block_quant:
+                assert (renormalize and use_grouped_topk
+                        and custom_routing_function is None)
+
+                return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
+                    routing_logits=router_logits.to(torch.float32),
+                    routing_bias=e_score_correction_bias,
+                    x=x,
+                    w13_weight=layer.w13_weight,
+                    w13_weight_scale_inv=layer.w13_weight_scale_inv,
+                    w2_weight=layer.w2_weight,
+                    w2_weight_scale_inv=layer.w2_weight_scale_inv,
+                    global_num_experts=global_num_experts,
+                    top_k=top_k,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    intermediate_size=layer.intermediate_size_per_partition,
+                    expert_offset=layer.ep_rank * layer.local_num_experts,
+                    local_num_experts=layer.local_num_experts,
+                    block_shape=self.quant_config.weight_block_size,
+                    routed_scaling=1.0,
+                )
+            else:
+                assert (not renormalize
+                        and custom_routing_function is not None)
+                return apply_flashinfer_per_tensor_scale_fp8(
+                    layer=layer,
+                    hidden_states=x,
+                    router_logits=router_logits,
+                    routing_bias=e_score_correction_bias,
+                    global_num_experts=global_num_experts,
+                    top_k=top_k,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    apply_router_weight_on_input=apply_router_weight_on_input)
+
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype,
+            enable_eplb=enable_eplb,
+            expert_map=expert_map,
+            expert_load_view=expert_load_view,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
+        )
 
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
@@ -994,45 +1054,30 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
-        elif self.flashinfer_moe_enabled:
-            assert activation == 'silu'
-            assert scoring_func == 'sigmoid'
-            if self.block_quant:
-                assert (renormalize and use_grouped_topk
-                        and custom_routing_function is None)
+        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            assert self.fused_experts is not None, (
+                "Expected self.fused_experts to be initialized")
+            assert self.block_quant is None
+            assert (not renormalize and custom_routing_function is not None)
+            assert activation == 'silu', (
+                f"Expected 'silu' activation but got {activation}")
+            assert scoring_func == 'sigmoid', (
+                f"Expected 'sigmoid' scoring func but got {scoring_func}")
 
-                return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
-                    routing_logits=router_logits.to(torch.float32),
-                    routing_bias=e_score_correction_bias,
-                    x=x,
-                    w13_weight=layer.w13_weight,
-                    w13_weight_scale_inv=layer.w13_weight_scale_inv,
-                    w2_weight=layer.w2_weight,
-                    w2_weight_scale_inv=layer.w2_weight_scale_inv,
-                    global_num_experts=global_num_experts,
-                    top_k=top_k,
-                    num_expert_group=num_expert_group,
-                    topk_group=topk_group,
-                    intermediate_size=layer.intermediate_size_per_partition,
-                    expert_offset=layer.ep_rank * layer.local_num_experts,
-                    local_num_experts=layer.local_num_experts,
-                    block_shape=self.quant_config.weight_block_size,
-                    routed_scaling=1.0,
-                )
-            else:
-                assert (not renormalize
-                        and custom_routing_function is not None)
-                return apply_flashinfer_per_tensor_scale_fp8(
-                    layer=layer,
-                    hidden_states=x,
-                    router_logits=router_logits,
-                    routing_bias=e_score_correction_bias,
-                    global_num_experts=global_num_experts,
-                    top_k=top_k,
-                    num_expert_group=num_expert_group,
-                    topk_group=topk_group,
-                    apply_router_weight_on_input=apply_router_weight_on_input)
+            return flashinfer_fp8_cutlass_moe_forward(
+                self.fused_experts,
+                layer,
+                x,
+                topk_weights,
+                topk_ids,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
         else:
+            assert self.fused_experts is not None, (
+                "Expected self.fused_experts to be initialized")
             return self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,

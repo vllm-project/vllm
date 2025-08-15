@@ -99,7 +99,6 @@ def flashinfer_fp4_cutlass_moe_forward(
     extra_prepare_args = {
         "use_dp": layer.dp_size > 1,
         "local_tokens": x.shape[0],
-        "a1_gscale": a1_gscale,
     }
     extra_finalize_args = {
         "use_dp": layer.dp_size > 1,
@@ -118,6 +117,7 @@ def flashinfer_fp4_cutlass_moe_forward(
         expert_map=expert_map,
         w1_scale=layer.w13_blockscale_swizzled,
         w2_scale=layer.w2_blockscale_swizzled,
+        a1_scale=a1_gscale,
         apply_router_weight_on_input=apply_router_weight_on_input,
         extra_expert_args=extra_expert_args,
         extra_prepare_args=extra_prepare_args,
