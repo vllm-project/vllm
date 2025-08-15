@@ -22,8 +22,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator)
-from vllm.model_executor.layers.pooler import (DispatchPooler, Pooler,
-                                               PoolingType)
+from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
@@ -604,6 +603,5 @@ class JambaForSequenceClassification(JambaForCausalLM):
             Pooler.for_classify(
                 pooler_config,
                 classifier=self.score,
-                default_pooling_type=PoolingType.LAST,
             ),
         })

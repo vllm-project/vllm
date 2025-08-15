@@ -31,7 +31,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, default_pooling_type
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -401,6 +401,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         return loaded_params
 
 
+@default_pooling_type("ALL")
 class InternLM2ForRewardModel(InternLM2ForCausalLM):
 
     is_pooling_model = True

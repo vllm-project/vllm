@@ -99,7 +99,7 @@ def yarn_linear_ramp_mask(low: float, high: float, dim: int,
     return ramp_func
 
 
-def yarn_get_mscale(scale: float = 1) -> float:
+def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     if scale <= 1:
         return 1.0
-    return 0.1 * math.log(scale) + 1.0
+    return 0.1 * mscale * math.log(scale) + 1.0

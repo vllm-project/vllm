@@ -170,8 +170,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "w1_scale and w2_scale must not "
             "be None for FlashInferExperts")
 
-        assert not apply_router_weight_on_input
-
         quant_scales = [
             a1_gscale,
             w1_scale.view(torch.int32),

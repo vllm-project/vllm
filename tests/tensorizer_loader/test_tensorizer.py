@@ -166,7 +166,7 @@ def test_load_without_tensorizer_load_format(vllm_runner, capfd, model_ref):
         combined_output = out + err
         assert ("ValueError: Model loader extra config "
                 "is not supported for load "
-                "format LoadFormat.AUTO") in combined_output
+                "format auto") in combined_output
     finally:
         del model
         gc.collect()
@@ -186,7 +186,7 @@ def test_raise_value_error_on_invalid_load_format(vllm_runner, capfd,
 
         combined_output = out + err
         assert ("ValueError: Model loader extra config is not supported "
-                "for load format LoadFormat.SAFETENSORS") in combined_output
+                "for load format safetensors") in combined_output
     finally:
         del model
         gc.collect()

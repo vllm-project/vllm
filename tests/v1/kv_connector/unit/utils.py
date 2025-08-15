@@ -154,7 +154,7 @@ def create_request(
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
         pooling_params=None,
-        multi_modal_inputs=None,
+        multi_modal_kwargs=None,
         multi_modal_placeholders=None,
         multi_modal_hashes=None,
         eos_token_id=EOS_TOKEN_ID,
@@ -179,6 +179,13 @@ def create_model_runner_output(
     sampled_token = EOS_TOKEN_ID if use_eos else 0
     sampled_token_ids = [[sampled_token] for _ in req_ids]
 
+    kv_connector_output = None if (
+        finished_sending is None
+        and finished_recving is None) else KVConnectorOutput(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
+        )
+
     # Make output data structure.
     return ModelRunnerOutput(
         req_ids=req_ids,
@@ -188,10 +195,7 @@ def create_model_runner_output(
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=None,
-        kv_connector_output=KVConnectorOutput(
-            finished_sending=finished_sending,
-            finished_recving=finished_recving,
-        ),
+        kv_connector_output=kv_connector_output,
     )
 
 

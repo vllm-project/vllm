@@ -30,7 +30,7 @@ from typing import Any, Optional, Union
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import Qwen2MoeConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -98,7 +98,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Qwen2MoeConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
@@ -256,7 +256,7 @@ class Qwen2MoeDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Qwen2MoeConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",

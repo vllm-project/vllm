@@ -10,7 +10,7 @@ pytest-timeout
 # testing utils
 backoff # required for phi4mm test
 blobfile # required for kimi-vl test
-einops # required for MPT, qwen-vl and Mamba
+einops # required for MPT, qwen-vl
 httpx
 librosa # required for audio tests
 vector_quantize_pytorch # required for minicpmo_26 test
@@ -21,12 +21,11 @@ ray[cgraph,default]>=2.48.0 # Ray Compiled Graph, required by pipeline paralleli
 sentence-transformers # required for embedding tests
 soundfile # required for audio tests
 jiwer # required for audio tests
-timm # required for internvl test
+timm >=1.0.17 # required for internvl and gemma3n-mm test
 torch==2.7.1
 torchaudio==2.7.1
 torchvision==0.22.1
 transformers_stream_generator # required for qwen-vl test
-mamba_ssm==2.2.5 # required for plamo2 test
 matplotlib # required for qwen-vl test
 mistral_common[image,audio] >= 1.8.2 # required for voxtral test
 num2words # required for smolvlm test

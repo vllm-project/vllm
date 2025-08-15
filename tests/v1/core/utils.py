@@ -6,7 +6,9 @@ import torch
 
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.inputs import (MultiModalBatchedField,
+                                    MultiModalFieldElem, MultiModalKwargsItem,
+                                    PlaceholderRange)
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -115,7 +117,7 @@ def create_scheduler(
 def create_requests(
     num_requests: int,
     num_tokens: int = 10,
-    mm_positions: Optional[list[PlaceholderRange]] = None,
+    mm_positions: Optional[list[list[PlaceholderRange]]] = None,
     max_tokens: int = 16,
     stop_token_ids: Optional[list[int]] = None,
     prompt_logprobs: Optional[int] = None,
@@ -129,10 +131,17 @@ def create_requests(
     for i in range(num_requests):
         if mm_positions is not None:
             mm_position = mm_positions[i]
-            mm_inputs = [MultiModalKwargs({})] * len(mm_position)
+            mm_elem = MultiModalFieldElem(
+                modality="dummy_m",
+                key="dummy_k",
+                data=None,
+                field=MultiModalBatchedField(),
+            )
+            mm_item = MultiModalKwargsItem.from_elems([mm_elem])
+            mm_kwargs = [mm_item] * len(mm_position)
         else:
             mm_position = None
-            mm_inputs = None
+            mm_kwargs = None
         prompt_token_ids = ([0] * num_tokens if same_prompt else [i] *
                             num_tokens)
         request = Request(
@@ -140,7 +149,7 @@ def create_requests(
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
             pooling_params=None,
-            multi_modal_inputs=mm_inputs,
+            multi_modal_kwargs=mm_kwargs,
             multi_modal_placeholders=mm_position,
             multi_modal_hashes=None,
             eos_token_id=EOS_TOKEN_ID,

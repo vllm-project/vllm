@@ -976,10 +976,12 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
+        # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
         merge_size = self.visual.spatial_merge_size
-        sizes = grid_thw.prod(-1) // merge_size // merge_size
+        sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
+                 (merge_size * merge_size)).tolist()
 
-        return image_embeds.split(sizes.tolist())
+        return image_embeds.split(sizes)
 
     def _process_video_input(
             self,
@@ -998,9 +1000,11 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
-        sizes = grid_thw.prod(-1) // merge_size // merge_size
+        # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
+        sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
+                 (merge_size * merge_size)).tolist()
 
-        return video_embeds.split(sizes.tolist())
+        return video_embeds.split(sizes)
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}

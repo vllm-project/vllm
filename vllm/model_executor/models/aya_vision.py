@@ -16,7 +16,6 @@ from transformers.models.got_ocr2.image_processing_got_ocr2 import (
     get_optimal_tiled_canvas)
 
 from vllm.config import VllmConfig
-from vllm.jsontree import json_map_leaves
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargs
@@ -29,6 +28,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP

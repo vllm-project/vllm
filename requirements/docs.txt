@@ -29,3 +29,5 @@ setproctitle
 torch
 transformers
 zmq
+uvloop
+prometheus-client
