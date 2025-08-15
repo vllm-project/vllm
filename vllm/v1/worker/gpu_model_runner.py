@@ -63,6 +63,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.metrics.eplb_loggers import EplbStatLogger
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
@@ -156,6 +157,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
         self.eplb_state: Optional[EplbState] = None
+        self.eplb_logger: Optional[EplbStatLogger] = None
         """
         State of the expert parallelism load balancer.
 
@@ -1416,12 +1418,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         assert self.eplb_state is not None
         assert is_mixture_of_experts(self.model)
-        self.eplb_state.step(
+        moe_load, phy2log = self.eplb_state.step(
             self.model,
             is_dummy,
             is_profile,
             log_stats=self.parallel_config.eplb_log_balancedness,
         )
+        self.eplb_logger.record(moe_load, phy2log)
 
     def get_dp_padding(self,
                        num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
@@ -2010,6 +2013,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 old_global_expert_indices,
                 rank_mapping,
             )
+            self.eplb_logger = EplbStatLogger(self.model,
+                                              self.device,
+                                              self.eplb_state.physical_to_logical_map)
 
         if (
             self.vllm_config.compilation_config.level == \

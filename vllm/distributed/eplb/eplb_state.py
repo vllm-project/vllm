@@ -330,7 +330,7 @@ class EplbState:
              model: MixtureOfExperts,
              is_dummy: bool = False,
              is_profile: bool = False,
-             log_stats: bool = False) -> None:
+             log_stats: bool = False) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Step the EPLB state.
 
@@ -353,7 +353,7 @@ class EplbState:
 
         if is_profile:
             self.rearrange(model, is_profile=True)
-            return
+            return None, None
 
         if is_dummy:
             # Do not record load metrics for dummy steps
@@ -391,11 +391,15 @@ class EplbState:
                     "balancedness=%.4f", avg_tokens, max_tokens, balancedness)
 
         # Update the expert load sliding window
+        global_phy_expert_load = None
         if not is_dummy:
             self.expert_load_window[self.expert_load_window_step] = (
                 self.expert_load_pass.clone())
             self.expert_load_window_step += 1
             if self.expert_load_window_step >= self.expert_load_window_size:
+                local_phy_expert_load = self.expert_load_window.sum(dim=0)
+                global_phy_expert_load = [torch.empty_like(local_phy_expert_load) for _ in range(ep_group.size())]
+                all_gather(global_phy_expert_load, local_phy_expert_load, group=ep_group)
                 self.expert_load_window_step = 0
             self.expert_load_pass.zero_()
 
@@ -408,6 +412,11 @@ class EplbState:
                 >= self.expert_rearrangement_step_interval):
             self.expert_rearrangement_step = 0
             self.rearrange(model)
+
+        if global_phy_expert_load is not None:
+            return global_phy_expert_load, self.physical_to_logical_map
+        else:
+            return None, None
 
     def rearrange(self,
                   model: MixtureOfExperts,
