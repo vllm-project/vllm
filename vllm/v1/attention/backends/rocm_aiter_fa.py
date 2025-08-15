@@ -311,11 +311,6 @@ class AiterFlashAttentionMetadataBuilder(
         )
         return attn_metadata
 
-    def can_run_in_cudagraph(
-            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        # Full CUDA Graph always supported (FA2 support checked separately)
-        return True
-
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return False
 

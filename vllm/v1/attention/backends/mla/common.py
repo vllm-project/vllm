@@ -575,7 +575,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             "MLA only supports decode-only full CUDAGraph capture. " \
             "Make sure all cudagraph capture sizes <= max_num_seq."
 
-        m.max_query_len = 1  # decode-only
+        assert m.max_query_len == 1  # decode-only
 
         return self.build(0, m)
 
@@ -727,10 +727,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self._build_fi_prefill_wrappers(attn_metadata.prefill)
 
         return attn_metadata
-
-    def can_run_in_cudagraph(
-            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        return common_attn_metadata.max_query_len == 1
 
 
 class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):

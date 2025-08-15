@@ -72,8 +72,9 @@ class PixtralHFImagePixelInputs(TensorSchema):
     in which case the data is passed as a list instead of a batched tensor.
     """
     type: Literal["pixel_values_pixtral"] = "pixel_values_pixtral"
-    pixel_values: Annotated[Union[torch.Tensor, list[torch.Tensor]],
-                            TensorShape("bn", "c", "h", "w")]
+    pixel_values: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "c", "h", "w", dynamic_dims={"h", "w"})]
 
 
 class LlavaImageEmbeddingInputs(TensorSchema):

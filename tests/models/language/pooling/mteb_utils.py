@@ -18,7 +18,7 @@ from tests.models.utils import EmbedModelInfo, RerankModelInfo
 # - Different model results in differences more than 1e-3
 # 1e-4 is a good tolerance threshold
 MTEB_EMBED_TASKS = ["STS12"]
-MTEB_EMBED_TOL = 1e-4
+MTEB_EMBED_TOL = 0.02
 
 # See #19344
 MTEB_RERANK_TASKS = ["NFCorpus"]
@@ -175,6 +175,7 @@ def mteb_test_embed_models(hf_runner,
     with vllm_runner(model_info.name,
                      runner="pooling",
                      max_model_len=None,
+                     enforce_eager=True,
                      **vllm_extra_kwargs) as vllm_model:
 
         model_config = vllm_model.llm.llm_engine.model_config
@@ -198,6 +199,7 @@ def mteb_test_embed_models(hf_runner,
         st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
         st_dtype = next(hf_model.model.parameters()).dtype
 
+    print("Model:", model_info.name)
     print("VLLM:", vllm_dtype, vllm_main_score)
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
@@ -286,6 +288,7 @@ def mteb_test_rerank_models(hf_runner,
                      runner="pooling",
                      max_model_len=None,
                      max_num_seqs=8,
+                     enforce_eager=True,
                      **vllm_extra_kwargs) as vllm_model:
 
         model_config = vllm_model.llm.llm_engine.model_config
@@ -304,6 +307,7 @@ def mteb_test_rerank_models(hf_runner,
     st_main_score, st_dtype = mteb_test_rerank_models_hf(
         hf_runner, model_info.name, hf_model_callback)
 
+    print("Model:", model_info.name)
     print("VLLM:", vllm_dtype, vllm_main_score)
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)

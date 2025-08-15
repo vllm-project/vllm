@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 import vllm.envs as envs
+from vllm.config import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
@@ -100,16 +101,17 @@ class XPUPlatform(Platform):
         # Instances created using VllmConfig() typically have model_config as
         # None by default. The modification involves adding a check to prevent
         # potential null exceptions check and update model config.
-        if model_config is not None:
-            if model_config.dtype == torch.bfloat16:
-                bf16_supported = cls.device_support_bf16()
-                if not bf16_supported:
-                    model_config.dtype = torch.float16
-            if not model_config.enforce_eager:
-                logger.warning(
-                    "CUDA graph is not supported on XPU, fallback to the eager "
-                    "mode.")
-                model_config.enforce_eager = True
+        if model_config is not None and model_config.dtype == torch.bfloat16 \
+            and not cls.device_support_bf16():
+            model_config.dtype = torch.float16
+
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.cudagraph_mode is None or \
+                compilation_config.cudagraph_mode.max_cudagraph_mode() \
+                    != CUDAGraphMode.NONE:
+            logger.info("[XPU] CUDA graph is not supported on XPU, "
+                        "disabling cudagraphs.")
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config

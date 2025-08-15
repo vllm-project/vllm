@@ -497,14 +497,11 @@ ENV HF_HUB_ENABLE_HF_TRANSFER 1
 # Copy in the v1 package for testing (it isn't distributed yet)
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
-# doc requires source code
-# we hide them inside `test_docs/` , so that this source code
+# Source code is used in the `python_only_compile.sh` test
+# We hide it inside `src/` so that this source code
 # will not be imported by other tests
-RUN mkdir test_docs
-RUN mv docs test_docs/
-RUN cp -r examples test_docs/
-RUN mv vllm test_docs/
-RUN mv mkdocs.yaml test_docs/
+RUN mkdir src
+RUN mv vllm src/vllm
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
