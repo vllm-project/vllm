@@ -34,41 +34,38 @@ namespace vllm::cutlass_w4a8 {
 
 using namespace cute;
 
-/////////////////////////////////////////////////////////////////////////////////////////////////
-/// GEMM kernel configurations
-/////////////////////////////////////////////////////////////////////////////////////////////////
-using MmaType = cutlass::float_e4m3_t;
-using QuantType = cutlass::int4b_t;
+// -------------------------------------------------------------------------------------
+// Static configuration shared across all instantiations
+// -------------------------------------------------------------------------------------
+using MmaType = cutlass::float_e4m3_t;  // A/scale element type
+using QuantType = cutlass::int4b_t;     // B element type (packed int4)
+
 constexpr int TileShapeK = 128 * 8 / sizeof_bits<MmaType>::value;
 
 // A matrix configuration
 using ElementA = MmaType;                   // Element type for A matrix operand
 using LayoutA = cutlass::layout::RowMajor;  // Layout type for A matrix operand
+using LayoutA_Transpose =
+    typename cutlass::layout::LayoutTranspose<LayoutA>::type;
 constexpr int AlignmentA =
     128 / cutlass::sizeof_bits<
               ElementA>::value;  // Memory access granularity/alignment of A
                                  // matrix in units of elements (up to 16 bytes)
+using StrideA = cutlass::detail::TagToStrideA_t<LayoutA>;
 
 // B matrix configuration
 using ElementB = QuantType;  // Element type for B matrix operand
 using LayoutB =
     cutlass::layout::ColumnMajor;  // Layout type for B matrix operand
+using LayoutB_Transpose =
+    typename cutlass::layout::LayoutTranspose<LayoutB>::type;
 constexpr int AlignmentB =
     128 / cutlass::sizeof_bits<
               ElementB>::value;  // Memory access granularity/alignment of B
                                  // matrix in units of elements (up to 16 bytes)
-
-// This example manually swaps and transposes, so keep transpose of input
-// layouts
-using LayoutA_Transpose =
-    typename cutlass::layout::LayoutTranspose<LayoutA>::type;
-using LayoutB_Transpose =
-    typename cutlass::layout::LayoutTranspose<LayoutB>::type;
-
-using StrideA = cutlass::detail::TagToStrideA_t<LayoutA>;
 using StrideB = cutlass::detail::TagToStrideB_t<LayoutB>;
 
-// Define the CuTe layout for reoredered quantized tensor B
+// Define the CuTe layout for reordered quantized tensor B
 // LayoutAtomQuant places values that will be read by the same thread in
 // contiguous locations in global memory. It specifies the reordering within a
 // single warp's fragment
@@ -77,9 +74,12 @@ using LayoutAtomQuant =
 using LayoutB_Reordered = decltype(cute::tile_to_shape(
     LayoutAtomQuant{}, Layout<Shape<int, int, int>, StrideB>{}));
 
+// Group-wise scales
 using ElementScale = MmaType;
-using ElementZero = ElementScale;  // only for verify
 using LayoutScale = cutlass::layout::RowMajor;
+
+// Per-tok, per-chan scales
+using ElementSChannel = float;
 
 // C/D matrix configuration
 using ElementC = cutlass::bfloat16_t;  // Element type for C and D matrix operands
@@ -90,7 +90,6 @@ constexpr int AlignmentC =
               ElementC>::value;  // Memory access granularity/alignment of C
                                  // matrix in units of elements (up to 16 bytes)
 
-// D matrix configuration
 using ElementD = ElementC;
 using LayoutD = LayoutC;
 constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
@@ -101,12 +100,12 @@ using ElementCompute = float;         // Element type for epilogue computation
 using ArchTag = cutlass::arch::Sm90;  // Tag indicating the minimum SM that
                                       // supports the intended feature
 using OperatorClass = cutlass::arch::OpClassTensorOp;  // Operator class tag
-// czhu: sweep
-using TileShape =
-    Shape<_128, _128, cute::Int<TileShapeK>>;  // Threadblock-level tile size
-using ClusterShape =
-    Shape<_1, _1, _1>;  // Shape of the threadblocks in a cluster
-// end sweep
+// // czhu: sweep
+// using TileShape =
+//     Shape<_128, _128, cute::Int<TileShapeK>>;  // Threadblock-level tile size
+// using ClusterShape =
+//     Shape<_1, _1, _1>;  // Shape of the threadblocks in a cluster
+// // end sweep
 using KernelSchedule =
     cutlass::gemm::KernelTmaWarpSpecializedCooperative;  // Kernel to launch
                                                          // based on the default
@@ -115,55 +114,151 @@ using KernelSchedule =
 using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecializedCooperative;
 using EpilogueTileType = cutlass::epilogue::collective::EpilogueTileAuto;
 
-// per-tok per-chan scaling, float scales
-using ElementSChannel = float;
-using ChTokScalesEpilogue =
-    typename vllm::c3x::ScaledEpilogue<ElementAccumulator, ElementD,
-                                        TileShape>;
-using EVTCompute = typename ChTokScalesEpilogue::EVTCompute;
+// ----------------------------------------------------------------------------
+// Kernel template — Tile/Cluster shapes
+// ----------------------------------------------------------------------------
+template<
+    class TileShape_MNK,
+    class ClusterShape_MNK
+>
+struct W4A8GemmKernel {
+    using TileShape = TileShape_MNK;
+    using ClusterShape = ClusterShape_MNK;
 
-using CollectiveEpilogue =
-    typename cutlass::epilogue::collective::CollectiveBuilder<
-        ArchTag, OperatorClass, TileShape, ClusterShape, EpilogueTileType,
-        ElementAccumulator, ElementSChannel,
-        // Transpose layout of D here since we use explicit swap + transpose
-        // the void type for C tells the builder to allocate 0 smem for the C
-        // matrix. We can enable this if beta == 0 by changing ElementC to void
-        // below.
-        ElementC, typename cutlass::layout::LayoutTranspose<LayoutC>::type,
-        AlignmentC, ElementD,
-        typename cutlass::layout::LayoutTranspose<LayoutD>::type, AlignmentD,
-        EpilogueSchedule,  // This is the only epi supporting the required swap +
-                          // transpose.
-        EVTCompute
-        >::CollectiveOp;
+    // Epilogue per-tok, per-chan scales
+    using ChTokScalesEpilogue =
+        typename vllm::c3x::ScaledEpilogue<ElementAccumulator, ElementD,
+                                            TileShape>;
+    using EVTCompute = typename ChTokScalesEpilogue::EVTCompute;
+    using CollectiveEpilogue =
+        typename cutlass::epilogue::collective::CollectiveBuilder<
+            ArchTag, OperatorClass, TileShape, ClusterShape, EpilogueTileType,
+            ElementAccumulator, ElementSChannel,
+            // Transpose layout of D here since we use explicit swap + transpose
+            // the void type for C tells the builder to allocate 0 smem for the C
+            // matrix. We can enable this if beta == 0 by changing ElementC to void
+            // below.
+            ElementC, typename cutlass::layout::LayoutTranspose<LayoutC>::type,
+            AlignmentC, ElementD,
+            typename cutlass::layout::LayoutTranspose<LayoutD>::type, AlignmentD,
+            EpilogueSchedule,  // This is the only epi supporting the required swap +
+                            // transpose.
+            EVTCompute
+            >::CollectiveOp;
 
-// =========================================================== MIXED INPUT WITH
-// SCALES
-// ===========================================================================
-// The Scale information must get paired with the operand that will be scaled.
-// In this example, B is scaled so we make a tuple of B's information and the
-// scale information.
-using CollectiveMainloopShuffled =
-    typename cutlass::gemm::collective::CollectiveBuilder<
-        ArchTag, OperatorClass,
-        cute::tuple<ElementB, cutlass::Array<ElementScale, 8>>,
-        LayoutB_Reordered, AlignmentB, ElementA, LayoutA_Transpose, AlignmentA,
-        ElementAccumulator, TileShape, ClusterShape,
-        cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-            sizeof(typename CollectiveEpilogue::SharedStorage))>,
-        KernelSchedule>::CollectiveOp;
+    // The Scale information must get paired with the operand that will be scaled.
+    // In this example, B is scaled so we make a tuple of B's information and the
+    // scale information.
+    using CollectiveMainloopShuffled =
+        typename cutlass::gemm::collective::CollectiveBuilder<
+            ArchTag, OperatorClass,
+            cute::tuple<ElementB, cutlass::Array<ElementScale, 8>>,
+            LayoutB_Reordered, AlignmentB, ElementA, LayoutA_Transpose, AlignmentA,
+            ElementAccumulator, TileShape, ClusterShape,
+            cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+                sizeof(typename CollectiveEpilogue::SharedStorage))>,
+            KernelSchedule>::CollectiveOp;
 
-using GemmKernelShuffled = cutlass::gemm::kernel::GemmUniversal<
-    Shape<int, int, int, int>,  // Indicates ProblemShape
-    CollectiveMainloopShuffled, CollectiveEpilogue>;
+    using GemmKernelShuffled = cutlass::gemm::kernel::GemmUniversal<
+        Shape<int, int, int, int>,  // Indicates ProblemShape
+        CollectiveMainloopShuffled, CollectiveEpilogue>;
+    using GemmShuffled =
+        cutlass::gemm::device::GemmUniversalAdapter<GemmKernelShuffled>;
+    
+    using StrideC = typename GemmKernelShuffled::StrideC;
+    using StrideD = typename GemmKernelShuffled::StrideD;
+    using StrideS = typename CollectiveMainloopShuffled::StrideScale;
 
-using GemmShuffled =
-    cutlass::gemm::device::GemmUniversalAdapter<GemmKernelShuffled>;
+    static torch::Tensor mm(torch::Tensor const& A,
+                 torch::Tensor const& B,  // already packed
+                 torch::Tensor const& group_scales,  // already packed
+                 int64_t group_size,
+                 torch::Tensor const& channel_scales,
+                 torch::Tensor const& token_scales,
+                 std::optional<at::ScalarType> const& maybe_out_type) {
+        // TODO: param validation
+        int m = A.size(0);
+        int k = A.size(1);
+        int n = B.size(1);
 
-using StrideC = typename GemmKernelShuffled::StrideC;
-using StrideD = typename GemmKernelShuffled::StrideD;
-using StrideS = typename CollectiveMainloopShuffled::StrideScale;
+        // Allocate output
+        auto device = A.device();
+        torch::Tensor D =
+            torch::empty({m, n},
+                        torch::TensorOptions()
+                            .dtype(equivalent_scalar_type_v<ElementD>)
+                            .device(device));
+        // prepare arg pointers
+        auto A_ptr = static_cast<MmaType const*>(A.const_data_ptr());
+        auto B_ptr = static_cast<QuantType const*>(B.const_data_ptr());
+        auto D_ptr = static_cast<ElementD*>(D.data_ptr());
+        // can we avoid harcode the 8 here
+        auto S_ptr = static_cast<cutlass::Array<ElementScale, 8> const*>(
+            group_scales.const_data_ptr());
+        
+        // runtime layout for B
+        auto shape_B = cute::make_shape(n, k, 1);
+        LayoutB_Reordered layout_B_reordered = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
+        
+        // strides
+        int const scale_k = cutlass::ceil_div(k, group_size);
+        StrideA stride_A = cutlass::make_cute_packed_stride(
+            StrideA{}, cute::make_shape(m, k, 1));
+        // Reverse stride here due to swap and transpose
+        StrideD stride_D = cutlass::make_cute_packed_stride(
+            StrideD{}, cute::make_shape(n, m, 1));
+        StrideS stride_S = cutlass::make_cute_packed_stride(
+            StrideS{}, cute::make_shape(n, scale_k, 1));
+
+
+        // Create a structure of gemm kernel arguments suitable for invoking an
+        // instance of Gemm auto arguments = args_from_options<GemmShuffled>(options);
+        /// Populates a Gemm::Arguments structure from the given arguments
+        /// Swap the A and B tensors, as well as problem shapes here.
+        using Args = typename GemmShuffled::Arguments;
+        using MainloopArguments = typename GemmKernelShuffled::MainloopArguments;
+        using EpilogueArguments = typename GemmKernelShuffled::EpilogueArguments;
+
+        MainloopArguments mainloop_arguments{
+            B_ptr, layout_B_reordered,
+            A_ptr, stride_A,
+            S_ptr, stride_S,
+            group_size
+        };
+
+        EpilogueArguments epilogue_arguments{
+            ChTokScalesEpilogue::prepare_args(channel_scales, token_scales),
+            nullptr, {},    // no C
+            D_ptr, stride_D
+        };
+
+        Args arguments{
+            cutlass::gemm::GemmUniversalMode::kGemm,
+            {n, m, k, 1}, // shape
+            mainloop_arguments,
+            epilogue_arguments
+        };
+
+        // Using the arguments, query for extra workspace required
+        size_t workspace_size = GemmShuffled::get_workspace_size(arguments);
+
+        // Allocate workspace memory
+        cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+        
+        // Run GEMM
+        GemmShuffled gemm;
+        CUTLASS_CHECK(gemm.can_implement(arguments));
+        CUTLASS_CHECK(gemm.initialize(arguments, workspace.get()));
+        CUTLASS_CHECK(gemm.run());
+
+        return D;
+    }
+
+};
+
+using DefaultTileShape = Shape<_128, _128, cute::Int<TileShapeK>>;
+using DefaultClusterShape = Shape<_1, _1, _1>;
+using DefaultKernel = W4A8GemmKernel<DefaultTileShape, DefaultClusterShape>;
 
 torch::Tensor mm(torch::Tensor const& A,
                  torch::Tensor const& B,  // already packed
@@ -172,80 +267,12 @@ torch::Tensor mm(torch::Tensor const& A,
                  torch::Tensor const& channel_scales,
                  torch::Tensor const& token_scales,
                  std::optional<at::ScalarType> const& maybe_out_type) {
-  // TODO: param validation
-  int m = A.size(0);
-  int k = A.size(1);
-  int n = B.size(1);
-
-  // Allocate output
-  auto device = A.device();
-  torch::Tensor D =
-      torch::empty({m, n},
-                   torch::TensorOptions()
-                       .dtype(equivalent_scalar_type_v<ElementD>)
-                       .device(device));
-
-  // run logic, pass in S_ptr so we can pass in scales
-  auto B_ptr = static_cast<QuantType const*>(B.const_data_ptr());
-  auto shape_B = cute::make_shape(n, k, 1);
-  LayoutB_Reordered layout_B_reordered_local = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
-  // Instantiate CUTLASS kernel depending on templates
-  GemmShuffled gemm;
-
-  // Create a structure of gemm kernel arguments suitable for invoking an
-  // instance of Gemm auto arguments = args_from_options<GemmShuffled>(options);
-  /// Populates a Gemm::Arguments structure from the given commandline options
-  /// Swap the A and B tensors, as well as problem shapes here.
-  using Args = typename GemmShuffled::Arguments;
-  using MainloopArguments = typename GemmKernelShuffled::MainloopArguments;
-  using EpilogueArguments = typename GemmKernelShuffled::EpilogueArguments;
-
-  auto D_ptr = static_cast<ElementD*>(D.data_ptr());
-  auto A_ptr = static_cast<MmaType const*>(A.const_data_ptr());
-  auto S_ptr = static_cast<cutlass::Array<ElementScale, 8> const*>(
-      group_scales.const_data_ptr());
-  // currently uses all the input (A, B, scales)
-  // init strides here
-  int const scale_k = cutlass::ceil_div(k, group_size);
-  StrideA stride_A = cutlass::make_cute_packed_stride(
-      StrideA{}, cute::make_shape(m, k, 1));
-  // Reverse stride here due to swap and transpose
-  StrideD stride_D = cutlass::make_cute_packed_stride(
-      StrideD{}, cute::make_shape(n, m, 1));
-  StrideS stride_S = cutlass::make_cute_packed_stride(
-      StrideS{}, cute::make_shape(n, scale_k, 1));
-
-  MainloopArguments mainloop_arguments{
-      B_ptr, layout_B_reordered_local, A_ptr, stride_A, S_ptr, stride_S, group_size};
-  EpilogueArguments epilogue_arguments{
-    ChTokScalesEpilogue::prepare_args(channel_scales, token_scales),
-    nullptr,
-    {},
-    D_ptr,
-    stride_D};
-
-  auto arguments = Args{
-      cutlass::gemm::GemmUniversalMode::kGemm,
-      {n, m, k, 1}, // shape
-      mainloop_arguments,
-      epilogue_arguments};
-
-  // Using the arguments, query for extra workspace required for matrix
-  // multiplication computation
-  size_t workspace_size = GemmShuffled::get_workspace_size(arguments);
-
-  // Allocate workspace memory
-  cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
-
-  // Check if the problem size is supported or not
-  CUTLASS_CHECK(gemm.can_implement(arguments));
-
-  // Initialize CUTLASS kernel with arguments and workspace pointer
-  CUTLASS_CHECK(gemm.initialize(arguments, workspace.get()));
-
-  CUTLASS_CHECK(gemm.run());
-
-  return D;
+    return DefaultKernel::mm(
+        A, B, 
+        group_scales, group_size,
+        channel_scales, token_scales,
+        maybe_out_type
+    );
 }
 
 torch::Tensor pack_scale_fp8(torch::Tensor const& scales) {
@@ -276,10 +303,10 @@ torch::Tensor encode_and_reorder_int4b(torch::Tensor const& B) {
   cutlass::unified_encode_int4b(B_ptr, B_packed_ptr, n * k);
   // reorder
   auto shape_B = cute::make_shape(n, k, 1);
-  LayoutB_Reordered layout_B_reordered_local = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
+  LayoutB_Reordered layout_B_reordered = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
   // layoutright/row major
   auto layout_B = make_layout(shape_B, LayoutRight{});
-  cutlass::reorder_tensor(B_packed_ptr, layout_B, layout_B_reordered_local);
+  cutlass::reorder_tensor(B_packed_ptr, layout_B, layout_B_reordered);
   return B_packed;
 }
 
