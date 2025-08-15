@@ -4,7 +4,7 @@
 
 import pytest
 
-from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 
 
