@@ -158,12 +158,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         assert torch.isnan(a1).sum() == 0
 
-        print(f"FP8 dispatch= {self.use_fp8_dispatch}")
-        print(f"TPR {self.max_tokens_per_rank}")
-        print(f"NE {num_experts}")
-        print(f"A1 {a1.shape}")
-        print(f"AND {self.num_dispatchers_}")
-        print(f"TOPK {topk_ids.shape}")
+        # print(f"FP8 dispatch= {self.use_fp8_dispatch}")
+        # print(f"TPR {self.max_tokens_per_rank}")
+        # print(f"NE {num_experts}")
+        # print(f"A1 {a1.shape}")
+        # print(f"AND {self.num_dispatchers_}")
+        # print(f"TOPK {topk_ids.shape}")
 
         # Dispatch
         expert_x, expert_num_tokens, handle, _, hook= \

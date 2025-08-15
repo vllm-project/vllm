@@ -22,8 +22,14 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    cutlass_fp4_supported)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    cutlass_fp8_supported)
 from vllm.platforms import current_platform
-from vllm.utils import has_deep_ep, has_deep_gemm
+from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.utils.deep_gemm import is_deep_gemm_supported
+from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
 
 @dataclass
@@ -140,33 +146,33 @@ def expert_info(kind) -> ExpertInfo:
     return info
 
 
-# register_prepare_and_finalize(
-#     MoEPrepareAndFinalizeNoEP,
-#     standard_format,
-#     common_float_types,
-#     blocked_quantization_support=True,
-#     backend=None,
-# )
+register_prepare_and_finalize(
+    MoEPrepareAndFinalizeNoEP,
+    standard_format,
+    common_float_types,
+    blocked_quantization_support=True,
+    backend=None,
+)
 
-# register_experts(
-#     BatchedTritonExperts,
-#     batched_format,
-#     common_float_types,
-#     blocked_quantization_support=True,
-#     supports_chunking=False,
-#     supports_expert_map=False,
-#     needs_matching_quant=True,
-# )
+register_experts(
+    BatchedTritonExperts,
+    batched_format,
+    common_float_types,
+    blocked_quantization_support=True,
+    supports_chunking=False,
+    supports_expert_map=False,
+    needs_matching_quant=True,
+)
 
-# register_experts(
-#     TritonExperts,
-#     standard_format,
-#     common_float_and_int_types,
-#     blocked_quantization_support=True,
-#     supports_chunking=True,
-#     supports_expert_map=True,
-#     needs_matching_quant=True,
-# )
+register_experts(
+    TritonExperts,
+    standard_format,
+    common_float_and_int_types,
+    blocked_quantization_support=True,
+    supports_chunking=True,
+    supports_expert_map=True,
+    needs_matching_quant=True,
+)
 
 register_experts(
     NaiveBatchedExperts,
@@ -179,16 +185,18 @@ register_experts(
 
 # Disable on blackwell for now
 if has_deep_ep() and not current_platform.has_device_capability(100):
+    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
+        DeepEPHTPrepareAndFinalize)
     from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
         DeepEPLLPrepareAndFinalize)
 
-    # register_prepare_and_finalize(
-    #     DeepEPHTPrepareAndFinalize,
-    #     standard_format,
-    #     common_float_types,
-    #     blocked_quantization_support=True,
-    #     backend="deepep_high_throughput",
-    # )
+    register_prepare_and_finalize(
+        DeepEPHTPrepareAndFinalize,
+        standard_format,
+        common_float_types,
+        blocked_quantization_support=True,
+        backend="deepep_high_throughput",
+    )
 
     register_prepare_and_finalize(
         DeepEPLLPrepareAndFinalize,
@@ -198,159 +206,159 @@ if has_deep_ep() and not current_platform.has_device_capability(100):
         backend="deepep_low_latency",
     )
 
-# if has_pplx():
-#     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-#         PplxPrepareAndFinalize)
-#     register_prepare_and_finalize(
-#         PplxPrepareAndFinalize,
-#         batched_format,
-#         common_float_and_int_types,
-#         blocked_quantization_support=True,
-#         backend="pplx",
-#     )
+if has_pplx():
+    from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
+        PplxPrepareAndFinalize)
+    register_prepare_and_finalize(
+        PplxPrepareAndFinalize,
+        batched_format,
+        common_float_and_int_types,
+        blocked_quantization_support=True,
+        backend="pplx",
+    )
 
-# if (has_flashinfer_cutlass_fused_moe()
-#         and current_platform.has_device_capability(100)):
-#     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
-#         FlashInferExperts)
-#     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-#         FlashInferCutlassMoEPrepareAndFinalize)
+if (has_flashinfer_cutlass_fused_moe()
+        and current_platform.has_device_capability(100)):
+    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
+        FlashInferExperts)
+    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
+        FlashInferCutlassMoEPrepareAndFinalize)
 
-#     register_prepare_and_finalize(
-#         FlashInferCutlassMoEPrepareAndFinalize,
-#         standard_format,
-#         nv_fp4_types,
-#         blocked_quantization_support=True,
-#         backend=None,
-#         force_multigpu=True,
-#         supports_apply_weight_on_input=False,
-#     )
+    register_prepare_and_finalize(
+        FlashInferCutlassMoEPrepareAndFinalize,
+        standard_format,
+        nv_fp4_types,
+        blocked_quantization_support=True,
+        backend=None,
+        force_multigpu=True,
+        supports_apply_weight_on_input=False,
+    )
 
-#     register_experts(
-#         FlashInferExperts,
-#         standard_format,
-#         nv_fp4_types,
-#         blocked_quantization_support=True,
-#         supports_chunking=True,
-#         # Note: this is a hack to get it to run for now
-#         supports_expert_map=True,
-#     )
-# else:
-#     FlashInferCutlassMoEPrepareAndFinalize = None
+    register_experts(
+        FlashInferExperts,
+        standard_format,
+        nv_fp4_types,
+        blocked_quantization_support=True,
+        supports_chunking=True,
+        # Note: this is a hack to get it to run for now
+        supports_expert_map=True,
+    )
+else:
+    FlashInferCutlassMoEPrepareAndFinalize = None
 
-# if has_deep_gemm() and is_deep_gemm_supported():
-#     register_experts(
-#         BatchedDeepGemmExperts,
-#         batched_format,
-#         fp8_types,
-#         blocked_quantization_support=True,
-#         supports_chunking=False,
-#         supports_expert_map=False,
-#         needs_matching_quant=False,
-#         needs_deep_gemm=True,
-#     )
-#     register_experts(
-#         DeepGemmExperts,
-#         standard_format,
-#         fp8_types,
-#         blocked_quantization_support=True,
-#         supports_chunking=True,
-#         supports_expert_map=True,
-#         needs_matching_quant=False,
-#         needs_deep_gemm=True,
-#     ),
-#     register_experts(
-#         BatchedTritonOrDeepGemmExperts,
-#         batched_format,
-#         common_float_and_int_types,
-#         blocked_quantization_support=True,
-#         supports_chunking=False,
-#         supports_expert_map=False,
-#         needs_matching_quant=True,
-#         needs_deep_gemm=True,
-#     )
-#     register_experts(
-#         TritonOrDeepGemmExperts,
-#         standard_format,
-#         common_float_and_int_types,
-#         blocked_quantization_support=True,
-#         supports_chunking=True,
-#         supports_expert_map=True,
-#         needs_matching_quant=True,
-#         needs_deep_gemm=True,
-#     )
+if has_deep_gemm() and is_deep_gemm_supported():
+    register_experts(
+        BatchedDeepGemmExperts,
+        batched_format,
+        fp8_types,
+        blocked_quantization_support=True,
+        supports_chunking=False,
+        supports_expert_map=False,
+        needs_matching_quant=False,
+        needs_deep_gemm=True,
+    )
+    register_experts(
+        DeepGemmExperts,
+        standard_format,
+        fp8_types,
+        blocked_quantization_support=True,
+        supports_chunking=True,
+        supports_expert_map=True,
+        needs_matching_quant=False,
+        needs_deep_gemm=True,
+    ),
+    register_experts(
+        BatchedTritonOrDeepGemmExperts,
+        batched_format,
+        common_float_and_int_types,
+        blocked_quantization_support=True,
+        supports_chunking=False,
+        supports_expert_map=False,
+        needs_matching_quant=True,
+        needs_deep_gemm=True,
+    )
+    register_experts(
+        TritonOrDeepGemmExperts,
+        standard_format,
+        common_float_and_int_types,
+        blocked_quantization_support=True,
+        supports_chunking=True,
+        supports_expert_map=True,
+        needs_matching_quant=True,
+        needs_deep_gemm=True,
+    )
 
-# if cutlass_fp8_supported():
-#     from vllm.model_executor.layers.fused_moe import (CutlassBatchedExpertsFp8,
-#                                                       CutlassExpertsFp8)
-#     register_experts(
-#         CutlassExpertsFp8,
-#         standard_format,
-#         fp8_types,
-#         blocked_quantization_support=False,
-#         supports_chunking=True,
-#         supports_expert_map=False,
-#     )
-#     register_experts(
-#         CutlassBatchedExpertsFp8,
-#         batched_format,
-#         fp8_types,
-#         blocked_quantization_support=False,
-#         supports_chunking=False,
-#         supports_expert_map=False,
-#     )
+if cutlass_fp8_supported():
+    from vllm.model_executor.layers.fused_moe import (CutlassBatchedExpertsFp8,
+                                                      CutlassExpertsFp8)
+    register_experts(
+        CutlassExpertsFp8,
+        standard_format,
+        fp8_types,
+        blocked_quantization_support=False,
+        supports_chunking=True,
+        supports_expert_map=False,
+    )
+    register_experts(
+        CutlassBatchedExpertsFp8,
+        batched_format,
+        fp8_types,
+        blocked_quantization_support=False,
+        supports_chunking=False,
+        supports_expert_map=False,
+    )
 
-# if cutlass_fp4_supported():
-#     from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-#         CutlassExpertsFp4)
-#     register_experts(
-#         CutlassExpertsFp4,
-#         standard_format,
-#         nv_fp4_types,
-#         blocked_quantization_support=True,
-#         supports_chunking=True,
-#         supports_expert_map=False,
-#     )
+if cutlass_fp4_supported():
+    from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        CutlassExpertsFp4)
+    register_experts(
+        CutlassExpertsFp4,
+        standard_format,
+        nv_fp4_types,
+        blocked_quantization_support=True,
+        supports_chunking=True,
+        supports_expert_map=False,
+    )
 
 MK_QUANT_CONFIGS: list[Optional[TestMoEQuantConfig]] = [
     None,
-    # # per-channel / per-column weights and per-tensor activations
-    # TestMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
-    #                    per_out_ch_quant=True,
-    #                    per_act_token_quant=False,
-    #                    block_shape=None),
-    # # per-channel / per-column weights and per-token activations
-    # TestMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
-    #                    per_out_ch_quant=True,
-    #                    per_act_token_quant=True,
-    #                    block_shape=None),
-    # # per-tensor weights and per-tensor activations
-    # TestMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
-    #                    per_out_ch_quant=False,
-    #                    per_act_token_quant=False,
-    #                    block_shape=None),
-    # # per-tensor weights and per-token activations
-    # TestMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
-    #                    per_out_ch_quant=False,
-    #                    per_act_token_quant=True,
-    #                    block_shape=None),
-    # # block-quantized weights and 128 block per-token activations
-    # TestMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
-    #                    per_out_ch_quant=False,
-    #                    per_act_token_quant=False,
-    #                    block_shape=[128, 128]),
+    # per-channel / per-column weights and per-tensor activations
+    TestMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                       per_out_ch_quant=True,
+                       per_act_token_quant=False,
+                       block_shape=None),
+    # per-channel / per-column weights and per-token activations
+    TestMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                       per_out_ch_quant=True,
+                       per_act_token_quant=True,
+                       block_shape=None),
+    # per-tensor weights and per-tensor activations
+    TestMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                       per_out_ch_quant=False,
+                       per_act_token_quant=False,
+                       block_shape=None),
+    # per-tensor weights and per-token activations
+    TestMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                       per_out_ch_quant=False,
+                       per_act_token_quant=True,
+                       block_shape=None),
+    # block-quantized weights and 128 block per-token activations
+    TestMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                       per_out_ch_quant=False,
+                       per_act_token_quant=False,
+                       block_shape=[128, 128]),
     # TODO (varun) : Should we test the following combinations ?
     # block-quantized weights and per-token activations
     # block-quantized weights and per-tensor activations
 ]
 
-# if cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe():
-#     MK_QUANT_CONFIGS += [
-#         TestMoEQuantConfig(quant_dtype="nvfp4",
-#                            per_out_ch_quant=False,
-#                            per_act_token_quant=False,
-#                            block_shape=None),
-#     ]
+if cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe():
+    MK_QUANT_CONFIGS += [
+        TestMoEQuantConfig(quant_dtype="nvfp4",
+                           per_out_ch_quant=False,
+                           per_act_token_quant=False,
+                           block_shape=None),
+    ]
 
 
 def make_prepare_finalize(
