@@ -175,6 +175,9 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
     reorder_batch_threshold: ClassVar[Optional[int]] = None
+    # Does this backend/builder support updating the block table in existing
+    # metadata
+    supports_update_block_table: bool = False
 
     @abstractmethod
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
@@ -196,6 +199,20 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
             fast_build: The meta-data will prioritize speed of building over
                 then speed at execution. Can be used for spec-decode where the
                 result of a build call may only be used for few layers/iters.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_block_table(
+        self,
+        metadata: M,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> M:
+        """
+        Update the block table for the attention metadata.
+        Faster when theres multiple kv-cache groups that create virtually the
+        same metadata but just with different block tables.
         """
         raise NotImplementedError
 
@@ -248,6 +265,10 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         num_sms: int,
     ) -> bool:
         return False
+
+    @classmethod
+    def full_cls_name(cls) -> tuple[str, str]:
+        return (cls.__module__, cls.__qualname__)
 
 
 @functools.lru_cache
@@ -408,7 +429,7 @@ def make_local_attention_virtual_batches(
     attn_chunk_size: int,
     common_attn_metadata: CommonAttentionMetadata,
     block_size: int = 0,
-) -> CommonAttentionMetadata:
+) -> tuple[CommonAttentionMetadata, Callable[[torch.Tensor], torch.Tensor]]:
     query_start_loc_np = common_attn_metadata.query_start_loc_cpu.numpy()
     seq_lens_np = common_attn_metadata.seq_lens_cpu.numpy()
     block_table = common_attn_metadata.block_table_tensor
@@ -508,15 +529,23 @@ def make_local_attention_virtual_batches(
     #     [ 22, 23 ], < local-batch 6, (batch 2, starting from k[4])
     #     [ 24, 25 ], < local-batch 7, (batch 2, starting from k[8])
     #   ]
-    block_indices= np.broadcast_to(
+    block_indices_cpu = np.broadcast_to(
         np.arange(pages_per_local_batch, dtype=np.int32),
         (virtual_batches, pages_per_local_batch)) \
             + np.expand_dims(block_starts, axis=1)
-    block_indices = block_indices.flatten().clip(max=block_table.shape[1] - 1)
-    batch_indices = np.repeat(np.arange(actual_batch_size, dtype=np.int32),
-                              local_blocks * pages_per_local_batch)
-    block_table_local = block_table[batch_indices, block_indices]\
-        .view(virtual_batches, -1)
+    block_indices_cpu = block_indices_cpu.flatten().clip(
+        max=block_table.shape[1] - 1)
+    batch_indices_cpu = np.repeat(np.arange(actual_batch_size, dtype=np.int32),
+                                  local_blocks * pages_per_local_batch)
+    block_indices = torch.from_numpy(block_indices_cpu).to(device=device,
+                                                           non_blocking=True)
+    batch_indices = torch.from_numpy(batch_indices_cpu).to(device=device,
+                                                           non_blocking=True)
+
+    # Save as a lambda so we can return this for update_block_table
+    reorder_block_table = lambda block_table: \
+        block_table[batch_indices, block_indices].view(virtual_batches, -1)
+    block_table_local = reorder_block_table(block_table)
 
     query_start_loc_cpu = torch.from_numpy(cu_seqlens_q_local)
     seq_lens_cpu = torch.from_numpy(seqlens_k_local)
@@ -534,14 +563,20 @@ def make_local_attention_virtual_batches(
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
-    )
+    ), reorder_block_table
 
 
 def subclass_attention_metadata_builder(
     name_prefix: str,
     builder_cls: type[AttentionMetadataBuilder[M]],
-    build_preprocess_fn: Callable[[CommonAttentionMetadata],
-                                  CommonAttentionMetadata],
+    build_preprocess_fn: Callable[
+        [AttentionMetadataBuilder[M], CommonAttentionMetadata],
+        CommonAttentionMetadata],
+    build_postprocess_fn: Optional[Callable[[AttentionMetadataBuilder[M], Any],
+                                            Any]] = None,
+    update_block_table_preprocess_fn: Optional[Callable[
+        [AttentionMetadataBuilder[M], Any, torch.Tensor, torch.Tensor],
+        tuple[Any, torch.Tensor, torch.Tensor]]] = None,
 ) -> type[AttentionMetadataBuilder[M]]:
     """
     Return a new subclass of `builder_cls` whose .build(...) method
@@ -553,15 +588,28 @@ def subclass_attention_metadata_builder(
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False):
-        return builder_cls.build(self, common_prefix_len,
-                                 build_preprocess_fn(common_attn_metadata),
-                                 fast_build)
+        metadata = builder_cls.build(
+            self, common_prefix_len,
+            build_preprocess_fn(self, common_attn_metadata), fast_build)
+        if build_postprocess_fn is not None:
+            metadata = build_postprocess_fn(self, metadata)
+        return metadata
+
+    def update_block_table(self, metadata, blk_table: torch.Tensor,
+                           slot_mapping: torch.Tensor):
+        if update_block_table_preprocess_fn is not None:
+            metadata, blk_table, slot_mapping = \
+                update_block_table_preprocess_fn(
+                    self, metadata, blk_table, slot_mapping)
+        return builder_cls.update_block_table(self, metadata, blk_table,
+                                              slot_mapping)
 
     Wrapped = type(
         name,
         (builder_cls, ),  # inherit from the original
         {
             "build": build,
+            "update_block_table": update_block_table,
         })
     return Wrapped  # type: ignore
 

@@ -10,8 +10,9 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig, QuantizationConfig
 from vllm.v1.attention.backends.utils import (
-    CommonAttentionMetadata, make_local_attention_virtual_batches,
-    subclass_attention_backend, subclass_attention_metadata_builder)
+    AttentionMetadataBuilder, CommonAttentionMetadata,
+    make_local_attention_virtual_batches, subclass_attention_backend,
+    subclass_attention_metadata_builder)
 
 from ..layer import Attention
 
@@ -24,9 +25,21 @@ def create_chunked_local_attention_backend(
 ) -> type[AttentionBackend]:
     prefix = f"ChunkedLocalAttention_{attention_chunk_size}_{block_size}_"
 
-    def build_preprocess_fn(cm: CommonAttentionMetadata):
-        return make_local_attention_virtual_batches(attention_chunk_size, cm,
-                                                    block_size)
+    def build_preprocess_fn(self: AttentionMetadataBuilder,
+                            cm: CommonAttentionMetadata):
+        cm, reorder_block_table = make_local_attention_virtual_batches(
+            attention_chunk_size, cm, block_size)
+        self.reorder_block_table = reorder_block_table
+        return cm
+
+    def update_block_table_preprocess_fn(self: AttentionMetadataBuilder,
+                                         metadata, blk_table: torch.Tensor,
+                                         slot_mapping: torch.Tensor):
+        return metadata, metadata.reorder_block_table(blk_table), slot_mapping
+
+    def build_postprocess_fn(self: AttentionMetadataBuilder, metadata):
+        metadata.reorder_block_table = self.reorder_block_table
+        return metadata
 
     # Dynamically create a new attention backend that wraps the
     # underlying attention backend but applies
@@ -34,7 +47,10 @@ def create_chunked_local_attention_backend(
     builder_cls = subclass_attention_metadata_builder(
         name_prefix=prefix,
         builder_cls=underlying_attn_backend.get_builder_cls(),
-        build_preprocess_fn=build_preprocess_fn)
+        build_preprocess_fn=build_preprocess_fn,
+        build_postprocess_fn=build_postprocess_fn,
+        update_block_table_preprocess_fn=update_block_table_preprocess_fn,
+    )
     attn_backend = subclass_attention_backend(
         name_prefix=prefix,
         attention_backend_cls=underlying_attn_backend,
