@@ -25,8 +25,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_kernel,
     flashinfer_fp4_cutlass_moe_forward, reorder_w1w3_to_w3w1)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_flashinfer_per_tensor_scale_fp8, rotate_flashinfer_fp8_moe_weights,
-    swap_w13_to_w31)
+    apply_flashinfer_per_tensor_scale_fp8, register_moe_scaling_factors,
+    rotate_flashinfer_fp8_moe_weights, swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear, is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin, prepare_moe_fp4_layer_for_marlin)
@@ -430,6 +430,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
             rotate_flashinfer_fp8_moe_weights(layer.w13_weight,
                                               layer.w2_weight)
+            register_moe_scaling_factors(layer)
 
     def apply(
         self,
