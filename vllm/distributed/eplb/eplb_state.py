@@ -409,10 +409,7 @@ class EplbState:
             self.expert_rearrangement_step = 0
             self.rearrange(model)
 
-    def _update_expert_tensors_size(
-            self,
-            model: MixtureOfExperts,
-            num_local_physical_experts: Optional[int] = None) -> None:
+    def _update_expert_tensors_size(self, model: MixtureOfExperts) -> None:
         """
         Update the size of expert-related tensors to match
         model.num_physical_experts. This ensures tensors are properly sized
@@ -420,8 +417,6 @@ class EplbState:
 
         Args:
             model: The MoE model instance
-            num_local_physical_experts: Optional new number of local physical
-                experts. If None, uses model.num_local_physical_experts.
         """
         current_size = self.expert_load_pass.size(-1)
         target_size = model.num_physical_experts
