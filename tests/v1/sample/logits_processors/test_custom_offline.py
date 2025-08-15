@@ -151,6 +151,7 @@ def test_custom_logitsprocs(monkeypatch,
     kwargs: dict[str, list[Union[str, type[LogitsProcessor]]]] = {}
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_FQCN:
         # Scenario: load logitproc based on fully-qualified class name (FQCN)
+        # Inject dummy module which defines logitproc
         sys.modules[DUMMY_LOGITPROC_MODULE] = dummy_module
         kwargs["logits_processors"] = [DUMMY_LOGITPROC_FQCN]
     elif logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_CLASS:
