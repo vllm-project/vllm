@@ -681,6 +681,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
+            print("Calling _calc_mrope_positions from _prepare_inputs")
             self._calc_mrope_positions(scheduler_output)
 
         # Get token indices.
