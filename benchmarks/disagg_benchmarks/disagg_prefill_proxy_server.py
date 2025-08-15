@@ -103,7 +103,6 @@ def main():
         """Start request processing task when app starts serving"""
         asyncio.create_task(request_queue.process())
 
-
     async def forward_request(url, data):
         """Forward request to backend service with rate limiting and error handling"""
         headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
@@ -138,7 +137,6 @@ def main():
                 # Handle timeout errors
                 logger.error("Timeout connecting to %s", url)
                 yield b'{"error": "Service timeout"}'
-
 
     async def process_request():
         """Process a single request through prefill and decode stages"""
