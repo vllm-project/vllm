@@ -1752,12 +1752,14 @@ async def init_app_state(
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
+        enable_force_include_usage=args.enable_force_include_usage,
     ) if "transcription" in supported_tasks else None
     state.openai_serving_translation = OpenAIServingTranslation(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
+        enable_force_include_usage=args.enable_force_include_usage,
     ) if "transcription" in supported_tasks else None
 
     state.enable_server_load_tracking = args.enable_server_load_tracking

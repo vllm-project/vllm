@@ -517,6 +517,38 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
 )
+async def test_completion_with_enable_force_include_usage(
+        client: openai.AsyncOpenAI, model_name: str):
+    prompt = "What is the capital of France?"
+
+    stream = await client.completions.create(model=model_name,
+                                             prompt=prompt,
+                                             max_tokens=5,
+                                             temperature=0.0,
+                                             stream=True,
+                                             enable_force_include_usage=True)
+    async for chunk in stream:
+        assert chunk.usage is not None
+        assert chunk.usage.prompt_tokens > 0
+        assert chunk.usage.completion_tokens > 0
+        assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
+                                            chunk.usage.completion_tokens)
+        if chunk.choices[0].finish_reason is not None:
+            final_chunk = await stream.__anext__()
+            assert final_chunk.usage is not None
+            assert final_chunk.usage.prompt_tokens > 0
+            assert final_chunk.usage.completion_tokens > 0
+            assert final_chunk.usage.total_tokens == (
+                final_chunk.usage.prompt_tokens +
+                final_chunk.usage.completion_tokens)
+            assert final_chunk.choices == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME, "zephyr-lora"],
+)
 async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
     # test both text and token IDs
     for prompts in (["Hello, my name is"] * 2, [[0, 0, 0, 0, 0]] * 2):
