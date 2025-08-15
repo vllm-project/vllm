@@ -627,3 +627,39 @@ python3 benchmarks/benchmark_prioritization.py \
 ```
 
 </details>
+
+## 👁️ Example - Multi-Modal Benchmark
+
+<details>
+<summary>Show more</summary>
+
+<br/>
+
+Benchmark the performance of multi-modal requests in vLLM.
+
+### Images (ShareGPT4V)
+
+Start vLLM:
+```bash
+python -m vllm.entrypoints.openai.api_server \
+  --model Qwen/Qwen2.5-VL-7B-Instruct \
+  --dtype bfloat16 \
+  --limit-mm-per-prompt '{"image": 1}' \
+  --allowed-local-media-path /path/to/sharegpt4v/images
+```
+
+Send requests with images:
+```bash
+python benchmarks/benchmark_serving.py \
+  --backend openai-chat \
+  --model Qwen/Qwen2.5-VL-7B-Instruct \
+  --dataset-name sharegpt \
+  --dataset-path /path/to/ShareGPT4V/sharegpt4v_instruct_gpt4-vision_cap100k.json \
+  --num-prompts 100 \
+  --save-result \
+  --result-dir ~/vllm_benchmark_results \
+  --save-detailed \
+  --endpoint /v1/chat/completion
+```
+
+</details>
