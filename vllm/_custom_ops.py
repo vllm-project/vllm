@@ -319,38 +319,6 @@ def apply_repetition_penalties(logits: torch.Tensor, prompt_mask: torch.Tensor,
                                          repetition_penalties)
 
 
-def advance_step_flashattn(num_seqs: int, num_queries: int, block_size: int,
-                           input_tokens: torch.Tensor,
-                           sampled_token_ids: torch.Tensor,
-                           input_positions: torch.Tensor,
-                           seq_lens: torch.Tensor, slot_mapping: torch.Tensor,
-                           block_tables: torch.Tensor) -> None:
-    """Advance a step on GPU for existing inputs for a multi-step runner"""
-    return torch.ops._C.advance_step_flashattn(num_seqs, num_queries,
-                                               block_size, input_tokens,
-                                               sampled_token_ids,
-                                               input_positions, seq_lens,
-                                               slot_mapping, block_tables)
-
-
-def advance_step_flashinfer(num_seqs: int, num_queries: int, block_size: int,
-                            input_tokens: torch.Tensor,
-                            sampled_token_ids: torch.Tensor,
-                            input_positions: torch.Tensor,
-                            seq_lens: torch.Tensor, slot_mapping: torch.Tensor,
-                            block_tables: torch.Tensor,
-                            paged_kv_indices: torch.Tensor,
-                            paged_kv_indptr: torch.Tensor,
-                            paged_kv_last_page_len: torch.Tensor,
-                            block_table_bound: torch.Tensor) -> None:
-
-    return torch.ops._C.advance_step_flashinfer(
-        num_seqs, num_queries, block_size, input_tokens, sampled_token_ids,
-        input_positions, seq_lens, slot_mapping, block_tables,
-        paged_kv_indices, paged_kv_indptr, paged_kv_last_page_len,
-        block_table_bound)
-
-
 # fused quant layer norm ops
 def rms_norm_dynamic_per_token_quant(
     input: torch.Tensor,
@@ -452,6 +420,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     def _gptq_marlin_gemm_fake(a: torch.Tensor,
                                c: Optional[torch.Tensor],
                                b_q_weight: torch.Tensor,
+                               b_bias: Optional[torch.Tensor],
                                b_scales: torch.Tensor,
                                global_scale: Optional[torch.Tensor],
                                b_zeros: Optional[torch.Tensor],
@@ -1048,6 +1017,7 @@ def awq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
 def gptq_marlin_gemm(a: torch.Tensor,
                      c: Optional[torch.Tensor],
                      b_q_weight: torch.Tensor,
+                     b_bias: Optional[torch.Tensor],
                      b_scales: torch.Tensor,
                      global_scale: Optional[torch.Tensor],
                      b_zeros: Optional[torch.Tensor],
@@ -1062,7 +1032,7 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      use_atomic_add: bool = False,
                      use_fp32_reduce: bool = False,
                      is_zp_float: bool = False) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_scales,
+    return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_bias, b_scales,
                                          global_scale, b_zeros, g_idx, perm,
                                          workspace, b_q_type.id, size_m,
                                          size_n, size_k, is_k_full,
@@ -1540,7 +1510,9 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
 
 
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
-                          b_qweight: torch.Tensor, b_scales: torch.Tensor,
+                          b_qweight: torch.Tensor,
+                          b_bias: Optional[torch.Tensor],
+                          b_scales: torch.Tensor,
                           global_scale: Optional[torch.Tensor],
                           b_qzeros: Optional[torch.Tensor],
                           g_idx: Optional[torch.Tensor],
@@ -1556,11 +1528,11 @@ def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
                           use_fp32_reduce: bool,
                           is_zp_float: bool) -> torch.Tensor:
     return torch.ops._moe_C.moe_wna16_marlin_gemm(
-        input, output, b_qweight, b_scales, global_scale, b_qzeros, g_idx,
-        perm, workspace, sorted_token_ids, expert_ids, num_tokens_past_padded,
-        topk_weights, moe_block_size, top_k, mul_topk_weights, is_ep,
-        b_q_type.id, size_m, size_n, size_k, is_k_full, use_atomic_add,
-        use_fp32_reduce, is_zp_float)
+        input, output, b_qweight, b_bias, b_scales, global_scale, b_qzeros,
+        g_idx, perm, workspace, sorted_token_ids, expert_ids,
+        num_tokens_past_padded, topk_weights, moe_block_size, top_k,
+        mul_topk_weights, is_ep, b_q_type.id, size_m, size_n, size_k,
+        is_k_full, use_atomic_add, use_fp32_reduce, is_zp_float)
 
 
 if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):

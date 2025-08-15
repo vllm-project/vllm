@@ -37,3 +37,21 @@ def end_monitoring_torch_compile(vllm_config: VllmConfig):
         if context_manager is not None:
             context_manager.__exit__(None, None, None)
             context_manager = None
+
+
+cudagraph_capturing_enabled: bool = True
+
+
+def validate_cudagraph_capturing_enabled():
+    # used to monitor whether an cudagraph capturing is legal at runtime.
+    # should be called before any cudagraph capturing.
+    # if an illegal cudagraph capturing happens, raise an error.
+    global cudagraph_capturing_enabled
+    if not cudagraph_capturing_enabled:
+        raise RuntimeError("CUDA graph capturing detected at an inappropriate "
+                           "time. This operation is currently disabled.")
+
+
+def set_cudagraph_capturing_enabled(enabled: bool):
+    global cudagraph_capturing_enabled
+    cudagraph_capturing_enabled = enabled
