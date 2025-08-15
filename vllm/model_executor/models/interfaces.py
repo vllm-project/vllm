@@ -295,6 +295,46 @@ def _supports_lora(model: Union[type[object], object]) -> bool:
 
 
 @runtime_checkable
+class SupportsTokenformer(Protocol):
+    """The interface required for all models that support Tokenformer."""
+
+    supports_tokenformer: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports Tokenformer operations.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+
+# We can't use runtime_checkable with ClassVar for issubclass checks
+# so we need to treat the class as an instance and use isinstance instead
+@runtime_checkable
+class _SupportsTokenformerType(Protocol):
+    supports_tokenformer: Literal[True]
+
+
+@overload
+def supports_tokenformer(model: type[object]) -> TypeIs[type[SupportsTokenformer]]:
+    ...
+
+
+@overload
+def supports_tokenformer(model: object) -> TypeIs[SupportsTokenformer]:
+    ...
+
+
+def supports_tokenformer(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsTokenformer]], TypeIs[SupportsTokenformer]]:
+    if isinstance(model, type):
+        return isinstance(model, _SupportsTokenformerType)
+
+    return isinstance(model, SupportsTokenformer)
+
+
+@runtime_checkable
 class SupportsPP(Protocol):
     """The interface required for all models that support pipeline parallel."""
 
