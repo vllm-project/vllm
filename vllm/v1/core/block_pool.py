@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 from vllm.distributed.kv_events import (AllBlocksCleared, BlockRemoved,
                                         BlockStored, KVCacheEvent)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
                                          FreeKVCacheBlockQueue, KVCacheBlock,
+                                         WorkloadAwareFreeKVCacheBlockQueue,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens)
 from vllm.v1.request import Request
@@ -30,15 +32,17 @@ class BlockPool:
         enable_kv_cache_events: Whether to enable kv cache events.
     """
 
-    def __init__(
-        self,
-        num_gpu_blocks: int,
-        enable_caching: bool,
-        enable_kv_cache_events: bool = False,
-    ):
+    def __init__(self,
+                 num_gpu_blocks: int,
+                 enable_caching: bool,
+                 enable_kv_cache_events: bool = False,
+                 enable_wa_policy: bool = False,
+                 wa_offline_param_path: Optional[str] = ""):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
+        self.free_block_queue: Union[FreeKVCacheBlockQueue,
+                                     WorkloadAwareFreeKVCacheBlockQueue]
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
@@ -46,7 +50,12 @@ class BlockPool:
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
         # enabled).
-        self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
+        if enable_wa_policy:
+            print("[pool] Enabling WA block queue")
+            self.free_block_queue = WorkloadAwareFreeKVCacheBlockQueue(
+                self.blocks, wa_offline_param_path)
+        else:
+            self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
         # {block_hash: {block ID: block}}. A cached block is
         # a full block with a block hash that can be used for prefix caching.
@@ -199,14 +208,15 @@ class BlockPool:
                     if request.lora_request else None,
                 ))
 
-    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+    def get_new_blocks(self, num_blocks: int,
+                       type_info: Optional[str]) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
 
         Args:
             num_blocks: The number of blocks to allocate.
-
+            type_info: The request type corresponding to these blocks
         Returns:
             A list of new block.
         """
@@ -214,7 +224,8 @@ class BlockPool:
             raise ValueError(
                 f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(
+            num_blocks, type_info=type_info)
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
@@ -274,6 +285,7 @@ class BlockPool:
             for block in blocks_per_group:
                 # ref_cnt=0 means this block is in the free list (i.e. eviction
                 # candidate), so remove it.
+                block.last_accessed = time.time()
                 if block.ref_cnt == 0 and not block.is_null:
                     self.free_block_queue.remove(block)
                 block.ref_cnt += 1

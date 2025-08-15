@@ -59,6 +59,10 @@ class Scheduler(SchedulerInterface):
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
 
+        self.enable_wa_policy = vllm_config.cache_config.enable_wa_policy
+        self.wa_offline_param_path = (
+            vllm_config.cache_config.wa_offline_param_path)
+
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
         # by update_from_outputs(). This is currently used in the multi-engine
@@ -159,7 +163,8 @@ class Scheduler(SchedulerInterface):
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
-        )
+            enable_wa_policy=self.enable_wa_policy,
+            wa_offline_param_path=self.wa_offline_param_path)
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
     def schedule(self) -> SchedulerOutput:
