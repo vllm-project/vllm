@@ -234,6 +234,7 @@ class Glm4vVisionAttention(nn.Module):
             total_num_kv_heads=num_heads,
             bias=False,
             quant_config=quant_config,
+            # Change qkv prefix to align with GLM-4.5V-FP8 quantization config
             prefix=f"{prefix}.qkv_proj" if quant_config else f"{prefix}.qkv",
         )
         self.proj = RowParallelLinear(
