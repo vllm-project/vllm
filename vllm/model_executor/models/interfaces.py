@@ -121,11 +121,11 @@ class SupportsMultiModal(Protocol):
 
 
 @runtime_checkable
-class SupportsInputEmbeddingsAndPositions(Protocol):
+class SupportsMultiModalPruning(Protocol):
     """The interface required for models that support returning both input embeddings and positions.
     Model may require custom positions for dynamic pruning of multimodal embeddings.
     """
-    supports_input_embeddings_and_positions: ClassVar[Literal[True]] = True
+    supports_multimodal_pruning: ClassVar[Literal[True]] = True
 
     def get_input_embeddings_and_positions(
         self,
@@ -196,22 +196,22 @@ def supports_multimodal_raw_input(
 
 
 @overload
-def supports_input_embeddings_and_positions(
-        model: type[object]) -> TypeIs[type[SupportsInputEmbeddingsAndPositions]]:
+def supports_multimodal_pruning(
+        model: type[object]) -> TypeIs[type[SupportsMultiModalPruning]]:
     ...
 
 
 @overload
-def supports_input_embeddings_and_positions(
-        model: object) -> TypeIs[SupportsInputEmbeddingsAndPositions]:
+def supports_multimodal_pruning(
+        model: object) -> TypeIs[SupportsMultiModalPruning]:
     ...
 
 
-def supports_input_embeddings_and_positions(
+def supports_multimodal_pruning(
     model: Union[type[object], object],
-) -> Union[TypeIs[type[SupportsInputEmbeddingsAndPositions]],
-           TypeIs[SupportsInputEmbeddingsAndPositions]]:
-    return getattr(model, "supports_input_embeddings_and_positions", False)
+) -> Union[TypeIs[type[SupportsMultiModalPruning]],
+           TypeIs[SupportsMultiModalPruning]]:
+    return getattr(model, "supports_multimodal_pruning", True)
 
 
 @runtime_checkable

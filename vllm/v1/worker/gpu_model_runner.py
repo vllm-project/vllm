@@ -35,7 +35,7 @@ from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
-                                                   supports_input_embeddings_and_positions,
+                                                   supports_multimodal_pruning,
                                                    supports_transcription)
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
@@ -1185,6 +1185,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> list[torch.Tensor]:
         mm_embeds: list[torch.Tensor] = []
         for req_id in self.input_batch.req_ids:
+            mm_embeds_req: list[torch.Tensor] = []
+
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
             req_state = self.requests[req_id]
@@ -1223,7 +1225,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     encoder_output[start_idx:end_idx],
                     is_embed=is_embed,
                 )
-                mm_embeds.append(mm_embeds_item)
+                mm_embeds_req.append(mm_embeds_item)
+
+            # We are done with all mm_embeds for a given request
+            # Now it's time to recompute mrope
+            if supports_multimodal_pruning(self.model):
+                print("Recomputing mrope")
+                mm_embeds_req, self.requests[req_id].mrope_positions, \
+                    self.requests[req_id].mrope_position_delta = self.model.recompute_mrope_positions(
+                        self.requests[req_id].prompt_token_ids, mm_embeds_req
+                    )
+                print(f"{self.requests[req_id].mrope_position_delta=}")
+                print(f"{self.requests[req_id].mrope_positions[0].tolist()}")
+                print(f"{self.requests[req_id].mrope_positions[1].tolist()}")
+                print(f"{self.requests[req_id].mrope_positions[2].tolist()}")
+
+            mm_embeds.extend(mm_embeds_req)
         return mm_embeds
 
     def get_model(self) -> nn.Module:
@@ -1509,49 +1526,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            
-            # Check if the model supports the new mixin for getting both embeddings and positions
-            if supports_input_embeddings_and_positions(self.model):
-                print(f"Before get_input_embeddings_and_positions")
-                print(f"{num_scheduled_tokens=}")
-                print(f"{num_input_tokens=}")
-                print(f"{self.input_batch.req_ids=}")
-
-                inputs_embeds_scheduled, positions_scheduled, mrope_position_delta = self.model.get_input_embeddings_and_positions(
-                    input_ids=self.input_ids[:num_scheduled_tokens],
-                    multimodal_embeddings=mm_embeds or None,
-                )
-                
-                # Update mrope positions if using MRoPE
-                if positions_scheduled is not None:
-                    if self.uses_mrope:
-                        positions = positions_scheduled[:, :num_scheduled_tokens]
-                        # self.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
-                        # self.mrope_positions_cpu[:, :num_scheduled_tokens].copy_(positions_scheduled.cpu())
-                        # self.mrope_positions_np[:, :num_scheduled_tokens] = self.mrope_positions_cpu[:, :num_scheduled_tokens].numpy()
-
-                        # ekhvedchenia: What request we should update?
-                        # ekhvedchenia: For now let's update all existing but that is probably incorrect
-                        for i, req_id in enumerate(self.input_batch.req_ids):
-                            req = self.requests[req_id]
-                            req.mrope_positions[:, :num_scheduled_tokens].copy_(positions_scheduled)
-                            req.mrope_position_delta = mrope_position_delta
-                            # print(f"Updating positions in req")
-                            # print(f"{req_id=}", f"{id(req)=}", f"{os.getpid()=}")
-                            # print(f"{req.mrope_position_delta=}")
-                            # print(f"{req.mrope_positions.shape=}")
-                            # print(req.mrope_positions[0].tolist())
-                            # print(req.mrope_positions[1].tolist())
-                            # print(req.mrope_positions[2].tolist())
-
-                    else:
-                        positions = positions_scheduled[:num_scheduled_tokens]
-                        # self.positions[:num_scheduled_tokens].copy(positions_scheduled)
-            else:
-                inputs_embeds_scheduled = self.model.get_input_embeddings(
-                    input_ids=self.input_ids[:num_scheduled_tokens],
-                    multimodal_embeddings=mm_embeds or None,
-                )
+            inputs_embeds_scheduled = self.model.get_input_embeddings(
+                input_ids=self.input_ids[:num_scheduled_tokens],
+                multimodal_embeddings=mm_embeds or None,
+            )
 
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds[:num_scheduled_tokens].copy_(
