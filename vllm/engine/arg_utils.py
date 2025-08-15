@@ -706,7 +706,7 @@ class EngineArgs:
                                  **cache_kwargs["enable_wa_policy"])
         cache_group.add_argument("--wa-offline-param-path",
                                  **cache_kwargs["wa_offline_param_path"])
-        
+
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)
         multimodal_group = parser.add_argument_group(
@@ -1122,7 +1122,6 @@ class EngineArgs:
             enable_wa_policy=self.enable_wa_policy,
             wa_offline_param_path=self.wa_offline_param_path,
         )
-
 
         ray_runtime_env = None
         if is_ray_initialized():
