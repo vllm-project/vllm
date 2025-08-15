@@ -1017,6 +1017,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 src_start = num_computed_tokens
                 src_end = num_computed_tokens + prompt_part_len
 
+                print("_calc_mrope_positions (prompt_part_len > 0)")
+                print(f"{req.mrope_positions[0,src_start:src_end].tolist()}")
+                print(f"{req.mrope_positions[1,dst_start:dst_end].tolist()}")
+                print(f"{req.mrope_positions[2,src_start:src_end].tolist()}")
+
                 self.mrope_positions_cpu[:, dst_start:dst_end] = \
                     req.mrope_positions[:,src_start:src_end]
 
@@ -1027,7 +1032,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 dst_start = mrope_pos_ptr
                 dst_end = mrope_pos_ptr + completion_part_len
 
-                print("_calc_mrope_positions")
+                print("_calc_mrope_positions (completion_part_len > 0)")
                 print(f"{dst_start=}")
                 print(f"{num_computed_tokens=}")
                 print(f"{prompt_part_len=}")
@@ -1519,11 +1524,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)
         num_input_tokens += num_pad
 
-        if self.uses_mrope:
-            positions = self.mrope_positions[:, :num_input_tokens]
-        else:
-            positions = self.positions[:num_input_tokens]
-
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
         if self.is_multimodal_model:
@@ -1557,6 +1557,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
             model_mm_kwargs = {}
+
+        if self.uses_mrope:
+            positions = self.mrope_positions[:, :num_input_tokens]
+        else:
+            positions = self.positions[:num_input_tokens]
 
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
