@@ -28,7 +28,7 @@ from typing import Any, Optional, Union
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers.models.glm4_moe import Glm4MoeConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -41,7 +41,6 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -100,7 +99,7 @@ class Glm4MoE(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Glm4MoeConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         enable_eplb: bool = False,
@@ -118,13 +117,15 @@ class Glm4MoE(nn.Module):
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
                              "Only silu is supported for now.")
-
-        self.gate = ReplicatedLinear(config.hidden_size,
-                                     config.n_routed_experts,
-                                     bias=False,
-                                     quant_config=None,
-                                     prefix=f"{prefix}.gate")
-
+        # NOTE In the transformers implementation, the gate isn't an nn.Linear,
+        # so we cannot use ReplicatedLinear here.
+        # See: https://github.com/huggingface/transformers/blob/v4.55.1/src/transformers/models/glm4_moe/modeling_glm4_moe.py#L260
+        self.gate = nn.Linear(
+            config.hidden_size,
+            config.n_routed_experts,
+            bias=False,
+            dtype=torch.float32,
+        )
         self.gate.e_score_correction_bias = nn.Parameter(
             torch.empty(config.n_routed_experts, dtype=torch.float32))
 
@@ -180,7 +181,7 @@ class Glm4MoE(nn.Module):
 
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
-        router_logits, _ = self.gate(hidden_states)
+        router_logits = self.gate(hidden_states.to(dtype=torch.float32))
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits) * self.routed_scaling_factor
@@ -197,7 +198,7 @@ class Glm4MoeAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Glm4MoeConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -296,7 +297,7 @@ class Glm4MoeDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Glm4MoeConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -371,7 +372,13 @@ class Glm4MoeDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": -1,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    })
 class Glm4MoeModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -600,8 +607,6 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
                                           quant_config=quant_config)
         else:
             self.lm_head = PPMissingLayer()
-        if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
@@ -682,7 +687,7 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         return self.model.get_expert_mapping()
 
 
-def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
+def get_spec_layer_idx_from_weight_name(config: Glm4MoeConfig,
                                         weight_name: str) -> Optional[int]:
     if hasattr(config,
                "num_nextn_predict_layers") and (config.num_nextn_predict_layers

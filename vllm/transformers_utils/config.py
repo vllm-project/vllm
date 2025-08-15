@@ -32,9 +32,9 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              EAGLEConfig, JAISConfig,
                                              KimiVLConfig, MedusaConfig,
-                                             MllamaConfig, MLPSpeculatorConfig,
+                                             MLPSpeculatorConfig,
                                              Nemotron_Nano_VL_Config,
-                                             NemotronConfig, NVLM_D_Config,
+                                             NemotronConfig, OvisConfig,
                                              RWConfig, SpeculatorsConfig,
                                              Step3TextConfig, Step3VLConfig,
                                              UltravoxConfig)
@@ -67,10 +67,6 @@ def _get_hf_token() -> Optional[str]:
     return None
 
 
-_CONFIG_REGISTRY_OVERRIDE_HF: dict[str, type[PretrainedConfig]] = {
-    "mllama": MllamaConfig
-}
-
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
     "deepseek_vl_v2": DeepseekVLV2Config,
@@ -84,15 +80,28 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "eagle": EAGLEConfig,
     "speculators": SpeculatorsConfig,
     "nemotron": NemotronConfig,
-    "NVLM_D": NVLM_D_Config,
+    "ovis": OvisConfig,
     "ultravox": UltravoxConfig,
     "step3_vl": Step3VLConfig,
     "step3_text": Step3TextConfig,
-    **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
+}
+
+_AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
+    "internvl_chat": {
+        "has_no_defaults_at_init": True
+    },
+    # transformers regards mllama as is_encoder_decoder=False
+    # vllm needs is_encoder_decoder=True to enable cross-attention
+    "mllama": {
+        "is_encoder_decoder": True
+    },
+    "NVLM_D": {
+        "has_no_defaults_at_init": True
+    },
 }
 
 
@@ -252,7 +261,8 @@ def _uses_mrope(config: PretrainedConfig) -> bool:
 
 def uses_mrope(config: PretrainedConfig) -> bool:
     """Detect if the model with this config uses M-ROPE."""
-    return _uses_mrope(config) or thinker_uses_mrope(config)
+    return _uses_mrope(config) or _uses_mrope(
+        config.get_text_config()) or thinker_uses_mrope(config)
 
 
 def thinker_uses_mrope(config: PretrainedConfig) -> bool:
@@ -270,11 +280,32 @@ def thinker_uses_mrope(config: PretrainedConfig) -> bool:
 
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
     """Detect if the model with this config is used as an encoder/decoder."""
-    text_config = getattr(config, "text_config", None)
-    if text_config is not None:
-        return is_encoder_decoder(text_config)
 
-    return getattr(config, "is_encoder_decoder", False)
+    def _is_encoder_decoder(config: PretrainedConfig) -> bool:
+        return getattr(config, "is_encoder_decoder", False)
+
+    return (_is_encoder_decoder(config)
+            or _is_encoder_decoder(config.get_text_config()))
+
+
+def is_interleaved(config: PretrainedConfig) -> bool:
+    """
+    Detect if the model with this config is used with interleaved attention.
+    """
+    text_config = config.get_text_config()
+    if layer_types := getattr(text_config, "layer_types", None):
+        interleaved_types = {"full_attention", "sliding_attention"}
+        return interleaved_types.issubset(layer_types)
+    return False
+
+
+def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
+    """
+    Update kwargs for AutoConfig initialization based on model_type
+    """
+    if model_type in _AUTO_CONFIG_KWARGS_OVERRIDES:
+        kwargs.update(_AUTO_CONFIG_KWARGS_OVERRIDES[model_type])
+    return kwargs
 
 
 def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
@@ -283,7 +314,6 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
         if hasattr(config, old_attr):
             if not hasattr(config, new_attr):
                 config.update({new_attr: getattr(config, old_attr)})
-            delattr(config, old_attr)
             logger.debug("Remapped config attribute '%s' to '%s'", old_attr,
                          new_attr)
     return config
@@ -394,15 +424,14 @@ def get_config(
             )
         else:
             try:
+                kwargs = _maybe_update_auto_config_kwargs(
+                    kwargs, model_type=model_type)
                 config = AutoConfig.from_pretrained(
                     model,
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
                     token=_get_hf_token(),
-                    # some old custom model's config needs
-                    # `has_no_defaults_at_init=True` to work.
-                    has_no_defaults_at_init=trust_remote_code,
                     **kwargs,
                 )
             except ValueError as e:
@@ -431,6 +460,18 @@ def get_config(
             config_dict["max_position_embeddings"] = max_position_embeddings
 
         config = adapt_config_dict(config_dict)
+
+        # Mistral configs may define sliding_window as list[int]. Convert it
+        # to int and add the layer_types list[str] to make it HF compatible
+        if ((sliding_window := getattr(config, "sliding_window", None))
+                and isinstance(sliding_window, list)):
+            pattern_repeats = config.num_hidden_layers // len(sliding_window)
+            layer_types = sliding_window * pattern_repeats
+            config.layer_types = [
+                "full_attention" if layer_type is None else "sliding_attention"
+                for layer_type in layer_types
+            ]
+            config.sliding_window = next(filter(None, sliding_window), None)
     else:
         supported_formats = [
             fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO

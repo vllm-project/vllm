@@ -401,7 +401,7 @@ def merge_multimodal_embeddings_from_map(
     """
     flattened_embeddings = _flatten_embeddings(multimodal_embeddings)
     inputs_embeds[placeholder_map.dest] = flattened_embeddings[
-        placeholder_map.src]
+        placeholder_map.src].to(dtype=inputs_embeds.dtype)
     return inputs_embeds
 
 
@@ -421,7 +421,8 @@ def _merge_multimodal_embeddings(
     flattened = _flatten_embeddings(multimodal_embeddings)
     try:
         # This is equivalent to: inputs_embeds[is_multimodal] = flattened.
-        inputs_embeds.masked_scatter_(is_multimodal.unsqueeze(-1), flattened)
+        inputs_embeds.masked_scatter_(is_multimodal.unsqueeze(-1),
+                                      flattened.to(dtype=inputs_embeds.dtype))
     except RuntimeError as e:
         num_expected_tokens = is_multimodal.sum().item()
         assert isinstance(num_expected_tokens, int)
@@ -534,16 +535,10 @@ class PPMissingLayer(torch.nn.Identity):
 
     def __init__(self, *args, **kwargs):
         super().__init__()
-        self.return_tuple = kwargs.get("return_tuple", False)
 
     def forward(self, *args, **kwargs):
-        """
-        Return the first arg from args or the first value from kwargs.
-
-        Wraps the input in a tuple if `self.return_tuple` is True.
-        """
-        input = args[0] if args else next(iter(kwargs.values()))
-        return (input, ) if self.return_tuple else input
+        """Return the first arg from args or the first value from kwargs."""
+        return args[0] if args else next(iter(kwargs.values()))
 
 
 _CPU_OFFLOAD_BYTES = 0
@@ -741,7 +736,23 @@ def cast_overflow_tensors(
     return tensors
 
 
-def fast_topk(values, topk, dim):
+def fast_topk(values: torch.Tensor, topk: int,
+              dim: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Optimized topk implementation that uses torch.max for k=1 case.
+    
+    This function provides better performance for the common case of k=1
+    by using torch.max instead of the more general torch.topk.
+    
+    Args:
+        values: Input tensor to find top-k values from
+        topk: Number of top values to return (k). Must be > 0.
+        dim: Dimension along which to compute topk
+        
+    Returns:
+        Tuple of (values, indices) where values are the top-k values
+        and indices are their corresponding indices in the input tensor
+    """
     if topk == 1:
         # Use max along the specified dimension to get both value and index
         return torch.max(values, dim=dim, keepdim=True)

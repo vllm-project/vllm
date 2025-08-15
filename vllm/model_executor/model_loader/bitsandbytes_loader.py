@@ -12,6 +12,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 import torch
 from huggingface_hub import HfApi
+from packaging import version
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
@@ -193,7 +194,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         try:
             import bitsandbytes
 
-            if bitsandbytes.__version__ < "0.46.1":
+            if version.parse(
+                    bitsandbytes.__version__) < version.parse("0.46.1"):
                 raise ImportError("bitsandbytes version is wrong. Please "
                                   "install bitsandbytes>=0.46.1.")
         except ImportError as err:
@@ -425,14 +427,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             elif isinstance(module, FusedMoE) and hasattr(
                     module.quant_method, "quant_config"):
                 # TODO: support FusedMoE with prequant and 8bit.
-                if self.pre_quant:
+                if self.pre_quant and self.load_8bit:
                     raise ValueError(
-                        "Prequant BitsAndBytes models with FusedMoE is not "
-                        "supported yet.")
-                if self.load_8bit:
-                    raise ValueError(
-                        "BitsAndBytes 8bit quantization with FusedMoE is not "
-                        "supported yet.")
+                        "Prequant BitsAndBytes 8bit models with FusedMoE "
+                        "is not supported yet.")
                 # Get the corresponding weight name using module name and
                 # expert_params_mapping.
 

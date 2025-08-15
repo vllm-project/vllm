@@ -21,7 +21,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
                                                               update_metadata)
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    extra_groups_for_head_shards, get_mamba_state_shape)
+    MambaStateShapeCalculator)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
@@ -36,7 +36,7 @@ from vllm.model_executor.models.mamba_cache import MambaCacheParams
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
-from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionMetadata
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
 # Added by the IBM Team, 2024
 
@@ -278,8 +278,9 @@ class MambaMixer2(MambaBase, CustomOp):
             # - for TP we shard conv_dim by sharding on n_groups,
             # - but if n_groups cannot divide tp_size, we need to
             #   extend some extra groups
-            self.n_groups = n_groups + extra_groups_for_head_shards(
+            groups = MambaStateShapeCalculator.extra_groups_for_head_shards(
                 n_groups, self.tp_size)
+            self.n_groups = n_groups + groups
 
         self.conv_dim = intermediate_size + 2 * self.n_groups * ssm_state_size
         self.conv1d = ColumnParallelLinear(
@@ -472,12 +473,12 @@ class MambaMixer2(MambaBase, CustomOp):
                 conv_state = self_kv_cache[0].transpose(-1, -2)
                 ssm_state = self_kv_cache[1]
                 state_indices_tensor = attn_metadata.state_indices_tensor
-                has_initial_states_p = attn_metadata.has_initial_states
+                has_initial_states_p = attn_metadata.has_initial_states_p
                 prep_initial_states = attn_metadata.prep_initial_states
                 chunk_size = attn_metadata.chunk_size
-                seq_idx_p = attn_metadata.seq_idx
-                chunk_indices_p = attn_metadata.chunk_indices
-                chunk_offsets_p = attn_metadata.chunk_offsets
+                seq_idx_p = attn_metadata.seq_idx_p
+                chunk_indices_p = attn_metadata.chunk_indices_p
+                chunk_offsets_p = attn_metadata.chunk_offsets_p
         else:
             conv_state = mamba_cache_params.conv_state
             ssm_state = mamba_cache_params.ssm_state
@@ -732,7 +733,7 @@ class MambaMixer2(MambaBase, CustomOp):
         output[:num_actual_tokens], _ = self.out_proj(hidden_states)
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
-        return get_mamba_state_shape(
+        return MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=self.intermediate_size,
             tp_world_size=get_tensor_model_parallel_world_size(),
             n_groups=self.n_groups,

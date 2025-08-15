@@ -337,6 +337,10 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.fuyu_vllm_to_hf_output,
         num_logprobs=10,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        # FIXME(Isotr0py): This model is broken in Transformers v4.54.1, we
+        # should enable this again after the fix is released:
+        # https://github.com/huggingface/transformers/pull/39915
+        marks=[pytest.mark.skip("HF model is broken")],
     ),
     "gemma3": VLMTestInfo(
         models=["google/gemma-3-4b-it"],
@@ -557,7 +561,7 @@ VLM_TEST_SETTINGS = {
         get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmo_26_patch_hf_runner,
-        # FIXME: https://huggingface.co/openbmb/MiniCPM-V-2_6/discussions/55
+        # FIXME: https://huggingface.co/openbmb/MiniCPM-o-2_6/discussions/49
         marks=[pytest.mark.skip("HF import fails")],
     ),
     "minicpmv_26": VLMTestInfo(
@@ -570,8 +574,6 @@ VLM_TEST_SETTINGS = {
         get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmv_26_patch_hf_runner,
-        # FIXME: https://huggingface.co/openbmb/MiniCPM-V-2_6/discussions/55
-        marks=[pytest.mark.skip("HF import fails")],
     ),
     "minimax_vl_01": VLMTestInfo(
         models=["MiniMaxAI/MiniMax-VL-01"],
@@ -606,18 +608,6 @@ VLM_TEST_SETTINGS = {
         hf_model_kwargs={"llm_attn_implementation": "sdpa"},
         patch_hf_runner=model_utils.ovis_patch_hf_runner,
         marks=[large_gpu_mark(min_gb=32)],
-    ),
-    "ovis1_6": VLMTestInfo(
-        models=["AIDC-AI/Ovis1.6-Llama3.2-3B"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are a helpful and honest multimodal assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", # noqa: E501
-        img_idx_to_prompt=lambda idx: "<image>\n", # noqa: E501
-        max_model_len=4096,
-        max_num_seqs=2,
-        dtype="half",
-        # use sdpa mode for hf runner since ovis2 didn't work with flash_attn
-        hf_model_kwargs={"llm_attn_implementation": "sdpa"},
-        patch_hf_runner=model_utils.ovis_patch_hf_runner,
     ),
     "ovis2": VLMTestInfo(
         models=["AIDC-AI/Ovis2-1B"],
