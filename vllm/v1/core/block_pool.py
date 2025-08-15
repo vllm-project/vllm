@@ -130,13 +130,24 @@ class BlockPool:
         assert len(block_hashes) >= num_cached_blocks
         new_block_hashes = block_hashes[num_cached_blocks:]
 
+        regenerate_hash = False
         # Update the new blocks with the block hashes through the chain.
         if num_cached_blocks == 0:
             prev_block_hash_value = None
         else:
             prev_block = blocks[num_cached_blocks - 1]
-            assert prev_block.block_hash is not None
-            prev_block_hash_value = prev_block.block_hash.get_hash_value()
+            if prev_block.block_hash is None:
+                # This will happen for the chunked local attention,
+                # when the new block starts from the begining of a chunk,
+                # previous block is not cached but as computed (null block)
+                # We need to generate the hash key from beginning tokens
+                # (e.g. window of 4, block of 2,
+                # [0,1], [2, 3] [4,5] will be null, null, new block),
+                # the hash key will be re-generated as of hash(0,1,2,3,4,5)
+                prev_block_hash_value = None
+                regenerate_hash = True
+            else:
+                prev_block_hash_value = prev_block.block_hash.get_hash_value()
 
         parent_block_hash = prev_block_hash_value
         new_hashes: Optional[list[int]] = ([] if self.enable_kv_cache_events
@@ -156,14 +167,15 @@ class BlockPool:
                 # Otherwise compute the block hash and cache it in the request
                 # in case it will be preempted in the future.
                 blk_idx = num_cached_blocks + i
-                start_token_idx = blk_idx * block_size
+                start_token_idx = 0 if regenerate_hash else blk_idx * block_size
                 end_token_idx = (blk_idx + 1) * block_size
                 block_tokens = request.all_token_ids[
                     start_token_idx:end_token_idx]
-                assert len(block_tokens) == block_size, (
-                    f"Expected {block_size} tokens, got "
-                    f"{len(block_tokens)} at {blk_idx}th block for request "
-                    f"{request.request_id}({request})")
+                if not regenerate_hash:
+                    assert len(block_tokens) == block_size, (
+                        f"Expected {block_size} tokens, got "
+                        f"{len(block_tokens)} at {blk_idx}th block for request "
+                        f"{request.request_id}({request})")
 
                 # Generate extra keys for multi-modal inputs. Note that since
                 # we reach to this branch only when the block is completed with
