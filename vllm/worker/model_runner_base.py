@@ -1,22 +1,27 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import dataclasses
+import pickle
 from abc import ABC, abstractmethod
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Type,
-                    TypeVar)
+from datetime import datetime
+from functools import wraps
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Generic,
+    Iterable,
+    List,
+    Optional,
+    Type,
+    TypeVar,
+)
 
 import torch
-import torch.nn as nn
+from torch import is_tensor
 
-from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.model_executor.models.interfaces import supports_transcription
-from vllm.model_executor.models.interfaces_base import (
-    is_pooling_model, is_text_generation_model)
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
-from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
@@ -25,12 +30,12 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-T = TypeVar('T', bound="BroadcastableModelInput")
+T = TypeVar("T", bound="BroadcastableModelInput")
 
 
 def _add_attn_metadata_broadcastable_dict(
-        tensor_dict: Dict[str, Any],
-        attn_metadata: Optional["AttentionMetadata"]) -> None:
+    tensor_dict: Dict[str, Any], attn_metadata: Optional["AttentionMetadata"]
+) -> None:
     """
     Helper method to update tensor_dict with broadcastable
     AttentionMetadata fields.
@@ -50,11 +55,9 @@ def _init_attn_metadata_from_tensor_dict(
     # Extract the fields used to create AttentionMetadata.
     valid_attn_kwargs = {}
     for field in dataclasses.fields(attn_backend.get_metadata_cls()):
-        if field.name in tensor_dict:
-            if field.name == "input_positions":
-                valid_attn_kwargs[field.name] = tensor_dict[field.name]
-            else:
-                valid_attn_kwargs[field.name] = tensor_dict.pop(field.name)
+        val = tensor_dict.pop(field.name, None)
+        if val is not None:
+            valid_attn_kwargs[field.name] = val
 
     attn_metadata = attn_backend.make_metadata(**valid_attn_kwargs)
     tensor_dict["attn_metadata"] = attn_metadata
@@ -62,7 +65,8 @@ def _init_attn_metadata_from_tensor_dict(
 
 
 def _init_sampling_metadata_from_tensor_dict(  # type: ignore
-        tensor_dict: Dict[str, Any]) -> Dict[str, Any]:
+    tensor_dict: Dict[str, Any]
+) -> Dict[str, Any]:
     """
     Helper method to initialize SamplingMetadata based on broadcastable
     SamplingMetadata fields.
@@ -83,20 +87,19 @@ def _init_sampling_metadata_from_tensor_dict(  # type: ignore
 
 
 def _add_sampling_metadata_broadcastable_dict(
-        tensor_dict: Dict[str, Any],
-        sampling_metadata: Optional["SamplingMetadata"]) -> None:
+    tensor_dict: Dict[str, Any], sampling_metadata: Optional["SamplingMetadata"]
+) -> None:
     """
     Helper method to update tensor_dict with broadcastable
     SamplingMetadata fields.
     """
     if sampling_metadata is not None:
-        tensor_dict["selected_token_indices"] = (
-            sampling_metadata.selected_token_indices)
+        tensor_dict["selected_token_indices"] = sampling_metadata.selected_token_indices
 
 
 def _init_frozen_model_input_from_tensor_dict(
-        frozen_model_input_cls: Type["ModelRunnerInputBase"],
-        tensor_dict: Dict[str, Any]) -> Dict[str, Any]:
+    frozen_model_input_cls: Type["ModelRunnerInputBase"], tensor_dict: Dict[str, Any]
+) -> Dict[str, Any]:
     """
     Helper method to initialize a frozen ModelInput based on broadcastable
     """
@@ -109,6 +112,63 @@ def _init_frozen_model_input_from_tensor_dict(
     frozen_model_input = frozen_model_input_cls(**valid_tensor_kwargs)
     tensor_dict["frozen_model_input"] = frozen_model_input
     return tensor_dict
+
+
+def dump_input_when_exception(
+    exclude_args: Optional[List[int]] = None, exclude_kwargs: Optional[List[str]] = None
+):
+
+    def _inner(func):
+
+        @wraps(func)
+        def _wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as err:
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                filename = f"/tmp/err_{func.__name__}_input_{timestamp}.pkl"
+                logger.info("Writing input of failed execution to %s...", filename)
+                with open(filename, "wb") as filep:
+                    dumped_inputs = {
+                        k: v
+                        for k, v in kwargs.items()
+                        if k not in (exclude_kwargs or [])
+                    }
+                    for i, arg in enumerate(args):
+                        if i not in (exclude_args or []):
+                            dumped_inputs[f"arg_{i}"] = arg
+
+                    # Only persist dtype and shape for kvcache tensors
+                    # (can be way to big otherwise)
+                    if (kv_caches := dumped_inputs.get("kv_caches")) and isinstance(
+                        kv_caches, Iterable
+                    ):
+                        dumped_inputs["kv_caches"] = [
+                            (t.dtype, t.shape) for t in kv_caches if is_tensor(t)
+                        ]
+
+                    try:
+                        pickle.dump(dumped_inputs, filep)
+                    except Exception as pickle_err:
+                        logger.warning(
+                            "Failed to pickle inputs of failed execution: %s",
+                            str(pickle_err),
+                        )
+                        raise type(err)(
+                            f"Error in model execution: " f"{str(err)}"
+                        ) from err
+
+                    logger.info(
+                        "Completed writing input of failed execution to %s.", filename
+                    )
+                raise type(err)(
+                    f"Error in model execution (input dumped to {filename}): "
+                    f"{str(err)}"
+                ) from err
+
+        return _wrapper
+
+    return _inner
 
 
 class BroadcastableModelInput(ABC):
@@ -146,17 +206,12 @@ class ModelRunnerInputBase(BroadcastableModelInput):
     ModelRunnerInputBase subclass, add their required fields, and specify how to
     serialize/deserialize a ModelInput for broadcast between workers.
     """
+
     pass
 
 
 class ModelRunnerInputBuilderBase(ABC, Generic[T]):
-    """A builder to create ModelRunnerInputBase objects.
-  """
-
-    @abstractmethod
-    def prepare(self,
-                finished_requests_ids: Optional[List[str]] = None) -> None:
-        raise NotImplementedError
+    """A builder to create ModelRunnerInputBase objects."""
 
     @abstractmethod
     def add_seq_group(self, seq_group_metadata):
@@ -178,21 +233,6 @@ class ModelRunnerBase(ABC, Generic[T]):
     Each ModelRunnerBase subclass should define a corresponding
     ModelRunnerInputBase subclass.
     """
-
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-    ) -> None:
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.cache_config = vllm_config.cache_config
-        self.lora_config = vllm_config.lora_config
-        self.load_config = vllm_config.load_config
-        self.parallel_config = vllm_config.parallel_config
-        self.scheduler_config = vllm_config.scheduler_config
-        self.device_config = vllm_config.device_config
-        self.speculative_config = vllm_config.speculative_config
-        self.observability_config = vllm_config.observability_config
 
     # Map of request_id -> generator used for seeded random sampling
     generators: Dict[str, torch.Generator] = {}
@@ -222,49 +262,13 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def get_model(self) -> nn.Module:
-        raise NotImplementedError
-
-    def get_supported_generation_tasks(self) -> list[GenerationTask]:
-        model = self.get_model()
-        supported_tasks = list[GenerationTask]()
-
-        if is_text_generation_model(model):
-            supported_tasks.append("generate")
-
-        if supports_transcription(model):
-            if model.supports_transcription_only:
-                return ["transcription"]
-
-            supported_tasks.append("transcription")
-
-        return supported_tasks
-
-    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
-        model = self.get_model()
-        if not is_pooling_model(model):
-            return []
-
-        return list(model.pooler.get_supported_tasks())
-
-    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        tasks = list[SupportedTask]()
-
-        if self.model_config.runner_type == "generate":
-            tasks.extend(self.get_supported_generation_tasks())
-        if self.model_config.runner_type == "pooling":
-            tasks.extend(self.get_supported_pooling_tasks())
-
-        return tuple(tasks)
-
+    @current_platform.inference_mode()
     def execute_model(
         self,
         model_input: T,
         kv_caches: Optional[List[torch.Tensor]],
-        intermediate_tensors: Optional[IntermediateTensors] = None,
+        intermediate_tensors: Optional[IntermediateTensors],
         num_steps: int = 1,
-        **kwargs,
     ) -> Optional[List[SamplerOutput]]:
         """
         Execute the model on the given input.
@@ -282,36 +286,3 @@ class ModelRunnerBase(ABC, Generic[T]):
                 self.generators.pop(request_id, None)
 
         return self.generators
-
-
-class ModelRunnerWrapperBase:
-    """
-    The whole point of this class is to lazily initialize the model_runner.
-    """
-
-    def __init__(
-        self,
-        model_runner: ModelRunnerBase,
-    ) -> None:
-        self.model_runner: ModelRunnerBase = model_runner
-
-    def __getattr__(self, attr):
-        return getattr(self.model_runner, attr)
-
-
-class InputProcessingError(Exception):
-    """This exception is raised when an error occurs preparing the inputs for
-    a single sequence group.
-    This allows the engine to gracefully handle errors with a single sequence
-    group without having to fail the entire batch.
-    """
-
-    def __init__(self, request_id, message):
-        """request_id is the id of the offending sequence group"""
-        self.request_id = request_id
-        self.message = message
-        super().__init__(self.message)
-
-    def __str__(self):
-        return "Failed to prepare inputs for sequence group with request id: " \
-                f"{self.request_id}, Error: {self.message}"

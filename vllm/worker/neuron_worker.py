@@ -1,88 +1,63 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A Neuron worker class."""
-import os
-from typing import List, Optional, Set, Tuple
 
+from typing import List, Optional, Tuple
+
+import torch
 import torch.distributed
 
-from vllm.config import VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment)
-from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+)
+from vllm.distributed import (
+    ensure_model_parallel_initialized,
+    init_distributed_environment,
+)
 from vllm.model_executor import set_random_seed
-from vllm.platforms import current_platform
-from vllm.platforms.neuron import NeuronFramework
 from vllm.sequence import ExecuteModelRequest
 from vllm.worker.neuron_model_runner import NeuronModelRunner
-from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
-                                     WorkerInput)
+from vllm.worker.worker_base import (
+    LocalOrDistributedWorkerBase,
+    LoraNotSupportedWorkerBase,
+    WorkerInput,
+)
 
-logger = init_logger(__name__)
 
+class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
+    """A worker class that executes the model on a group of neuron cores."""
 
-class NeuronWorker(LocalOrDistributedWorkerBase):
-    """A worker class that executes the model on a group of neuron cores.
-    """
-
-    model_runner: NeuronModelRunner
-
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 local_rank: int,
-                 rank: int,
-                 distributed_init_method: str,
-                 is_driver_worker: bool = False) -> None:
-        WorkerBase.__init__(self, vllm_config=vllm_config)
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
+        device_config: DeviceConfig,
+        cache_config: CacheConfig,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
+    ) -> None:
+        self.model_config = model_config
+        self.parallel_config = parallel_config
+        self.scheduler_config = scheduler_config
+        self.device_config = device_config
+        self.cache_config = cache_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
-        self.is_driver_worker = is_driver_worker
-        self.lora_config = vllm_config.lora_config
-
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
+
             init_cached_hf_modules()
 
-        neuron_framework = current_platform.get_neuron_framework_to_use()
-        if neuron_framework == NeuronFramework.TRANSFORMERS_NEURONX:
-            self.model_runner = self.get_tnx_model_runner(vllm_config)
-        elif neuron_framework == NeuronFramework.NEURONX_DISTRIBUTED_INFERENCE:
-            self.model_runner = self.get_neuronx_distributed_model_runner(
-                vllm_config)
-        else:
-            raise NotImplementedError(
-                "Specified framework" +
-                f" {os.environ.get('VLLM_NEURON_FRAMEWORK')}" +
-                " is either not installed or not supported." +
-                " Supported frameworks: " +
-                "[transformers-neuronx, neuronx-distributed-inference]")
-
-    def get_tnx_model_runner(self, vllm_config):
-        assert (self.lora_config
-                is None), ("LoRA is not supported for TransformersNeuronX "
-                           "framework.")
-        from vllm.worker.multi_step_neuron_model_runner import (
-            MultiStepNeuronModelRunner)
-        if self.speculative_config is not None:
-            return MultiStepNeuronModelRunner(vllm_config=vllm_config)
-        else:
-            return NeuronModelRunner(vllm_config=vllm_config)
-
-    def get_neuronx_distributed_model_runner(self, vllm_config):
-        from vllm.worker.multi_step_neuronx_distributed_model_runner import (
-            MultiStepNeuronxDistributedModelRunner)
-        from vllm.worker.neuronx_distributed_model_runner import (
-            NeuronxDistributedModelRunner)
-        if self.speculative_config is not None:
-            assert (self.lora_config
-                    is None), "LoRA is not supported for Speculative Decoding"
-            return MultiStepNeuronxDistributedModelRunner(
-                vllm_config=vllm_config)
-        else:
-            return NeuronxDistributedModelRunner(vllm_config=vllm_config)
+        self.model_runner: NeuronModelRunner = NeuronModelRunner(
+            model_config, parallel_config, scheduler_config, device_config
+        )
+        self.is_driver_worker = True
 
     def init_device(self) -> None:
         self.init_distributed_environment()
@@ -103,21 +78,19 @@ class NeuronWorker(LocalOrDistributedWorkerBase):
         # Set the number of GPU blocks to be the same as the maximum number of
         # sequences that can be processed in a single batch. This is equivalent
         # to schedule without PagedAttention.
-        num_gpu_blocks = self.scheduler_config.max_num_seqs + 1
+        num_gpu_blocks = self.scheduler_config.max_num_seqs
 
         # Swap not yet supported with Neuron backend.
         num_cpu_blocks = 0
 
         return num_gpu_blocks, num_cpu_blocks
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
-        """Initialize the KV cache.
-        """
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+        """Initialize the KV cache."""
 
         # Different values are not tested.
         assert num_cpu_blocks == 0
-        assert num_gpu_blocks == self.scheduler_config.max_num_seqs + 1
+        assert num_gpu_blocks == self.scheduler_config.max_num_seqs
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -132,9 +105,11 @@ class NeuronWorker(LocalOrDistributedWorkerBase):
 
     @torch.inference_mode()
     def prepare_worker_input(
-            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
-        return WorkerInput(num_seq_groups=len(
-            execute_model_req.seq_group_metadata_list), )
+        self, execute_model_req: ExecuteModelRequest
+    ) -> WorkerInput:
+        return WorkerInput(
+            num_seq_groups=len(execute_model_req.seq_group_metadata_list),
+        )
 
     def execute_worker(self, worker_input: WorkerInput) -> None:
         pass
@@ -149,45 +124,16 @@ class NeuronWorker(LocalOrDistributedWorkerBase):
     def init_distributed_environment(self):
         """Neuron uses transformers-neuronx for tensor parallelism.
 
-        vLLM still needs the environment initialized when TP/PP > 1
+        vLLM still needs the environment inited when TP/PP > 1
         """
         init_distributed_environment(
             world_size=1,
             rank=self.rank,
             local_rank=self.local_rank,
             distributed_init_method=self.distributed_init_method,
-            backend=current_platform.dist_backend,
+            backend="gloo",
         )
-
         ensure_model_parallel_initialized(
             1,
             1,
         )
-
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        if current_platform.use_transformers_neuronx():
-            raise NotImplementedError(
-                f"{type(self)} does not support LoRA with Neuron Framework "
-                f"Transformers NeuronX")
-        return self.model_runner.add_lora(lora_request)
-
-    def remove_lora(self, lora_id: int) -> bool:
-        if current_platform.use_transformers_neuronx():
-            raise NotImplementedError(
-                f"{type(self)} does not support LoRA with Neuron Framework "
-                f"Transformers NeuronX")
-        return self.model_runner.remove_lora(lora_id)
-
-    def pin_lora(self, lora_id: int) -> bool:
-        if current_platform.use_transformers_neuronx():
-            raise NotImplementedError(
-                f"{type(self)} does not support LoRA with Neuron Framework "
-                f"Transformers NeuronX")
-        return self.model_runner.pin_lora(lora_id)
-
-    def list_loras(self) -> Set[int]:
-        if current_platform.use_transformers_neuronx():
-            raise NotImplementedError(
-                f"{type(self)} does not support LoRA with Neuron Framework "
-                f"Transformers NeuronX")
-        return self.model_runner.list_loras()

@@ -1,11 +1,8 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 # Adapted from
 #  https://github.com/modelscope/ms-swift/blob/v2.4.2/swift/utils/module_mapping.py
 
 from dataclasses import dataclass, field
-from typing import Union
+from typing import List, Union
 
 
 @dataclass
@@ -47,26 +44,30 @@ class ModelKeys:
 
 @dataclass
 class MultiModelKeys(ModelKeys):
-    language_model: list[str] = field(default_factory=list)
-    connector: list[str] = field(default_factory=list)
+    language_model: List[str] = field(default_factory=list)
+    connector: List[str] = field(default_factory=list)
     # vision tower and audio tower
-    tower_model: list[str] = field(default_factory=list)
-    generator: list[str] = field(default_factory=list)
+    tower_model: List[str] = field(default_factory=list)
+    generator: List[str] = field(default_factory=list)
 
     @staticmethod
-    def from_string_field(language_model: Union[str, list[str]] = None,
-                          connector: Union[str, list[str]] = None,
-                          tower_model: Union[str, list[str]] = None,
-                          generator: Union[str, list[str]] = None,
-                          **kwargs) -> 'MultiModelKeys':
+    def from_string_field(
+        language_model: Union[str, List[str]] = None,
+        connector: Union[str, List[str]] = None,
+        tower_model: Union[str, List[str]] = None,
+        generator: Union[str, List[str]] = None,
+        **kwargs
+    ) -> "MultiModelKeys":
 
         def to_list(value):
             if value is None:
                 return []
             return [value] if isinstance(value, str) else list(value)
 
-        return MultiModelKeys(language_model=to_list(language_model),
-                              connector=to_list(connector),
-                              tower_model=to_list(tower_model),
-                              generator=to_list(generator),
-                              **kwargs)
+        return MultiModelKeys(
+            language_model=to_list(language_model),
+            connector=to_list(connector),
+            tower_model=to_list(tower_model),
+            generator=to_list(generator),
+            **kwargs
+        )

@@ -1,34 +1,29 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Logging configuration for vLLM."""
+
 import datetime
 import json
 import logging
 import os
 import sys
-from collections.abc import Hashable
-from functools import lru_cache, partial
+from functools import partial
 from logging import Logger
 from logging.config import dictConfig
 from os import path
-from types import MethodType
-from typing import Any, Optional, cast
+from typing import Dict, Optional
 
 import vllm.envs as envs
 
 VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING
 VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
 VLLM_LOGGING_LEVEL = envs.VLLM_LOGGING_LEVEL
-VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
 
-_FORMAT = (f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
-           "[%(filename)s:%(lineno)d] %(message)s")
+_FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 DEFAULT_LOGGING_CONFIG = {
     "formatters": {
         "vllm": {
-            "class": "vllm.logging_utils.NewLineFormatter",
+            "class": "vllm.logging.NewLineFormatter",
             "datefmt": _DATE_FORMAT,
             "format": _FORMAT,
         },
@@ -49,76 +44,20 @@ DEFAULT_LOGGING_CONFIG = {
         },
     },
     "version": 1,
-    "disable_existing_loggers": False
-}
-
-
-@lru_cache
-def _print_debug_once(logger: Logger, msg: str, *args: Hashable) -> None:
-    # Set the stacklevel to 2 to print the original caller's line info
-    logger.debug(msg, *args, stacklevel=2)
-
-
-@lru_cache
-def _print_info_once(logger: Logger, msg: str, *args: Hashable) -> None:
-    # Set the stacklevel to 2 to print the original caller's line info
-    logger.info(msg, *args, stacklevel=2)
-
-
-@lru_cache
-def _print_warning_once(logger: Logger, msg: str, *args: Hashable) -> None:
-    # Set the stacklevel to 2 to print the original caller's line info
-    logger.warning(msg, *args, stacklevel=2)
-
-
-class _VllmLogger(Logger):
-    """
-    Note:
-        This class is just to provide type information.
-        We actually patch the methods directly on the [`logging.Logger`][]
-        instance to avoid conflicting with other libraries such as
-        `intel_extension_for_pytorch.utils._logger`.
-    """
-
-    def debug_once(self, msg: str, *args: Hashable) -> None:
-        """
-        As [`debug`][logging.Logger.debug], but subsequent calls with
-        the same message are silently dropped.
-        """
-        _print_debug_once(self, msg, *args)
-
-    def info_once(self, msg: str, *args: Hashable) -> None:
-        """
-        As [`info`][logging.Logger.info], but subsequent calls with
-        the same message are silently dropped.
-        """
-        _print_info_once(self, msg, *args)
-
-    def warning_once(self, msg: str, *args: Hashable) -> None:
-        """
-        As [`warning`][logging.Logger.warning], but subsequent calls with
-        the same message are silently dropped.
-        """
-        _print_warning_once(self, msg, *args)
-
-
-# Pre-defined methods mapping to avoid repeated dictionary creation
-_METHODS_TO_PATCH = {
-    "debug_once": _print_debug_once,
-    "info_once": _print_info_once,
-    "warning_once": _print_warning_once,
+    "disable_existing_loggers": False,
 }
 
 
 def _configure_vllm_root_logger() -> None:
-    logging_config = dict[str, Any]()
+    logging_config: Optional[Dict] = None
 
     if not VLLM_CONFIGURE_LOGGING and VLLM_LOGGING_CONFIG_PATH:
         raise RuntimeError(
             "VLLM_CONFIGURE_LOGGING evaluated to false, but "
             "VLLM_LOGGING_CONFIG_PATH was given. VLLM_LOGGING_CONFIG_PATH "
             "implies VLLM_CONFIGURE_LOGGING. Please enable "
-            "VLLM_CONFIGURE_LOGGING or unset VLLM_LOGGING_CONFIG_PATH.")
+            "VLLM_CONFIGURE_LOGGING or unset VLLM_LOGGING_CONFIG_PATH."
+        )
 
     if VLLM_CONFIGURE_LOGGING:
         logging_config = DEFAULT_LOGGING_CONFIG
@@ -127,35 +66,28 @@ def _configure_vllm_root_logger() -> None:
         if not path.exists(VLLM_LOGGING_CONFIG_PATH):
             raise RuntimeError(
                 "Could not load logging config. File does not exist: %s",
-                VLLM_LOGGING_CONFIG_PATH)
-        with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8") as file:
+                VLLM_LOGGING_CONFIG_PATH,
+            )
+        with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8", mode="r") as file:
             custom_config = json.loads(file.read())
 
         if not isinstance(custom_config, dict):
-            raise ValueError("Invalid logging config. Expected dict, got %s.",
-                             type(custom_config).__name__)
+            raise ValueError(
+                "Invalid logging config. Expected Dict, got %s.",
+                type(custom_config).__name__,
+            )
         logging_config = custom_config
-
-    for formatter in logging_config.get("formatters", {}).values():
-        # This provides backwards compatibility after #10134.
-        if formatter.get("class") == "vllm.logging.NewLineFormatter":
-            formatter["class"] = "vllm.logging_utils.NewLineFormatter"
 
     if logging_config:
         dictConfig(logging_config)
 
 
-def init_logger(name: str) -> _VllmLogger:
+def init_logger(name: str) -> Logger:
     """The main purpose of this function is to ensure that loggers are
     retrieved in such a way that we can be sure the root vllm logger has
     already been configured."""
 
-    logger = logging.getLogger(name)
-
-    for method_name, method in _METHODS_TO_PATCH.items():
-        setattr(logger, method_name, MethodType(method, logger))
-
-    return cast(_VllmLogger, logger)
+    return logging.getLogger(name)
 
 
 # The root logger is initialized when the module is imported.
@@ -167,7 +99,7 @@ logger = init_logger(__name__)
 
 
 def _trace_calls(log_path, root_dir, frame, event, arg=None):
-    if event in ['call', 'return']:
+    if event in ["call", "return"]:
         # Extract the filename, line number, function name, and the code object
         filename = frame.f_code.co_filename
         lineno = frame.f_lineno
@@ -187,26 +119,28 @@ def _trace_calls(log_path, root_dir, frame, event, arg=None):
                 last_filename = ""
                 last_lineno = 0
                 last_func_name = ""
-            with open(log_path, 'a') as f:
-                ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-                if event == 'call':
-                    f.write(f"{ts} Call to"
-                            f" {func_name} in {filename}:{lineno}"
-                            f" from {last_func_name} in {last_filename}:"
-                            f"{last_lineno}\n")
+            with open(log_path, "a") as f:
+                if event == "call":
+                    f.write(
+                        f"{datetime.datetime.now()} Call to"
+                        f" {func_name} in {filename}:{lineno}"
+                        f" from {last_func_name} in {last_filename}:"
+                        f"{last_lineno}\n"
+                    )
                 else:
-                    f.write(f"{ts} Return from"
-                            f" {func_name} in {filename}:{lineno}"
-                            f" to {last_func_name} in {last_filename}:"
-                            f"{last_lineno}\n")
+                    f.write(
+                        f"{datetime.datetime.now()} Return from"
+                        f" {func_name} in {filename}:{lineno}"
+                        f" to {last_func_name} in {last_filename}:"
+                        f"{last_lineno}\n"
+                    )
         except NameError:
             # modules are deleted during shutdown
             pass
     return partial(_trace_calls, log_path, root_dir)
 
 
-def enable_trace_function_call(log_file_path: str,
-                               root_dir: Optional[str] = None):
+def enable_trace_function_call(log_file_path: str, root_dir: Optional[str] = None):
     """
     Enable tracing of every function call in code under `root_dir`.
     This is useful for debugging hangs or crashes.
@@ -220,7 +154,8 @@ def enable_trace_function_call(log_file_path: str,
     logger.warning(
         "VLLM_TRACE_FUNCTION is enabled. It will record every"
         " function executed by Python. This will slow down the code. It "
-        "is suggested to be used for debugging hang or crashes only.")
+        "is suggested to be used for debugging hang or crashes only."
+    )
     logger.info("Trace frame log is saved to %s", log_file_path)
     if root_dir is None:
         # by default, this is the vllm root directory

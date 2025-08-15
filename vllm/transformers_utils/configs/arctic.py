@@ -1,6 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 # yapf: disable
 # ruff: noqa: E501
 # coding=utf-8
@@ -9,7 +6,7 @@
 """ Arctic model configuration"""
 
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Dict
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
@@ -22,7 +19,7 @@ ARCTIC_PRETRAINED_CONFIG_ARCHIVE_MAP = {
 
 
 @dataclass
-class ArcticLoRAConfig:
+class ArcticLoraConfig:
     lora_r: int = 64
     lora_alpha: float = 16
     shard_base_weights: bool = False
@@ -193,14 +190,14 @@ class ArcticConfig(PretrainedConfig):
         )
 
     @classmethod
-    def from_dict(cls, config_dict: dict[str, Any], **kwargs) -> "ArcticConfig":
+    def from_dict(cls, config_dict: Dict[str, Any], **kwargs) -> "ArcticConfig":
         result = super().from_dict(config_dict, **kwargs)
         config = result[0] if isinstance(result, tuple) else result
         if isinstance(config.quantization, dict):
             config.quantization = ArcticQuantizationConfig(**config.quantization)
         return result
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         ret = super().to_dict()
         if isinstance(ret["quantization"], ArcticQuantizationConfig):
             ret["quantization"] = asdict(ret["quantization"])

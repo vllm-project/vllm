@@ -1,20 +1,24 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from .data import (DecoderOnlyInputs, EmbedsInputs, EmbedsPrompt,
-                   EncoderDecoderInputs, ExplicitEncoderDecoderPrompt,
-                   ProcessorInputs, PromptType, SingletonInputs,
-                   SingletonPrompt, TextPrompt, TokenInputs, TokensPrompt,
-                   build_explicit_enc_dec_prompt, embeds_inputs,
-                   to_enc_dec_tuple_list, token_inputs, zip_enc_dec_prompts)
-from .registry import (DummyData, InputContext, InputProcessingContext,
-                       InputRegistry)
+from .data import (
+    EncoderDecoderLLMInputs,
+    ExplicitEncoderDecoderPrompt,
+    LLMInputs,
+    PromptType,
+    SingletonPrompt,
+    TextPrompt,
+    TokensPrompt,
+    build_explicit_enc_dec_prompt,
+    to_enc_dec_tuple_list,
+    zip_enc_dec_prompts,
+)
+from .registry import InputContext, InputRegistry
 
 INPUT_REGISTRY = InputRegistry()
 """
-The global [`InputRegistry`][vllm.inputs.registry.InputRegistry] which is used
-by [`LLMEngine`][vllm.LLMEngine] to dispatch data processing according to the
-target model.
+The global :class:`~InputRegistry` which is used by :class:`~vllm.LLMEngine`
+to dispatch data processing according to the target model.
+
+See also:
+    :ref:`input_processing_pipeline`
 """
 
 __all__ = [
@@ -23,21 +27,28 @@ __all__ = [
     "PromptType",
     "SingletonPrompt",
     "ExplicitEncoderDecoderPrompt",
-    "TokenInputs",
-    "EmbedsInputs",
-    "EmbedsPrompt",
-    "token_inputs",
-    "embeds_inputs",
-    "DecoderOnlyInputs",
-    "EncoderDecoderInputs",
-    "ProcessorInputs",
-    "SingletonInputs",
+    "LLMInputs",
+    "EncoderDecoderLLMInputs",
     "build_explicit_enc_dec_prompt",
     "to_enc_dec_tuple_list",
     "zip_enc_dec_prompts",
     "INPUT_REGISTRY",
-    "DummyData",
     "InputContext",
-    "InputProcessingContext",
     "InputRegistry",
 ]
+
+
+def __getattr__(name: str):
+    if name == "PromptInput":
+        import warnings
+
+        msg = (
+            "PromptInput has been renamed to PromptType. "
+            "The original name will be removed in an upcoming version."
+        )
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return PromptType
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

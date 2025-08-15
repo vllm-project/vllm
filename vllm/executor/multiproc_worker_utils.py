@@ -1,28 +1,28 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import asyncio
+import multiprocessing
 import os
+import sys
 import threading
+import traceback
 import uuid
 from dataclasses import dataclass
 from multiprocessing import Queue
 from multiprocessing.connection import wait
 from multiprocessing.process import BaseProcess
-from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar, Union
+from typing import Any, Callable, Dict, Generic, List, Optional, TextIO, TypeVar, Union
 
-import torch
-
-from vllm.config import VllmConfig
+import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import (_maybe_force_spawn, decorate_logs, get_mp_context,
-                        run_method)
 
 logger = init_logger(__name__)
 
-T = TypeVar('T')
+T = TypeVar("T")
 
 _TERMINATE = "TERMINATE"  # sentinel
+
+# ANSI color codes
+CYAN = "\033[1;36m"
+RESET = "\033[0;0m"
 
 JOIN_TIMEOUT_S = 2
 
@@ -55,8 +55,7 @@ class ResultFuture(threading.Event, Generic[T]):
         return self.result.value  # type: ignore[return-value]
 
 
-def _set_future_result(future: Union[ResultFuture, asyncio.Future],
-                       result: Result):
+def _set_future_result(future: Union[ResultFuture, asyncio.Future], result: Result):
     if isinstance(future, ResultFuture):
         future.set_result(result)
         return
@@ -84,8 +83,8 @@ class ResultHandler(threading.Thread):
         for task_id, future in self.tasks.items():
             _set_future_result(
                 future,
-                Result(task_id=task_id,
-                       exception=ChildProcessError("worker died")))
+                Result(task_id=task_id, exception=ChildProcessError("worker died")),
+            )
 
     def close(self):
         self.result_queue.put(_TERMINATE)
@@ -94,8 +93,9 @@ class ResultHandler(threading.Thread):
 class WorkerMonitor(threading.Thread):
     """Monitor worker status (in background thread)"""
 
-    def __init__(self, workers: List['ProcessWorkerWrapper'],
-                 result_handler: ResultHandler):
+    def __init__(
+        self, workers: List["ProcessWorkerWrapper"], result_handler: ResultHandler
+    ):
         super().__init__(daemon=True)
         self.workers = workers
         self.result_handler = result_handler
@@ -113,8 +113,12 @@ class WorkerMonitor(threading.Thread):
                 if process.sentinel in dead_sentinels:
                     process.join(JOIN_TIMEOUT_S)
                 if process.exitcode is not None and process.exitcode != 0:
-                    logger.error("Worker %s pid %s died, exit code: %s",
-                                 process.name, process.pid, process.exitcode)
+                    logger.error(
+                        "Worker %s pid %s died, exit code: %s",
+                        process.name,
+                        process.pid,
+                        process.exitcode,
+                    )
             # Cleanup any remaining workers
             if logger:
                 logger.info("Killing local vLLM worker processes")
@@ -141,9 +145,9 @@ class ProcessWorkerWrapper:
     """Local process wrapper for vllm.worker.Worker,
     for handling single-node multi-GPU tensor parallel."""
 
-    def __init__(self, result_handler: ResultHandler,
-                 worker_factory: Callable[[VllmConfig, int], Any],
-                 vllm_config: VllmConfig, rank: int) -> None:
+    def __init__(
+        self, result_handler: ResultHandler, worker_factory: Callable[[], Any]
+    ) -> None:
         self.mp = get_mp_context()
         self._task_queue = self.mp.Queue()
         self.result_queue = result_handler.result_queue
@@ -155,15 +159,15 @@ class ProcessWorkerWrapper:
                 worker_factory=worker_factory,
                 task_queue=self._task_queue,
                 result_queue=self.result_queue,
-                vllm_config=vllm_config,
-                rank=rank,
             ),
-            daemon=True)
+            daemon=True,
+        )
 
         self.process.start()
 
-    def _enqueue_task(self, future: Union[ResultFuture, asyncio.Future],
-                      method: Union[str, bytes], args, kwargs):
+    def _enqueue_task(
+        self, future: Union[ResultFuture, asyncio.Future], method: str, args, kwargs
+    ):
         task_id = uuid.uuid4()
         self.tasks[task_id] = future
         try:
@@ -174,13 +178,12 @@ class ProcessWorkerWrapper:
             del self.tasks[task_id]
             raise ChildProcessError("worker died") from e
 
-    def execute_method(self, method: Union[str, bytes], *args, **kwargs):
+    def execute_method(self, method: str, *args, **kwargs):
         future: ResultFuture = ResultFuture()
         self._enqueue_task(future, method, args, kwargs)
         return future
 
-    async def execute_method_async(self, method: Union[str, bytes], *args,
-                                   **kwargs):
+    async def execute_method_async(self, method: str, *args, **kwargs):
         future = asyncio.get_running_loop().create_future()
         self._enqueue_task(future, method, args, kwargs)
         return await future
@@ -198,20 +201,20 @@ class ProcessWorkerWrapper:
 
 
 def _run_worker_process(
-    worker_factory: Callable[[VllmConfig, int], Any],
+    worker_factory: Callable[[], Any],
     task_queue: Queue,
     result_queue: Queue,
-    vllm_config: VllmConfig,
-    rank: int,
 ) -> None:
     """Worker process event loop"""
 
     # Add process-specific prefix to stdout and stderr
     process_name = get_mp_context().current_process().name
-    decorate_logs(process_name)
+    pid = os.getpid()
+    _add_prefix(sys.stdout, process_name, pid)
+    _add_prefix(sys.stderr, process_name, pid)
 
     # Initialize worker
-    worker = worker_factory(vllm_config, rank)
+    worker = worker_factory()
     del worker_factory
 
     # Accept tasks from the engine in task_queue
@@ -223,57 +226,58 @@ def _run_worker_process(
             exception = None
             task_id, method, args, kwargs = items
             try:
-                output = run_method(worker, method, args, kwargs)
+                executor = getattr(worker, method)
+                output = executor(*args, **kwargs)
             except SystemExit:
                 raise
             except KeyboardInterrupt:
                 break
             except BaseException as e:
-                logger.exception(
-                    "Exception in worker %s while processing method %s.",
-                    process_name, method)
+                tb = traceback.format_exc()
+                logger.error(
+                    "Exception in worker %s while processing method %s: %s, %s",
+                    process_name,
+                    method,
+                    e,
+                    tb,
+                )
                 exception = e
-            result_queue.put(
-                Result(task_id=task_id, value=output, exception=exception))
+            result_queue.put(Result(task_id=task_id, value=output, exception=exception))
     except KeyboardInterrupt:
         pass
     except Exception:
         logger.exception("Worker failed")
 
-    # Flush TunableOp results when TunableOp is enabled and
-    # online (in situ) tuning is enabled.
-    # Offline tuning API (record_untuned_is_enabled()) only
-    # available in PyTorch 2.6 or later.
-    if torch.cuda.is_available():
-        import torch.cuda.tunable as tunable
-        if (tunable.is_enabled() and tunable.tuning_is_enabled()
-                and not tunable.record_untuned_is_enabled()):
-            tunable.write_file()
-
     logger.info("Worker exiting")
 
 
-def set_multiprocessing_worker_envs(parallel_config):
-    """ Set up environment variables that should be used when there are workers
-    in a multiprocessing environment. This should be called by the parent 
-    process before worker processes are created"""
+def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
+    """Prepend each output line with process-specific prefix"""
 
-    _maybe_force_spawn()
+    prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
+    file_write = file.write
 
-    # Configure thread parallelism if OMP_NUM_THREADS isn't set
-    #
-    # Helps to avoid CPU contention. The default of spawning a thread per
-    # core combined with multiprocessing for each GPU can have a negative
-    # impact on performance. The contention is amplified when running in a
-    # container where CPU limits can cause throttling.
-    default_omp_num_threads = 1
-    if "OMP_NUM_THREADS" not in os.environ and (
-            current_parallelism :=
-            torch.get_num_threads()) > default_omp_num_threads:
-        logger.warning(
-            "Reducing Torch parallelism from %d threads to %d to avoid "
-            "unnecessary CPU contention. Set OMP_NUM_THREADS in the "
-            "external environment to tune this value as needed.",
-            current_parallelism, default_omp_num_threads)
-        os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
-        torch.set_num_threads(default_omp_num_threads)
+    def write_with_prefix(s: str):
+        if not s:
+            return
+        if file.start_new_line:  # type: ignore[attr-defined]
+            file_write(prefix)
+        idx = 0
+        while (next_idx := s.find("\n", idx)) != -1:
+            next_idx += 1
+            file_write(s[idx:next_idx])
+            if next_idx == len(s):
+                file.start_new_line = True  # type: ignore[attr-defined]
+                return
+            file_write(prefix)
+            idx = next_idx
+        file_write(s[idx:])
+        file.start_new_line = False  # type: ignore[attr-defined]
+
+    file.start_new_line = True  # type: ignore[attr-defined]
+    file.write = write_with_prefix  # type: ignore[method-assign]
+
+
+def get_mp_context():
+    mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
+    return multiprocessing.get_context(mp_method)

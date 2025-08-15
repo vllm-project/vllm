@@ -1,19 +1,17 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import asyncio
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
-from collections.abc import Sequence as GenericSequence
-from typing import Optional, Union, cast
+from typing import AsyncGenerator, AsyncIterator, Callable, Dict, List, Optional
+from typing import Sequence as GenericSequence
+from typing import Tuple, Union, cast
 
-import jinja2
 from fastapi import Request
-from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
+from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
+
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
@@ -23,28 +21,34 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
                                               ErrorResponse,
-                                              PromptTokenUsageInfo,
                                               RequestResponseMetadata,
                                               UsageInfo)
-from vllm.entrypoints.openai.serving_engine import (
-    EmbedsPrompt as ServingEngineEmbedsPrompt)
-from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
-                                                    TextTokensPrompt,
-                                                    clamp_prompt_logprobs,
-                                                    is_text_tokens_prompt)
 # yapf: enable
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.utils import get_max_tokens
-from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
-                              is_tokens_prompt)
+from vllm.entrypoints.openai.serving_engine import (
+    BaseModelPath,
+    LoRAModulePath,
+    OpenAIServing,
+    PromptAdapterPath,
+)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
+from vllm.tracing import (
+    contains_trace_headers,
+    extract_trace_headers,
+    log_tracing_disabled_warning,
+)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import merge_async_iterators
+from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
+
+TypeTokenIDs = List[int]
+TypeTopLogProbs = List[Optional[Dict[int, float]]]
+TypeCreateLogProbsFn = Callable[
+    [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], CompletionLogProbs
+]
 
 
 class OpenAIServingCompletion(OpenAIServing):
@@ -53,37 +57,27 @@ class OpenAIServingCompletion(OpenAIServing):
         self,
         engine_client: EngineClient,
         model_config: ModelConfig,
-        models: OpenAIServingModels,
+        base_model_paths: List[BaseModelPath],
         *,
+        lora_modules: Optional[List[LoRAModulePath]],
+        prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
-        enable_prompt_tokens_details: bool = False,
-        enable_force_include_usage: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
             model_config=model_config,
-            models=models,
+            base_model_paths=base_model_paths,
+            lora_modules=lora_modules,
+            prompt_adapters=prompt_adapters,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            enable_force_include_usage=enable_force_include_usage,
         )
-        self.enable_prompt_tokens_details = enable_prompt_tokens_details
-        self.default_sampling_params = (
-            self.model_config.get_diff_sampling_param())
-        if self.default_sampling_params:
-            source = self.model_config.generation_config
-            source = "model" if source == "auto" else source
-            logger.info(
-                "Using default completion sampling params from %s: %s",
-                source,
-                self.default_sampling_params,
-            )
 
     async def create_completion(
         self,
         request: CompletionRequest,
-        raw_request: Optional[Request] = None,
+        raw_request: Request,
     ) -> Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse]:
         """Completion API similar to OpenAI's API.
 
@@ -106,119 +100,86 @@ class OpenAIServingCompletion(OpenAIServing):
 
         # Return error for unsupported features.
         if request.suffix is not None:
-            return self.create_error_response(
-                "suffix is not currently supported")
+            return self.create_error_response("suffix is not currently supported")
 
-        if request.echo and request.prompt_embeds is not None:
-            return self.create_error_response(
-                "Echo is unsupported with prompt embeds.")
-
-        request_id = (
-            f"cmpl-"
-            f"{self._base_request_id(raw_request, request.request_id)}")
+        model_name = self.base_model_paths[0].name
+        request_id = f"cmpl-{random_uuid()}"
         created_time = int(time.time())
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
+        # Schedule the request and get the result generator.
+        generators: List[AsyncGenerator[RequestOutput, None]] = []
         try:
-            lora_request = self._maybe_get_adapters(request)
+            (
+                lora_request,
+                prompt_adapter_request,
+            ) = self._maybe_get_adapters(request)
+
+            logger.info(f"Lora request: {lora_request}")
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-            request_prompts, engine_prompts = await self._preprocess_completion(
-                request,
-                tokenizer,
-                request.prompt,
-                truncate_prompt_tokens=request.truncate_prompt_tokens,
-                add_special_tokens=request.add_special_tokens,
-            )
-        except ValueError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
-        except TypeError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
-        except RuntimeError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
-        except jinja2.TemplateError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
-
-        # Schedule the request and get the result generator.
-        generators: list[AsyncGenerator[RequestOutput, None]] = []
-        try:
-            for i, engine_prompt in enumerate(engine_prompts):
-                sampling_params: Union[SamplingParams, BeamSearchParams]
-                # Mypy does not infer that engine_prompt will have only one of
-                # "prompt_token_ids" or "prompt_embeds" defined, and both of
-                # these as Union[object, the expected type], where it infers
-                # object if engine_prompt is a subclass of one of the
-                # typeddicts that defines both keys. Worse, because of
-                # https://github.com/python/mypy/issues/8586, mypy does not
-                # infer the type of engine_prompt correctly because of the
-                # enumerate. So we need an unnecessary cast here.
-                engine_prompt = cast(Union[EmbedsPrompt, TokensPrompt],
-                                     engine_prompt)
-                if is_embeds_prompt(engine_prompt):
-                    input_length = len(engine_prompt["prompt_embeds"])
-                elif is_tokens_prompt(engine_prompt):
-                    input_length = len(engine_prompt["prompt_token_ids"])
-                else:
-                    assert_never(engine_prompt)
-
-                if self.default_sampling_params is None:
-                    self.default_sampling_params = {}
-
-                max_tokens = get_max_tokens(
-                    max_model_len=self.max_model_len,
-                    request=request,
-                    input_length=input_length,
-                    default_sampling_params=self.default_sampling_params,
+            prompts = list(
+                self._tokenize_prompt_input_or_inputs(
+                    request,
+                    tokenizer,
+                    request.prompt,
+                    truncate_prompt_tokens=request.truncate_prompt_tokens,
+                    add_special_tokens=request.add_special_tokens,
                 )
+            )
 
+            for i, prompt_inputs in enumerate(prompts):
+                sampling_params: Union[SamplingParams, BeamSearchParams]
+                default_max_tokens = self.max_model_len - len(
+                    prompt_inputs["prompt_token_ids"]
+                )
                 if request.use_beam_search:
-                    sampling_params = request.to_beam_search_params(
-                        max_tokens, self.default_sampling_params)
+                    sampling_params = request.to_beam_search_params(default_max_tokens)
                 else:
-                    sampling_params = request.to_sampling_params(
-                        max_tokens,
-                        self.model_config.logits_processor_pattern,
-                        self.default_sampling_params,
-                    )
+                    sampling_params = request.to_sampling_params(default_max_tokens)
 
                 request_id_item = f"{request_id}-{i}"
 
                 self._log_inputs(
                     request_id_item,
-                    request_prompts[i],
+                    prompt_inputs,
                     params=sampling_params,
                     lora_request=lora_request,
+                    prompt_adapter_request=prompt_adapter_request,
                 )
 
-                trace_headers = (None if raw_request is None else await
-                                 self._get_trace_headers(raw_request.headers))
+                is_tracing_enabled = await self.engine_client.is_tracing_enabled()
+                trace_headers = None
+                if is_tracing_enabled:
+                    trace_headers = extract_trace_headers(raw_request.headers)
+                if not is_tracing_enabled and contains_trace_headers(
+                    raw_request.headers
+                ):
+                    log_tracing_disabled_warning()
 
-                # Mypy inconsistently requires this second cast in different
-                # environments. It shouldn't be necessary (redundant from above)
-                # but pre-commit in CI fails without it.
-                engine_prompt = cast(Union[EmbedsPrompt, TokensPrompt],
-                                     engine_prompt)
                 if isinstance(sampling_params, BeamSearchParams):
+                    assert isinstance(
+                        self.engine_client, (AsyncLLMEngine, MQLLMEngineClient)
+                    ), (
+                        "Beam search is only supported with"
+                        "AsyncLLMEngine and MQLLMEngineClient."
+                    )
                     generator = self.engine_client.beam_search(
-                        prompt=engine_prompt,
-                        request_id=request_id,
-                        params=sampling_params,
-                        lora_request=lora_request,
+                        prompt_inputs["prompt_token_ids"],
+                        request_id_item,
+                        sampling_params,
                     )
                 else:
                     generator = self.engine_client.generate(
-                        engine_prompt,
+                        {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
                         sampling_params,
                         request_id_item,
                         lora_request=lora_request,
+                        prompt_adapter_request=prompt_adapter_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
                     )
@@ -228,35 +189,34 @@ class OpenAIServingCompletion(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        result_generator = merge_async_iterators(*generators)
-
-        model_name = self._get_model_name(request.model, lora_request)
-        num_prompts = len(engine_prompts)
+        result_generator = merge_async_iterators(
+            *generators, is_cancelled=raw_request.is_disconnected
+        )
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
-        # results. Noting that best_of is only supported in V0. In addition,
-        # we do not stream the results when use beam search.
-        stream = (request.stream
-                  and (request.best_of is None or request.n == request.best_of)
-                  and not request.use_beam_search)
+        # results. In addition, we do not stream the results when use
+        # beam search.
+        stream = (
+            request.stream
+            and (request.best_of is None or request.n == request.best_of)
+            and not request.use_beam_search
+        )
 
         # Streaming response
         if stream:
             return self.completion_stream_generator(
                 request,
-                request_prompts,
                 result_generator,
                 request_id,
                 created_time,
                 model_name,
-                num_prompts=num_prompts,
+                num_prompts=len(prompts),
                 tokenizer=tokenizer,
                 request_metadata=request_metadata,
-                enable_force_include_usage=self.enable_force_include_usage,
             )
 
         # Non-streaming response
-        final_res_batch: list[Optional[RequestOutput]] = [None] * num_prompts
+        final_res_batch: List[Optional[RequestOutput]] = [None] * len(prompts)
         try:
             async for i, res in result_generator:
                 final_res_batch[i] = res
@@ -268,14 +228,9 @@ class OpenAIServingCompletion(OpenAIServing):
                 # We did not pass it into vLLM engine to avoid being redundant
                 # with the inputs token IDs
                 if final_res.prompt is None:
-                    request_prompt = request_prompts[i]
-                    if is_text_tokens_prompt(request_prompt):
-                        final_res.prompt = request_prompt["prompt"]
-                    else:
-                        final_res.prompt = None
+                    final_res.prompt = prompts[i]["prompt"]
 
-            final_res_batch_checked = cast(list[RequestOutput],
-                                           final_res_batch)
+            final_res_batch_checked = cast(List[RequestOutput], final_res_batch)
 
             response = self.request_output_to_completion_response(
                 final_res_batch_checked,
@@ -308,83 +263,58 @@ class OpenAIServingCompletion(OpenAIServing):
     async def completion_stream_generator(
         self,
         request: CompletionRequest,
-        request_prompts: list[Union[TextTokensPrompt,
-                                    ServingEngineEmbedsPrompt]],
-        result_generator: AsyncIterator[tuple[int, RequestOutput]],
+        result_generator: AsyncIterator[Tuple[int, RequestOutput]],
         request_id: str,
         created_time: int,
         model_name: str,
         num_prompts: int,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-        enable_force_include_usage: bool,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
         previous_text_lens = [0] * num_choices * num_prompts
         previous_num_tokens = [0] * num_choices * num_prompts
         has_echoed = [False] * num_choices * num_prompts
         num_prompt_tokens = [0] * num_prompts
-        num_cached_tokens = None
-        first_iteration = True
-
-        stream_options = request.stream_options
-        if stream_options:
-            include_usage = (stream_options.include_usage
-                             or enable_force_include_usage)
-            include_continuous_usage = (include_usage and
-                                        stream_options.continuous_usage_stats)
-        else:
-            include_usage, include_continuous_usage = False, False
 
         try:
             async for prompt_idx, res in result_generator:
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
-
-                if first_iteration:
-                    num_cached_tokens = res.num_cached_tokens
-                    first_iteration = False
-
-                if res.prompt is not None:
-                    prompt_text = res.prompt
-                else:
-                    request_prompt = request_prompts[prompt_idx]
-                    if is_text_tokens_prompt(request_prompt):
-                        prompt_text = request_prompt["prompt"]
-                    else:
-                        prompt_text = None
+                prompt_text = res.prompt
 
                 # Prompt details are excluded from later streamed outputs
-                if prompt_token_ids is not None:
-                    num_prompt_tokens[prompt_idx] = len(prompt_token_ids)
+                if res.prompt_token_ids is not None:
+                    num_prompt_tokens[prompt_idx] = len(res.prompt_token_ids)
 
                 delta_token_ids: GenericSequence[int]
-                out_logprobs: Optional[GenericSequence[Optional[dict[
-                    int, Logprob]]]]
+                out_logprobs: Optional[GenericSequence[Optional[Dict[int, Logprob]]]]
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
+                    # TODO(simon): optimize the performance by avoiding full
+                    # text O(n^2) sending.
 
                     assert request.max_tokens is not None
-                    if request.echo and not has_echoed[i]:
+                    if request.echo and request.max_tokens == 0:
                         assert prompt_token_ids is not None
                         assert prompt_text is not None
-                        if request.max_tokens == 0:
-                            # only return the prompt
-                            delta_text = prompt_text
-                            delta_token_ids = prompt_token_ids
-                            out_logprobs = prompt_logprobs
-                        else:
-                            # echo the prompt and first token
-                            delta_text = prompt_text + output.text
-                            delta_token_ids = [
-                                *prompt_token_ids,
-                                *output.token_ids,
-                            ]
-                            out_logprobs = [
-                                *(prompt_logprobs or []),
-                                *(output.logprobs or []),
-                            ]
+                        # only return the prompt
+                        delta_text = prompt_text
+                        delta_token_ids = prompt_token_ids
+                        out_logprobs = prompt_logprobs
+                        has_echoed[i] = True
+                    elif request.echo and request.max_tokens > 0 and not has_echoed[i]:
+                        assert prompt_token_ids is not None
+                        assert prompt_text is not None
+                        assert prompt_logprobs is not None
+                        # echo the prompt and first token
+                        delta_text = prompt_text + output.text
+                        delta_token_ids = [*prompt_token_ids, *output.token_ids]
+                        out_logprobs = [
+                            *prompt_logprobs,
+                            *(output.logprobs or []),
+                        ]
                         has_echoed[i] = True
                     else:
                         # return just the delta
@@ -392,22 +322,14 @@ class OpenAIServingCompletion(OpenAIServing):
                         delta_token_ids = output.token_ids
                         out_logprobs = output.logprobs
 
-                        if (not delta_text and not delta_token_ids
-                                and not previous_num_tokens[i]):
-                            # Chunked prefill case, don't return empty chunks
-                            continue
-
                     if request.logprobs is not None:
-                        assert out_logprobs is not None, (
-                            "Did not output logprobs")
+                        assert out_logprobs is not None, "Did not output logprobs"
                         logprobs = self._create_completion_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=out_logprobs,
                             num_output_top_logprobs=request.logprobs,
                             tokenizer=tokenizer,
                             initial_text_offset=previous_text_lens[i],
-                            return_as_token_id=request.
-                            return_tokens_as_token_ids,
                         )
                     else:
                         logprobs = None
@@ -431,46 +353,49 @@ class OpenAIServingCompletion(OpenAIServing):
                             )
                         ],
                     )
-                    if include_continuous_usage:
-                        prompt_tokens = num_prompt_tokens[prompt_idx]
-                        completion_tokens = previous_num_tokens[i]
-                        chunk.usage = UsageInfo(
-                            prompt_tokens=prompt_tokens,
-                            completion_tokens=completion_tokens,
-                            total_tokens=prompt_tokens + completion_tokens,
-                        )
+                    if request.stream_options and request.stream_options.include_usage:
+                        if (
+                            request.stream_options.continuous_usage_stats
+                            or output.finish_reason is not None
+                        ):
+                            prompt_tokens = num_prompt_tokens[prompt_idx]
+                            completion_tokens = previous_num_tokens[i]
+                            usage = UsageInfo(
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                total_tokens=prompt_tokens + completion_tokens,
+                            )
+                        if request.stream_options.continuous_usage_stats:
+                            chunk.usage = usage
+                        else:
+                            chunk.usage = None
 
                     response_json = chunk.model_dump_json(exclude_unset=False)
                     yield f"data: {response_json}\n\n"
 
-            total_prompt_tokens = sum(num_prompt_tokens)
-            total_completion_tokens = sum(previous_num_tokens)
-            final_usage_info = UsageInfo(
-                prompt_tokens=total_prompt_tokens,
-                completion_tokens=total_completion_tokens,
-                total_tokens=total_prompt_tokens + total_completion_tokens,
-            )
-
-            if self.enable_prompt_tokens_details and num_cached_tokens:
-                final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
-                    cached_tokens=num_cached_tokens)
-
-            if include_usage:
+            if request.stream_options and request.stream_options.include_usage:
                 final_usage_chunk = CompletionStreamResponse(
                     id=request_id,
                     created=created_time,
                     model=model_name,
                     choices=[],
-                    usage=final_usage_info,
+                    usage=usage,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
-                    exclude_unset=False, exclude_none=True)
+                    exclude_unset=False, exclude_none=True
+                )
                 yield f"data: {final_usage_data}\n\n"
 
             # report to FastAPI middleware aggregate usage across all choices
-            request_metadata.final_usage_info = final_usage_info
+            total_prompt_tokens = sum(num_prompt_tokens)
+            total_completion_tokens = sum(previous_num_tokens)
+            request_metadata.final_usage_info = UsageInfo(
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                total_tokens=total_prompt_tokens + total_completion_tokens,
+            )
 
-        except Exception as e:
+        except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
@@ -478,7 +403,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
     def request_output_to_completion_response(
         self,
-        final_res_batch: list[RequestOutput],
+        final_res_batch: List[RequestOutput],
         request: CompletionRequest,
         request_id: str,
         created_time: int,
@@ -486,44 +411,41 @@ class OpenAIServingCompletion(OpenAIServing):
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> CompletionResponse:
-        choices: list[CompletionResponseChoice] = []
+        choices: List[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
-        kv_transfer_params = None
-        last_final_res = None
+
         for final_res in final_res_batch:
-            last_final_res = final_res
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
-            prompt_logprobs = clamp_prompt_logprobs(final_res.prompt_logprobs)
+            prompt_logprobs = final_res.prompt_logprobs
             prompt_text = final_res.prompt
 
             token_ids: GenericSequence[int]
-            out_logprobs: Optional[GenericSequence[Optional[dict[int,
-                                                                 Logprob]]]]
+            out_logprobs: Optional[GenericSequence[Optional[Dict[int, Logprob]]]]
 
             for output in final_res.outputs:
                 assert request.max_tokens is not None
-                if request.echo:
+                if request.echo and request.max_tokens == 0:
                     assert prompt_text is not None
-                    if request.max_tokens == 0:
-                        token_ids = prompt_token_ids
-                        out_logprobs = prompt_logprobs
-                        output_text = prompt_text
+                    token_ids = prompt_token_ids
+                    out_logprobs = prompt_logprobs
+                    output_text = prompt_text
+                elif request.echo and request.max_tokens > 0:
+                    assert prompt_text is not None
+                    token_ids = [*prompt_token_ids, *output.token_ids]
+
+                    if request.logprobs is None:
+                        out_logprobs = None
                     else:
-                        token_ids = [*prompt_token_ids, *output.token_ids]
+                        assert prompt_logprobs is not None
+                        assert output.logprobs is not None
+                        out_logprobs = [
+                            *prompt_logprobs,
+                            *output.logprobs,
+                        ]
 
-                        if request.logprobs is None:
-                            out_logprobs = None
-                        else:
-                            assert prompt_logprobs is not None
-                            assert output.logprobs is not None
-                            out_logprobs = [
-                                *prompt_logprobs,
-                                *output.logprobs,
-                            ]
-
-                        output_text = prompt_text + output.text
+                    output_text = prompt_text + output.text
                 else:
                     token_ids = output.token_ids
                     out_logprobs = output.logprobs
@@ -536,7 +458,6 @@ class OpenAIServingCompletion(OpenAIServing):
                         top_logprobs=out_logprobs,
                         tokenizer=tokenizer,
                         num_output_top_logprobs=request.logprobs,
-                        return_as_token_id=request.return_tokens_as_token_ids,
                     )
                 else:
                     logprobs = None
@@ -561,48 +482,37 @@ class OpenAIServingCompletion(OpenAIServing):
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
 
-        if (self.enable_prompt_tokens_details and last_final_res
-                and last_final_res.num_cached_tokens):
-            usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=last_final_res.num_cached_tokens)
-
         request_metadata.final_usage_info = usage
-        if final_res_batch:
-            kv_transfer_params = final_res_batch[0].kv_transfer_params
+
         return CompletionResponse(
             id=request_id,
             created=created_time,
             model=model_name,
             choices=choices,
             usage=usage,
-            kv_transfer_params=kv_transfer_params,
         )
 
     def _create_completion_logprobs(
         self,
         token_ids: GenericSequence[int],
-        top_logprobs: GenericSequence[Optional[dict[int, Logprob]]],
+        top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
         num_output_top_logprobs: int,
         tokenizer: AnyTokenizer,
         initial_text_offset: int = 0,
-        return_as_token_id: Optional[bool] = None,
     ) -> CompletionLogProbs:
         """Create logprobs for OpenAI Completion API."""
-        out_text_offset: list[int] = []
-        out_token_logprobs: list[Optional[float]] = []
-        out_tokens: list[str] = []
-        out_top_logprobs: list[Optional[dict[str, float]]] = []
+        out_text_offset: List[int] = []
+        out_token_logprobs: List[Optional[float]] = []
+        out_tokens: List[str] = []
+        out_top_logprobs: List[Optional[Dict[str, float]]] = []
 
         last_token_len = 0
 
-        should_return_as_token_id = (return_as_token_id
-                                     if return_as_token_id is not None else
-                                     self.return_tokens_as_token_ids)
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
                 token = tokenizer.decode(token_id)
-                if should_return_as_token_id:
+                if self.return_tokens_as_token_ids:
                     token = f"token_id:{token_id}"
 
                 out_tokens.append(token)
@@ -615,7 +525,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     step_token,
                     token_id,
                     tokenizer,
-                    return_as_token_id=should_return_as_token_id,
+                    return_as_token_id=self.return_tokens_as_token_ids,
                 )
                 token_logprob = max(step_token.logprob, -9999.0)
 
@@ -626,19 +536,20 @@ class OpenAIServingCompletion(OpenAIServing):
                 # logprobs, as defined in the openai API
                 # (cf. https://github.com/openai/openai-openapi/blob/
                 # 893ba52242dbd5387a97b96444ee1c742cfce9bd/openapi.yaml#L7153)
-                out_top_logprobs.append({
-                    # Convert float("-inf") to the
-                    # JSON-serializable float that OpenAI uses
-                    self._get_decoded_token(
-                        top_lp[1],
-                        top_lp[0],
-                        tokenizer,
-                        return_as_token_id=should_return_as_token_id,
-                    ):
-                    max(top_lp[1].logprob, -9999.0)
-                    for i, top_lp in enumerate(step_top_logprobs.items())
-                    if num_output_top_logprobs >= i
-                })
+                out_top_logprobs.append(
+                    {
+                        # Convert float("-inf") to the
+                        # JSON-serializable float that OpenAI uses
+                        self._get_decoded_token(
+                            top_lp[1],
+                            top_lp[0],
+                            tokenizer,
+                            return_as_token_id=self.return_tokens_as_token_ids,
+                        ): max(top_lp[1].logprob, -9999.0)
+                        for i, top_lp in enumerate(step_top_logprobs.items())
+                        if num_output_top_logprobs >= i
+                    }
+                )
 
             if len(out_text_offset) == 0:
                 out_text_offset.append(initial_text_offset)

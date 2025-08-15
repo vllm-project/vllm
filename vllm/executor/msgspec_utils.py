@@ -1,6 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from array import array
 from typing import Any, Type
 
@@ -15,7 +12,8 @@ def encode_hook(obj: Any) -> Any:
     if isinstance(obj, array):
         assert obj.typecode == VLLM_TOKEN_ID_ARRAY_TYPE, (
             f"vLLM array type should use '{VLLM_TOKEN_ID_ARRAY_TYPE}' type. "
-            f"Given array has a type code of {obj.typecode}.")
+            f"Given array has a type code of {obj.typecode}."
+        )
         return obj.tobytes()
 
 

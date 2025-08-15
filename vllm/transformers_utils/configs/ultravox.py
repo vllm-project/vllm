@@ -1,8 +1,5 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_config.py
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import transformers
 
@@ -38,20 +35,15 @@ class UltravoxConfig(transformers.PretrainedConfig):
             The LoRA configuration for finetuning the text model.
         audio_model_lora_config (`LoraConfigSimplified`, *optional*):
             The LoRA configuration for finetuning the audio model.
-        projector_ln_mid (`bool`, *optional*, defaults to `False`):
-            Whether to apply layer normalization at the middle of the
-            projector or at the end. Versions v0.4.1 and below
-            use `False`, but v0.5 and above use `True`.
     """
 
     model_type = "ultravox"
-    audio_token = "<|audio|>"
     is_composition = False
 
     def __init__(
         self,
-        audio_config: Optional[dict[str, Any]] = None,
-        text_config: Optional[dict[str, Any]] = None,
+        audio_config: Optional[Dict[str, Any]] = None,
+        text_config: Optional[Dict[str, Any]] = None,
         audio_model_id: Optional[str] = None,
         text_model_id: Optional[str] = None,
         ignore_index: int = -100,
@@ -60,9 +52,8 @@ class UltravoxConfig(transformers.PretrainedConfig):
         stack_factor: int = 8,
         norm_init: float = 0.4,
         projector_act: str = "swiglu",
-        text_model_lora_config: Optional[dict[str, Any]] = None,
-        audio_model_lora_config: Optional[dict[str, Any]] = None,
-        projector_ln_mid: bool = False,
+        text_model_lora_config: Optional[Dict[str, Any]] = None,
+        audio_model_lora_config: Optional[Dict[str, Any]] = None,
         **kwargs,
     ):
         self.ignore_index = ignore_index
@@ -75,38 +66,34 @@ class UltravoxConfig(transformers.PretrainedConfig):
         self.stack_factor = stack_factor
         self.norm_init = norm_init
         self.projector_act = projector_act
-        self.projector_ln_mid = projector_ln_mid
 
         if text_model_id is not None:
             # Avoid circular import
             from vllm.transformers_utils.config import get_config
 
-            text_config_obj = get_config(text_model_id,
-                                         trust_remote_code=False)
+            self.text_config = get_config(text_model_id, trust_remote_code=False)
         else:
             text_config = text_config or {}
-            text_config_obj = transformers.CONFIG_MAPPING[text_config.get(
-                "model_type", "llama")](**text_config)
-
-        inner_text_config = text_config_obj.get_text_config()
+            self.text_config = transformers.CONFIG_MAPPING[
+                text_config.get("model_type", "llama")
+            ](**text_config)
 
         if audio_model_id is not None:
             # Avoid circular import
             from vllm.transformers_utils.config import get_config
 
-            audio_config = get_config(audio_model_id, trust_remote_code=False)
+            self.audio_config = get_config(audio_model_id, trust_remote_code=False)
         else:
             audio_config = audio_config or {}
-            audio_config = transformers.CONFIG_MAPPING[audio_config.get(
-                "model_type", "whisper")](**audio_config)
+            self.audio_config = transformers.CONFIG_MAPPING[
+                audio_config.get("model_type", "whisper")
+            ](**audio_config)
 
-        self.text_config = text_config_obj
-        self.audio_config = audio_config
         self.text_model_lora_config = text_model_lora_config or {}
         self.audio_model_lora_config = audio_model_lora_config or {}
 
-        self.vocab_size = inner_text_config.vocab_size
-        self.initializer_range = inner_text_config.initializer_range
-        self.text_hidden_size = inner_text_config.hidden_size
+        self.vocab_size = self.text_config.vocab_size
+
+        self.initializer_range = self.text_config.initializer_range
 
         super().__init__(**kwargs)

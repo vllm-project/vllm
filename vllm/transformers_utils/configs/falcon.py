@@ -1,6 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 # Adapted from
 # https://huggingface.co/tiiuae/falcon-7b/blob/main/configuration_RW.py
 # Copyright 2023 The vLLM team.
@@ -77,9 +74,7 @@ class RWConfig(PretrainedConfig):
             # Hack for falcon-40b
             self.new_decoder_architecture = True
 
-        super().__init__(bos_token_id=bos_token_id,
-                         eos_token_id=eos_token_id,
-                         **kwargs)
+        super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
 
     @property
     def head_dim(self):

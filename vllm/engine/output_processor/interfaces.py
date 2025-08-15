@@ -1,6 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from abc import ABC, abstractmethod
 from typing import Callable, List
 
@@ -42,14 +39,16 @@ class SequenceGroupOutputProcessor(ABC):
         if scheduler_config.num_lookahead_slots == 0:
             # Importing here to avoid cycle.
             from vllm.engine.output_processor.single_step import (
-                SingleStepOutputProcessor)
-            return SingleStepOutputProcessor(scheduler_config, detokenizer,
-                                             scheduler, seq_counter,
-                                             stop_checker)
+                SingleStepOutputProcessor,
+            )
+
+            return SingleStepOutputProcessor(
+                scheduler_config, detokenizer, scheduler, seq_counter, stop_checker
+            )
         else:
             # Importing here to avoid cycle.
-            from vllm.engine.output_processor.multi_step import (
-                MultiStepOutputProcessor)
+            from vllm.engine.output_processor.multi_step import MultiStepOutputProcessor
+
             return MultiStepOutputProcessor(
                 detokenizer,
                 scheduler,
@@ -59,9 +58,12 @@ class SequenceGroupOutputProcessor(ABC):
             )
 
     @abstractmethod
-    def process_outputs(self, sequence_group: SequenceGroup,
-                        outputs: List[SequenceGroupOutput],
-                        is_async: bool) -> None:
+    def process_outputs(
+        self,
+        sequence_group: SequenceGroup,
+        outputs: List[SequenceGroupOutput],
+        is_async: bool,
+    ) -> None:
         """Process new token ids for the sequence group. Handles logic such as
         detokenization, stop checking, and freeing/forking sequences in the
         scheduler.
@@ -69,7 +71,8 @@ class SequenceGroupOutputProcessor(ABC):
         pass
 
     @abstractmethod
-    def process_prompt_logprob(self, seq_group: SequenceGroup,
-                               outputs: List[SequenceGroupOutput]) -> None:
+    def process_prompt_logprob(
+        self, seq_group: SequenceGroup, outputs: List[SequenceGroupOutput]
+    ) -> None:
         """Update prompt logprobs received from outputs to seq_group."""
         pass

@@ -1,8 +1,5 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, Dict, Hashable, Optional, TypeVar
 
 from torch import nn
 
@@ -24,16 +21,16 @@ class AdapterModel(ABC):
         raise NotImplementedError("Subclasses must implement this method.")
 
 
-T = TypeVar('T')
+T = TypeVar("T")
 
 
-class AdapterLRUCache(LRUCache[int, T]):
+class AdapterLRUCache(LRUCache[T]):
 
-    def __init__(self, capacity: int, deactivate_fn: Callable[[int], object]):
+    def __init__(self, capacity: int, deactivate_fn: Callable[[Hashable], None]):
         super().__init__(capacity)
         self.deactivate_fn = deactivate_fn
 
-    def _on_remove(self, key: int, value: Optional[T]):
+    def _on_remove(self, key: Hashable, value: Optional[T]):
         logger.debug("Removing adapter int id: %d", key)
         self.deactivate_fn(key)
         return super()._on_remove(key, value)
@@ -50,10 +47,10 @@ class AdapterModelManager(ABC):
             model: the model to be adapted.
         """
         self.model: nn.Module = model
-        self._registered_adapters: dict[int, Any] = {}
+        self._registered_adapters: Dict[int, Any] = {}
         # Dict instead of a Set for compatibility with LRUCache.
-        self._active_adapters: dict[int, None] = {}
-        self.adapter_type = 'Adapter'
+        self._active_adapters: Dict[int, None] = {}
+        self.adapter_type = "Adapter"
         self._last_mapping = None
 
     def __len__(self) -> int:
@@ -98,7 +95,7 @@ class AdapterModelManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_adapters(self) -> dict[int, Any]:
+    def list_adapters(self) -> Dict[int, Any]:
         raise NotImplementedError
 
     @abstractmethod

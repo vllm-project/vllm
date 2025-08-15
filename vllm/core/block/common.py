@@ -1,6 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Dict, Iterable, List, Optional, Protocol, Tuple
@@ -37,10 +34,7 @@ class RefCounter(RefCounterProtocol):
 
     def __init__(self, all_block_indices: Iterable[BlockId]):
         deduped = set(all_block_indices)
-        self._refcounts: Dict[BlockId, RefCount] = {
-            index: 0
-            for index in deduped
-        }
+        self._refcounts: Dict[BlockId, RefCount] = {index: 0 for index in deduped}
 
     def incr(self, block_id: BlockId) -> RefCount:
         assert block_id in self._refcounts
@@ -123,11 +117,12 @@ class CopyOnWriteTracker:
         refcount = self._refcounter.get(block_id)
         return refcount <= 1
 
-    def record_cow(self, src_block_id: Optional[BlockId],
-                   trg_block_id: Optional[BlockId]) -> None:
+    def record_cow(
+        self, src_block_id: Optional[BlockId], trg_block_id: Optional[BlockId]
+    ) -> None:
         """Records a copy-on-write operation from source to target block id
         Args:
-            src_block_id (BlockId): The source block id from which to copy 
+            src_block_id (BlockId): The source block id from which to copy
                 the data
             trg_block_id (BlockId): The target block id to which the data
                 is copied
@@ -165,8 +160,13 @@ class BlockPool:
     prefix caching and more complicated sharing of physical blocks.
     """
 
-    def __init__(self, block_size: int, create_block: Block.Factory,
-                 allocator: BlockAllocator, pool_size: int):
+    def __init__(
+        self,
+        block_size: int,
+        create_block: Block.Factory,
+        allocator: BlockAllocator,
+        pool_size: int,
+    ):
         self._block_size = block_size
         self._create_block = create_block
         self._allocator = allocator
@@ -177,16 +177,17 @@ class BlockPool:
         self._pool = []
         for i in range(self._pool_size):
             self._pool.append(
-                self._create_block(prev_block=None,
-                                   token_ids=[],
-                                   block_size=self._block_size,
-                                   allocator=self._allocator,
-                                   block_id=None,
-                                   extra_hash=None))
+                self._create_block(
+                    prev_block=None,
+                    token_ids=[],
+                    block_size=self._block_size,
+                    allocator=self._allocator,
+                    block_id=None,
+                )
+            )
 
     def increase_pool(self):
-        """Doubles the internal pool size
-        """
+        """Doubles the internal pool size"""
         cur_pool_size = self._pool_size
         new_pool_size = cur_pool_size * 2
         self._pool_size = new_pool_size
@@ -195,19 +196,22 @@ class BlockPool:
 
         for i in range(cur_pool_size, new_pool_size):
             self._pool.append(
-                self._create_block(prev_block=None,
-                                   token_ids=[],
-                                   block_size=self._block_size,
-                                   allocator=self._allocator,
-                                   block_id=None,
-                                   extra_hash=None))
+                self._create_block(
+                    prev_block=None,
+                    token_ids=[],
+                    block_size=self._block_size,
+                    allocator=self._allocator,
+                    block_id=None,
+                )
+            )
 
-    def init_block(self,
-                   prev_block: Optional[Block],
-                   token_ids: List[int],
-                   block_size: int,
-                   physical_block_id: Optional[int],
-                   extra_hash: Optional[int] = None) -> Block:
+    def init_block(
+        self,
+        prev_block: Optional[Block],
+        token_ids: List[int],
+        block_size: int,
+        physical_block_id: Optional[int],
+    ) -> Block:
         if len(self._free_ids) == 0:
             self.increase_pool()
             assert len(self._free_ids) > 0
@@ -219,9 +223,9 @@ class BlockPool:
             prev_block=prev_block,
             token_ids=token_ids,
             block_size=block_size,
-            allocator=block._allocator,  # type: ignore[attr-defined] 
+            allocator=block._allocator,  # type: ignore[attr-defined]
             block_id=physical_block_id,
-            extra_hash=extra_hash)
+        )
         block.pool_id = pool_id  # type: ignore[attr-defined]
         return block
 
@@ -230,9 +234,9 @@ class BlockPool:
 
 
 class BlockList:
-    """This class is an optimization to allow fast-access to physical 
-    block ids. It maintains a block id list that is updated with the 
-    block list and this avoids the need to reconstruct the block id 
+    """This class is an optimization to allow fast-access to physical
+    block ids. It maintains a block id list that is updated with the
+    block list and this avoids the need to reconstruct the block id
     list on every iteration of the block manager
     """
 
@@ -246,8 +250,9 @@ class BlockList:
         assert block_id is not None
         self._block_ids.append(block_id)
 
-    def _update_block_id(self, block_index: int,
-                         new_block_id: Optional[BlockId]) -> None:
+    def _update_block_id(
+        self, block_index: int, new_block_id: Optional[BlockId]
+    ) -> None:
         assert new_block_id is not None
         self._block_ids[block_index] = new_block_id
 
@@ -307,6 +312,7 @@ class CacheMetricData:
     H = current number of hits (< BS).
     hit rate = ((HR x nB) + (H / Q) x (Q / BS)) / (nB + Q / BS)
     """
+
     num_completed_blocks: int = 0
     completed_block_cache_hit_rate: float = 0.0
     num_incompleted_block_queries: int = 0
@@ -320,11 +326,13 @@ class CacheMetricData:
         # When a block is completed, update the cache hit rate
         # and reset the incomplete numbers.
         if self.num_incompleted_block_queries == self.block_size:
-            hit_rate = (self.num_incompleted_block_hit /
-                        self.num_incompleted_block_queries)
+            hit_rate = (
+                self.num_incompleted_block_hit / self.num_incompleted_block_queries
+            )
             self.completed_block_cache_hit_rate = (
                 self.completed_block_cache_hit_rate * self.num_completed_blocks
-                + hit_rate) / (self.num_completed_blocks + 1)
+                + hit_rate
+            ) / (self.num_completed_blocks + 1)
             self.num_incompleted_block_queries = 0
             self.num_incompleted_block_hit = 0
             self.num_completed_blocks += 1
@@ -337,12 +345,14 @@ class CacheMetricData:
 
         completed_block_hit, incompleted_block_hit = 0.0, 0.0
         if self.num_completed_blocks > 0:
-            completed_block_hit = (self.completed_block_cache_hit_rate *
-                                   self.num_completed_blocks)
+            completed_block_hit = (
+                self.completed_block_cache_hit_rate * self.num_completed_blocks
+            )
         if self.num_incompleted_block_queries > 0:
-            incompleted_hit_rate = (self.num_incompleted_block_hit /
-                                    self.num_incompleted_block_queries)
-            incompleted_block_hit = (incompleted_hit_rate * incomplete_ratio)
+            incompleted_hit_rate = (
+                self.num_incompleted_block_hit / self.num_incompleted_block_queries
+            )
+            incompleted_block_hit = incompleted_hit_rate * incomplete_ratio
         return (completed_block_hit + incompleted_block_hit) / total_blocks
 
 

@@ -1,32 +1,28 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from .base import MultiModalPlaceholderMap
-from .hasher import MultiModalHashDict, MultiModalHasher
-from .inputs import (BatchedTensorInputs, ModalityData, MultiModalDataBuiltins,
-                     MultiModalDataDict, MultiModalKwargs,
-                     MultiModalPlaceholderDict, NestedTensors)
+from .base import (
+    BatchedTensorInputs,
+    MultiModalDataBuiltins,
+    MultiModalDataDict,
+    MultiModalInputs,
+    MultiModalPlugin,
+    NestedTensors,
+)
 from .registry import MultiModalRegistry
 
 MULTIMODAL_REGISTRY = MultiModalRegistry()
 """
-The global [`MultiModalRegistry`][vllm.multimodal.registry.MultiModalRegistry]
-is used by model runners to dispatch data processing according to the target
-model.
+The global :class:`~MultiModalRegistry` is used by model runners to
+dispatch data processing according to its modality and the target model.
 
-Info:
-    [mm_processing](../../../design/mm_processing.html)
+See also:
+    :ref:`input_processing_pipeline`
 """
 
 __all__ = [
     "BatchedTensorInputs",
-    "ModalityData",
     "MultiModalDataBuiltins",
     "MultiModalDataDict",
-    "MultiModalHashDict",
-    "MultiModalHasher",
-    "MultiModalKwargs",
-    "MultiModalPlaceholderDict",
-    "MultiModalPlaceholderMap",
+    "MultiModalInputs",
+    "MultiModalPlugin",
     "NestedTensors",
     "MULTIMODAL_REGISTRY",
     "MultiModalRegistry",

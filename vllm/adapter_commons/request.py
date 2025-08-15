@@ -1,6 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from abc import ABC, abstractmethod
 
 
@@ -19,8 +16,7 @@ class AdapterRequest(ABC):
             raise ValueError(f"id must be > 0, got {self.adapter_id}")
 
     def __eq__(self, value: object) -> bool:
-        return isinstance(
-            value, self.__class__) and self.adapter_id == value.adapter_id
+        return isinstance(value, self.__class__) and self.adapter_id == value.adapter_id
 
     def __hash__(self) -> int:
         return hash(self.adapter_id)

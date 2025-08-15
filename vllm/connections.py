@@ -1,9 +1,5 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from collections.abc import Mapping, MutableMapping
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, MutableMapping, Optional
 from urllib.parse import urlparse
 
 import aiohttp
@@ -33,7 +29,7 @@ class HTTPConnection:
     # required, so that the client is only accessible inside async event loop
     async def get_async_client(self) -> aiohttp.ClientSession:
         if self._async_client is None or not self.reuse_client:
-            self._async_client = aiohttp.ClientSession(trust_env=True)
+            self._async_client = aiohttp.ClientSession()
 
         return self._async_client
 
@@ -41,8 +37,10 @@ class HTTPConnection:
         parsed_url = urlparse(url)
 
         if parsed_url.scheme not in ("http", "https"):
-            raise ValueError("Invalid HTTP URL: A valid HTTP URL "
-                             "must have scheme 'http' or 'https'.")
+            raise ValueError(
+                "Invalid HTTP URL: A valid HTTP URL "
+                "must have scheme 'http' or 'https'."
+            )
 
     def _headers(self, **extras: str) -> MutableMapping[str, str]:
         return {"User-Agent": f"vLLM/{VLLM_VERSION}", **extras}
@@ -60,10 +58,9 @@ class HTTPConnection:
         client = self.get_sync_client()
         extra_headers = extra_headers or {}
 
-        return client.get(url,
-                          headers=self._headers(**extra_headers),
-                          stream=stream,
-                          timeout=timeout)
+        return client.get(
+            url, headers=self._headers(**extra_headers), stream=stream, timeout=timeout
+        )
 
     async def get_async_response(
         self,
@@ -77,9 +74,7 @@ class HTTPConnection:
         client = await self.get_async_client()
         extra_headers = extra_headers or {}
 
-        return client.get(url,
-                          headers=self._headers(**extra_headers),
-                          timeout=timeout)
+        return client.get(url, headers=self._headers(**extra_headers), timeout=timeout)
 
     def get_bytes(self, url: str, *, timeout: Optional[float] = None) -> bytes:
         with self.get_response(url, timeout=timeout) as r:
@@ -168,7 +163,4 @@ class HTTPConnection:
 
 
 global_http_connection = HTTPConnection()
-"""
-The global [`HTTPConnection`][vllm.connections.HTTPConnection] instance used
-by vLLM.
-"""
+"""The global :class:`HTTPConnection` instance used by vLLM."""

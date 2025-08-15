@@ -1,40 +1,76 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import torch
+from torch import nn
 from safetensors.torch import safe_open
 from pathlib import Path
 from typing import Optional, Any, Dict, List
 from collections import OrderedDict
 import copy
+from tokenformer.tokenformer_surgeon import (
+    TokenformerSurgeon,
+    TokenformerAttentionAdapter,
+)
 from vllm.model_executor.models import SupportsLoRA, supports_tokenformer
 from vllm.lora.models import get_lora_id
 from vllm.logger import init_logger
 
 from vllm.adapter_commons.models import AdapterModel, AdapterModelManager
 from vllm.attention import AttentionMetadata, AttentionType
+from cray_infra.util.get_config import get_config
+
+from vllm.adapter_commons.utils import (
+    get_adapter,
+    list_adapters,
+    remove_adapter,
+    deactivate_adapter,
+)
 
 logger = init_logger(__name__)
 
 
-class vLLMTokenformerSurgeon:
-    """A class that modifies a vLLM model to support tokenformer adapters."""
+class vLLMTokenformerAttentionAdapter(TokenformerAttentionAdapter):
+    def __init__(self, layer, hidden_size, device):
+        super().__init__(layer, hidden_size, device)
 
-    def __init__(self, model: torch.nn.Module, device: torch.device):
-        self.model = model
-        self.device = device
+    def forward(
+        self,
+        query,
+        key,
+        value,
+        kv_cache: Optional[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        attn_type: AttentionType = AttentionType.DECODER,
+    ) -> torch.Tensor:
 
-    def insert_adapter_modules(self) -> torch.nn.Module:
-        """Insert tokenformer adapter modules into the model."""
-        logger.info("Inserting tokenformer adapter modules")
-        
-        # For now, return the model as-is since we're using the protocol approach
-        # In a full implementation, this would modify attention layers
-        return self.model
+        base_layer_results = self.layer(
+            query=query,
+            key=key,
+            value=value,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            attn_type=attn_type,
+        )
 
-    def _is_attn_layer(self, name: str) -> bool:
-        """Check if a layer is an attention layer that needs tokenformer support."""
-        return "attn" in name.lower() or "attention" in name.lower()
+        seq_len = query.shape[0]
+        new_shape = [-1, self.layer.num_heads, seq_len, self.layer.head_dim]
+        reshaped_query = torch.reshape(query, new_shape)
+        reshaped_base_layer_results = torch.reshape(base_layer_results, new_shape)
+        result = super().forward(reshaped_query, reshaped_base_layer_results)
+        return torch.reshape(result, [-1, self.layer.num_heads * self.layer.head_dim])
+
+
+class vLLMTokenformerSurgeon(TokenformerSurgeon):
+
+    def __init__(
+        self,
+        model: nn.Module,
+        device: torch.device,
+    ):
+        super().__init__(model, device)
+
+    def update_attn(self, name, layer):
+        """Try to wrap the layer with a TokenformerAttentionAdaptor."""
+        if not self._is_attn_layer(name):
+            return
 
 
 class TokenformerModel(AdapterModel):
@@ -48,9 +84,9 @@ class TokenformerModel(AdapterModel):
     def from_local_checkpoint(
         cls, model_dir: str, device: torch.device
     ) -> "TokenformerModel":
-        """Load tokenformer model from local checkpoint."""
-        model_path = Path(model_dir)
-        files = list(model_path.glob("*.pt"))
+        # Find all .pt files in the directory
+        files = list(Path(model_dir).glob("*.pt"))
+
         if len(files) == 0:
             raise FileNotFoundError(f"No .pt file found in {model_dir}")
 
@@ -90,10 +126,20 @@ class TokenformerModelManager(AdapterModelManager):
                 if "lm_head" in k
             }
         )
+        self._lru_adaptor_ids = []
 
-    def _activate_adapter(self, adapter_id: int):
-        """Activate a tokenformer adapter."""
+    def activate_adapter(self, adapter_id: int) -> bool:
+        assert adapter_id in self._registered_adapters, f"Adapter {adapter_id} not found"
+
+        if adapter_id == self._active_adapter:
+            logger.info(f"Tokenformer {adapter_id} is already active")
+            return False
+
+        self.update_lru_position(adapter_id)
+
         logger.info(f"Activating Tokenformer - {adapter_id}")
+
+        logger.info(f"Model is {self.model}")
 
         model_state_dict = self.model.state_dict()
         tokenformers = self._registered_adapters[adapter_id].tokenformers
@@ -107,79 +153,94 @@ class TokenformerModelManager(AdapterModelManager):
             model_state_dict[key] = value
 
         load_result = self.model.load_state_dict(model_state_dict, strict=False)
-        logger.info(f"Load result: {load_result}")
+
+        if len(load_result.unexpected_keys) > 0:
+            logger.warning(
+                f"Unexpected keys in state dict: {load_result.unexpected_keys}"
+            )
 
         self._active_adapter = adapter_id
 
+        return True
+
+    def update_lru_position(self, adapter_id: int) -> None:
+        if adapter_id in self._lru_adaptor_ids:
+            self._lru_adaptor_ids.remove(adapter_id)
+        self._lru_adaptor_ids.append(adapter_id)
+
+    def deactivate_adapter(self, adapter_id: int) -> bool:
+        return self._deactivate_adapter(adapter_id)
+
     def _deactivate_adapter(self, adapter_id: int):
-        """Deactivate a tokenformer adapter."""
         logger.info(f"Deactivating Tokenformer - {adapter_id}")
         model_state_dict = self.model.state_dict()
-        
-        for key, value in self.orig_lm_head.items():
-            model_state_dict[key] = value
+        tokenformers = self._registered_adapters[adapter_id].tokenformers
 
-        load_result = self.model.load_state_dict(model_state_dict, strict=False)
-        logger.info(f"Load result: {load_result}")
-        
+        for key in tokenformers:
+            if "tokenformer_p" in key:
+                nn.init.zeros_(model_state_dict[key])
+            elif "lm_head" in key:
+                model_state_dict[key] = self.orig_lm_head[key]
+
+        self.model.load_state_dict(model_state_dict, strict=False)
+
+    def add_adapter(self, adapter: TokenformerModel) -> bool:
+        if len(self._registered_adapters) >= self.capacity:
+            # Remove the least recently used adapter
+            lru_adapter_id = self._lru_adaptor_ids.pop(0)
+            self.remove_adapter(lru_adapter_id)
+
+        self._registered_adapters[adapter.id] = adapter
+        self._lru_adaptor_ids.append(adapter.id)
+
+        logger.info(f"Adapter {adapter.id} added")
+
+        return True
+
+    def set_adapter_mapping(self, mapping: Any) -> None:
+        pass
+
+    def remove_adapter(self, adapter_id: int) -> bool:
+        return remove_adapter(
+            adapter_id, self._registered_adapters, self._remove_adapter
+        )
+
+    def _remove_adapter(self, adapter_id: int) -> None:
+        if adapter_id not in self._registered_adapters:
+            logger.warning(f"Adapter {adapter_id} not found")
+            return
+
+        if adapter_id == self._active_adapter:
+            self.deactivate_adapter(adapter_id)
+
+        del self._registered_adapters[adapter_id]
+        logger.info(f"Adapter {adapter_id} removed")
+
+    def deactivate_all_adapters(self) -> None:
+        if self._active_adapter is not None:
+            self.deactivate_adapter(self._active_adapter)
         self._active_adapter = None
 
-    def _create_merged_adapter(self, adapter_ids: List[int]) -> AdapterModel:
-        """Create a merged adapter from multiple adapters."""
-        # Simple implementation - just use the first adapter
-        if adapter_ids:
-            return self._registered_adapters[adapter_ids[0]]
-        raise ValueError("No adapter IDs provided")
+    def remove_all_adapters(self) -> None:
+        for id in self._registered_adapters:
+            self.deactivate_adapter(id)
+        self._registered_adapters.clear()
+        self._active_adapter = None
 
+    def get_adapter(self, adapter_id: int) -> Optional[Any]:
+        get_adapter(adapter_id, self._registered_adapters)
 
-class WorkerTokenformerManager:
-    """Worker-level tokenformer manager."""
+    def list_adapters(self) -> Dict[int, Any]:
+        return list_adapters(self._registered_adapters)
 
-    def __init__(self, device: torch.device):
-        self.device = device
-        self._adapter_manager: Optional[TokenformerModelManager] = None
+    def pin_adapter(self, adapter_id: int) -> bool:
+        pass
 
-    def create_tokenformer_manager(self, model: SupportsLoRA) -> torch.nn.Module:
-        """Create and return a tokenformer-enabled model."""
-        self._adapter_manager = TokenformerModelManager(model, self.device)
-        return self._adapter_manager.model
+    @property
+    def capacity(self) -> int:
+        config = get_config()
+        return config.get("tokenformer_cache_capacity", 4)
 
-    def add_adapter(self, lora_request) -> bool:
-        """Add a tokenformer adapter."""
-        if self._adapter_manager is None:
-            return False
-            
-        try:
-            adapter_path = lora_request.lora_path
-            tokenformer_model = TokenformerModel.from_local_checkpoint(
-                adapter_path, self.device
-            )
-            self._adapter_manager.add_adapter(tokenformer_model)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to add tokenformer adapter: {e}")
-            return False
-
-    def activate_adapter(self, lora_request) -> bool:
-        """Activate a tokenformer adapter."""
-        if self._adapter_manager is None:
-            return False
-            
-        try:
-            self._adapter_manager.activate_adapter(lora_request.adapter_id)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to activate tokenformer adapter: {e}")
-            return False
-
-    def deactivate_all_adapters(self) -> bool:
-        """Deactivate all tokenformer adapters."""
-        if self._adapter_manager is None:
-            return False
-            
-        try:
-            self._adapter_manager.deactivate_all_adapters()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to deactivate tokenformer adapters: {e}")
-            return False
+    @property
+    def adapter_slots(self) -> int:
+        pass

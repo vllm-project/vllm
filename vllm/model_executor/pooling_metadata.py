@@ -1,8 +1,5 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Dict, List, Tuple
 
 import torch
 
@@ -24,25 +21,20 @@ class PoolingMetadata:
 
     def __init__(
         self,
-        seq_groups: list[tuple[list[int], PoolingParams]],
-        seq_data: dict[int, Any],  # Specific data related to sequences
-        prompt_lens: list[int],
+        seq_groups: List[Tuple[List[int], PoolingParams]],
+        seq_data: Dict[int, Any],  # Specific data related to sequences
+        prompt_lens: List[int],
     ) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
         self.prompt_lens = prompt_lens
 
     def __repr__(self) -> str:
-        return ("PoolingMetadata("
-                f"seq_groups={self.seq_groups}, "
-                f"seq_data={self.seq_data}, "
-                f"prompt_lens={self.prompt_lens})")
-
-    def __getitem__(self, indices: slice):
-        return PoolingMetadata(
-            seq_groups=self.seq_groups[indices],
-            seq_data=dict(list(self.seq_data.items())[indices]),
-            prompt_lens=self.prompt_lens[indices],
+        return (
+            "PoolingMetadata("
+            f"seq_groups={self.seq_groups}, "
+            f"seq_data={self.seq_data}, "
+            f"prompt_lens={self.prompt_lens})"
         )
 
 
@@ -75,5 +67,6 @@ class PoolingTensors:
             pin_memory=pin_memory,
         )
 
-        return cls(prompt_lens=prompt_lens_t.to(device=device,
-                                                non_blocking=True), )
+        return cls(
+            prompt_lens=prompt_lens_t.to(device=device, non_blocking=True),
+        )
