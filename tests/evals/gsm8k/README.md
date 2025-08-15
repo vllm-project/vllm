@@ -5,6 +5,7 @@ This directory contains a replacement for the lm-eval-harness GSM8K evaluation, 
 ## Usage
 
 ### Run tests with pytest (like buildkite)
+
 ```bash
 pytest -s -v tests/gsm8k/test_gsm8k_correctness.py \
     --config-list-file=configs/models-small.txt \
@@ -12,6 +13,7 @@ pytest -s -v tests/gsm8k/test_gsm8k_correctness.py \
 ```
 
 ### Run standalone evaluation script
+
 ```bash
 # Start vLLM server first
 vllm serve Qwen/Qwen2.5-1.5B-Instruct --port 8000
