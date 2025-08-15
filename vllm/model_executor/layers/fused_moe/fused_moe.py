@@ -1394,9 +1394,9 @@ def fused_experts(hidden_states: torch.Tensor,
     # E8M0 scale, which means we requantize the weight and input to the specific
     # scale. Fallen back to cutlass or triton for some cases would cause
     # accuracy issue.
-    should_use_deep_gemm = is_blackwell_deep_gemm_e8m0_used(
-    ) or _valid_deep_gemm(hidden_states, w1, w2)
-    if (allow_deep_gemm and use_fp8_w8a8 and should_use_deep_gemm):
+    if (allow_deep_gemm and use_fp8_w8a8
+            and (is_blackwell_deep_gemm_e8m0_used()
+                 or _valid_deep_gemm(hidden_states, w1, w2))):
         assert apply_router_weight_on_input is False
         assert is_act_and_mul, (
             "DeepGemm only supports is_act_and_mul=True for now.")
@@ -1905,7 +1905,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
-        extra_expert_args: Optional[dict[str, Any]],
     ):
         # Check constraints.
         if self.use_int4_w4a16:

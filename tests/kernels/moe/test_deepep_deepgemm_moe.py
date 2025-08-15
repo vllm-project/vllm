@@ -70,8 +70,10 @@ def make_block_quant_fp8_weights(
     """
     Return weights w1q, w2q, w1_scale, w2_scale
     """
-    w1, w1q, w1_scale, w2, w2q, w2_scale = make_test_weights(
-        e, n, k, torch.bfloat16, torch.float8_e4m3fn, block_size)
+    (_, w1q, w1_scale, _), (_, w2q, w2_scale,
+                            _) = make_test_weights(e, n, k, torch.bfloat16,
+                                                   torch.float8_e4m3fn,
+                                                   block_size)
     return w1q, w2q, w1_scale, w2_scale
 
 
