@@ -278,7 +278,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             (layer.w2_input_global_scale), requires_grad=False)
 
     def maybe_make_prepare_finalize(
-        self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
+            self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
         if not self.allow_flashinfer:
             return super().maybe_make_prepare_finalize()
 
@@ -302,17 +302,17 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
-        if not self.use_marlin:
-            return nvfp4_moe_quant_config(
-                g1_alphas=layer.g1_alphas,
-                g2_alphas=layer.g2_alphas,
-                a1_gscale=layer.w13_input_scale_quant,
-                a2_gscale=layer.w2_input_scale_quant,
-                w1_scale=layer.w13_blockscale_swizzled,
-                w2_scale=layer.w2_blockscale_swizzled,
-            )
+        if self.use_marlin:
+            return None
 
-        return None
+        return nvfp4_moe_quant_config(
+            g1_alphas=layer.g1_alphas,
+            g2_alphas=layer.g2_alphas,
+            a1_gscale=layer.w13_input_scale_quant,
+            a2_gscale=layer.w2_input_scale_quant,
+            w1_scale=layer.w13_blockscale_swizzled,
+            w2_scale=layer.w2_blockscale_swizzled,
+        )
 
     def apply(
         self,

@@ -140,7 +140,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         in_dtype=act_dtype,
         quant_dtype=quant_dtype,
         block_shape=block_shape,
-        per_out_ch_quant=per_act_token_quant, # TODO: fix
+        per_out_ch_quant=per_act_token_quant,  # TODO: fix
     )
 
     out_shape = (num_experts, max_tokens_per_expert, N)

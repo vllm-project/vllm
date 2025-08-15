@@ -451,7 +451,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
-            per_channel_quant=False,
+            per_act_token_quant=False,
         )
 
     def apply(
@@ -979,7 +979,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.fused_experts: Optional[
             mk.FusedMoEModularKernel] = None  # type: ignore[assignment]
 
-    def maybe_make_prepare_finalize(self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
+    def maybe_make_prepare_finalize(
+            self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
         if not self.allow_flashinfer:
             return super().maybe_make_prepare_finalize()
 
