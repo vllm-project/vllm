@@ -58,6 +58,7 @@ from vllm.transformers_utils.processor import (
     cached_image_processor_from_config)
 from vllm.transformers_utils.processors.ernie45_vl import (
     Ernie4_5_VLProcessor, smart_resize)
+from .ernie45_vl_moe import Ernie4_5_VLMoeForCausalLM
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
@@ -756,34 +757,18 @@ class VariableResolutionResamplerModel(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        resampler_weight_mappings = {
-            "spatial_linear.0.": "spatial_linear1.",
-            "spatial_linear.2.": "spatial_linear2.",
-            "spatial_linear.1.": "spatial_norm.",
-            "spatial_linear.3.": "spatial_norm.",
-            "temporal_linear.0.": "temporal_linear1.",
-            "temporal_linear.2.": "temporal_linear2.",
-            "temporal_linear.1.": "temporal_norm.",
-            "temporal_linear.3.": "temporal_norm.",
-        }
 
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
-            mapped_name = name
-            for old_pattern, new_pattern in resampler_weight_mappings.items():
-                if old_pattern in name:
-                    mapped_name = name.replace(old_pattern, new_pattern)
-                    break
-
-            if mapped_name not in params_dict:
+            if name not in params_dict:
                 continue
-            param = params_dict[mapped_name]
+            param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
-            loaded_params.add(mapped_name)
+            loaded_params.add(name)
         return loaded_params
 
 
@@ -831,21 +816,8 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
 
         return kwargs
 
-    def get_image_processor(
-        self,
-        *,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        size: Optional[dict[str, int]] = None,
-        **kwargs: object,
-    ):
-        return cached_image_processor_from_config(
-            self.ctx.model_config,
-            **self._get_image_processor_kwargs(min_pixels=min_pixels,
-                                               max_pixels=max_pixels,
-                                               size=size,
-                                               **kwargs),
-        )
+    def get_image_processor(self, **kwargs: object):
+        return self.get_hf_processor(**kwargs).image_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
@@ -1180,7 +1152,17 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
             # model.resampler_model.-> language_model.model.resampler_model.
             # language_model.model.resampler_model. -> resampler_model.
             "language_model.model.resampler_model.": "resampler_model.",
-        })
+        },
+        # resampler_weight_mappings
+        orig_to_new_substr={
+            "spatial_linear.0.": "spatial_linear1.",
+            "spatial_linear.2.": "spatial_linear2.",
+            "spatial_linear.3.": "spatial_norm.",
+            "temporal_linear.0.": "temporal_linear1.",
+            "temporal_linear.2.": "temporal_linear2.",
+            "temporal_linear.3.": "temporal_norm.",
+        }
+    )
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -1207,10 +1189,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
             prefix=maybe_prefix(prefix, "vision_model"),
         )
 
-        self.language_model = init_vllm_registered_model(
+        self.language_model = Ernie4_5_VLMoeForCausalLM(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Ernie4_5_VLForCausalLM"],
         )
 
         self.resampler_model = VariableResolutionResamplerModel(
@@ -1301,6 +1282,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
                     f"grid_thw has {grid_thw.numel()} elements after filtering,"
                     "which is not divisible by 3.")
             grid_thw = grid_thw.reshape(-1, 3)
+            # example: [[1,64,64],[2,80,80]] -> [[1,64,64],[1,80,80],[1,80,80]]
             grid_thw = F.pad(
                 torch.repeat_interleave(grid_thw[:, 1:], grid_thw[:, 0], 0),
                 [1, 0, 0, 0],

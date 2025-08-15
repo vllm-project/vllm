@@ -18,15 +18,6 @@ class Ernie4_5_VLRotaryEmbedding(MRotaryEmbedding):
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """PyTorch-native implementation equivalent to forward().
-
-        Args:
-            positions:
-                [num_tokens,] (text only) or
-                [3, num_tokens] (T/H/W positions with multimodal inputs)
-            query: [num_tokens, num_heads * head_size]
-            key: [num_tokens, num_kv_heads * head_size]
-        """
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
 

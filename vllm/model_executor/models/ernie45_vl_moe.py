@@ -60,11 +60,11 @@ from .utils import (PPMissingLayer, extract_layer_index,
 logger = init_logger(__name__)
 
 
-class Ernie4_5_VLMLP(Ernie4_5_MoeMLP):
+class Ernie4_5_VLMoeMLP(Ernie4_5_MoeMLP):
     pass
 
 
-class Ernie4_5_VLAttention(nn.Module):
+class Ernie4_5_VLMoeAttention(nn.Module):
 
     def __init__(
         self,
@@ -162,7 +162,7 @@ class Ernie4_5_VLAttention(nn.Module):
         return output
 
 
-class Ernie4_5_VLMoE(nn.Module):
+class Ernie4_5_VLMoeMoE(nn.Module):
 
     def __init__(
         self,
@@ -193,21 +193,21 @@ class Ernie4_5_VLMoE(nn.Module):
         moe_layer_start_index = config.moe_layer_start_index
         if isinstance(moe_layer_start_index, int):
             text_moe_layer_start_index = moe_layer_start_index
-            image_moe_layer_start_index = moe_layer_start_index
+            vision_moe_layer_start_index = moe_layer_start_index
         else:
             text_moe_layer_start_index = moe_layer_start_index[0]
-            image_moe_layer_start_index = moe_layer_start_index[1]
+            vision_moe_layer_start_index = moe_layer_start_index[1]
 
         moe_layer_end_index = config.moe_layer_end_index
         if moe_layer_end_index is None:
             text_moe_layer_end_index = config.num_layers
-            image_moe_layer_end_index = config.num_layers
+            vision_moe_layer_end_index = config.num_layers
         elif isinstance(moe_layer_end_index, int):
             text_moe_layer_end_index = moe_layer_end_index
-            image_moe_layer_end_index = moe_layer_end_index
+            vision_moe_layer_end_index = moe_layer_end_index
         else:
             text_moe_layer_end_index = moe_layer_end_index[0]
-            image_moe_layer_end_index = moe_layer_end_index[1]
+            vision_moe_layer_end_index = moe_layer_end_index[1]
 
         assert config.moe_num_experts[0] == config.moe_num_experts[1]
         self.e_score_correction_bias = nn.Parameter(
@@ -235,7 +235,7 @@ class Ernie4_5_VLMoE(nn.Module):
                 e_score_correction_bias=self.e_score_correction_bias[0],
                 prefix=f"{prefix}.text_experts")
         else:
-            self.text_experts = Ernie4_5_VLMLP(
+            self.text_experts = Ernie4_5_VLMoeMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
@@ -243,17 +243,17 @@ class Ernie4_5_VLMoE(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp")
 
-        assert image_moe_layer_start_index <= image_moe_layer_end_index
-        if layer_idx >= image_moe_layer_start_index and \
-            layer_idx <= image_moe_layer_end_index:
-            self.image_experts_gate = ReplicatedLinear(
+        assert vision_moe_layer_start_index <= vision_moe_layer_end_index
+        if layer_idx >= vision_moe_layer_start_index and \
+            layer_idx <= vision_moe_layer_end_index:
+            self.vision_experts_gate = ReplicatedLinear(
                 config.hidden_size,
                 config.moe_num_experts[1],
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.image_experts_gate")
+                prefix=f"{prefix}.vision_experts_gate")
 
-            self.image_experts = FusedMoE(
+            self.vision_experts = FusedMoE(
                 num_experts=config.moe_num_experts[1],
                 top_k=config.moe_k,
                 hidden_size=config.hidden_size,
@@ -262,9 +262,9 @@ class Ernie4_5_VLMoE(nn.Module):
                 renormalize=True,
                 quant_config=quant_config,
                 e_score_correction_bias=self.e_score_correction_bias[1],
-                prefix=f"{prefix}.image_experts")
+                prefix=f"{prefix}.vision_experts")
         else:
-            self.image_experts = Ernie4_5_VLMLP(
+            self.vision_experts = Ernie4_5_VLMoeMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
@@ -275,7 +275,7 @@ class Ernie4_5_VLMoE(nn.Module):
         if self.has_shared_experts:
             intermediate_size = (config.moe_intermediate_size[0] *
                                  config.moe_num_shared_experts)
-            self.shared_experts = Ernie4_5_VLMLP(
+            self.shared_experts = Ernie4_5_VLMoeMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
@@ -307,7 +307,7 @@ class Ernie4_5_VLMoE(nn.Module):
 
             text_hidden_states = hidden_states[text_token_mask].reshape(
                 -1, self.hidden_size)
-            image_hidden_states = hidden_states[visual_token_mask].reshape(
+            vision_hidden_states = hidden_states[visual_token_mask].reshape(
                 -1, self.hidden_size)
 
             text_router_logits, _ = self.text_experts_gate(text_hidden_states)
@@ -315,11 +315,11 @@ class Ernie4_5_VLMoE(nn.Module):
                 hidden_states=text_hidden_states,
                 router_logits=text_router_logits).flatten()
 
-            image_router_logits, _ = self.image_experts_gate(
-                image_hidden_states)
-            final_hidden_states[visual_token_mask] = self.image_experts(
-                hidden_states=image_hidden_states,
-                router_logits=image_router_logits).flatten()
+            vision_router_logits, _ = self.vision_experts_gate(
+                vision_hidden_states)
+            final_hidden_states[visual_token_mask] = self.vision_experts(
+                hidden_states=vision_hidden_states,
+                router_logits=vision_router_logits).flatten()
         else:
             # text modal input processing directly
             text_router_logits, _ = self.text_experts_gate(hidden_states)
@@ -339,7 +339,7 @@ class Ernie4_5_VLMoE(nn.Module):
         return final_hidden_states.view(orig_shape)
 
 
-class Ernie4_5_VLDecoderLayer(nn.Module):
+class Ernie4_5_VLMoeDecoderLayer(nn.Module):
 
     def __init__(
         self,
@@ -356,7 +356,7 @@ class Ernie4_5_VLDecoderLayer(nn.Module):
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           131072)
 
-        self.self_attn = Ernie4_5_VLAttention(
+        self.self_attn = Ernie4_5_VLMoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
@@ -403,11 +403,11 @@ class Ernie4_5_VLDecoderLayer(nn.Module):
         if (use_moe and ((layer_idx + 1) % moe_layer_interval == 0)
                 and layer_idx >= min_moe_layer_start_index
                 and layer_idx <= max_moe_layer_end_index):
-            self.mlp = Ernie4_5_VLMoE(config=config,
+            self.mlp = Ernie4_5_VLMoeMoE(config=config,
                                       quant_config=quant_config,
                                       prefix=f"{prefix}.mlp")
         else:
-            self.mlp = Ernie4_5_VLMLP(
+            self.mlp = Ernie4_5_VLMoeMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
@@ -446,7 +446,7 @@ class Ernie4_5_VLDecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
 
-        if isinstance(self.mlp, Ernie4_5_VLMoE):
+        if isinstance(self.mlp, Ernie4_5_VLMoeMoE):
             hidden_states = self.mlp(hidden_states, visual_token_mask,
                                      **kwargs)
         else:
@@ -455,7 +455,7 @@ class Ernie4_5_VLDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-# Since Ernie VL distinguishes between text experts and multimodal experts,
+# Since Ernie VL distinguishes between text experts and vision experts,
 # enabling torch.compile will cause errors.
 # @support_torch_compile(
 #     dynamic_arg_dims={
@@ -465,7 +465,7 @@ class Ernie4_5_VLDecoderLayer(nn.Module):
 #         "inputs_embeds": 0,
 #         "visual_token_mask": 0,
 #     })
-class Ernie4_5_VLModel(nn.Module):
+class Ernie4_5_VLMoeModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -491,7 +491,7 @@ class Ernie4_5_VLModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Ernie4_5_VLDecoderLayer(config=config,
+            lambda prefix: Ernie4_5_VLMoeDecoderLayer(config=config,
                                                    cache_config=cache_config,
                                                    quant_config=quant_config,
                                                    prefix=prefix),
@@ -546,8 +546,8 @@ class Ernie4_5_VLModel(nn.Module):
 
         return hidden_states
 
-
-class Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
+# only used as text backbone for ernie4.5-vl
+class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -568,7 +568,7 @@ class Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.model = Ernie4_5_VLModel(vllm_config=vllm_config,
+        self.model = Ernie4_5_VLMoeModel(vllm_config=vllm_config,
                                       prefix=maybe_prefix(prefix, "model"))
 
         if get_pp_group().is_last_rank:
@@ -661,18 +661,18 @@ class Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # Distinguish between image experts and text experts
+                # Distinguish between vision experts and text experts
                 if "mlp.experts" in name:
                     moe_offset = int(name.split(".")[-3])
-                    image_expert_start_idx = self.config.moe_num_experts[0]
+                    vision_expert_start_idx = self.config.moe_num_experts[0]
                     is_text_expert = \
-                        moe_offset <= image_expert_start_idx - 1
+                        moe_offset <= vision_expert_start_idx - 1
                     if is_text_expert:
                         name = name.replace(".experts.", ".text_experts.")
                     else:
                         name = name.replace(
                             f".experts.{moe_offset}",
-                            f".image_experts.{moe_offset-image_expert_start_idx}"
+                            f".vision_experts.{moe_offset-vision_expert_start_idx}"
                         )
 
                 for mapping in expert_params_mapping:
@@ -681,7 +681,7 @@ class Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
                     if weight_name not in name:
                         continue
 
-                    # Distinguish between image experts and text experts
+                    # Distinguish between vision experts and text experts
                     moe_offset = int(name.split(".")[-3])
                     is_text_expert = \
                         moe_offset <= self.config.moe_num_experts[0] - 1
@@ -690,7 +690,7 @@ class Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
                     if is_text_expert:
                         name = name.replace(".experts.", ".text_experts.")
                     else:
-                        name = name.replace(".experts.", ".image_experts.")
+                        name = name.replace(".experts.", ".vision_experts.")
 
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
@@ -710,14 +710,14 @@ class Ernie4_5_VLForCausalLM(nn.Module, SupportsPP):
                                   expert_id=expert_id)
                     break
                 else:
-                    # Distinguish between image expert gate and text expert gate
+                    # Distinguish between vision expert gate and text expert gate
                     if name.endswith("mlp.gate.weight"):
                         name = name.replace("gate.weight",
                                             "text_experts_gate.weight")
                         loaded_weight = loaded_weight.T
                     elif name.endswith("mlp.gate.weight_1"):
                         name = name.replace("gate.weight_1",
-                                            "image_experts_gate.weight")
+                                            "vision_experts_gate.weight")
                         loaded_weight = loaded_weight.T
 
                     if "e_score_correction_bias" in name:
