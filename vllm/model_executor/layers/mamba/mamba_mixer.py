@@ -8,8 +8,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 from vllm import envs
-from vllm.attention.backends.placeholder_attn import (
-    PlaceholderAttentionMetadata)
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
@@ -235,7 +234,7 @@ class MambaMixer(MambaBase, CustomOp):
                 ssm_state = self_kv_cache[1]
                 has_initial_states = mamba1_metadata.has_initial_states
         else:
-            assert isinstance(attn_metadata, PlaceholderAttentionMetadata)
+            assert isinstance(attn_metadata, AttentionMetadata)
             assert mamba_cache_params is not None
             conv_state = mamba_cache_params.conv_state
             ssm_state = mamba_cache_params.ssm_state
