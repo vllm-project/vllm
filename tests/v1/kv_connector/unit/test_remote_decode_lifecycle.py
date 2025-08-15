@@ -121,13 +121,19 @@ def test_short_prompt_lifecycle():
     model_runner_output = create_model_runner_output(reqs=[request])
 
     # (1c): update_from_output()
-    # Since tokens < block_size, there will be no kv xfer.
-    # So this should be cleaned up immediately.
-    _ = scheduler.update_from_output(scheduler_output, model_runner_output)
+    # Even though tokens < block_size, there will be kv xfer for partial block.
+    eco = scheduler.update_from_output(scheduler_output, model_runner_output)
+    kv_transfer_params = eco[0].outputs[0].kv_transfer_params
+
+    assert (len(kv_transfer_params["remote_block_ids"]) == 1)
 
     # Confirm we do not have any memory leaks after req lifecycle.
-    # We need one more call to schedule() to clear data for persistent batch.
-    _ = scheduler.schedule()
+    # We need to mark sending finish to clear data for persistent batch.
+    scheduler_output = scheduler.schedule()
+    # Use create_model_runner_output to pass kv_connector_output along
+    model_runner_output = create_model_runner_output(
+        reqs=[request], finished_sending=[request.request_id])
+    scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)
 
 
@@ -169,16 +175,16 @@ def test_prefix_cache_lifecycle():
     eco = scheduler.update_from_output(scheduler_output, model_runner_output)
     kv_transfer_params = eco[0].outputs[0].kv_transfer_params
 
-    # Ensure we send all block ids, even if there is a cache hit.
+    # Ensure we send all block ids, including the partial blocks,
+    # even if there is a cache hit.
     assert (len(
-        kv_transfer_params["remote_block_ids"]) == NUM_EXTERNAL_FULL_BLOCKS)
+        kv_transfer_params["remote_block_ids"]) == (NUM_EXTERNAL_FULL_BLOCKS +
+                                                    1))
 
     # STEP (2): Ensure it is freed.
     scheduler_output = scheduler.schedule()
-    scheduler.schedule()
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     model_runner_output.kv_connector_output = KVConnectorOutput(
         finished_sending=[request_remote.request_id])
     scheduler.update_from_output(scheduler_output, model_runner_output)
-    _ = scheduler.schedule()
     assert_scheduler_empty(scheduler)

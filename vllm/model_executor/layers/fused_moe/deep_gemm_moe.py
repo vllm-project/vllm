@@ -33,7 +33,7 @@ def deep_gemm_block_shape() -> list[int]:
     return [block, block]
 
 
-def _valid_deep_gemm_shape(M: int, N: int, K: int):
+def _valid_deep_gemm_shape(M: int, N: int, K: int) -> bool:
     align = deep_gemm_block_shape()[0]
     return align <= M and N % align == 0 and K % align == 0
 
@@ -51,9 +51,26 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
 
     M = hidden_states.size(0)
     _, K, N = w2.size()
+
+    align = deep_gemm_block_shape()[0]
+
     if not _valid_deep_gemm_shape(M, N, K):
         logger.debug_once(
-            "DeepGemm disabled: unaligned problem size. M: %s, N: %s, K: %s",
+            "DeepGemm disabled due to unaligned problem size. "
+            "M: %s, N: %s, K: %s. M should >= align size "
+            "and N and K must be multiples of %s."
+            "This is not an error and we will fall back to triton.",
+            M,
+            N,
+            K,
+            align,
+        )
+        return False
+    elif N <= 512:
+        logger.debug_once(
+            "DeepGemm disabled for N <= 512. M: %s, N: %s, K: %s. "
+            "This means we will fallback to triton "
+            "for this specific shape for further speed up.",
             M,
             N,
             K,
@@ -219,18 +236,6 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert a1q_scale is not None
         assert w1_scale is not None
         assert w2_scale is not None
-
-        if not env.VLLM_SKIP_DEEP_GEMM_WARMUP:
-            # DeepGemm JITs the grouped-gemm kernels. We don't want the JIT'ing
-            # to happen during actual model-inference. The
-            # `warmup_deepgemm_kernels` function is a `run_once` decorated
-            # function that executes during the model profile run. This warmup
-            # should create all the required JITs for the current model.
-            warmup_deepgemm_gg_contiguous_kernels(w1,
-                                                  w2,
-                                                  w1_scale,
-                                                  w2_scale,
-                                                  num_topk=topk_ids.size(1))
 
         a1q = hidden_states
         _, N, K = w1.size()
