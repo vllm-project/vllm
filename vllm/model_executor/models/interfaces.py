@@ -129,7 +129,7 @@ class SupportsMultiModalPruning(Protocol):
 
     def recompute_mrope_positions(
         self,
-        input_ids: List[int],
+        input_ids: list[int],
         multimodal_embeddings: MultiModalEmbeddings,
     ) -> tuple[MultiModalEmbeddings, Tensor, int]:
         """
