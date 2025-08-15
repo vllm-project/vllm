@@ -13,6 +13,9 @@
 #elif defined(__aarch64__)
   // arm implementation
   #include "cpu_types_arm.hpp"
+#elif defined(__riscv)
+  // riscv implementation
+  #include "cpu_types_riscv.hpp"
 #else
   #warning "unsupported vLLM cpu implementation"
 #endif

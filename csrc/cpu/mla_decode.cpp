@@ -40,6 +40,8 @@ struct KernelVecType<c10::BFloat16> {
 };
 #elif defined(__aarch64__) && !defined(ARM_BF16_SUPPORT)
 // pass
+#elif defined(__riscv) && !defined(RISCV_BF16_SUPPORT)
+// pass
 #else
 template <>
 struct KernelVecType<c10::BFloat16> {
