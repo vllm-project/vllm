@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import vllm
 from vllm import SamplingParams
 
@@ -6,7 +8,7 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-MODEL= "zai-org/GLM-4.5V-FP8"
+MODEL = "zai-org/GLM-4.5V-FP8"
 QUESTION = "What is the content of each image?"
 IMAGE_URLS = [
     "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg",
@@ -55,7 +57,9 @@ def parse_args():
     parser = FlexibleArgumentParser()
     parser.add_argument("--num-prompts", type=int, default=2)
     parser.add_argument("--mm", action="store_true")
-    parser.add_argument("--model", type=str, default="glm45", choices=["glm45", "glm45-fp8"])
+    parser.add_argument(
+        "--model", type=str, default="glm45", choices=["glm45", "glm45-fp8"]
+    )
     return parser.parse_args()
 
 
