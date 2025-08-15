@@ -354,6 +354,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
       set_source_files_properties(${MARLIN_TEMPLATE_KERNEL_SRC}
         PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+    endif()
 
     list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_KERNEL_SRC})
 
@@ -370,6 +371,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
       set_source_files_properties("csrc/quantization/gptq_marlin/gptq_marlin.cu"
         PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+    endif()
     list(APPEND VLLM_EXT_SRC "${MARLIN_SRCS}")
 
     message(STATUS "Building Marlin kernels for archs: ${MARLIN_ARCHS}")
@@ -864,6 +866,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
       set_source_files_properties(${MOE_WNAA16_MARLIN_SRC}
         PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+    endif()
 
     list(APPEND VLLM_MOE_EXT_SRC ${MOE_WNAA16_MARLIN_SRC})
 
