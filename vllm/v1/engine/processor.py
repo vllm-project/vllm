@@ -240,8 +240,6 @@ class Processor:
         # TODO(woosuk): Support encoder-decoder models.
         self._validate_lora(lora_request)
         self._validate_params(params, lora_request)
-        if prompt_adapter_request is not None:
-            raise ValueError("V1 does not support prompt_adapter_request.")
 
         data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
         if data_parallel_rank is not None and not (0 <= data_parallel_rank <
