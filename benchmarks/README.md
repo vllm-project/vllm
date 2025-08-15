@@ -23,6 +23,17 @@ become available.
       <td><code>wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json</code></td>
     </tr>
     <tr>
+      <td><strong>ShareGPT4V (Image)</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td>
+        <code>wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/blob/main/sharegpt4v_instruct_gpt4-vision_cap100k.json</code>
+        <br>
+        <div>Note that the images need to be downloaded separately. For example, to download COCO's 2017 Train images:</div>
+        <code>wget http://images.cocodataset.org/zips/train2017.zip</code>
+      </td>
+    </tr>
+    <tr>
       <td><strong>BurstGPT</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
