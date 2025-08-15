@@ -100,7 +100,7 @@ The command to run Llama70B on Galaxy is:
 MESH_DEVICE=TG LLAMA_DIR=<path to weights> TT_LLAMA_TEXT_VER="llama3_70b_galaxy" python examples/offline_inference_tt.py --model "meta-llama/Llama-3.1-70B-Instruct" --override_tt_config '{"dispatch_core_axis": "col", "sample_on_device_mode": "all", "fabric_config": "FABRIC_1D", "worker_l1_size": 1344544, "trace_region_size": 62000000}'
 ```
 
-### Llama-3.2 (11B and 90B) Vision models
+### Llama-3.2 (11B and 90B) and Qwen-2.5-VL (32B and 72B) Vision models
 
 To generate tokens (Llama-3.2-11B on N300) for sample prompts:
 
@@ -115,8 +115,10 @@ MESH_DEVICE=N300 python examples/offline_inference_tt.py --model "meta-llama/Lla
 ```
 
 > **Notes:**
-> - To run the 11B model on QuietBox, set `MESH_DEVICE=T3K` and `--max_seqs_in_batch 32`.
-> - To run the 90B model, set `MESH_DEVICE=T3K`, `--model "meta-llama/Llama-3.2-90B-Vision-Instruct"` and `--max_seqs_in_batch 4`.
+> - To run the 11B Llama-3.2 model on QuietBox, set `MESH_DEVICE=T3K` and `--max_seqs_in_batch 32`.
+> - To run the 90B Llama-3.2 model, set `MESH_DEVICE=T3K`, `--model "meta-llama/Llama-3.2-90B-Vision-Instruct"` and `--max_seqs_in_batch 4`.
+> - To run the 32B Qwen-2.5-VL model, set `MESH_DEVICE=T3K`, `--model "Qwen/Qwen2.5-VL-32B"` and `--max_seqs_in_batch 32`.
+> - To run the 72B Qwen-2.5-VL model, set `MESH_DEVICE=T3K`, `--model "Qwen/Qwen2.5-VL-72B"`, `--max_seqs_in_batch 32`, and `--override_tt_config '{"trace_region_size": 28467200}'`.
 
 ## Running the server example
 
@@ -136,7 +138,7 @@ To send a request to the server:
 curl http://localhost:8000/v1/completions -H "Content-Type: application/json" -d '{ "model": "meta-llama/Llama-3.1-70B-Instruct", "prompt": "San Francisco is a", "max_tokens": 32, "temperature": 1, "top_p": 0.9, "top_k": 10 }'
 ```
 
-### Llama-3.2 (11B and 90B) Vision models
+### Llama-3.2 (11B and 90B) and Qwen-2.5-VL (32B and 72B) Vision models
 
 First, start the server following the instructions above with the correct model through `--model`.
 
@@ -186,6 +188,9 @@ payload = {
 with open("server-instruct-mm-prompt.json", "w") as json_file:
     json.dump(payload, json_file, indent=4)
 ```
+
+> **Notes:**
+> - Qwen-2.5-VL models can also work with a real url like `"https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"` instead of `"data:image/jpeg;base64,{base64_image}"`.
 
 Finally, send a request to the server:
 
