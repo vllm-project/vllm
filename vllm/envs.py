@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_LOGITS_PROCESSOR_THREADS: Optional[int] = None
+    VLLM_LOG_STATS_INTERVAL: float = 10.
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
@@ -122,6 +123,7 @@ if TYPE_CHECKING:
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
+    VLLM_MXFP4_USE_MARLIN: Optional[bool] = None
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
@@ -180,6 +182,12 @@ def maybe_convert_int(value: Optional[str]) -> Optional[int]:
     if value is None:
         return None
     return int(value)
+
+
+def maybe_convert_bool(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    return bool(int(value))
 
 
 def get_vllm_port() -> Optional[int]:
@@ -428,6 +436,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOGITS_PROCESSOR_THREADS":
     lambda: int(os.getenv("VLLM_LOGITS_PROCESSOR_THREADS", "0"))
     if "VLLM_LOGITS_PROCESSOR_THREADS" in os.environ else None,
+
+    # If set, vllm will log stats at this interval in seconds
+    # If not set, vllm will log stats every 10 seconds.
+    "VLLM_LOG_STATS_INTERVAL":
+    lambda: val if (val := float(os.getenv("VLLM_LOG_STATS_INTERVAL", "10.")))
+        > 0. else 10.,
 
     # Trace function calls
     # If set to 1, vllm will trace function calls
@@ -906,6 +920,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MARLIN_USE_ATOMIC_ADD":
     lambda: os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1",
 
+    # Whether to use marlin kernel in mxfp4 quantization method
+    "VLLM_MXFP4_USE_MARLIN":
+    lambda: maybe_convert_bool(os.environ.get("VLLM_MXFP4_USE_MARLIN", None)),
+
     # Whether to turn on the outlines cache for V0
     # This cache is unbounded and on disk, so it's not safe to use in
     # an environment with potentially malicious users.
@@ -1090,6 +1108,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRTLLM_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
 
+    # If set to 1, force the use of TRTLLM FP4 GEMM backend in flashinfer.
+    # Otherwise, uses the first available of: flashinfer cutlass GEMM,
+    # vllm cutlass GEMM, marlin GEMM.
+    "VLLM_USE_TRTLLM_FP4_GEMM":
+    lambda: bool(int(os.getenv("VLLM_USE_TRTLLM_FP4_GEMM", "0"))),
+
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
     # If set to 1, allows GC to run during capture.
@@ -1197,6 +1221,7 @@ def compute_hash() -> str:
         "VLLM_DP_SIZE",
         "VLLM_USE_STANDALONE_COMPILE",
         "VLLM_FUSED_MOE_CHUNK_SIZE",
+        "VLLM_USE_TRTLLM_FP4_GEMM",
     ]
     for key in environment_variables_to_hash:
         if key in environment_variables:
