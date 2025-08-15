@@ -46,7 +46,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsQuant, SupportsV0Only
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
+                    maybe_prefix)
 
 logger = logging.get_logger(__name__)
 
@@ -422,10 +423,7 @@ class BartEncoderLayer(nn.Module):
         if hidden_states.dtype == torch.float16 and (
                 torch.isinf(hidden_states).any()
                 or torch.isnan(hidden_states).any()):
-            clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-            hidden_states = torch.clamp(hidden_states,
-                                        min=-clamp_value,
-                                        max=clamp_value)
+            hidden_states = cast_overflow_tensors(hidden_states)
 
         return hidden_states
 
@@ -936,10 +934,7 @@ class MBartEncoderLayer(BartEncoderLayer):
         if hidden_states.dtype == torch.float16 and (
                 torch.isinf(hidden_states).any()
                 or torch.isnan(hidden_states).any()):
-            clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-            hidden_states = torch.clamp(hidden_states,
-                                        min=-clamp_value,
-                                        max=clamp_value)
+            hidden_states = cast_overflow_tensors(hidden_states)
 
         return hidden_states
 
@@ -1282,17 +1277,6 @@ class MBartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
                                        sampling_metadata)
         return logits
 
-    def _map_hf_name_to_vllm(self, hf_name: str) -> str:
-        """Manually applies the mapping rules from the WeightsMapper."""
-        vllm_name = hf_name
-        for src, dst in self.hf_to_vllm_mapper.orig_to_new_substr.items():
-            vllm_name = vllm_name.replace(src, dst)
-        for src, dst in self.hf_to_vllm_mapper.orig_to_new_prefix.items():
-            if vllm_name.startswith(src):
-                vllm_name = dst + vllm_name[len(src):]
-                break
-        return vllm_name
-
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -1302,64 +1286,57 @@ class MBartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
         ]
         model_params_dict = dict(self.named_parameters())
         loaded_params = set()
-        other_weights = []
-
-        weights_tuple_list = list(weights)
+        remaining_weights = []
         shared_embedding_weight = None
-        for name, loaded_weight in weights_tuple_list:
-            if ('shared.weight' in name
-                    or 'encoder.embed_tokens.weight' in name
-                    or 'decoder.embed_tokens.weight' in name):
-                shared_embedding_weight = loaded_weight
-                break
 
-        for hf_name, loaded_weight in weights_tuple_list:
-            if ("cls." in hf_name or "pooler." in hf_name
-                    or "final_logits_bias" in hf_name):
+        for name, loaded_weight in weights:
+            if any(skip in name
+                   for skip in ["cls.", "pooler.", "final_logits_bias"]):
                 continue
-
-            if ('shared.weight' in hf_name
-                    or 'embed_tokens.weight' in hf_name):
+            if any(embed_name in name for embed_name in [
+                    'shared.weight', 'encoder.embed_tokens.weight',
+                    'decoder.embed_tokens.weight'
+            ]):
+                if shared_embedding_weight is None:
+                    shared_embedding_weight = loaded_weight
                 continue
-
             is_stacked = False
             for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in hf_name:
+                if weight_name not in name:
                     continue
-
-                vllm_shard_name = self._map_hf_name_to_vllm(hf_name)
-                vllm_param_name = vllm_shard_name.replace(
-                    weight_name, param_name)
-
-                if vllm_param_name in model_params_dict:
-                    param = model_params_dict[vllm_param_name]
+                vllm_name = name
+                for src, dst in self.hf_to_vllm_mapper.orig_to_new_substr.items(
+                ):
+                    vllm_name = vllm_name.replace(src, dst)
+                for src, dst in self.hf_to_vllm_mapper.orig_to_new_prefix.items(
+                ):
+                    if vllm_name.startswith(src):
+                        vllm_name = dst + vllm_name[len(src):]
+                        break
+                vllm_name = vllm_name.replace(weight_name, param_name)
+                if vllm_name in model_params_dict:
+                    param = model_params_dict[vllm_name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight, shard_id)
-                    loaded_params.add(vllm_param_name)
-
+                    loaded_params.add(vllm_name)
                 is_stacked = True
                 break
-
             if not is_stacked:
-                other_weights.append((hf_name, loaded_weight))
-
-        loader = AutoWeightsLoader(self, skip_prefixes=(["cls.", "pooler."]))
-        auto_loaded_params = loader.load_weights(other_weights,
+                remaining_weights.append((name, loaded_weight))
+        loader = AutoWeightsLoader(self, skip_prefixes=["cls.", "pooler."])
+        auto_loaded_params = loader.load_weights(remaining_weights,
                                                  mapper=self.hf_to_vllm_mapper)
         loaded_params.update(auto_loaded_params)
-
         if shared_embedding_weight is not None:
             lm_head_param = self.lm_head.weight
             weight_loader = getattr(lm_head_param, "weight_loader",
                                     default_weight_loader)
             weight_loader(lm_head_param, shared_embedding_weight)
-
             self.model.encoder.embed_tokens.weight = self.lm_head.weight
             self.model.decoder.embed_tokens.weight = self.lm_head.weight
             loaded_params.update({
                 'model.encoder.embed_tokens.weight', 'lm_head.weight',
                 'model.decoder.embed_tokens.weight'
             })
-
         return loaded_params
