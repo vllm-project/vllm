@@ -177,17 +177,20 @@ class CudaPlatformBase(Platform):
                 logger.info("Forcing kv cache block size to 128 for "
                             "CUTLASS_MLA backend.")
 
+        # lazy import to avoid circular import
+        from vllm.config import CUDAGraphMode
+
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
-                and compilation_config.use_cudagraph):
+                and compilation_config.cudagraph_mode != CUDAGraphMode.NONE):
             logger.info(
-                "Data Parallel: Forcing enforce eager to be True since DP "
+                "Data Parallel: disabling cudagraphs since DP "
                 "with DeepEP high-throughput kernels are not CUDA Graph "
                 "compatible. The DeepEP low-latency kernels are CUDA Graph "
                 "compatible. Set the all_to_all backend to deepep_low_latency "
                 "to use those kernels instead.")
-            compilation_config.use_cudagraph = False
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             if model_config is not None:
                 model_config.enforce_eager = True
 
@@ -316,7 +319,7 @@ class CudaPlatformBase(Platform):
 
             # FlashAttention is the default for SM 8.0+ GPUs
             if cls.has_device_capability(80):
-                if has_sink:
+                if has_sink and not cls.is_device_capability(90):
                     logger.info_once("Using Triton backend on V1 engine.")
                     return TRITON_ATTN_VLLM_V1
                 if is_default_backend_supported := is_attn_backend_supported(
@@ -454,8 +457,8 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
-    def get_piecewise_backend_cls(cls) -> str:
-        return "vllm.compilation.cuda_piecewise_backend.CUDAPiecewiseBackend"  # noqa
+    def get_static_graph_wrapper_cls(cls) -> str:
+        return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
     @classmethod
     def stateless_init_device_torch_dist_pg(
