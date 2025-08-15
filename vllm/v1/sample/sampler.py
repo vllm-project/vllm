@@ -161,10 +161,10 @@ class Sampler(nn.Module):
         else:
             greedy_sampled = self.greedy_sample(logits)
             if sampling_metadata.all_greedy:
-                if return_processed_logits or return_processed_logprobs:
+                if return_processed_logits:
                     processed_logprobs = logits
-                    if return_processed_logprobs:
-                        processed_logprobs = self.compute_logprobs(logits)
+                elif return_processed_logprobs:
+                    processed_logprobs = self.compute_logprobs(logits)
                 return greedy_sampled, processed_logprobs
 
         assert sampling_metadata.temperature is not None
