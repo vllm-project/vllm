@@ -3618,7 +3618,7 @@ class VllmConfig:
         current_platform.check_and_update_config(self)
 
         # final check of cudagraph mode after platform-specific update
-        if envs.VLLM_USE_V1:
+        if envs.VLLM_USE_V1 and current_platform.is_cuda():
             if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL \
                 and self.model_config is not None and \
                 not self.model_config.disable_cascade_attn:
