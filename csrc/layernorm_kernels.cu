@@ -15,14 +15,14 @@ __device__ __forceinline__ T warp_sum(T v) {
 #ifdef __HIP_PLATFORM_AMD__
   const unsigned long long m = 0xffffffffffffffffull;
 #else
-  const unsigned           m = 0xffffffffu;
+  const unsigned m = 0xffffffffu;
 #endif
   constexpr int kWidth = 32;
   v += __shfl_down_sync(m, v, 16, kWidth);
-  v += __shfl_down_sync(m, v,  8, kWidth);
-  v += __shfl_down_sync(m, v,  4, kWidth);
-  v += __shfl_down_sync(m, v,  2, kWidth);
-  v += __shfl_down_sync(m, v,  1, kWidth);
+  v += __shfl_down_sync(m, v, 8, kWidth);
+  v += __shfl_down_sync(m, v, 4, kWidth);
+  v += __shfl_down_sync(m, v, 2, kWidth);
+  v += __shfl_down_sync(m, v, 1, kWidth);
   return v;
 }
 
@@ -57,7 +57,7 @@ __device__ __forceinline__ void copy_row_to_shared_aligned(
 
   for (int i = tid; i < prefix; i += blockDim.x) dst[i] = src[i];
 
-  const int remain     = n_elems - prefix;
+  const int remain = n_elems - prefix;
   const int main_elems = (remain / perVec) * perVec;
   if (main_elems > 0) {
     const uint4* __restrict__ vsrc =
@@ -65,7 +65,7 @@ __device__ __forceinline__ void copy_row_to_shared_aligned(
 #if defined(__HIP_PLATFORM_AMD__)
     uint32_t* __restrict__ s32 = reinterpret_cast<uint32_t*>(dst + prefix);
     const int nvec = main_elems / perVec;
-    constexpr int WORDS_PER_PKT = kVecBytes / sizeof(uint32_t); // 4
+    constexpr int WORDS_PER_PKT = kVecBytes / sizeof(uint32_t);  // 4
     for (int v = tid; v < nvec; v += blockDim.x) {
       const uint4 p = vsrc[v];
       const int base = v * WORDS_PER_PKT;
@@ -92,8 +92,8 @@ __device__ __forceinline__ void copy_row_to_shared_aligned(
 template <int V, typename T>
 struct VecMulNormWeight {
   const vec_n_t<T, V>* __restrict__ wv;
-  float  inv_rms;
-  int    stride_vec;
+  float inv_rms;
+  int stride_vec;
   mutable int64_t vec_idx;
   __device__ __forceinline__ void operator()(vec_n_t<T, V>& dst,
                                              const vec_n_t<T, V>& src) const {
@@ -110,8 +110,8 @@ struct VecMulNormWeight {
 template <typename T>
 struct ScalarMulNormWeight {
   const T* __restrict__ w_base;
-  T*       __restrict__ out_base;
-  float    inv_rms;
+  T* __restrict__ out_base;
+  float inv_rms;
   __device__ __forceinline__ void operator()(T& dst, const T src) const {
     const int i = static_cast<int>(&dst - out_base);
     const T xn = static_cast<T>(static_cast<float>(src) * inv_rms);
@@ -122,8 +122,8 @@ struct ScalarMulNormWeight {
 template <int V, typename T>
 struct VecNormMulWeightScalarW {
   const T* __restrict__ w_base;  // offset by prefix
-  float  inv_rms;
-  int    stride_vec;
+  float inv_rms;
+  int stride_vec;
   mutable int vec_idx;
   __device__ __forceinline__ void operator()(vec_n_t<T, V>& dst,
                                              const vec_n_t<T, V>& src) const {
@@ -138,16 +138,14 @@ struct VecNormMulWeightScalarW {
 };
 
 template <typename scalar_t>
-__global__ void rms_norm_kernel(
-    scalar_t* __restrict__ out,
-    const scalar_t* __restrict__ input,
-    const int64_t input_stride,
-    const scalar_t* __restrict__ weight,
-    const float epsilon, const int /*num_tokens*/, const int hidden_size,
-    int smem_elems) {
-
-  const scalar_t* __restrict__ in_row  = input + blockIdx.x * input_stride;
-  scalar_t*       __restrict__ out_row = out   + blockIdx.x * hidden_size;
+__global__ void rms_norm_kernel(scalar_t* __restrict__ out,
+                                const scalar_t* __restrict__ input,
+                                const int64_t input_stride,
+                                const scalar_t* __restrict__ weight,
+                                const float epsilon, const int /*num_tokens*/,
+                                const int hidden_size, int smem_elems) {
+  const scalar_t* __restrict__ in_row = input + blockIdx.x * input_stride;
+  scalar_t* __restrict__ out_row = out + blockIdx.x * hidden_size;
 
   extern __shared__ unsigned char smem_raw[];
   scalar_t* s_in = reinterpret_cast<scalar_t*>(smem_raw);
@@ -161,7 +159,8 @@ __global__ void rms_norm_kernel(
       kAllowCache && (sizeof(scalar_t) == 2) && (smem_elems > 0);
 
 #if !defined(__HIP_PLATFORM_AMD__)
-  if (use_cached) copy_row_to_shared_aligned(in_row, s_in, hidden_size, threadIdx.x);
+  if (use_cached)
+    copy_row_to_shared_aligned(in_row, s_in, hidden_size, threadIdx.x);
 #endif
 
   float sumsq = 0.f;
@@ -191,15 +190,16 @@ __global__ void rms_norm_kernel(
 
   if (hidden_size == blockDim.x) {
     const int i = threadIdx.x;
-    const float x  = static_cast<float>(use_cached ? s_in[i] : in_row[i]);
+    const float x = static_cast<float>(use_cached ? s_in[i] : in_row[i]);
     const scalar_t xn = static_cast<scalar_t>(x * inv_rms);
     out_row[i] = xn * weight[i];
     return;
   }
 
-  constexpr int V     = (sizeof(scalar_t) == 2) ? 8 : 4;  // 16B
+  constexpr int V = (sizeof(scalar_t) == 2) ? 8 : 4;  // 16B
   constexpr int WIDTH = V * sizeof(scalar_t);
-  const bool vec_store_ok = (hidden_size % V == 0) && same_phase(in_row, out_row, WIDTH);
+  const bool vec_store_ok =
+      (hidden_size % V == 0) && same_phase(in_row, out_row, WIDTH);
 
   const bool s_same = use_cached && same_phase(in_row, s_in, kVecBytes);
   const scalar_t* vin = s_same ? s_in : in_row;
@@ -208,25 +208,30 @@ __global__ void rms_norm_kernel(
     ScalarMulNormWeight<scalar_t> sca_op{weight, out_row, inv_rms};
 
     const auto addr = reinterpret_cast<uintptr_t>(vin);
-    const int  mis  = addr & (WIDTH - 1);
-    const int  prefix = mis ? (WIDTH - mis) / static_cast<int>(sizeof(scalar_t)) : 0;
+    const int mis = addr & (WIDTH - 1);
+    const int prefix =
+        mis ? (WIDTH - mis) / static_cast<int>(sizeof(scalar_t)) : 0;
 
     if (same_phase(in_row, weight, WIDTH)) {
       using VecT = vec_n_t<scalar_t, V>;
       const VecT* __restrict__ wv =
           reinterpret_cast<const VecT*>(weight + prefix);
-      VecMulNormWeight<V, scalar_t> vec_op{wv, inv_rms, (int)blockDim.x, (int64_t)threadIdx.x};
-      vectorize_with_alignment<V>(vin, out_row, hidden_size, threadIdx.x, blockDim.x, vec_op, sca_op);
+      VecMulNormWeight<V, scalar_t> vec_op{wv, inv_rms, (int)blockDim.x,
+                                           (int64_t)threadIdx.x};
+      vectorize_with_alignment<V>(vin, out_row, hidden_size, threadIdx.x,
+                                  blockDim.x, vec_op, sca_op);
     } else {
-      VecNormMulWeightScalarW<V, scalar_t> vec_op{weight + prefix, inv_rms, (int)blockDim.x, (int)threadIdx.x};
-      vectorize_with_alignment<V>(vin, out_row, hidden_size, threadIdx.x, blockDim.x, vec_op, sca_op);
+      VecNormMulWeightScalarW<V, scalar_t> vec_op{
+          weight + prefix, inv_rms, (int)blockDim.x, (int)threadIdx.x};
+      vectorize_with_alignment<V>(vin, out_row, hidden_size, threadIdx.x,
+                                  blockDim.x, vec_op, sca_op);
     }
     return;
   }
 
   // scalar fallback (keeps op order identical to fused path)
   for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
-    const float x  = static_cast<float>(use_cached ? s_in[i] : in_row[i]);
+    const float x = static_cast<float>(use_cached ? s_in[i] : in_row[i]);
     const scalar_t xn = static_cast<scalar_t>(x * inv_rms);
     out_row[i] = xn * weight[i];
   }
@@ -536,9 +541,9 @@ poly_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
 }  // namespace vllm
 
 static inline int ln_block_threads_unified(int H) {
-  int threads = (H >= 1024) ? 256
-             : (H >= 512)  ? 512
-                            : std::min(1024, ((H + 31) / 32) * 32);
+  int threads = (H >= 1024)  ? 256
+                : (H >= 512) ? 512
+                             : std::min(1024, ((H + 31) / 32) * 32);
   return std::min(1024, std::max(128, ((threads + 31) / 32) * 32));
 }
 
@@ -550,8 +555,8 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   TORCH_CHECK(input.stride(-1) == 1);
   TORCH_CHECK(weight.is_contiguous());
 
-  const int hidden_size   = input.size(-1);
-  const int num_tokens    = input.numel() / hidden_size;
+  const int hidden_size = input.size(-1);
+  const int num_tokens = input.numel() / hidden_size;
   const int64_t in_stride = input.stride(-2);
 
   dim3 grid(num_tokens);
@@ -568,23 +573,16 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   int smem_elems = 0;
   if (input.scalar_type() == at::kHalf && hidden_size <= 4096) {
     shmem_bytes = static_cast<size_t>(hidden_size) * sizeof(at::Half);
-    smem_elems  = hidden_size;  // flag to kernel that shmem was provisioned
+    smem_elems = hidden_size;  // flag to kernel that shmem was provisioned
   }
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
-    vllm::rms_norm_kernel<scalar_t>
-        <<<grid, block, shmem_bytes, stream>>>(
-            out.data_ptr<scalar_t>(),
-            input.data_ptr<scalar_t>(),
-            in_stride,
-            weight.data_ptr<scalar_t>(),
-            static_cast<float>(epsilon),
-            num_tokens,
-            hidden_size,
-            smem_elems);
+    vllm::rms_norm_kernel<scalar_t><<<grid, block, shmem_bytes, stream>>>(
+        out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), in_stride,
+        weight.data_ptr<scalar_t>(), static_cast<float>(epsilon), num_tokens,
+        hidden_size, smem_elems);
   });
 }
-
 
 #define LAUNCH_FUSED_ADD_RMS_NORM(width)                                    \
   VLLM_DISPATCH_FLOATING_TYPES(                                             \
