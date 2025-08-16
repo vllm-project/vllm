@@ -1006,8 +1006,8 @@ class OpenAIServing:
             # OPTIMIZATION
             priority = orig_priority - 1
 
+    @staticmethod
     def _load_prompt_embeds(
-        self,
         prompt_embeds: Optional[Union[bytes, list[bytes]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     ) -> list[EmbedsPrompt]:
@@ -1015,12 +1015,14 @@ class OpenAIServing:
         def _load_and_validate_embed(embed: bytes) -> EmbedsPrompt:
             tensor = torch.load(io.BytesIO(
                 pybase64.b64decode(embed, validate=True)),
-                                weights_only=True)
+                                weights_only=True,
+                                map_location=torch.device("cpu"))
             assert isinstance(tensor, torch.Tensor) and tensor.dtype in (
                 torch.float32,
                 torch.bfloat16,
                 torch.float16,
             )
+            tensor = tensor.to_dense()
             if tensor.dim() > 2:
                 tensor = tensor.squeeze(0)
                 assert tensor.dim() == 2
