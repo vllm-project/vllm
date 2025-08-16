@@ -347,7 +347,7 @@ class MultiModalDummyField(BaseMultiModalField):
         *,
         pin_memory: bool,
     ) -> NestedTensors:
-        raise RuntimeError("Dummy items should never be merged")
+        raise AssertionError("Dummy items should never be merged")
 
     def build_elems(
         self,
@@ -355,7 +355,7 @@ class MultiModalDummyField(BaseMultiModalField):
         key: str,
         data: NestedTensors,
     ) -> Sequence[MultiModalFieldElem]:
-        raise RuntimeError("Dummy items should never be used on real data")
+        raise AssertionError("Dummy items should never be used on real data")
 
 
 @dataclass(frozen=True)
@@ -798,7 +798,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
                 elems_by_key[key].append(elem)
 
         # We assume that the data of MultiModalDataKwargs is used
-        # only if none of the MultiModalFieldElem are dummy items
+        # only if none of the MultiModalFieldElem are dummy items.
         # This is a temporary solution to avoid having to define
         # a separate MultiModalKwargs class for V0 and V1.
         # TODO: Clean this up once V0 is completely removed!
