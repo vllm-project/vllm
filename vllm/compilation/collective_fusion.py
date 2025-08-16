@@ -457,7 +457,6 @@ if flashinfer_comm is not None:
                 hidden_dim=allreduce_in.shape[-1],
                 workspace_ptrs=_FI_WORKSPACE_TENSOR,
                 launch_with_pdl=launch_with_pdl,
-                use_oneshot=True,
                 trigger_completion_at_end=trigger_completion_at_end,
                 fp32_acc=fp32_acc,
                 pattern_code=pattern_code,
