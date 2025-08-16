@@ -23,6 +23,7 @@ from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 # yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            BlockQuantScaleParameter,
+                                           ModelWeightParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            PerTensorScaleParameter,
@@ -34,6 +35,7 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
+    "CompressedTensorsLinearTransformMethod",
     "CompressedTensorsLinearMethod",
     "BitBLASLinearMethod",
     "GPTQBitBLASLinearMethod",
@@ -190,11 +192,14 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-        weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                       input_size_per_partition,
-                                       dtype=params_dtype),
-                           requires_grad=False)
-        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+        weight_loader = extra_weight_attrs.pop("weight_loader")
+        weight = ModelWeightParameter(data=torch.empty(
+            sum(output_partition_sizes),
+            input_size_per_partition,
+            dtype=params_dtype),
+                                      input_dim=1,
+                                      output_dim=0,
+                                      weight_loader=weight_loader)
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
@@ -218,6 +223,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
                     "CPU SGL kernels require Intel AMX support,"
                     " bfloat16 weight, IC and OC are divisible by 32.")
                 layer.use_cpu_sgl = False
+
+        # required by torch.compile
+        layer.weight = Parameter(layer.weight.data, requires_grad=False)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -367,9 +375,10 @@ class ReplicatedLinear(LinearBase):
         return output, output_bias
 
     def extra_repr(self) -> str:
+        has_bias = getattr(self, "bias", None) is not None
         s = f"in_features={self.input_size}"
         s += f", output_features={self.output_size}"
-        s += f", bias={self.bias is not None}"
+        s += f", bias={has_bias}"
         return s
 
 
@@ -595,9 +604,10 @@ class ColumnParallelLinear(LinearBase):
         return output, output_bias
 
     def extra_repr(self) -> str:
+        has_bias = getattr(self, "bias", None) is not None
         s = f"in_features={self.input_size}"
         s += f", output_features={self.output_size_per_partition}"
-        s += f", bias={self.bias is not None}"
+        s += f", bias={has_bias}"
         s += f", tp_size={get_tensor_model_parallel_world_size()}"
         s += f", gather_output={self.gather_output}"
         return s
@@ -1378,9 +1388,10 @@ class RowParallelLinear(LinearBase):
         return output, output_bias
 
     def extra_repr(self) -> str:
+        has_bias = getattr(self, "bias", None) is not None
         s = f"input_features={self.input_size_per_partition}"
         s += f", output_features={self.output_size}"
-        s += f", bias={self.bias is not None}"
+        s += f", bias={has_bias}"
         s += f", tp_size={self.tp_size}"
         s += f", reduce_results={self.reduce_results}"
         return s
@@ -1593,10 +1604,11 @@ class QKVCrossParallelLinear(LinearBase):
             layer.weight_loader(target_param, loaded_weight, *shard_id_args)
 
     def extra_repr(self) -> str:
+        has_bias = getattr(self, "bias", None) is not None
         s = f"in_features={self.input_size}"
         s += f", q_size={self.q_size}"
         s += f", kv_size={self.kv_size}"
-        s += f", bias={self.bias is not None}"
+        s += f", bias={has_bias}"
         s += f", tp_size={get_tensor_model_parallel_world_size()}"
         s += ", gather_output=False"
         return s
