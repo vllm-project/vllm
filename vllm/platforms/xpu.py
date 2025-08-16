@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 import vllm.envs as envs
-from vllm.config import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
@@ -105,6 +104,8 @@ class XPUPlatform(Platform):
             and not cls.device_support_bf16():
             model_config.dtype = torch.float16
 
+        # lazy import to avoid circular import
+        from vllm.config import CUDAGraphMode
         compilation_config = vllm_config.compilation_config
         if compilation_config.cudagraph_mode is None or \
                 compilation_config.cudagraph_mode.max_cudagraph_mode() \
