@@ -461,8 +461,9 @@ def cutlass_moe_fp8(
         assert (quant_config.per_act_token_quant ==
                 quant_config.a2_scale.numel() != 1)
 
-    assert (quant_config.per_out_ch_quant == (
-        quant_config.w1_scale.size(1) == w1_q.size(1)))
+    assert (quant_config.w1_scale is None
+            or (quant_config.per_out_ch_quant == (quant_config.w1_scale.size(1)
+                                                  == w1_q.size(1))))
 
     num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(
         0)
@@ -740,14 +741,9 @@ def cutlass_moe_fp4(
         a: torch.Tensor,
         w1_fp4: torch.Tensor,
         w2_fp4: torch.Tensor,
-        w1_blockscale: torch.Tensor,
-        w2_blockscale: torch.Tensor,
-        g1_alphas: torch.Tensor,
-        g2_alphas: torch.Tensor,
-        a1_gscale: torch.Tensor,
-        a2_gscale: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
         m: int,
         n: int,
         k: int,
@@ -758,6 +754,7 @@ def cutlass_moe_fp4(
                                 "is currently not supported for "
                                 "ModelOptNvFp4FusedMoE's cutlass_moe_fp4.")
 
+    # TODO(bnell): this is a bit hacky
     # NVFP4 requires two levels of quantization, which involves
     # computing some scaling factors dynamically. This makes it
     # incompatible with the typical prepare -> MoE -> finalize
@@ -767,12 +764,12 @@ def cutlass_moe_fp4(
         per_act_token_quant=False,
         per_out_ch_quant=False,
         block_shape=None,
-        g1_alphas=g1_alphas,
-        g2_alphas=g2_alphas,
-        a1_gscale=a1_gscale,
-        a2_gscale=a2_gscale,
-        w1_scale=w1_blockscale,
-        w2_scale=w2_blockscale,
+        g1_alphas=quant_config.g1_alphas,
+        g2_alphas=quant_config.g2_alphas,
+        a1_gscale=quant_config.a1_gscale,
+        a2_gscale=quant_config.a2_gscale,
+        w1_scale=quant_config.w1_scale,
+        w2_scale=quant_config.w2_scale,
     )
 
     fn = mk.FusedMoEModularKernel(

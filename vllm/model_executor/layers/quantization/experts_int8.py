@@ -111,7 +111,9 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         return int8_w8a16_moe_quant_config(w1_scale=layer.w13_scale,
-                                           w2_scale=layer.w2_scale)
+                                           w2_scale=layer.w2_scale,
+                                           w1_zp=None,
+                                           w2_zp=None)
 
     def apply(
         self,

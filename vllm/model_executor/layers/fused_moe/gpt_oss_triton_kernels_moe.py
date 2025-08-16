@@ -6,7 +6,8 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FUSED_MOE_UNQUANTIZED_CONFIG, FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.utils import has_triton_kernels
@@ -76,6 +77,8 @@ def triton_kernel_fused_experts(
     expert_map: Optional[torch.Tensor] = None,
     a1q_scale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    if quant_config is None:
+        quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
     # type check, uint8 means mxfp4
     assert hidden_states.dtype == torch.bfloat16
