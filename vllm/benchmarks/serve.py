@@ -608,7 +608,7 @@ async def benchmark(
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
                                     benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
-    if task_type == TaskType.GENERATION:
+    if isinstance(metrics, BenchmarkMetrics):
         print("{:<40} {:<10}".format(
             "Total generated tokens:", metrics.total_output))
     print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
@@ -616,7 +616,7 @@ async def benchmark(
     if goodput_config_dict:
         print("{:<40} {:<10.2f}".format("Request goodput (req/s):",
                                         metrics.request_goodput))
-    if task_type == TaskType.GENERATION:
+    if isinstance(metrics, BenchmarkMetrics):
         print(
             "{:<40} {:<10.2f}".format(
                 "Output token throughput (tok/s):", metrics.output_throughput
@@ -625,7 +625,7 @@ async def benchmark(
     print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
                                     metrics.total_token_throughput))
 
-    if task_type == TaskType.GENERATION:
+    if isinstance(metrics, BenchmarkMetrics):
         result = {
             "duration": benchmark_duration,
             "completed": metrics.completed,
