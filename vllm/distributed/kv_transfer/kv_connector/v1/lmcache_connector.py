@@ -89,7 +89,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[Optional[set[str]], Optional[set[str]], Optional[set[str]]]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.

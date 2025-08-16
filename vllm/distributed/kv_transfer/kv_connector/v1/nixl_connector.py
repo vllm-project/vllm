@@ -198,8 +198,10 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.set_host_xfer_buffer_ops(copy_operation)
 
-    def get_finished(self,
-                     finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
+    def get_finished(
+        self,
+        finished_req_ids: set[str],
+    ) -> tuple[set[str], set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
@@ -548,6 +550,9 @@ class NixlConnectorWorker:
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
+
+        self.failure_request = set[ReqId]()
+        self.xfer_timeout = 30.0
 
     def __del__(self):
         """Cleanup background threads on destruction."""
@@ -1016,7 +1021,7 @@ class NixlConnectorWorker:
             self.copy_blocks(self.device_kv_caches, self.host_xfer_buffers,
                              meta.local_block_ids, meta.local_block_ids, "d2h")
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_finished(self) -> tuple[set[str], set[str], set[str]]:
         """
         Get requests that are done sending or recving on this specific worker.
         The scheduler process (via the MultiprocExecutor) will use this output
@@ -1049,9 +1054,10 @@ class NixlConnectorWorker:
                 "retrieved by %d decode worker(s) within %d seconds.", req_id,
                 count, envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT)
             del self._reqs_to_send[req_id]
-            done_sending.add(req_id)
-
-        return done_sending, done_recving
+            self.failure_request.add(req_id)
+        failure_request = self.failure_request.copy()
+        self.failure_request.clear()
+        return done_sending, done_recving, failure_request
 
     def _get_new_notifs(self) -> set[str]:
         """
@@ -1091,18 +1097,30 @@ class NixlConnectorWorker:
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
             in_progress = False
+            Failed = False
             for handle, _xfer_stime in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
                 elif xfer_state == "PROC":
-                    in_progress = True
-                    continue
+                    if time.perf_counter() - _xfer_stime > self.xfer_timeout:
+                        logger.warning("Transfer %d for request %s timed out",
+                                       handle, req_id)
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                        Failed = True
+                    else:
+                        in_progress = True
                 else:
-                    raise RuntimeError("Transfer failed with state %s",
-                                       xfer_state)
+                    logger.error(
+                        "Transfer %d for request %s failed with state: %s",
+                        handle, req_id, xfer_state)
+                    self.nixl_wrapper.release_xfer_handle(handle)
+                    Failed = True
             if not in_progress:
-                done_req_ids.add(req_id)
+                if not Failed:
+                    done_req_ids.add(req_id)
+                else:
+                    self.failure_request.add(req_id)
                 del transfers[req_id]
         return done_req_ids
 
@@ -1227,23 +1245,30 @@ class NixlConnectorWorker:
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
-        # Prepare transfer with Nixl.
-        handle = self.nixl_wrapper.make_prepped_xfer(
-            "READ",
-            local_xfer_side_handle,
-            local_block_descs_ids,
-            remote_xfer_side_handle,
-            remote_block_descs_ids,
-            notif_msg=notif_id,
-        )
+        handle = None
+        try:
+            # Prepare transfer with Nixl.
+            handle = self.nixl_wrapper.make_prepped_xfer(
+                "READ",
+                local_xfer_side_handle,
+                local_block_descs_ids,
+                remote_xfer_side_handle,
+                remote_block_descs_ids,
+                notif_msg=notif_id,
+            )
+            # Begin async xfer.
+            self.nixl_wrapper.transfer(handle)
 
-        # Begin async xfer.
-        self.nixl_wrapper.transfer(handle)
-
-        # Use handle to check completion in future step().
-        # TODO (NickLucche) surface xfer elapsed time
-        self._recving_transfers[request_id].append(
-            (handle, time.perf_counter()))
+            # Use handle to check completion in future step().
+            # TODO (NickLucche) surface xfer elapsed time
+            self._recving_transfers[request_id].append(
+                (handle, time.perf_counter()))
+        except Exception as e:
+            if handle is not None:
+                self.nixl_wrapper.release_xfer_handle(handle)
+            logger.error("Failed to start NIXL xfer for request %s: %s",
+                         request_id, e)
+            self.failure_request.add(request_id)
 
     def _get_block_descs_ids(self,
                              engine_id: str,

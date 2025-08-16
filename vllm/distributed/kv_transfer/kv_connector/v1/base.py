@@ -206,7 +206,7 @@ class KVConnectorBase_V1(ABC):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[Optional[set[str]], Optional[set[str]], Optional[set[str]]]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens on the worker.
@@ -220,7 +220,7 @@ class KVConnectorBase_V1(ABC):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        return None, None
+        return None, None, None
 
     # ==============================
     # Scheduler-side methods

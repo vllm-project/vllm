@@ -262,8 +262,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
             self.p2p_nccl_engine.wait_for_sent()
 
     def get_finished(
-            self, finished_req_ids: set[str],
-            **kwargs) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        self, finished_req_ids: set[str], **kwargs
+    ) -> tuple[Optional[set[str]], Optional[set[str]], Optional[set[str]]]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.

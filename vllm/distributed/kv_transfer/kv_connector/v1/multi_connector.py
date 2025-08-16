@@ -108,15 +108,17 @@ class MultiConnector(KVConnectorBase_V1):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[Optional[set[str]], Optional[set[str]], Optional[set[str]]]:
         finished_sending: set[str] = set()
         finished_recving: set[str] = set()
+        failure_request: set[str] = set()
         for c in self._connectors:
-            sending, recving = c.get_finished(finished_req_ids)
-            if not recving and not sending:
+            sending, recving, failure = c.get_finished(finished_req_ids)
+            if not recving and not sending and not failure:
                 continue
             # Aggregate finished recving request ids.
             finished_recving.update(recving or ())
+            failure_request.update(failure or ())
             # Aggregate finished sending request ids - only include
             # once we've drained the "extra" count (for cases where
             # more than one connector is async-saving the same request).
@@ -131,7 +133,8 @@ class MultiConnector(KVConnectorBase_V1):
                 else:
                     self._extra_async_saves[req_id] = extra_pending - 1
 
-        return finished_sending or None, finished_recving or None
+        return (finished_sending or None, finished_recving
+                or None, failure_request or None)
 
     # ==============================
     # Scheduler-side methods
