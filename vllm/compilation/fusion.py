@@ -11,6 +11,7 @@ from torch._ops import OpOverload
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.platforms import current_platform
@@ -227,6 +228,63 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
 
         inputs = [
             torch.empty(5, 4, device="cuda", dtype=self.quant_dtype),  # result
+            empty_bf16(5, 4),  # result_rms
+            empty_bf16(5, 4),  # input
+            empty_bf16(1, 5),  # weight
+            empty_fp32(1, 1)  # scale
+        ]
+
+        pm.register_replacement(pattern, replacement, inputs, pm.fwd_only,
+                                pm_pass)
+
+
+class RMSNormStaticQuantPattern2(RMSNormQuantPattern):
+
+    def __init__(self,
+                 epsilon: float,
+                 quant_dtype: torch.dtype,
+                 symmetric=True):
+        fused_key = FusedRMSQuantKey(fused_add=False,
+                                     quant=QuantKey(
+                                         dtype=quant_dtype,
+                                         static=True,
+                                         group_shape=GroupShape.PER_TENSOR,
+                                         symmetric=symmetric))
+        super().__init__(epsilon, fused_key)
+
+        self.quant_fp8 = QuantFP8(static=True,
+                                  group_shape=GroupShape.PER_TENSOR)
+
+    def register(self, pm_pass: PatternMatcherPass):
+        # Cannot use methods, as the self argument affects tracing
+        def pattern(result_rms: torch.Tensor, input: torch.Tensor,
+                    weight: torch.Tensor, scale: torch.Tensor):
+            at1 = auto_functionalized(RMS_OP,
+                                      result=result_rms,
+                                      input=input,
+                                      weight=weight,
+                                      epsilon=self.epsilon)
+            result2, _ = self.quant_fp8(at1[1], scale=scale)
+            # result
+            return result2
+
+        def replacement(result_rms: torch.Tensor, input: torch.Tensor,
+                        weight: torch.Tensor, scale: torch.Tensor):
+            result = torch.empty(input.size(),
+                                 dtype=self.quant_dtype,
+                                 device=input.device)
+            at = auto_functionalized(self.FUSED_OP,
+                                     result=result,
+                                     input=input,
+                                     weight=weight,
+                                     scale=scale,
+                                     epsilon=self.epsilon)
+
+            # result
+            return at[1]
+
+        inputs = [
+            # torch.empty(5, 4, device="cuda", dtype=self.quant_dtype),  # result
             empty_bf16(5, 4),  # result_rms
             empty_bf16(5, 4),  # input
             empty_bf16(1, 5),  # weight
@@ -569,6 +627,9 @@ class FusionPass(VllmInductorPass):
             # Fuse rms_norm + static fp8 quant
             RMSNormStaticQuantPattern(epsilon,
                                       FP8_DTYPE).register(self.patterns)
+            # Fuse rms_norm + static fp8 quant
+            RMSNormStaticQuantPattern2(epsilon,
+                                       FP8_DTYPE).register(self.patterns)
 
             # Matches for patterns below have 2 or more outputs,
             # so we need to process them manually (see process_matches)
