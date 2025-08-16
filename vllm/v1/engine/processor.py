@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal, Optional, Union
 
 from vllm.config import VllmConfig
@@ -47,21 +47,17 @@ class Processor:
 
         self.generation_config_fields = (
             self.model_config.try_get_generation_config())
+
+        self.mm_registry = mm_registry
+        self.mm_input_cache = CachedMultiModalInputExchanger.for_p0(
+            vllm_config, mm_registry)
+
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
             self.tokenizer,
             mm_registry,
-            mm_input_cache=CachedMultiModalInputExchanger.for_p0(
-                vllm_config, mm_registry),
+            mm_input_cache=self.mm_input_cache,
         )
-
-    @property
-    def mm_registry(self):
-        return self.input_preprocessor.mm_registry
-
-    @property
-    def mm_input_cache(self):
-        return self.input_preprocessor.mm_input_cache
 
     def _validate_logprobs(
         self,
@@ -303,7 +299,8 @@ class Processor:
             pooling_params = params.clone()
 
         # Multimodal related.
-        sorted_mm_inputs: Optional[list[Optional[MultiModalKwargsItem]]] = None
+        sorted_mm_inputs: Optional[Sequence[
+            Optional[MultiModalKwargsItem]]] = None
         sorted_mm_positions: Optional[list[PlaceholderRange]] = None
         sorted_mm_hashes: Optional[list[str]] = None
         if decoder_inputs["type"] == "multimodal":
