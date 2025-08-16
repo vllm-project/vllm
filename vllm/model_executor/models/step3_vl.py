@@ -674,14 +674,14 @@ class Step3VisionAttention(nn.Module):
             self.total_num_heads,
             bias=True,
             quant_config=quant_config,
-            prefix=prefix,
+            prefix=f"{prefix}.qkv_proj",
             disable_tp=use_data_parallel,
         )
         self.out_proj = RowParallelLinear(self.embed_dim,
                                           self.embed_dim,
                                           bias=True,
                                           quant_config=quant_config,
-                                          prefix=prefix,
+                                          prefix=f"{prefix}.out_proj",
                                           disable_tp=use_data_parallel)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
