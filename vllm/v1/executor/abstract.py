@@ -80,6 +80,11 @@ class Executor(ExecutorBase):
         output = self.collective_rpc("get_kv_cache_spec")
         return output
 
+    def get_kv_connector_handshake_metadata(
+            self) -> list[dict[int, dict[int, dict]]]:
+        output = self.collective_rpc("get_kv_connector_handshake_metadata")
+        return output
+
     def execute_model(
         self,
         scheduler_output,
