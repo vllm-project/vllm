@@ -30,9 +30,9 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          LoRAConfig, MambaDType, ModelConfig, ModelDType,
                          ModelImpl, MultiModalConfig, ObservabilityConfig,
                          ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
-                         RunnerOption, SchedulerConfig, SchedulerPolicy,
-                         SpeculativeConfig, TaskOption, TokenizerMode,
-                         VllmConfig, get_attr_docs, get_field)
+                         ReasoningConfig, RunnerOption, SchedulerConfig,
+                         SchedulerPolicy, SpeculativeConfig, TaskOption,
+                         TokenizerMode, VllmConfig, get_attr_docs, get_field)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -413,6 +413,9 @@ class EngineArgs:
 
     kv_transfer_config: Optional[KVTransferConfig] = None
     kv_events_config: Optional[KVEventsConfig] = None
+
+    reasoning_config: ReasoningConfig = get_field(VllmConfig,
+                                                  "reasoning_config")
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
@@ -842,6 +845,8 @@ class EngineArgs:
                                 **vllm_kwargs["kv_events_config"])
         vllm_group.add_argument("--compilation-config", "-O",
                                 **vllm_kwargs["compilation_config"])
+        vllm_group.add_argument("--reasoning-config",
+                                **vllm_kwargs["reasoning_config"])
         vllm_group.add_argument("--additional-config",
                                 **vllm_kwargs["additional_config"])
 
@@ -1346,6 +1351,7 @@ class EngineArgs:
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            reasoning_config=self.reasoning_config,
             additional_config=self.additional_config,
         )
 

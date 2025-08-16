@@ -5,7 +5,7 @@ import copy
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 import msgspec
 from pydantic import BaseModel
@@ -215,6 +215,11 @@ class SamplingParams(
     generated token can complete the sequence."""
     _bad_words_token_ids: Optional[list[list[int]]] = None
 
+    # Fields used for reasoning
+    reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
+    thinking_token_budget: Optional[int] = None
+    """Maximum number of tokens allowed for thinking operations."""
+
     @staticmethod
     def from_optional(
         n: Optional[int] = 1,
@@ -230,6 +235,8 @@ class SamplingParams(
         stop: Optional[Union[str, list[str]]] = None,
         stop_token_ids: Optional[list[int]] = None,
         bad_words: Optional[list[str]] = None,
+        reasoning_effort: Optional[Literal["low", "medium", "high"]] = None,
+        thinking_token_budget: Optional[int] = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: Optional[int] = 16,
@@ -273,6 +280,8 @@ class SamplingParams(
             stop=stop,
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,
+            reasoning_effort=reasoning_effort,
+            thinking_token_budget=thinking_token_budget,
             include_stop_str_in_output=include_stop_str_in_output,
             ignore_eos=ignore_eos,
             max_tokens=max_tokens,
@@ -542,6 +551,8 @@ class SamplingParams(
             f"stop={self.stop}, "
             f"stop_token_ids={self.stop_token_ids}, "
             f"bad_words={self.bad_words}, "
+            f"reasoning_effort={self.reasoning_effort}, "
+            f"thinking_token_budget={self.thinking_token_budget}, "
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "
             f"ignore_eos={self.ignore_eos}, "
             f"max_tokens={self.max_tokens}, "

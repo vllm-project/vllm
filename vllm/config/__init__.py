@@ -3272,6 +3272,35 @@ class KVEventsConfig:
 
 
 @config
+@dataclass
+class ReasoningConfig:
+    """Configuration for reasoning models."""
+
+    think_start_str: Optional[str] = None
+    """String that indicates the start of reasoning."""
+    think_end_str: Optional[str] = None
+    """String that indicates the end of reasoning."""
+    think_start_token_ids: Optional[list[int]] = None
+    """Token ID that indicates the start of reasoning."""
+    think_end_token_ids: Optional[list[int]] = None
+    """Token ID that indicates the end of reasoning."""
+    low_effort_token_budget: int = 1024
+    """Token budget for low effort reasoning."""
+    medium_effort_token_budget: int = 2048
+    """Token budget for medium effort reasoning."""
+    high_effort_token_budget: int = 8192
+    """Token budget for high effort reasoning."""
+
+    def is_thinking_enabled(self) -> bool:
+        """Check if both start and end thinking token IDs
+        are set to enable thinking token budget logic."""
+        return (self.think_start_token_ids is not None
+                and self.think_end_token_ids is not None
+                and len(self.think_start_token_ids) > 0
+                and len(self.think_end_token_ids) > 0)
+
+
+@config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
@@ -3322,6 +3351,8 @@ class VllmConfig:
     """The configurations for distributed KV cache transfer."""
     kv_events_config: Optional[KVEventsConfig] = None
     """The configurations for event publishing."""
+    reasoning_config: ReasoningConfig = field(default_factory=ReasoningConfig)
+    """The configurations for reasoning model."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
