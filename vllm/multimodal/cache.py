@@ -4,7 +4,7 @@ import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeVar, Union
+from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union
 
 import torch
 from typing_extensions import override
@@ -102,7 +102,10 @@ class MultiModalCache:
         )
 
 
-class CachedMultiModalInputExchanger(ABC):
+_O = TypeVar("_O", covariant=True)
+
+
+class CachedMultiModalInputExchanger(ABC, Generic[_O]):
     """
     Abstract base class to read/write multi-modal items from cache.
 
@@ -131,7 +134,7 @@ class CachedMultiModalInputExchanger(ABC):
     def for_p0(
         vllm_config: "VllmConfig",
         mm_registry: "MultiModalRegistry",
-    ) -> "CachedMultiModalInputExchanger":
+    ) -> "CachedMultiModalInputExchanger[Optional[MultiModalKwargsItem]]":
         model_config = vllm_config.model_config
 
         if not mm_registry.supports_multimodal_inputs(model_config):
@@ -153,7 +156,7 @@ class CachedMultiModalInputExchanger(ABC):
     def for_p1(
         vllm_config: "VllmConfig",
         mm_registry: "MultiModalRegistry",
-    ) -> "CachedMultiModalInputExchanger":
+    ) -> "CachedMultiModalInputExchanger[MultiModalKwargsItem]":
         model_config = vllm_config.model_config
 
         if not mm_registry.supports_multimodal_inputs(model_config):
@@ -205,9 +208,9 @@ class CachedMultiModalInputExchanger(ABC):
     @abstractmethod
     def get_and_update_item(
         self,
-        mm_item: MultiModalKwargsItem,
+        mm_item: Optional[MultiModalKwargsItem],
         mm_hash: str,
-    ) -> MultiModalKwargsItem:
+    ) -> _O:
         """
         Possibly update a multi-modal item based on whether it is
         in the underlying cache.
@@ -225,9 +228,9 @@ class CachedMultiModalInputExchanger(ABC):
 
     def get_and_update(
         self,
-        mm_items: Sequence[MultiModalKwargsItem],
+        mm_items: Sequence[Optional[MultiModalKwargsItem]],
         mm_hashes: list[str],
-    ) -> list[MultiModalKwargsItem]:
+    ) -> list[_O]:
         """
         Possibly update a sequence of multi-modal items based on whether they
         are in the underlying cache.
@@ -254,7 +257,8 @@ class CachedMultiModalInputExchanger(ABC):
         raise NotImplementedError
 
 
-class CachedMultiModalInputSender(CachedMultiModalInputExchanger):
+class CachedMultiModalInputSender(
+        CachedMultiModalInputExchanger[Optional[MultiModalKwargsItem]]):
     """
     How to update each item:
 
@@ -284,15 +288,13 @@ class CachedMultiModalInputSender(CachedMultiModalInputExchanger):
     @override
     def get_and_update_item(
         self,
-        mm_item: MultiModalKwargsItem,
+        mm_item: Optional[MultiModalKwargsItem],
         mm_hash: str,
-    ) -> MultiModalKwargsItem:
-        if self._cache.get(mm_hash) is not None:
-            return mm_item.without_data()
+    ) -> Optional[MultiModalKwargsItem]:
+        if self._cache.get(mm_hash) is not None or mm_item is None:
+            return None
 
-        self._cache[mm_hash] = MultiModalCacheItemMetadata.wraps(
-            mm_item.require_data())
-
+        self._cache[mm_hash] = MultiModalCacheItemMetadata.wraps(mm_item)
         return mm_item
 
     @override
@@ -300,7 +302,8 @@ class CachedMultiModalInputSender(CachedMultiModalInputExchanger):
         self._cache.clear()
 
 
-class CachedMultiModalInputReceiver(CachedMultiModalInputExchanger):
+class CachedMultiModalInputReceiver(
+        CachedMultiModalInputExchanger[MultiModalKwargsItem]):
     """
     How to update each item:
 
@@ -315,7 +318,7 @@ class CachedMultiModalInputReceiver(CachedMultiModalInputExchanger):
 
         self._cache = MultiModalCache.get_lru_cache(
             mm_config.mm_processor_cache_gb,
-            Mapping[str, NestedTensors],  # type: ignore[type-abstract]
+            MultiModalKwargsItem,
         )
 
     @override
@@ -325,14 +328,15 @@ class CachedMultiModalInputReceiver(CachedMultiModalInputExchanger):
     @override
     def get_and_update_item(
         self,
-        mm_item: MultiModalKwargsItem,
+        mm_item: Optional[MultiModalKwargsItem],
         mm_hash: str,
     ) -> MultiModalKwargsItem:
-        if (mm_data := self._cache.get(mm_hash)) is not None:
-            return mm_item.with_data(mm_data)
+        if (cached_item := self._cache.get(mm_hash)) is not None:
+            return cached_item
 
-        self._cache[mm_hash] = mm_item.require_data()
+        assert mm_item is not None, f"Expected an item from P0 for {mm_hash=}"
 
+        self._cache[mm_hash] = mm_item
         return mm_item
 
     @override
@@ -340,7 +344,8 @@ class CachedMultiModalInputReceiver(CachedMultiModalInputExchanger):
         self._cache.clear()
 
 
-class CachedMultiModalInputDisabled(CachedMultiModalInputExchanger):
+class CachedMultiModalInputDisabled(
+        CachedMultiModalInputExchanger[MultiModalKwargsItem]):
     """Return the passed items without applying any caching."""
 
     @override
@@ -350,9 +355,11 @@ class CachedMultiModalInputDisabled(CachedMultiModalInputExchanger):
     @override
     def get_and_update_item(
         self,
-        mm_item: MultiModalKwargsItem,
+        mm_item: Optional[MultiModalKwargsItem],
         mm_hash: str,
     ) -> MultiModalKwargsItem:
+        assert mm_item is not None, f"Expected an item from P0 for {mm_hash=}"
+
         return mm_item
 
     @override

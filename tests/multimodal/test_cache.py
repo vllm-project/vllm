@@ -121,7 +121,7 @@ def _compare_caches(
         for _ in range(int(item_capacity / hit_rate))
     ]
     all_hashes = [
-        MultiModalHasher.hash_kwargs(item=item.require_data())
+        MultiModalHasher.hash_kwargs(item=item.get_data())
         for item in all_items
     ]
 
