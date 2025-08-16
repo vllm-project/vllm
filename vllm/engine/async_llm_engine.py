@@ -998,7 +998,7 @@ class AsyncLLMEngine(EngineClient):
             await self.abort(request_id)
             raise
 
-    async def abort(self, request_id: str) -> None:
+    async def abort(self, request_id: Union[str, Iterable[str]]) -> None:
         """Abort a request.
 
         Abort a submitted request. If the request is finished or not found,
@@ -1007,6 +1007,9 @@ class AsyncLLMEngine(EngineClient):
         Args:
             request_id: The unique id of the request.
         """
+        if not isinstance(request_id, str):
+            raise RuntimeError("Only single-request abort supported in"
+                               " deprecated V0")
         if not self.is_running:
             raise AsyncEngineDeadError(
                 "Background loop is not running. If it was running, "
