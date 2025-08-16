@@ -55,7 +55,7 @@ class LlavaOnevisionVideoPixelInputs(TensorSchema):
 
     pixel_values_videos: Annotated[
         Union[torch.Tensor, list[torch.Tensor]],
-        TensorShape("bn", "f", 3, "h", "w"),
+        TensorShape("bn", "f", 3, "h", "w", dynamic_dims={"f"}),
     ]
 
 
