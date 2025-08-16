@@ -144,6 +144,8 @@ def test_ngram_correctness(
              "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
             True,
             marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
+        (("eagle", "eagle618/deepseek-v3-random",
+          "eagle618/eagle-deepseek-v3-random", 1), False),
     ],
     ids=[
         # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
@@ -151,7 +153,8 @@ def test_ngram_correctness(
         "llama3_eagle",
         "llama3_eagle3",
         "llama4_eagle",
-        "llama4_eagle_mm"
+        "llama4_eagle_mm",
+        "deepseek_eagle"
     ])
 @pytest.mark.parametrize("attn_backend",
                          get_attn_backend_list_based_on_platform())
