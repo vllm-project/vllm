@@ -3563,6 +3563,8 @@ class VllmConfig:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
             self._set_cudagraph_sizes()
+        else:
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if self.cache_config.cpu_offload_gb > 0 and \
             self.compilation_config.level != CompilationLevel.NO_COMPILATION \
