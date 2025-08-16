@@ -24,7 +24,7 @@ import random
 import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Optional
@@ -54,33 +54,43 @@ class TaskType(Enum):
 
 @dataclass
 class BenchmarkMetrics:
-    completed: int = 0
-    total_input: int = 0
-    total_output: int = 0
-    request_throughput: float = 0.0
-    request_goodput: float = 0.0
-    output_throughput: float = 0.0
-    total_token_throughput: float = 0.0
-    mean_ttft_ms: float = 0.0
-    median_ttft_ms: float = 0.0
-    std_ttft_ms: float = 0.0
-    percentiles_ttft_ms: list[tuple[float, float]] = field(default_factory=list)
-    mean_tpot_ms: float = 0.0
-    median_tpot_ms: float = 0.0
-    std_tpot_ms: float = 0.0
-    percentiles_tpot_ms: list[tuple[float, float]] = field(default_factory=list)
-    mean_itl_ms: float = 0.0
-    median_itl_ms: float = 0.0
-    std_itl_ms: float = 0.0
-    percentiles_itl_ms: list[tuple[float, float]] = field(default_factory=list)
+    completed: int
+    total_input: int
+    total_output: int
+    request_throughput: float
+    request_goodput: float
+    output_throughput: float
+    total_token_throughput: float
+    mean_ttft_ms: float
+    median_ttft_ms: float
+    std_ttft_ms: float
+    percentiles_ttft_ms: list[tuple[float, float]]
+    mean_tpot_ms: float
+    median_tpot_ms: float
+    std_tpot_ms: float
+    percentiles_tpot_ms: list[tuple[float, float]]
+    mean_itl_ms: float
+    median_itl_ms: float
+    std_itl_ms: float
+    percentiles_itl_ms: list[tuple[float, float]]
     # E2EL stands for end-to-end latency per request.
     # It is the time taken on the client side from sending
     # a request to receiving a complete response.
-    mean_e2el_ms: float = 0.0
-    median_e2el_ms: float = 0.0
-    std_e2el_ms: float = 0.0
-    percentiles_e2el_ms: list[tuple[float, float]] = field(default_factory=list)
+    mean_e2el_ms: float
+    median_e2el_ms: float
+    std_e2el_ms: float
+    percentiles_e2el_ms: list[tuple[float, float]]
 
+@dataclass
+class EmbedBenchmarkMetrics:
+    completed: int
+    total_input: int
+    request_throughput: float
+    total_token_throughput :float
+    mean_e2el_ms: float
+    std_e2el_ms: float
+    median_e2el_ms: float
+    percentiles_e2el_ms: float
 
 def _get_current_request_rate(
     ramp_up_strategy: Optional[Literal["linear", "exponential"]],
@@ -199,7 +209,7 @@ def calculate_metrics_for_embeddings(
     outputs: list[RequestFuncOutput], 
     dur_s: float, 
     selected_percentiles: list[float]
-) -> BenchmarkMetrics:
+) -> EmbedBenchmarkMetrics:
     """Calculate the metrics for the embedding requests.
 
     Args:
@@ -218,7 +228,13 @@ def calculate_metrics_for_embeddings(
             e2els.append(outputs[i].latency)
             completed += 1
             total_input += outputs[i].prompt_len
-    metrics = BenchmarkMetrics(
+
+    if completed == 0:
+        warnings.warn(
+            "All requests failed. This is likely due to a misconfiguration "
+            "on the benchmark arguments.",
+            stacklevel=2)
+    metrics = EmbedBenchmarkMetrics(
         completed=completed,
         total_input=total_input,
         request_throughput=completed / dur_s,
@@ -609,23 +625,34 @@ async def benchmark(
     print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
                                     metrics.total_token_throughput))
 
-    result = {
-        "duration": benchmark_duration,
-        "completed": metrics.completed,
-        "total_input_tokens": metrics.total_input,
-        "total_output_tokens": metrics.total_output,
-        "request_throughput": metrics.request_throughput,
-        "request_goodput":
-        metrics.request_goodput if goodput_config_dict else None,
-        "output_throughput": metrics.output_throughput,
-        "total_token_throughput": metrics.total_token_throughput,
-        "input_lens": [output.prompt_len for output in outputs],
-        "output_lens": actual_output_lens,
-        "ttfts": [output.ttft for output in outputs],
-        "itls": [output.itl for output in outputs],
-        "generated_texts": [output.generated_text for output in outputs],
-        "errors": [output.error for output in outputs],
-    }
+    if task_type == TaskType.GENERATION:
+        result = {
+            "duration": benchmark_duration,
+            "completed": metrics.completed,
+            "total_input_tokens": metrics.total_input,
+            "total_output_tokens": metrics.total_output,
+            "request_throughput": metrics.request_throughput,
+            "request_goodput":
+            metrics.request_goodput if goodput_config_dict else None,
+            "output_throughput": metrics.output_throughput,
+            "total_token_throughput": metrics.total_token_throughput,
+            "input_lens": [output.prompt_len for output in outputs],
+            "output_lens": actual_output_lens,
+            "ttfts": [output.ttft for output in outputs],
+            "itls": [output.itl for output in outputs],
+            "generated_texts": [output.generated_text for output in outputs],
+            "errors": [output.error for output in outputs],
+        }
+    else:
+        result = {
+            "duration": benchmark_duration,
+            "completed": metrics.completed,
+            "total_input_tokens": metrics.total_input,
+            "request_throughput": metrics.request_throughput,
+            "total_token_throughput": metrics.total_token_throughput,
+            "input_lens": [output.prompt_len for output in outputs],
+            "errors": [output.error for output in outputs],
+        }
 
     if rps_change_events:
         result["rps_change_events"] = rps_change_events
