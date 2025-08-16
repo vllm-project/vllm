@@ -4,10 +4,10 @@ import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Generic, Optional, Union
 
 import torch
-from typing_extensions import override
+from typing_extensions import TypeVar, override
 
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, LRUCache
@@ -102,7 +102,13 @@ class MultiModalCache:
         )
 
 
-_O = TypeVar("_O", covariant=True)
+_O = TypeVar(
+    "_O",
+    MultiModalKwargsItem,
+    Optional[MultiModalKwargsItem],
+    covariant=True,
+    default=Optional[MultiModalKwargsItem],
+)
 
 
 class CachedMultiModalInputExchanger(ABC, Generic[_O]):
@@ -148,6 +154,10 @@ class CachedMultiModalInputExchanger(ABC, Generic[_O]):
         supports_ipc_cache = (parallel_config.data_parallel_size == 1
                               or parallel_config.data_parallel_external_lb)
         if not supports_ipc_cache:
+            return CachedMultiModalInputReceiver(model_config)
+
+        if mm_registry.create_processor(model_config).requires_out_mm_kwargs:
+            # The processed data must be cached inside P0
             return CachedMultiModalInputReceiver(model_config)
 
         return CachedMultiModalInputSender(model_config)

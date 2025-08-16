@@ -1008,6 +1008,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def allowed_mm_limits(self):
         return self._allowed_mm_limits
 
+    @property
+    def requires_out_mm_kwargs(self) -> bool:
+        """
+        Set this to `True` for models that need to extract data
+        from `out_mm_kwargs` in `_get_prompt_updates`.
+        """
+        return False
+
     def __call__(
         self,
         prompt: str,
@@ -1298,6 +1306,26 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return prompt_ids, mm_processed_data, False
 
+    def _hash_mm_items(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+    ) -> MultiModalHashes:
+        """Create MM hashes to be returned (only used in V1)."""
+        model_id = self.info.model_id
+
+        return {
+            modality: [
+                MultiModalHasher.hash_kwargs(model_id=model_id,
+                                             **{modality: item},
+                                             **hf_processor_mm_kwargs,
+                                             **tokenization_kwargs)
+                for item in items
+            ]
+            for modality, items in mm_items.items()
+        }
+
     def _get_cache_missing_items(
         self,
         cache: "CachedMultiModalInputExchanger",
@@ -1323,46 +1351,30 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return mm_is_cached, self._to_mm_items(mm_missing_data)
 
-    def _hash_mm_items(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> MultiModalHashes:
-        """Create MM hashes to be returned (only used in V1)."""
-        model_id = self.info.model_id
-
-        return {
-            modality: [
-                MultiModalHasher.hash_kwargs(model_id=model_id,
-                                             **{modality: item},
-                                             **hf_processor_mm_kwargs,
-                                             **tokenization_kwargs)
-                for item in items
-            ]
-            for modality, items in mm_items.items()
-        }
-
     def _merge_mm_kwargs(
         self,
+        cache: "CachedMultiModalInputExchanger",
+        mm_hashes: MultiModalHashes,
         mm_is_cached: dict[str, list[bool]],
         mm_missing_kwargs: MultiModalKwargs,
-    ) -> dict[str, list[MultiModalKwargsItem]]:
+    ) -> dict[str, list[Optional[MultiModalKwargsItem]]]:
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
-        merged_items = defaultdict[str, list[MultiModalKwargsItem]](list)
+        merged_items = defaultdict[str,
+                                   list[Optional[MultiModalKwargsItem]]](list)
         for modality, items_is_cached in mm_is_cached.items():
-            for item_is_cached in items_is_cached:
+            for i, item_is_cached in enumerate(items_is_cached):
                 if not item_is_cached:
-                    kw_item = mm_missing_kwargs.get_item(
-                        modality,
-                        mm_missing_next_idx[modality],
-                    )
+                    kw_item = mm_missing_kwargs[modality][
+                        mm_missing_next_idx[modality]]
                     mm_missing_next_idx[modality] += 1
                 else:
-                    # Should be replaced by get_and_update() in P1 cache
-                    kw_item = MultiModalKwargsItem.dummy(modality)
+                    kw_item = None
 
+                kw_item = cache.get_and_update_item(
+                    kw_item,
+                    mm_hashes[modality][i],
+                )
                 merged_items[modality].append(kw_item)
 
         return dict(merged_items)
@@ -1451,22 +1463,18 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             enable_hf_prompt_update=False,
         )
 
-        # TODO: Defer config construction until merge step
         mm_missing_kwargs = MultiModalKwargs.from_hf_inputs(
             mm_missing_processed_data,
             self._get_mm_fields_config(mm_missing_processed_data,
                                        hf_processor_mm_kwargs),
         )
 
-        mm_cache_items_merged = self._merge_mm_kwargs(
+        mm_kwargs = self._merge_mm_kwargs(
+            cache=cache,
+            mm_hashes=mm_hashes,
             mm_is_cached=mm_is_cached,
             mm_missing_kwargs=mm_missing_kwargs,
         )
-
-        mm_kwargs = MultiModalKwargs.from_items([
-            item for cache_items in mm_cache_items_merged.values()
-            for item in cache_items
-        ])
 
         return prompt_ids, mm_kwargs, mm_hashes_to_return, is_update_applied
 

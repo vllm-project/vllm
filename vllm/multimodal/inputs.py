@@ -730,18 +730,30 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
             for key, elem in item.items():
                 elems_by_key[key].append(elem)
 
-        # We assume that the data of MultiModalDataKwargs is used
-        # only if none of the MultiModalFieldElem are dummy items.
-        # This is a temporary solution to avoid having to define
-        # a separate MultiModalKwargs class for V0 and V1.
-        # TODO: Clean this up once V0 is completely removed!
         data = {
-            key: (None if any(e.data is None for e in elems) else
-                  elems[0].field.reduce_data(elems, pin_memory=pin_memory))
+            key: elems[0].field.reduce_data(elems, pin_memory=pin_memory)
             for key, elems in elems_by_key.items() if len(elems) > 0
         }
 
-        return MultiModalKwargs(data, items=items)  # type: ignore
+        return MultiModalKwargs(data, items=items)
+
+    @staticmethod
+    def from_items_by_modality(
+        items_by_modality: "MultiModalKwargs",
+        *,
+        pin_memory: bool = False,
+    ):
+        valid_items = list[MultiModalKwargsItem]()
+
+        for modality, items in items_by_modality.items():
+            for i, item in enumerate(items):
+                assert item is not None, (
+                    f"Cannot build data from empty "
+                    f"`items_by_modality[{modality}][{i}]`")
+
+                valid_items.append(item)
+
+        return MultiModalKwargs.from_items(valid_items, pin_memory=pin_memory)
 
     def __init__(
         self,

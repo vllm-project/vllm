@@ -194,11 +194,21 @@ llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
 
 Based on the configuration, the content of the multi-modal caches on `P0` and `P1` are as follows:
 
-| Processor Caching | IPC Caching | `P0` Cache | `P1` Cache | Max. Memory |
-|-------------------|-------------|------------|------------|-------------|
-| ✅ | ✅ | K | K + V | `mm_processor_cache_gb * data_parallel_size` |
-| ✅ | ❌ | K + V | N/A | `mm_processor_cache_gb * api_server_count` |
-| ❌ | ❌ | N/A | N/A | `0` |
+- For models with `requires_out_mm_kwargs=False`:
+
+    | Processor Caching | IPC Caching | `P0` Cache | `P1` Cache | Max. Memory |
+    |-------------------|-------------|------------|------------|-------------|
+    | ✅ | ✅ | K | K + V | `mm_processor_cache_gb * data_parallel_size` |
+    | ✅ | ❌ | K + V | N/A | `mm_processor_cache_gb * api_server_count` |
+    | ❌ | ❌ | N/A | N/A | `0` |
+
+- For models with `requires_out_mm_kwargs=True`:
+
+    | Processor Caching | IPC Caching | `P0` Cache | `P1` Cache | Max. Memory |
+    |-------------------|-------------|------------|------------|-------------|
+    | ✅ | ✅ | K + V | K + V | `mm_processor_cache_gb * (data_parallel_size + api_server_count)` |
+    | ✅ | ❌ | K + V | N/A | `mm_processor_cache_gb * api_server_count` |
+    | ❌ | ❌ | N/A | N/A | `0` |
 
 K: Stores the hashes of multi-modal items  
 V: Stores the processed tensor data of multi-modal items

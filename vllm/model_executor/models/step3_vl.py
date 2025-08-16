@@ -516,6 +516,10 @@ class Step3VLDummyInputsBuilder(BaseDummyInputsBuilder[Step3VLProcessingInfo]):
 class Step3VLMultiModalProcessor(BaseMultiModalProcessor[Step3VLProcessingInfo]
                                  ):
 
+    @property
+    def requires_out_mm_kwargs(self) -> bool:
+        return True
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,

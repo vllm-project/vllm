@@ -421,6 +421,10 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
 class H2OVLMultiModalProcessor(
         BaseInternVLMultiModalProcessor[H2OVLProcessingInfo]):
 
+    @property
+    def requires_out_mm_kwargs(self) -> bool:
+        return True
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,

@@ -968,6 +968,10 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
                                  ):
 
+    @property
+    def requires_out_mm_kwargs(self) -> bool:
+        return True
+
     def _get_data_parser(self) -> MultiModalDataParser:
         return Qwen2VLMultiModalDataParser()
 

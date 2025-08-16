@@ -508,6 +508,10 @@ class SkyworkR1VDummyInputsBuilder(
 class SkyworkR1VMultiModalProcessor(
         BaseMultiModalProcessor[SkyworkR1VProcessingInfo]):
 
+    @property
+    def requires_out_mm_kwargs(self) -> bool:
+        return True
+
     def _call_hf_processor(
         self,
         prompt: str,
