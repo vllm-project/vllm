@@ -763,11 +763,8 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
 
         num_image_patches = kwargs.pop("num_image_patches")
         if pixel_values is not None:
-            if isinstance(pixel_values, torch.Tensor):
-                pixel_values = flatten_bn(pixel_values).to(self.dtype)
-            elif is_list_of(pixel_values, torch.Tensor):
-                pixel_values = torch.stack(flatten_bn(pixel_values)).to(
-                    self.dtype)
+            if isinstance(pixel_values, torch.Tensor) or is_list_of(pixel_values, torch.Tensor):
+                pixel_values = flatten_bn(pixel_values, concat=True).to(self.dtype)
             else:
                 raise ValueError(
                     f"Unsupported pixel_values type {type(pixel_values)}. "
