@@ -1452,6 +1452,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             enable_hf_prompt_update=False,
         )
 
+        # TODO: Defer config construction until merge step
         mm_missing_kwargs = MultiModalKwargs.from_hf_inputs(
             mm_missing_processed_data,
             self._get_mm_fields_config(mm_missing_processed_data,
