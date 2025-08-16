@@ -67,6 +67,12 @@ def split_json_by_tp_pp(
 
     df = pd.DataFrame(data)
 
+    # Keep only "serving" tests
+    name_col = next((c for c in ["Test name", "test_name", "Test Name"] if c in df.columns), None)
+    if name_col:
+        df = df[df[name_col].astype(str).str.contains(r"serving", case=False, na=False)].copy()
+
+
     # Handle alias column names
     rename_map = {
         "tp_size": "TP Size",
@@ -181,7 +187,6 @@ if __name__ == "__main__":
                     f"Expected subset: {filtered_info_cols}, "
                     f"but DataFrame has: {list(output_df.columns)}"
                 )
-
             output_df_sorted = output_df.sort_values(by=existing_group_cols)
             output_groups = output_df_sorted.groupby(existing_group_cols, dropna=False)
             for name, group in output_groups:
