@@ -137,6 +137,59 @@ def test_cutlass_sparse_subset():
     torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
 
 
+@pytest.mark.skipif(not sparse_cutlass_supported(),
+                    reason="Sparse CUTLASS is not supported on this GPU type.")
+# Test working with a subset of A and B for sparse matmul
+def test_cutlass_sparse_subset2():
+    m, n, k = 512, 256, 64
+
+    def _make_sparse_tensors(dtype,
+                             m, n, k):
+        a = torch.randn((m, k), device='cuda', dtype=dtype)        
+        zero_sparse_b = torch.Tensor([0, 0, 1, 1]).to('cuda').to(dtype).tile((n, k // 4)).t()
+
+        print(f"zero_sparse_b : shape={zero_sparse_b.shape}, \nsnapshot={zero_sparse_b}")
+
+        b = prune_to_2_4(zero_sparse_b.t()).t()
+
+        torch.testing.assert_close(zero_sparse_b, b, rtol=1e-1, atol=1e0)
+
+        compressed_zero_sparse_b, e = ops.cutlass_sparse_compress(zero_sparse_b.t())
+
+        print(f"compressed_zero_sparse_b : shape={compressed_zero_sparse_b.shape}, \nsnapshot={compressed_zero_sparse_b}")
+        print(f"e : shape={e.shape}, \nsnapshot={e}")
+
+        check_compress_decompress_invariance(dtype, zero_sparse_b, compressed_zero_sparse_b, e)
+
+        return a, zero_sparse_b, compressed_zero_sparse_b, e
+
+    def sparse_encode(b):
+        sparse_encoded_b = torch.sparse.to_sparse_semi_structured(b)
+        return sparse_encoded_b
+
+    a, b, compressed_b, e = _make_sparse_tensors(torch.bfloat16, m, n, k)
+
+    scale_a = torch.Tensor([[1,],]).to('cuda')
+    scale_b = torch.Tensor([[1,],]).to('cuda')
+
+    out = ops.cutlass_scaled_sparse_mm(a,
+                                       compressed_b,
+                                       e,
+                                       scale_a,
+                                       scale_b,
+                                       out_dtype=torch.bfloat16)
+
+    ref_baseline = torch.mm(a * scale_a.to(torch.bfloat16), b * scale_b.to(torch.bfloat16))
+
+    sparse_encoded_b = sparse_encode((b * scale_b.to(torch.bfloat16)).t()).t()
+
+    # NOTE(yiakwy) : torch._scaled_mm does not support bfloat16
+    ref = torch.mm(a * scale_a.to(torch.bfloat16), sparse_encoded_b)
+
+    torch.testing.assert_close(ref, ref_baseline, rtol=1e-1, atol=1e0)
+    torch.testing.assert_close(ref, out, rtol=1e-1, atol=1e0)
+
+
 MNK_FACTORS = [
     (1, 256, 128),
     (1, 16384, 1024),
