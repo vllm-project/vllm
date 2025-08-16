@@ -31,13 +31,14 @@ from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     PlaceholderRange)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptUpdate)
+                                        PromptInsertion, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 
 from .interfaces import SupportsMultiModal
+from .siglip import SiglipEncoderInfo
 
 
-class SiglipSo400mProcessingInfo(BaseProcessingInfo):
+class SiglipSo400mProcessingInfo(SiglipEncoderInfo):
 
     def get_hf_processor(self, **kwargs):
         vision_config = self.get_hf_config()
@@ -65,28 +66,9 @@ class SiglipSo400mProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Optional[Mapping[str, int]]:
-        image_size = self.get_image_size()
-        patch_size = self.get_patch_size()
-        num_patches = (image_size // patch_size)**2
-        return {"image": num_patches}
-
-    def get_image_size(self) -> int:
-        hf_config = self.get_hf_config()
-        if hasattr(hf_config, "vision_config"):
-            return hf_config.vision_config.image_size
-        elif hasattr(hf_config, "image_size"):
-            return hf_config.image_size
-        raise TypeError(
-            f"Could not find image_size in config of type {type(hf_config)}")
-
-    def get_patch_size(self) -> int:
-        hf_config = self.get_hf_config()
-        if hasattr(hf_config, "vision_config"):
-            return hf_config.vision_config.patch_size
-        elif hasattr(hf_config, "patch_size"):
-            return hf_config.patch_size
-        raise TypeError(
-            f"Could not find patch_size in config of type {type(hf_config)}")
+        return {
+            "image": self.get_num_image_tokens(image_width=0, image_height=0)
+        }
 
 
 class SiglipSo400mDummyInputsBuilder(
@@ -133,7 +115,10 @@ class SiglipSo400mMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        return []
+        return [
+            PromptInsertion(modality="image", num_tokens=0, item_idx=i)
+            for i in range(mm_items.get_item_count("image"))
+        ]
 
     def _process_image(self, images: list[Image.Image]) -> MultiModalDataDict:
         processor: SiglipImageProcessor = self.info.get_hf_processor(

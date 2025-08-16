@@ -7,15 +7,13 @@ from typing import Callable
 import requests
 from PIL import Image
 
-from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import (rescale_video_size, resize_video,
                                    sample_frames_from_video)
 
 from .....conftest import IMAGE_ASSETS, VIDEO_ASSETS
 from .builders import build_multi_image_inputs, build_single_image_inputs
-from .types import (CustomTestOptions, ImageSizeWrapper,
-                    PromptWithMultiModalInput, SizeType)
+from .types import ImageSizeWrapper, PromptWithMultiModalInput, SizeType
 
 
 def multi_image_multi_aspect_ratio_inputs(formatter: Callable[[str], str]):
@@ -151,14 +149,3 @@ def video_with_metadata_glm4_1v():
             video_data=video_input,
         )
     ]
-
-
-def siglip_navit_custom_inputs():
-    image_assets = [ImageAsset("stop_sign"), ImageAsset("cherry_blossom")]
-    inputs = [{
-        "prompt": "",
-        "multi_modal_data": {
-            "image": [asset.pil_image]
-        }
-    } for asset in image_assets]
-    return CustomTestOptions(inputs=inputs, limit_mm_per_prompt={"image": 1})
