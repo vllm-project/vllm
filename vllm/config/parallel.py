@@ -183,7 +183,7 @@ class ParallelConfig:
                     self.get_next_dp_init_port(),
                     self.data_parallel_rank,
                     self.data_parallel_size,
-                    backend="gloo")
+                    backend=current_platform.dist_backend)
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
                 if "EADDRINUSE" in str(e):
@@ -200,9 +200,17 @@ class ParallelConfig:
     @staticmethod
     def has_unfinished_dp(dp_group: ProcessGroup,
                           has_unfinished: bool) -> bool:
-        tensor = torch.tensor([has_unfinished],
-                              dtype=torch.int32,
-                              device="cpu")
+        from vllm.distributed.utils import pg_metadata
+
+        is_platform_pg = pg_metadata.get(dp_group, False)
+        if is_platform_pg:
+            tensor = torch.tensor([has_unfinished],
+                                  dtype=torch.int32,
+                                  device=current_platform.device_type)
+        else:
+            tensor = torch.tensor([has_unfinished],
+                                  dtype=torch.int32,
+                                  device="cpu")
         # dp rank 0: has_unfinished_seqs=True
         # dp rank 1: has_unfinished_seqs=False
         # aggregated: has_unfinished_seqs=True
