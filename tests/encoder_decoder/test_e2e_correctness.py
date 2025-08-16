@@ -63,6 +63,7 @@ def clear_cache():
     current_platform.is_cpu(),
     reason="CPU backend is not currently supported with encoder/decoder models"
 )
+@pytest.mark.skip(reason="bart not supported in V1")
 def test_encoder_decoder_e2e(
     hf_runner,
     vllm_runner,

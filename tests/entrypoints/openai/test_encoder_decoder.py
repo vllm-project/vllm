@@ -30,6 +30,7 @@ async def client(server):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.skip(reason="bart is not yet supported in V1")
 async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
     completion = await client.completions.create(model=model_name,
                                                  prompt="Hello, my name is",
