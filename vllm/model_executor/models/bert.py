@@ -491,7 +491,7 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
 
     def _build_pooler(self, pooler_config: PoolerConfig,
                       vllm_config: VllmConfig) -> Pooler:
-        projector = _load_st_projector(vllm_config)
+        projector = _load_st_projector(vllm_config.model_config)
 
         return DispatchPooler({
             "encode":

@@ -8,7 +8,9 @@ import torch
 import torch.nn as nn
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
+from vllm.config import ModelConfig
 
 from .interfaces_base import VllmModelForPooling, is_pooling_model
 
@@ -17,32 +19,14 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T", bound=type[nn.Module])
 
+logger = init_logger(__name__)
+
 _GENERATE_SUFFIXES = [
     "ForCausalLM",
     "ForConditionalGeneration",
     "ChatModel",
     "LMHeadModel",
 ]
-
-logger = init_logger(__name__)
-
-
-def _st_activation(name: Optional[str]) -> nn.Module:
-    """Get activation function for Sentence-Transformers Dense layers."""
-    m = (name or "").lower()
-    if m == "gelu":
-        return nn.GELU()
-    if m == "gelu_new":
-        return nn.GELU(approximate="tanh")
-    if m == "relu":
-        return nn.ReLU()
-    if m == "tanh":
-        return nn.Tanh()
-    if m == "sigmoid":
-        return nn.Sigmoid()
-    if m == "swish":
-        return nn.SiLU()
-    return nn.Identity()
 
 
 def _load_weights_to_linear(state_dict: dict, linear: nn.Linear) -> bool:
@@ -75,21 +59,23 @@ def _load_weights_to_linear(state_dict: dict, linear: nn.Linear) -> bool:
         return False
 
 
-def _load_st_projector(vllm_config: "VllmConfig") -> Optional[nn.Module]:
+def _load_st_projector(model_config: "ModelConfig") -> Optional[nn.Module]:
     """Load Sentence-Transformers Dense projection layers."""
-    from vllm.transformers_utils.config import (get_hf_file_bytes,
-                                                get_hf_file_to_dict)
+    from vllm.transformers_utils.config import get_hf_file_to_dict, get_hf_file_bytes
 
-    model_path = vllm_config.model_config.model
-    revision = vllm_config.model_config.revision
+    model_path = model_config.model
+    revision = model_config.revision
 
+    # Read modules.json
     modules = get_hf_file_to_dict("modules.json", model_path, revision)
 
+    # Handle dict format (some ST variants)
     if isinstance(modules, dict):
         modules = modules.get("modules", [])
     if not isinstance(modules, list):
         return None
 
+    # Filter Dense modules
     dense_entries = [
         m for m in modules
         if m.get("type") == "sentence_transformers.models.Dense"
@@ -97,6 +83,7 @@ def _load_st_projector(vllm_config: "VllmConfig") -> Optional[nn.Module]:
     if not dense_entries:
         return None
 
+    # Build projection layer sequence
     layers = []
     for entry in dense_entries:
         folder = entry.get("path")
@@ -104,8 +91,7 @@ def _load_st_projector(vllm_config: "VllmConfig") -> Optional[nn.Module]:
             continue
 
         # Read config
-        cfg = get_hf_file_to_dict(f"{folder}/config.json", model_path,
-                                  revision)
+        cfg = get_hf_file_to_dict(f"{folder}/config.json", model_path, revision)
         if not cfg:
             continue
 
@@ -115,22 +101,21 @@ def _load_st_projector(vllm_config: "VllmConfig") -> Optional[nn.Module]:
             continue
 
         use_bias = cfg.get("bias", True)
-        activation = _st_activation(cfg.get("activation_function"))
-
+        # Create linear layer with float32 for numerical stability
         linear = nn.Linear(in_features, out_features, bias=use_bias)
 
+        # Try to load weights - first safetensors, then pytorch_model.bin
         weight_loaded = False
-
+        
+        # Try safetensors
         try:
-            b = get_hf_file_bytes(f"{folder}/model.safetensors", model_path,
-                                  revision)
+            b = get_hf_file_bytes(f"{folder}/model.safetensors", model_path, revision)
             if b is not None:
                 import io
-
                 from safetensors.torch import load as st_load
                 sd = st_load(b)
                 weight_loaded = _load_weights_to_linear(sd, linear)
-        except (OSError, ImportError, ValueError) as e:
+        except (IOError, ImportError, ValueError) as e:
             logger.debug("Failed to load safetensors from %s: %s", folder, e)
 
         if not weight_loaded:
@@ -151,11 +136,14 @@ def _load_st_projector(vllm_config: "VllmConfig") -> Optional[nn.Module]:
                            folder)
 
         layers.append(linear)
-        layers.append(activation)
+        activation_name = cfg.get("activation_function")
+        if activation_name is not None:
+            layers.append(get_act_fn(activation_name))
 
     if not layers:
         return None
 
+    # Ensure the entire module uses float32
     projector = nn.Sequential(*layers)
     projector = projector.to(dtype=torch.float32)
     return projector
@@ -261,7 +249,7 @@ def as_embedding_model(cls: _T) -> _T:
             assert pooler_config is not None
 
             # Load ST projector for embed task only
-            projector = _load_st_projector(vllm_config)
+            projector = _load_st_projector(vllm_config.model_config)
 
             self.pooler = DispatchPooler({
                 "encode":
