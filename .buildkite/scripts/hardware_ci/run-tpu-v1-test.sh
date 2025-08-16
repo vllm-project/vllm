@@ -5,7 +5,6 @@ set -xu
 
 remove_docker_container() { 
     docker rm -f tpu-test || true; 
-    docker rm -f vllm-tpu || true;
 }
 
 trap remove_docker_container EXIT
@@ -135,7 +134,7 @@ run_and_track_test 1 "test_compilation.py" \
 run_and_track_test 2 "test_basic.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_basic.py"
 run_and_track_test 3 "test_accuracy.py::test_lm_eval_accuracy_v1_engine" \
-    "HF_HUB_DISABLE_XET=1 python3 -m pytest -s -v /workspace/vllm/tests/entrypoints/llm/test_accuracy.py::test_lm_eval_accuracy_v1_engine"
+    "python3 -m pytest -s -v /workspace/vllm/tests/entrypoints/llm/test_accuracy.py::test_lm_eval_accuracy_v1_engine"
 run_and_track_test 4 "test_quantization_accuracy.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_quantization_accuracy.py"
 run_and_track_test 5 "examples/offline_inference/tpu.py" \

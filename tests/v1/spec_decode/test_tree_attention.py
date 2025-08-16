@@ -155,7 +155,7 @@ def test_tree_attn_correctness() -> None:
 
     dim_per_head = 128
     num_kv_heads = 2
-    block_size = 128
+    block_size = 32
     max_sequence_length = 8192
     randomize_blocks = True
     for batch_size in [1, 16, 32]:

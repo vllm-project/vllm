@@ -21,12 +21,15 @@ from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import (decorate_logs, make_zmq_socket,
+from vllm.utils import (decorate_logs, get_hash_fn_by_name, make_zmq_socket,
                         resolve_obj_by_qualname, set_process_title)
-from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
+from vllm.v1.core.kv_cache_utils import (BlockHash, get_kv_cache_config,
+                                         get_request_block_hasher,
+                                         init_none_hash,
                                          unify_kv_cache_configs)
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -35,7 +38,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
                             ReconfigureDistributedRequest, ReconfigureRankType,
                             UtilityOutput, UtilityResult)
-from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
+from vllm.v1.engine.mm_input_cache import MultiModalInputCacheServer
 from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -124,9 +127,8 @@ class EngineCore:
             log_stats=self.log_stats,
         )
 
-        # Setup MM Input Mapper.
-        self.mm_input_cache_server = MirroredProcessingCache(
-            vllm_config.model_config)
+        self.mm_input_cache_server = MultiModalInputCacheServer(
+            vllm_config.model_config, MULTIMODAL_REGISTRY)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -139,6 +141,19 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
+
+        self.request_block_hasher: Optional[Callable[[Request],
+                                                     list[BlockHash]]] = None
+        if (self.vllm_config.cache_config.enable_prefix_caching
+                or self.scheduler.get_kv_connector() is not None):
+
+            block_size = vllm_config.cache_config.block_size
+            caching_hash_fn = get_hash_fn_by_name(
+                vllm_config.cache_config.prefix_caching_hash_algo)
+            init_none_hash(caching_hash_fn)
+
+            self.request_block_hasher = get_request_block_hasher(
+                block_size, caching_hash_fn)
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -409,14 +424,16 @@ class EngineCore:
         request initialization running in parallel with Model forward
         """
         if request.mm_hashes is not None:
-            assert request.mm_inputs is not None
+            assert request.mm_kwargs is not None
+
             # Note on thread safety: no race condition.
             # `mm_input_cache_server` is reset at the end of LLMEngine init,
             # and will only accessed in the input processing thread afterwards.
-            request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
-                request.mm_inputs, request.mm_hashes)
+            request.mm_kwargs = self.mm_input_cache_server.get_and_update(
+                request.mm_kwargs, request.mm_hashes)
 
-        req = Request.from_engine_core_request(request)
+        req = Request.from_engine_core_request(request,
+                                               self.request_block_hasher)
         if req.use_structured_output:
             # Note on thread safety: no race condition.
             # `grammar_init` is only invoked in input processing thread. For
