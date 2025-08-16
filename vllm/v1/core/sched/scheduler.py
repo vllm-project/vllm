@@ -1052,6 +1052,11 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
+        if (request.priority != 0
+                and not self.scheduler_config.policy == "priority"):
+            raise ValueError(f"Got priority {request.priority} but "
+                             "Priority scheduling is not enabled.")
+
         self.waiting.add_request(request)
         self.requests[request.request_id] = request
         if self.log_stats:

@@ -12,6 +12,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
@@ -35,6 +36,7 @@ def create_scheduler(
     num_speculative_tokens: Optional[int] = None,
     skip_tokenizer_init: bool = False,
     async_scheduling: bool = False,
+    policy: SchedulingPolicy = SchedulingPolicy.FCFS,
 ) -> Union[Scheduler, AsyncScheduler]:
     '''Create scheduler under test.
 
@@ -59,6 +61,7 @@ def create_scheduler(
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=True,
         async_scheduling=async_scheduling,
+        policy=policy,
     )
     model_config = ModelConfig(
         model=model,
@@ -133,7 +136,6 @@ def create_requests(
         init_none_hash(hash)
         _none_hash_initialized = True
 
-    block_hasher = get_request_block_hasher(block_size, hash)
     sampling_params = SamplingParams(ignore_eos=False,
                                      max_tokens=max_tokens,
                                      stop_token_ids=stop_token_ids,
@@ -156,14 +158,45 @@ def create_requests(
 
         prompt_token_ids = ([0] * num_tokens if same_prompt else [i] *
                             num_tokens)
-        request = Request(
+
+        request = create_request(
             request_id=f"{i}",
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
-            pooling_params=None,
+            mm_position=mm_position,
             mm_features=mm_features if mm_features else None,
-            eos_token_id=EOS_TOKEN_ID,
-            block_hasher=block_hasher,
         )
         requests.append(request)
     return requests
+
+
+def create_request(
+    request_id: str,
+    prompt_token_ids: list[int],
+    sampling_params: Optional[SamplingParams] = None,
+    mm_position: Optional[list[PlaceholderRange]] = None,
+    mm_features: list = None,
+    block_size: int = 16,
+    priority: int = 0,
+) -> Request:
+    if mm_position is not None:
+        mm_item = MultiModalKwargsItem.dummy("dummy_m")
+        mm_kwargs = [mm_item] * len(mm_position)
+        mm_hashes = ["hash"] * len(mm_position)
+    else:
+        mm_kwargs = None
+        mm_hashes = None
+
+    return Request(
+        request_id=request_id,
+        prompt_token_ids=prompt_token_ids,
+        sampling_params=sampling_params,
+        pooling_params=None,
+        mm_features=mm_features,
+        multi_modal_kwargs=mm_kwargs,
+        multi_modal_placeholders=mm_position,
+        multi_modal_hashes=mm_hashes,
+        eos_token_id=EOS_TOKEN_ID,
+        block_hasher=get_request_block_hasher(block_size, hash),
+        priority=priority,
+    )
