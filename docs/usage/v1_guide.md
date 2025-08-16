@@ -59,12 +59,13 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 
 ### Hardware
 
-| Hardware   | Status                             |
-|------------|------------------------------------|
-| **NVIDIA** | <nobr>🚀</nobr>                   |
-| **AMD**    | <nobr>🟢</nobr>                   |
-| **TPU**    | <nobr>🟢</nobr>                   |
-| **CPU**    | <nobr>🟢 (x86) 🟡 (MacOS) </nobr> |
+| Hardware   | Status                                        |
+|------------|-----------------------------------------------|
+| **NVIDIA** | <nobr>🚀</nobr>                               |
+| **AMD**    | <nobr>🟢</nobr>                               |
+| **INTEL GPU**    | <nobr>🟢</nobr>                               |
+| **TPU**    | <nobr>🟢</nobr>                               |
+| **CPU**    | <nobr>🟢 (x86\_64/aarch64) 🟡 (MacOS) </nobr> |
 
 !!! note
 
@@ -72,6 +73,7 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 
     - [vllm-ascend](https://github.com/vllm-project/vllm-ascend)
     - [vllm-spyre](https://github.com/vllm-project/vllm-spyre)
+    - [vllm-gaudi](https://github.com/vllm-project/vllm-gaudi)
     - [vllm-openvino](https://github.com/vllm-project/vllm-openvino)
 
     Please check their corresponding repositories for more details.
