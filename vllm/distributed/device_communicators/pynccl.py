@@ -107,6 +107,11 @@ class PyNcclCommunicator:
             stream.synchronize()
             del data
 
+    def __del__(self):
+        if hasattr(self, "comm"):
+            with torch.cuda.device(self.device):
+                self.nccl.ncclCommDestroy(self.comm)
+
     def all_reduce(self,
                    in_tensor: torch.Tensor,
                    op: ReduceOp = ReduceOp.SUM,
