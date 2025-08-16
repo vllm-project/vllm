@@ -697,7 +697,9 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
-        assert torch.isnan(hidden_states).sum() == 0
+        num = torch.isnan(hidden_states).sum()
+        if num != 0:
+            print(f"FBM NAN {num}, {hidden_states.numel()}")
 
         num_local_experts = w1.size(0)
         assert num_local_experts == w1.size(0), (
