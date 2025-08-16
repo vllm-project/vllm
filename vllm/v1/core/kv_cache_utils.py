@@ -10,7 +10,7 @@ from typing import Any, Callable, NamedTuple, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, cdiv, sha256_cbor_64bit
+from vllm.utils import cdiv, sha256_cbor_64bit
 from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
@@ -671,17 +671,29 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
         available_memory: Memory available for KV cache in bytes.
 
     Raises:
-        ValueError: If there is not enough memory available for the KV cache.
+        InsufficientKVCacheMemoryError: If there is not enough memory
+            available for the KV cache.
     """
+    from vllm.v1.engine.initialization_errors import (
+        InsufficientKVCacheMemoryError, get_memory_suggestions)
 
     # No need to check for available memory if the kv_cache_spec is empty
     if not kv_cache_spec:
         return
 
     if available_memory <= 0:
-        raise ValueError("No available memory for the cache blocks. "
-                         "Try increasing `gpu_memory_utilization` when "
-                         "initializing the engine.")
+        suggestions = get_memory_suggestions(
+            required_memory=1024**3,  # 1 GiB as minimum
+            available_memory=available_memory,
+            current_gpu_utilization=vllm_config.cache_config.
+            gpu_memory_utilization,
+            max_model_len=vllm_config.model_config.max_model_len,
+            is_kv_cache=True)
+        raise InsufficientKVCacheMemoryError(
+            required_kv_memory=1024**3,  # 1 GiB as minimum
+            available_kv_memory=available_memory,
+            max_model_len=vllm_config.model_config.max_model_len,
+            suggestions=suggestions)
 
     max_model_len = vllm_config.model_config.max_model_len
     needed_memory = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
@@ -690,20 +702,27 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
         # Estimate the maximum model length that can fit in the available memory
         estimated_max_len = estimate_max_model_len(vllm_config, kv_cache_spec,
                                                    available_memory)
-        estimated_msg = ""
-        if estimated_max_len > 0:
-            estimated_msg = (
-                "Based on the available memory, "
-                f"the estimated maximum model length is {estimated_max_len}.")
 
-        raise ValueError(
-            f"To serve at least one request with the models's max seq len "
-            f"({max_model_len}), ({needed_memory/GiB_bytes:.2f} GiB KV "
-            f"cache is needed, which is larger than the available KV cache "
-            f"memory ({available_memory/GiB_bytes:.2f} GiB). "
-            f"{estimated_msg} "
-            f"Try increasing `gpu_memory_utilization` or decreasing "
-            f"`max_model_len` when initializing the engine.")
+        suggestions = get_memory_suggestions(
+            required_memory=needed_memory,
+            available_memory=available_memory,
+            current_gpu_utilization=vllm_config.cache_config.
+            gpu_memory_utilization,
+            max_model_len=max_model_len,
+            is_kv_cache=True)
+
+        # Add model-specific suggestions
+        if estimated_max_len > 0:
+            suggestions.insert(
+                0, f"Reduce max_model_len from {max_model_len} to "
+                f"{estimated_max_len} or lower")
+
+        raise InsufficientKVCacheMemoryError(
+            required_kv_memory=needed_memory,
+            available_kv_memory=available_memory,
+            max_model_len=max_model_len,
+            estimated_max_len=estimated_max_len,
+            suggestions=suggestions)
 
 
 def create_kv_cache_group_specs(
