@@ -790,7 +790,7 @@ class MultiModalKwargs:
         item_lists = defaultdict[str, list[NestedTensors]](list)
 
         for inputs in inputs_list:
-            for k, v in inputs.get_data().items():
+            for k, v in inputs.items():
                 item_lists[k].append(v)
 
         return {
