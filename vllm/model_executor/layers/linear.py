@@ -23,6 +23,7 @@ from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 # yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            BlockQuantScaleParameter,
+                                           ModelWeightParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            PerTensorScaleParameter,
@@ -34,6 +35,7 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
+    "UnquantizedLinearMethod",
     "CompressedTensorsLinearMethod",
     "BitBLASLinearMethod",
     "GPTQBitBLASLinearMethod",
@@ -189,11 +191,14 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-        weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                       input_size_per_partition,
-                                       dtype=params_dtype),
-                           requires_grad=False)
-        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+        weight_loader = extra_weight_attrs.pop("weight_loader")
+        weight = ModelWeightParameter(data=torch.empty(
+            sum(output_partition_sizes),
+            input_size_per_partition,
+            dtype=params_dtype),
+                                      input_dim=1,
+                                      output_dim=0,
+                                      weight_loader=weight_loader)
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
@@ -217,6 +222,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
                     " bf16/fp16/int8 weight, IC and OC are divisible by "
                     "32 and 16.")
                 layer.use_cpu_sgl = False
+
+        # required by torch.compile
+        layer.weight = Parameter(layer.weight.data, requires_grad=False)
 
     def apply(self,
               layer: torch.nn.Module,
