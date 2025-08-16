@@ -62,9 +62,9 @@ class Mamba1AttentionMetadataBuilder(
                 num_decodes)
             self.state_indices_tensor[:num_decodes].copy_(
                 state_indices_for_decode, non_blocking=True)
-            padded_state_indices = self.state_indices_tensor[:
+            state_indices_tensor = self.state_indices_tensor[:
                                                              num_padded_decodes]
-            padded_state_indices[num_decodes:] = PAD_SLOT_ID
+            state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
         return Mamba1AttentionMetadata(
             query_start_loc=query_start_loc,
