@@ -6,6 +6,11 @@ void topk_softmax(torch::Tensor& topk_weights, torch::Tensor& topk_indices,
                   torch::Tensor& token_expert_indices,
                   torch::Tensor& gating_output);
 
+std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
+    torch::Tensor const& scores, torch::Tensor const& scores_with_bias,
+    int64_t n_group, int64_t topk_group, int64_t topk, bool renormalize,
+    double routed_scaling_factor);
+
 void moe_sum(torch::Tensor& input, torch::Tensor& output);
 
 void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,

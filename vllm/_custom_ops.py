@@ -1454,6 +1454,14 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                                   gating_output)
 
 
+def grouped_topk(scores: torch.Tensor, scores_with_bias: torch.Tensor,
+                 num_expert_group: int, topk_group: int, topk: int,
+                 renormalize: bool, routed_scaling_factor: float):
+    return torch.ops._moe_C.grouped_topk(scores, scores_with_bias,
+                                         num_expert_group, topk_group, topk,
+                                         renormalize, routed_scaling_factor)
+
+
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
                           b_qweight: torch.Tensor,
                           b_bias: Optional[torch.Tensor],
