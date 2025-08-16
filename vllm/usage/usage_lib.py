@@ -14,14 +14,14 @@ from typing import Any, Optional, Union
 from uuid import uuid4
 
 import cpuinfo
-import psutil
 import requests
 import torch
 
 import vllm.envs as envs
 from vllm.connections import global_http_connection
 from vllm.logger import init_logger
-from vllm.utils import cuda_device_count_stateless, cuda_get_device_properties
+from vllm.utils import (cuda_device_count_stateless,
+                        cuda_get_device_properties, get_cpu_memory)
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -190,7 +190,7 @@ class UsageMessage:
         self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()
         self.platform = platform.platform()
-        self.total_memory = psutil.virtual_memory().total
+        self.total_memory = get_cpu_memory()
 
         info = cpuinfo.get_cpu_info()
         self.num_cpu = info.get("count", None)
