@@ -159,6 +159,11 @@ class SchedulerConfig:
     structured outputs, speculative decoding, and pipeline parallelism.
     """
 
+    include_finished_set: bool = False
+    """If set to True, a separate set of finished request ids will be included 
+    in the EngineCoreOutputs returned by update_from_outputs(). 
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
