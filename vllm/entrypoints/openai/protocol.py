@@ -26,6 +26,7 @@ from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
+from starlette.responses import JSONResponse
 from typing_extensions import TypeAlias
 
 from vllm import envs
@@ -83,6 +84,10 @@ class ErrorInfo(OpenAIBaseModel):
     type: str
     param: Optional[str] = None
     code: int
+
+    def to_json_response(self) -> JSONResponse:
+        """Convert to a JSONResponse."""
+        return JSONResponse(self.model_dump(), status_code=self.code)
 
 
 class ErrorResponse(OpenAIBaseModel):
