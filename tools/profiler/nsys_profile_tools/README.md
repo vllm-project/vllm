@@ -132,3 +132,44 @@ Once a category is shown to have more cycles for one configuration than
 another, the next step would be to use the csv file to see what kernels are
 mapped into that category, and which kernels are taking the largest amount of
 time which would cause a difference for the overall category.
+
+## Example 3: add new classification for a new model
+
+Suppose there's a new model ABC that is available for engine DEF, and say there
+are 4 kernels to be classified into "gemm" and "attn", where the gemm kernels
+have names with "*H*" or "*I*" in them, and attn kernels have names with "*J*"
+or "*K*" in them, add a new entry like so:
+
+```python
+engine_model = {
+        'DEF': {
+            'ABC': { 
+                'layer_anno': {
+                    'Stage': {
+                        '.*': 'layer',
+                    },
+                    'Substage': {
+                        'H|I': 'gemm',
+                        'J|K': 'attn',
+                        'CUDA mem': 'non-gpu-H_D_memops',
+                        '.*': 'misc'
+                    }
+                }
+            },
+        }
+      'vllm': {...}
+```
+
+Basically Substage is a dictionary with a list of key/value pairs, where the
+keys are regex's of the kernel names to be classified, and values are the
+classification bins which one wishes to compare across engines/models.
+
+The last 2 entries are common for all engine/models, consisting of CUDA memory
+operations and a 'misc' for anything that's leftover and can't be classified.
+
+When invoking gputrc2graph.py, specify a trace file with this new model/engine
+like the following:
+
+```bash
+--infile new.nsys-rep,DEF,ABC,<runtime>
+```
