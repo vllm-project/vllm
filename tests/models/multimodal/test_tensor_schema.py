@@ -7,6 +7,9 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
+from mistral_common.protocol.instruct.messages import (ImageChunk, TextChunk,
+                                                       UserMessage)
+from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 
 from vllm.config import ModelConfig
@@ -103,8 +106,22 @@ def create_batched_mm_kwargs(
         modality: resize_mm_data(data, size_factors)
         for modality, data in mm_data.items()
     }
+    # Mistral chat outputs tokens directly, rather than text prompts
+    if model_config.tokenizer_mode == "mistral":
+        images = resized_mm_data.get("image", [])
+        request = ChatCompletionRequest(messages=[
+            UserMessage(content=[
+                TextChunk(text=""),
+                *(ImageChunk(image=image) for image in images),
+            ]),
+        ])
+        tokenizer = processing_info.get_tokenizer()
+        res = tokenizer.mistral.encode_chat_completion(request)
+        prompt = res.tokens
+    else:
+        prompt = processor_inputs.prompt
     mm_kwargs = processor.apply(
-        prompt=processor_inputs.prompt,
+        prompt=prompt,
         mm_data=resized_mm_data,
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         tokenization_kwargs=processor_inputs.tokenization_kwargs,
