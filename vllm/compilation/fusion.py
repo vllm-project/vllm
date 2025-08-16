@@ -31,6 +31,14 @@ def empty_fp32(*args, **kwargs):
     return torch.empty(*args, **kwargs, dtype=torch.float32, device="cuda")
 
 
+def empty_u8(*args, **kwargs):
+    return torch.empty(*args, **kwargs, dtype=torch.uint8, device="cuda")
+
+
+def empty_i32(*args, **kwargs):
+    return torch.empty(*args, **kwargs, dtype=torch.int32, device="cuda")
+
+
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 
@@ -330,6 +338,47 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
                                        epsilon=rms_node.kwargs["epsilon"])
 
 
+class ActivationNVFP4QuantFusionPass:
+
+    def register(self, pm_pass: PatternMatcherPass,
+                 record_match: Callable[[MultiOutputMatch], bool]):
+
+        def pattern(result: torch.Tensor, output_scale: torch.Tensor,
+                    result_silu_mul: torch.Tensor, input: torch.Tensor,
+                    scale: torch.Tensor):
+            at1 = auto_functionalized(torch.ops._C.silu_and_mul.default,
+                                      result=result_silu_mul,
+                                      input=input)
+            at2 = auto_functionalized(torch.ops._C.scaled_fp4_quant.default,
+                                      output=result,
+                                      input=at1[1],
+                                      output_scale=output_scale,
+                                      input_scale=scale)
+            return at2[1], at2[2]
+
+        def replacement(result: torch.Tensor, output_scale: torch.Tensor,
+                        result_silu_mul: torch.Tensor, input: torch.Tensor,
+                        scale: torch.Tensor):
+            at = auto_functionalized(
+                torch.ops._C.silu_and_mul_nvfp4_quant.default,
+                result=result,
+                result_scale=output_scale,
+                input=input,
+                scale=scale)
+            return at[1], at[2]
+
+        inputs = [
+            empty_u8(16, 14336),  # Quant output
+            empty_i32(128, 448),  # Quant output scale
+            empty_bf16(16, 28672),  # Silu_and_mul output
+            empty_bf16(16, 57344),  # Input
+            empty_fp32(1, 1)  # Scale
+        ]
+
+        pm.register_replacement(pattern, replacement, inputs, pm.fwd_only,
+                                pm_pass)
+
+
 class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
 
     def __init__(self,
@@ -588,6 +637,9 @@ class FusionPass(VllmInductorPass):
             # WARNING: This is a hack to clear the pattern matcher cache
             # and allow multiple values of epsilon.
             torch._inductor.pattern_matcher._seen_patterns.clear()
+
+        ActivationNVFP4QuantFusionPass().register(self.patterns,
+                                                  self.record_match)
 
     def record_match(self, match: MultiOutputMatch) -> bool:
         # Hijack the extra_check to record the match and
