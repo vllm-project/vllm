@@ -1189,10 +1189,10 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
         hidden_states: torch.Tensor,
         input_scale: torch.Tensor,
         gemm1_weights: torch.Tensor,
-        gemm1_weights_scale: torch.Tensor,
-        activation_scale: torch.Tensor,
         gemm2_weights: torch.Tensor,
-        gemm2_weights_scale: torch.Tensor,
+        output1_scales_scalar: torch.Tensor,
+        output1_scales_gate_scalar: torch.Tensor,
+        output2_scales_scalar: torch.Tensor,
         num_experts: int,
         top_k: int,
         num_expert_group: Optional[int],
@@ -1206,16 +1206,11 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
     num_expert_group = num_expert_group if num_expert_group is not None else 0
     topk_group = topk_group if topk_group is not None else 0
 
-    quant_hidden_states, input_scale = moe_kernel_quantize_input(
+    quant_hidden_states, _ = moe_kernel_quantize_input(
         hidden_states,
         input_scale,
         quant_dtype=torch.float8_e4m3fn,
         per_act_token_quant=False)
-
-    output1_scales_scalar = gemm1_weights_scale * input_scale * (
-        1.0 / activation_scale)
-    output1_scales_gate_scalar = gemm1_weights_scale * input_scale
-    output2_scales_scalar = activation_scale * gemm2_weights_scale
 
     from vllm.utils.flashinfer import (
         flashinfer_trtllm_fp8_per_tensor_scale_moe)
@@ -1244,24 +1239,24 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
 
 def flashinfer_fused_moe_per_tensor_scale_fp8_fake(
         routing_logits: torch.Tensor,
-        routing_bias: torch.Tensor,
+        routing_bias: Optional[torch.Tensor],
         hidden_states: torch.Tensor,
+        input_scale: torch.Tensor,
         gemm1_weights: torch.Tensor,
+        gemm2_weights: torch.Tensor,
         output1_scales_scalar: torch.Tensor,
         output1_scales_gate_scalar: torch.Tensor,
-        gemm2_weights: torch.Tensor,
         output2_scales_scalar: torch.Tensor,
         num_experts: int,
         top_k: int,
-        num_expert_group: int,
-        topk_group: int,
+        num_expert_group: Optional[int],
+        topk_group: Optional[int],
         intermediate_size: int,
         local_expert_offset: int,
         local_num_experts: int,
-        routed_scaling_factor: float = 1.0,
-        use_routing_scales_on_input: bool = False,
-        tile_tokens_dim: int = 8,
-        routing_method_type: int = 0) -> torch.Tensor:
+        use_routing_scales_on_input: bool,
+        routing_method_type: int,
+        routed_scaling_factor: float = 1.0) -> torch.Tensor:
     pass
 
 
@@ -1399,9 +1394,9 @@ def fused_experts(hidden_states: torch.Tensor,
     # E8M0 scale, which means we requantize the weight and input to the specific
     # scale. Fallen back to cutlass or triton for some cases would cause
     # accuracy issue.
-    should_use_deep_gemm = is_blackwell_deep_gemm_e8m0_used(
-    ) or _valid_deep_gemm(hidden_states, w1, w2)
-    if (allow_deep_gemm and use_fp8_w8a8 and should_use_deep_gemm):
+    if (allow_deep_gemm and use_fp8_w8a8
+            and (is_blackwell_deep_gemm_e8m0_used()
+                 or _valid_deep_gemm(hidden_states, w1, w2))):
         assert apply_router_weight_on_input is False
         assert is_act_and_mul, (
             "DeepGemm only supports is_act_and_mul=True for now.")
@@ -1910,7 +1905,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
-        extra_expert_args: Optional[dict[str, Any]],
     ):
         # Check constraints.
         if self.use_int4_w4a16:
