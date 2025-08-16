@@ -312,6 +312,8 @@ class Attention(nn.Module):
         if (self.backend == _Backend.FLASHINFER_VLLM_V1
                 and self.impl.sinks is not None
                 and self.impl.sinks.dtype != torch.float32):
+            from vllm.v1.attention.backends.flashinfer import FlashInferImpl
+            assert isinstance(self.impl, FlashInferImpl)
             self.impl.sinks = self.impl.sinks.to(torch.float32)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
