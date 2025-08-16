@@ -291,7 +291,7 @@ class CachedMultiModalInputReceiver(CachedMultiModalInputExchanger):
 
         self._cache = MultiModalCache.get_lru_cache(
             model_config.get_mm_input_cache_gb(),
-            Mapping[str, NestedTensors],
+            Mapping[str, NestedTensors],  # type: ignore[type-abstract]
         )
 
     @override
