@@ -642,9 +642,6 @@ class FlashInferImpl(AttentionImpl):
                     f"heads in the layer. Expected {num_heads}, but got "
                     f"{sinks.shape[0]}."
                 )
-            # Cast sinks to float32 if needed (FlashInfer requirement)
-            if sinks.dtype != torch.float32:
-                sinks = sinks.to(torch.float32)
             self.sinks = sinks
 
     def forward(
@@ -679,6 +676,10 @@ class FlashInferImpl(AttentionImpl):
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
                 " for FlashInferImpl")
+
+        # Cast sinks to float32 if needed (FlashInfer requirement)
+        if self.sinks is not None and self.sinks.dtype != torch.float32:
+            self.sinks = self.sinks.to(torch.float32)
 
         if attn_metadata is None:
             # Profiling run.
