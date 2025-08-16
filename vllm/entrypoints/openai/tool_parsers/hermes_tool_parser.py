@@ -365,10 +365,20 @@ class Hermes2ProToolParser(ToolParser):
                 logger.debug("finding %s in %s", delta_text,
                              cur_arguments_json)
 
-                # get the location where previous args differ from current
-                if (delta_text not in cur_arguments_json[:-2]):
+                # get the location where previous args differ from current.
+                if cur_arguments_json[-2] in ('"', "'"):
+                    # last argument is a string,
+                    #   so remove the closing quote and brace.
+                    #   for example, cur_arguments_json = {"unit": "f"}
+                    stripped_cur_arguments_json = cur_arguments_json[:-2]
+                else:
+                    # last argument is not a string,
+                    #   so remove the closing brace only.
+                    #   for example, cur_arguments_json = {"product_id": 7}
+                    stripped_cur_arguments_json = cur_arguments_json[:-1]
+                if (delta_text not in stripped_cur_arguments_json):
                     return None
-                args_delta_start_loc = cur_arguments_json[:-2]. \
+                args_delta_start_loc = stripped_cur_arguments_json. \
                                            rindex(delta_text) + \
                                            len(delta_text)
 
