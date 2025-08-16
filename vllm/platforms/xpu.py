@@ -197,3 +197,8 @@ class XPUPlatform(Platform):
     @classmethod
     def device_count(cls) -> int:
         return torch.xpu.device_count()
+
+    @classmethod
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
+        return "intel-gpu-" + str(physical_device_id)
