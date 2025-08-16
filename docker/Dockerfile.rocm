@@ -8,6 +8,15 @@ FROM ${BASE_IMAGE} AS base
 ARG ARG_PYTORCH_ROCM_ARCH
 ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 
+ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
+ENV TOKENIZERS_PARALLELISM=false
+
+# ENV that can improve safe tensor loading, and end-to-end time
+ENV SAFETENSORS_FAST_GPU=1
+
+# Performance environment variable.
+ENV HIP_FORCE_DEV_KERNARG=1
+
 # Install some basic utilities
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
@@ -101,13 +110,5 @@ ARG COMMON_WORKDIR
 COPY --from=export_vllm /benchmarks ${COMMON_WORKDIR}/vllm/benchmarks
 COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
 
-ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
-ENV TOKENIZERS_PARALLELISM=false
-
-# ENV that can improve safe tensor loading, and end-to-end time
-ENV SAFETENSORS_FAST_GPU=1
-
-# Performance environment variable.
-ENV HIP_FORCE_DEV_KERNARG=1
 
 CMD ["/bin/bash"]
