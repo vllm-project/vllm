@@ -12,10 +12,12 @@ from argparse import Namespace
 from dataclasses import asdict
 from typing import Literal, NamedTuple, Optional, TypedDict, Union, get_args
 
+import torch
 from PIL.Image import Image
 
 from vllm import LLM, EngineArgs
 from vllm.entrypoints.score_utils import ScoreMultiModalParam
+from vllm.inputs import TextPrompt
 from vllm.multimodal.utils import fetch_image
 from vllm.utils import FlexibleArgumentParser
 
@@ -139,6 +141,44 @@ def run_jinavl_reranker(query: Query) -> ModelRequestData:
     )
 
 
+def run_siglip_so400m(query: Query) -> ModelRequestData:
+    engine_args = EngineArgs(
+        model="HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit",
+        tokenizer="google/siglip-base-patch16-224",
+        trust_remote_code=True,
+        max_model_len=64,
+        gpu_memory_utilization=0.8,
+        runner="pooling",
+    )
+    return ModelRequestData(engine_args=engine_args)
+
+
+def run_siglip_functional_test(model: str, seed: Optional[int]):
+    req_data = model_example_map[model]({})
+    engine_args = asdict(req_data.engine_args) | {"seed": seed, "dtype": "half"}
+    llm = LLM(**engine_args)
+    IMAGE_URL = "http://images.cocodataset.org/val2017/000000039769.jpg"
+    TEXTS: list[str] = ["a photo of a cat", "a photo of a dog"]
+    image = fetch_image(IMAGE_URL)
+    image_input = TextPrompt(prompt="", multi_modal_data={"image": image})
+    text_inputs = [TextPrompt(prompt=p) for p in TEXTS]
+    image_outputs = llm.encode([image_input])
+    text_outputs = llm.encode(text_inputs)
+    image_embedding = image_outputs[0].outputs.data.squeeze()
+    cat_text_embedding = text_outputs[0].outputs.data.squeeze()
+    dog_text_embedding = text_outputs[1].outputs.data.squeeze()
+    sim_cat = torch.nn.functional.cosine_similarity(
+        image_embedding, cat_text_embedding, dim=0
+    )
+    sim_dog = torch.nn.functional.cosine_similarity(
+        image_embedding, dog_text_embedding, dim=0
+    )
+    if sim_cat > sim_dog:
+        print("\n Sanity check PASSED")
+    else:
+        print("\n Sanity check FAILED")
+
+
 def get_query(modality: QueryModality):
     if modality == "text":
         return TextQuery(modality="text", text="A dog sitting in the grass")
@@ -234,6 +274,7 @@ model_example_map = {
     "e5_v": run_e5_v,
     "vlm2vec": run_vlm2vec,
     "jinavl_reranker": run_jinavl_reranker,
+    "siglip": run_siglip_so400m,
 }
 
 
@@ -275,6 +316,9 @@ def parse_args():
 
 
 def main(args: Namespace):
+    if args.model_name == "siglip":
+        run_siglip_functional_test(args.model_name, args.seed)
+        return
     if args.task == "embedding":
         run_encode(args.model_name, args.modality, args.seed)
     elif args.task == "scoring":

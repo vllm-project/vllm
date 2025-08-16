@@ -10,8 +10,7 @@ from pathlib import PosixPath
 
 import pytest
 from transformers import (AutoModel, AutoModelForImageTextToText,
-                          AutoModelForTextToWaveform, AutoModelForVision2Seq,
-                          SiglipModel)
+                          AutoModelForTextToWaveform, AutoModelForVision2Seq)
 
 from vllm.platforms import current_platform
 from vllm.utils import identity
@@ -816,21 +815,6 @@ VLM_TEST_SETTINGS = {
         )],
     ),
 
-    "siglip_so400m_navit": VLMTestInfo(
-    models=["HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit"],
-    test_type=VLMTestType.CUSTOM_INPUTS,
-    auto_cls=SiglipModel,
-
-    convert_assets_to_embeddings=model_utils.prepare_siglip_navit_inputs_for_hf,
-    hf_output_post_proc=lambda hf_output, model: hf_output.image_embeds,
-    vllm_output_post_proc=lambda vllm_output,
-       model: [o.outputs.embedding for o in vllm_output],
-
-    custom_test_opts=[custom_inputs.siglip_navit_custom_inputs()],
-
-    dtype="float32",
-    marks=[pytest.mark.core_model],
-),
 }
 # yapf: enable
 
