@@ -12,7 +12,9 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig, FusedMoEQuantConfig, fp8_w8a8_moe_quant_config,
+    nvfp4_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     is_valid_flashinfer_cutlass_fused_moe)
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -439,6 +441,19 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                                               layer.w2_weight)
             register_moe_scaling_factors(layer)
 
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        if self.flashinfer_moe_enabled:
+            return None
+
+        return fp8_w8a8_moe_quant_config(
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            a1_scale=layer.w13_input_scale,
+            a2_scale=layer.w2_input_scale,
+            per_act_token_quant=False,
+        )
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -505,15 +520,10 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             topk_ids=topk_ids,
             inplace=True,
             activation=activation,
-            use_fp8_w8a8=True,
-            per_channel_quant=False,
+            apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
-            w1_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
-            a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
-            apply_router_weight_on_input=apply_router_weight_on_input,
+            quant_config=self.moe_quant_config,
         )
 
 
@@ -970,30 +980,22 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             mk.FusedMoEModularKernel] = None  # type: ignore[assignment]
 
     def maybe_make_prepare_finalize(
-        self,
-        moe: FusedMoEConfig,
-    ) -> Optional[mk.FusedMoEPrepareAndFinalize]:
+            self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
         if not self.allow_flashinfer:
-            return super().maybe_make_prepare_finalize(moe)
+            return super().maybe_make_prepare_finalize()
 
         prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-            moe,
-            a1_gscale=self.layer.w13_input_scale_quant,
-        )
+            self.moe)
         logger.debug_once("%s", prepare_finalize.__class__.__name__)
         return prepare_finalize
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
-        moe: FusedMoEConfig,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         experts = select_nvfp4_gemm_impl(
-            moe,
-            g1_alphas=self.layer.g1_alphas,
-            g2_alphas=self.layer.g2_alphas,
-            a1_gscale=self.layer.w13_input_scale_quant,
-            a2_gscale=self.layer.w2_input_scale_quant,
+            self.moe,
+            self.moe_quant_config,
             allow_flashinfer=self.allow_flashinfer,
         )
         logger.debug_once("Using %s", experts.__class__.__name__)
@@ -1295,6 +1297,20 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             del layer.w13_blockscale_swizzled
             del layer.w2_blockscale_swizzled
 
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        if self.use_marlin:
+            return None
+
+        return nvfp4_moe_quant_config(
+            w1_scale=layer.w13_blockscale_swizzled,
+            w2_scale=layer.w2_blockscale_swizzled,
+            g1_alphas=layer.g1_alphas,
+            g2_alphas=layer.g2_alphas,
+            a1_gscale=layer.w13_input_scale_quant,
+            a2_gscale=layer.w2_input_scale_quant,
+        )
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -1414,24 +1430,21 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             # only (no EP).
             from vllm.model_executor.layers.fused_moe.cutlass_moe import (
                 cutlass_moe_fp4)
-            out = cutlass_moe_fp4(
+            return cutlass_moe_fp4(
                 a=x,
                 w1_fp4=layer.w13_weight,
                 w2_fp4=layer.w2_weight,
-                w1_blockscale=layer.w13_blockscale_swizzled,
-                w2_blockscale=layer.w2_blockscale_swizzled,
-                g1_alphas=layer.g1_alphas,
-                g2_alphas=layer.g2_alphas,
-                a1_gscale=layer.w13_input_scale_quant,
-                a2_gscale=layer.w2_input_scale_quant,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
+                quant_config=self.moe_quant_config,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                # TODO: derive from arguments
                 m=x.shape[0],
                 n=layer.w2_weight.shape[2] * 2,
                 k=x.shape[1],
                 e=layer.w13_weight.shape[0],
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input)
+            )
         else:
             assert self.allow_flashinfer and \
                self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
@@ -1440,7 +1453,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 x, layer.w13_weight, layer.w2_weight), (
                     "Flashinfer CUTLASS Fused MoE not applicable!")
 
-            out = self.fused_experts(
+            return self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
@@ -1450,9 +1463,5 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 activation=activation,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
-                w1_scale=layer.w13_blockscale_swizzled,
-                w2_scale=layer.w2_blockscale_swizzled,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
-
-        return out

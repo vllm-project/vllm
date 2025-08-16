@@ -43,7 +43,6 @@ __all__ = [
 if HAS_TRITON:
     # import to register the custom ops
     import vllm.model_executor.layers.fused_moe.fused_marlin_moe  # noqa
-    import vllm.model_executor.layers.fused_moe.fused_moe  # noqa
     from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
         BatchedDeepGemmExperts)
     from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
@@ -56,13 +55,12 @@ if HAS_TRITON:
     from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
         BatchedTritonExperts)
     from vllm.model_executor.layers.fused_moe.fused_moe import (
-        TritonExperts, fused_experts, fused_moe, fused_topk,
-        get_config_file_name, grouped_topk)
+        TritonExperts, fused_experts, fused_topk, get_config_file_name,
+        grouped_topk)
     from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
         TritonOrDeepGemmExperts)
 
     __all__ += [
-        "fused_moe",
         "fused_topk",
         "fused_experts",
         "get_config_file_name",

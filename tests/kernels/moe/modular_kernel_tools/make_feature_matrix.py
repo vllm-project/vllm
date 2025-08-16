@@ -86,7 +86,7 @@ def make_feature_matrix(csv_file_path: str):
         quant_config_dict = config_dict['quant_config']
         del config_dict['quant_config']
         if quant_config_dict is None:
-            quant_config = FusedMoEQuantConfig(None)
+            quant_config = FusedMoEQuantConfig.make()
             quant_config_dict = asdict(quant_config)
 
         config_dict |= quant_config_dict
