@@ -568,6 +568,39 @@ class Platform:
         """
         return False
 
+    @classmethod
+    def empty_cache(cls):
+        # torch.accelerator.empty_cache() only works after torch 2.8
+        raise NotImplementedError
+
+    @classmethod
+    def reset_peak_memory_stats(cls):
+        raise NotImplementedError
+
+    @classmethod
+    def mem_get_info(cls):
+        raise NotImplementedError
+
+    @classmethod
+    def memory_stats(cls):
+        raise NotImplementedError
+
+    @classmethod
+    def memory_reserved(cls):
+        raise NotImplementedError
+
+    @classmethod
+    def synchronize(cls):
+        torch.accelerator.synchronize()
+
+    @classmethod
+    def get_num_sms(cls, device: torch.device) -> int:
+        """
+        Returns the number of streaming multiprocessors (SMS) on a single GPU.
+        By default we return zero
+        """
+        return 0
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
