@@ -6,19 +6,18 @@ from typing import Union
 
 import pytest
 
+from tests.utils import create_new_process_for_each_test
 # yapf: disable
-from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
-                                                     DUMMY_LOGITPROC_FQCN,
-                                                     DUMMY_LOGITPROC_MODULE,
-                                                     MAX_TOKENS, MODEL_NAME,
-                                                     POOLING_MODEL_NAME,
-                                                     TEMP_GREEDY,
-                                                     CustomLogitprocSource,
-                                                     DummyLogitsProcessor,
-                                                     dummy_module)
-from tests.v1.sample.logits_processors.utils import (
-    entry_points as fake_entry_points)
-from tests.v1.sample.logits_processors.utils import prompts
+from tests.v1.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
+                                              DUMMY_LOGITPROC_FQCN,
+                                              DUMMY_LOGITPROC_MODULE,
+                                              MAX_TOKENS, MODEL_NAME,
+                                              POOLING_MODEL_NAME, TEMP_GREEDY,
+                                              CustomLogitprocSource,
+                                              DummyLogitsProcessor,
+                                              dummy_module)
+from tests.v1.logits_processors.utils import entry_points as fake_entry_points
+from tests.v1.logits_processors.utils import prompts
 # yapf: enable
 from vllm import LLM, SamplingParams
 from vllm.v1.sample.logits_processor import (STR_POOLING_REJECTS_LOGITSPROCS,
@@ -94,6 +93,7 @@ def _run_test(kwargs: dict, logitproc_loaded: bool) -> None:
                     f"{ref_toks}")
 
 
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("logitproc_source", list(CustomLogitprocSource))
 def test_custom_logitsprocs(monkeypatch,
                             logitproc_source: CustomLogitprocSource):
@@ -161,6 +161,7 @@ def test_custom_logitsprocs(monkeypatch,
     _run_test(kwargs, logitproc_loaded=True)
 
 
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("logitproc_source", [
     CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT,
     CustomLogitprocSource.LOGITPROC_SOURCE_FQCN,

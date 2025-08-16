@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 
+from tests.utils import create_new_process_for_each_test
 from tests.v1.sample.utils import (LogitsprocsTestFakes, create_fake_logits,
                                    create_penalty_tensor,
                                    create_prompt_tokens_tensor,
@@ -567,6 +568,7 @@ def _assert_valid(
             step_idx=step_idx)
 
 
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("reqs_per_logitproc", [REQS_PER_LOGITPROC])
 @pytest.mark.parametrize("logitsprocs_under_test", _get_test_cases())
