@@ -57,7 +57,7 @@ def run_test(
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
-                     **vllm_kwargs) as vllm_model:
+                     **vllm_kwargs) as vllm_model:  # type: ignore
         vllm_outputs = vllm_model.generate_encoder_decoder_greedy_logprobs(
             vllm_prompts, max_tokens, num_logprobs)
 
