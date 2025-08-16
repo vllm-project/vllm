@@ -78,7 +78,6 @@ its Sentence Transformers configuration file (`modules.json`) takes priority ove
 You can further customize this via the `--override-pooler-config` option,
 which takes priority over both the model's and Sentence Transformers's defaults.
 
-
 ## Supported Pooling Models
 
 The following tables list pooling models that are natively supported or have been tested in vLLM.
@@ -94,7 +93,6 @@ These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) a
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) | [V1](gh-issue:8779) |
 |--------------|--------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `SiglipModel` | SigLIP-So400M | I | `HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit` | ✅︎ | ✅︎ | ✅︎ |
-
 
 
 ## Offline Inference
