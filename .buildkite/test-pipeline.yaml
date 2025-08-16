@@ -758,6 +758,9 @@ steps:
   - pip uninstall vllm_add_dummy_platform -y
   # end platform plugin tests
   # other tests continue here:
+  - pip install -e ./plugins/vllm_add_dummy_stat_logger
+  - pytest -v -s plugins_tests/test_stat_logger_plugins.py
+  - pip uninstall vllm_add_dummy_stat_logger -y
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
