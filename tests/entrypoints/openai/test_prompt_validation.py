@@ -57,9 +57,8 @@ async def test_out_of_vocab_token_ids():
     [torch.strided, torch.sparse_coo, torch.sparse_csc, torch.sparse_csr])
 @pytest.mark.parametrize("seq_len", [2, 10])
 @pytest.mark.parametrize("hidden_size", [2, 10])
-def test_load_prompt_embeds(device: torch.device, dtype: torch.dtype,
-                            layout: torch.layout, seq_len: int,
-                            hidden_size: int):
+def test_load_prompt_embeds(dtype: torch.dtype, layout: torch.layout,
+                            seq_len: int, hidden_size: int):
     # construct arbitrary tensors of various dtypes, layouts, and sizes.
     # We need to check against different layouts to make sure that if a user
     # uses sparse tensors to reduce the transmission size of prompt embeddings,
