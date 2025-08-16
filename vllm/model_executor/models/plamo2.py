@@ -29,7 +29,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_state_update)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
-    mamba_chunk_scan_combined)
+    mamba_chunk_scan_combined_varlen)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -304,29 +304,27 @@ class Plamo2MambaMixer(nn.Module):
                 initial_states = torch.where(
                     mamba2_metadata.has_initial_states[:, None, None, None],
                     mamba_cache_params.ssm_state[state_indices_tensor_p], 0)
-            varlen_state = mamba_chunk_scan_combined(
-                hidden_states_p.view(1, num_prefill_tokens,
+            varlen_state = mamba_chunk_scan_combined_varlen(
+                hidden_states_p.view(num_prefill_tokens,
                                      self.num_heads // self.tp_size,
                                      self.head_dim),
-                dt.unsqueeze(0),
+                dt,
                 self.A,
-                B.view(1, num_prefill_tokens, 1, -1),
-                C.view(1, num_prefill_tokens, 1, -1),
+                B.view(num_prefill_tokens, 1, -1),
+                C.view(num_prefill_tokens, 1, -1),
                 chunk_size=mamba2_metadata.chunk_size,
                 D=self.D,
-                z=gate_p.view(1, num_prefill_tokens,
+                z=gate_p.view(num_prefill_tokens,
                               self.num_heads // self.tp_size, self.head_dim),
                 dt_bias=self.dt_bias,
                 seq_idx=mamba2_metadata.seq_idx,
                 chunk_indices=mamba2_metadata.chunk_indices,
                 chunk_offsets=mamba2_metadata.chunk_offsets,
-                cu_seqlens=attn_metadata.query_start_loc[:num_prefills + 1],
+                cu_seqlens=mamba2_metadata.query_start_loc_p,
                 initial_states=initial_states,
-                return_varlen_states=True,
-                return_final_states=False,
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
-                out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
+                out=preallocated_ssm_out_p.view(num_prefill_tokens, -1,
                                                 self.head_dim),
             )
 
