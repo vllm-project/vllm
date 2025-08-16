@@ -72,6 +72,7 @@ from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
+from vllm.v1.sample.tree_rejection_sampler import TreeRejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -198,7 +199,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 raise ValueError("Unknown speculative decoding method: "
                                  f"{self.speculative_config.method}")
-            self.rejection_sampler = RejectionSampler()
+            tree_drafter_params = self.speculative_config.tree_drafter_params
+            self.rejection_sampler = (RejectionSampler() if
+                                      tree_drafter_params.first_branching_level
+                                      is None else TreeRejectionSampler(
+                                          tree_drafter_params,
+                                          max_batch_size=self.max_num_reqs,
+                                          main_sampler=self.sampler,
+                                          device=device,
+                                      ))
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -345,6 +354,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else None)
 
         self.reorder_batch_threshold: Optional[int] = None
+        self.draft_probs = None
 
     def _init_model_kwargs(self, num_tokens: int):
         model_kwargs = dict[str, Any]()
@@ -1613,6 +1623,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+            kv_caches = self.model.get_layer_kv_caches()
+            for i, kv_cache in enumerate(kv_caches):
+                print(f"layer {i}, kv_cache: {kv_cache.shape}")
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
@@ -1682,7 +1695,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             target_logits = logits[spec_decode_metadata.target_logits_indices]
             output_token_ids = self.rejection_sampler(
                 spec_decode_metadata,
-                None,  # draft_probs
+                self.draft_probs,
                 target_logits,
                 bonus_token_ids,
                 sampling_metadata,
@@ -1887,7 +1900,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 mm_embeds = self._gather_mm_embeddings(scheduler_output,
                                                        shift_computed_tokens=1)
 
-            draft_token_ids = self.drafter.propose(
+            draft_token_ids, self.draft_probs = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -2247,7 +2260,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 - CUDAGraphMode.PIECEWISE: Piecewise cudagraph.
                 - CUDAGraphMode.FULL: Full cudagraph, attention metadata is
                     needed.
-            force_attention: If True, always create attention metadata. Used to 
+            force_attention: If True, always create attention metadata. Used to
                 warm up attention backend when mode is NONE.
             uniform_decode: If True, the batch is a uniform decode batch.
             skip_eplb: If True, skip EPLB state update.
@@ -2467,15 +2480,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 raise e
         if self.speculative_config:
-            draft_token_ids = [[0] for _ in range(num_reqs)]
+            num_spec_tokens = self.speculative_config.num_speculative_tokens
+            draft_token_ids = [[0] * num_spec_tokens for _ in range(num_reqs)]
             dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(
                 draft_token_ids, self.device)
 
             num_tokens = sum(len(ids) for ids in draft_token_ids)
-            # draft_probs = torch.randn(
-            #     num_tokens, logits.shape[-1], device=self.device,
-            #     dtype=logits.dtype)
-            draft_probs = None
+            draft_probs = torch.randn(num_tokens,
+                                      1,
+                                      device=self.device,
+                                      dtype=logits.dtype)
             target_logits = torch.randn(num_tokens,
                                         logits.shape[-1],
                                         device=self.device,
