@@ -338,7 +338,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 runtime_shape=None)
             # Lazy import here to avoid circular import
             from .cuda_graph import CUDAGraphOptions
-            from .cuda_piecewise_backend import PiecewiseBackend
+            from .piecewise_backend import PiecewiseBackend
 
             piecewise_backend = PiecewiseBackend(
                 submod, self.vllm_config, index,
