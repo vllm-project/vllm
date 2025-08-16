@@ -1053,6 +1053,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        assert self.moe_quant_config is not None
         experts = select_nvfp4_gemm_impl(
             self.moe,
             self.moe_quant_config,
@@ -1528,6 +1529,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             # only (no EP).
             from vllm.model_executor.layers.fused_moe.cutlass_moe import (
                 cutlass_moe_fp4)
+            assert self.moe_quant_config is not None
             return cutlass_moe_fp4(
                 a=x,
                 w1_fp4=layer.w13_weight,

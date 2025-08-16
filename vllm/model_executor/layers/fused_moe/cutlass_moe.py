@@ -754,16 +754,16 @@ def cutlass_moe_fp4(
                                 "is currently not supported for "
                                 "ModelOptNvFp4FusedMoE's cutlass_moe_fp4.")
 
-    # TODO(bnell): this is a bit hacky
+    # TODO(bnell): this feels a bit hacky
     # NVFP4 requires two levels of quantization, which involves
     # computing some scaling factors dynamically. This makes it
     # incompatible with the typical prepare -> MoE -> finalize
     # pipeline. Move the quantization logic into the MoE body.
     quant_config = FusedMoEQuantConfig.make(
         quant_dtype=None,  # skip quantization in prepare/finalize
-        per_act_token_quant=False,
-        per_out_ch_quant=False,
-        block_shape=None,
+        per_act_token_quant=quant_config.per_act_token_quant,
+        per_out_ch_quant=quant_config.per_out_ch_quant,
+        block_shape=quant_config.block_shape,
         g1_alphas=quant_config.g1_alphas,
         g2_alphas=quant_config.g2_alphas,
         a1_gscale=quant_config.a1_gscale,
@@ -849,7 +849,7 @@ def _valid_cutlass_block_scaled_grouped_gemm(
     return True
 
 
-# TODO: combine with regular cutlass_fp8
+# TODO: combine/integrate with regular cutlass_fp8
 def run_cutlass_block_scaled_fused_experts(
     a: torch.Tensor,
     w1: torch.Tensor,
