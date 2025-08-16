@@ -309,7 +309,8 @@ class Attention(nn.Module):
             self.impl.process_weights_after_loading(act_dtype)
 
         # FlashInfer requires attention sinks to be float32
-        if (self.backend == _Backend.FLASHINFER and self.impl.sinks is not None
+        if (self.backend == _Backend.FLASHINFER_VLLM_V1
+                and self.impl.sinks is not None
                 and self.impl.sinks.dtype != torch.float32):
             self.impl.sinks = self.impl.sinks.to(torch.float32)
 
