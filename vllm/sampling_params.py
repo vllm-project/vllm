@@ -6,7 +6,7 @@ import warnings
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 import msgspec
 from pydantic.dataclasses import dataclass
@@ -214,7 +214,7 @@ class SamplingParams(
     _bad_words_token_ids: Optional[list[list[int]]] = None
 
     # Fields used for reasoning
-    reasoning_effort: Optional[str] = None
+    reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
     thinking_token_budget: Optional[int] = None
     """Maximum number of tokens allowed for thinking operations."""
 
@@ -233,7 +233,7 @@ class SamplingParams(
         stop: Optional[Union[str, list[str]]] = None,
         stop_token_ids: Optional[list[int]] = None,
         bad_words: Optional[list[str]] = None,
-        reasoning_effort: Optional[str] = None,
+        reasoning_effort: Optional[Literal["low", "medium", "high"]] = None,
         thinking_token_budget: Optional[int] = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,

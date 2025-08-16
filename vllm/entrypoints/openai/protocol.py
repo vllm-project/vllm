@@ -465,6 +465,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ChatCompletionNamedToolChoiceParam,
     ]] = "none"
     reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
+    thinking_token_budget: Optional[int] = None
     include_reasoning: bool = True
 
     # NOTE this will be ignored by vLLM -- the model determines the behavior
@@ -488,8 +489,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     prompt_logprobs: Optional[int] = None
     allowed_token_ids: Optional[list[int]] = None
     bad_words: list[str] = Field(default_factory=list)
-    reasoning_effort: Optional[str] = None
-    thinking_token_budget: Optional[int] = None
     # --8<-- [end:chat-completion-sampling-params]
 
     # --8<-- [start:chat-completion-extra-params]
