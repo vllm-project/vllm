@@ -500,8 +500,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 second_per_grid_ts = []
                 audio_feature_lengths = []
                 use_audio_in_video = False
-                for item in self.requests[req_id].mm_kwargs:
-                    mm_input = item.require_data()
+                for mm_item in self.requests[req_id].mm_kwargs:
+                    mm_input = mm_item.get_data()
                     if mm_input.get("image_grid_thw") is not None:
                         image_grid_thw.append(
                             mm_input["image_grid_thw"].tolist())
