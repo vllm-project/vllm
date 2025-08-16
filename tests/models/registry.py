@@ -487,7 +487,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Qwen2_5OmniForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B-AWQ"),  # noqa: E501
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B",
                                            trust_remote_code=True),
-    "SmolVLMForConditionalGeneration": _HfExamplesInfo("HuggingFaceTB/SmolVLM2-2.2B-Instruct",
+    "SmolVLMForConditionalGeneration": _HfExamplesInfo("HuggingFaceTB/SmolVLM2-2.2B-Instruct",  # noqa: E501
                                                        min_transformers_version="4.55.1",
                                                        transformers_version_reason="HF model broken in 4.55.0"),  # noqa: E501
     "Step3VLForConditionalGeneration": _HfExamplesInfo("stepfun-ai/step3",
