@@ -198,6 +198,33 @@ def test_empty_sequence(rejection_sampler):
     assert torch.equal(output, expected)
 
 
+def test_nan_logits(rejection_sampler):
+    """Test handling nan values in the target logits"""
+    spec_tokens: list[list[int]] = [[0]]
+    output_tokens = [[0, 0]]  # Just the bonus token
+
+    metadata = create_sampling_metadata(all_greedy=False,
+                                        temperature=torch.ones(1,
+                                                               device=DEVICE))
+    logits = create_logits_tensor(output_tokens) + torch.nan
+    bonus_token_tensor = torch.tensor([output_tokens[0][-1]],
+                                      device=logits.device)
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(spec_tokens,
+                                                         device=logits.device)
+
+    output = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        target_logits=logits,
+        bonus_token_ids=bonus_token_tensor,
+        sampling_metadata=metadata,
+    )
+    expected = torch.tensor([[0, PLACEHOLDER_TOKEN_ID]],
+                            dtype=torch.int,
+                            device=logits.device)
+    assert torch.equal(output, expected)
+
+
 def test_multiple_mismatches(rejection_sampler):
     """Test handling multiple sequences with mismatches"""
     spec_tokens = [[1, 2, 3], [4, 5, 6]]
