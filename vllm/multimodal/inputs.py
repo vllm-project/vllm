@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import partial
 from itertools import accumulate
 from typing import (TYPE_CHECKING, Any, Literal, Optional, TypedDict, TypeVar,
@@ -218,7 +218,7 @@ class MultiModalFieldElem:
     i.e. the name of the keyword argument to be passed to the model.
     """
 
-    data: Optional[NestedTensors]
+    data: NestedTensors
     """
     The tensor data of this field in
     [`MultiModalKwargs`][vllm.multimodal.inputs.MultiModalKwargs],
@@ -315,13 +315,8 @@ class BaseMultiModalField(ABC):
         if len(set(field_types)) > 1:
             raise ValueError(f"Cannot merge different {field_types=}")
 
-        validated_data = list[NestedTensors]()
-        for i, elem in enumerate(elems):
-            assert elem.data is not None, (
-                f"Cannot merge with empty `elems[{i}]`")
-            validated_data.append(elem.data)
-
-        return self._reduce_data(validated_data, pin_memory=pin_memory)
+        batch = [elem.data for elem in elems]
+        return self._reduce_data(batch, pin_memory=pin_memory)
 
 
 @dataclass(frozen=True)
@@ -644,6 +639,17 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
     """
 
     @staticmethod
+    def dummy(modality: str):
+        """Convenience class for testing."""
+        mm_elem = MultiModalFieldElem(
+            modality=modality,
+            key="dummy",
+            data=torch.empty(1),
+            field=MultiModalSharedField(1),
+        )
+        return MultiModalKwargsItem.from_elems([mm_elem])
+
+    @staticmethod
     def from_elems(elems: Sequence[MultiModalFieldElem]):
         return MultiModalKwargsItem({elem.key: elem for elem in elems})
 
@@ -654,46 +660,12 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
         assert len(modalities) == 1, f"Found different modalities={modalities}"
         self._modality = next(iter(modalities))
 
-        self._is_empty = any(elem.data is None for elem in self.values())
-
     @property
     def modality(self) -> str:
         return self._modality
 
-    @property
-    def is_empty(self) -> bool:
-        return self._is_empty
-
-    def get_data(self) -> Optional[Mapping[str, NestedTensors]]:
-        if self._is_empty:
-            return None
-
-        out_data = dict[str, NestedTensors]()
-        for key, elem in self.items():
-            assert elem.data is not None, (
-                f"Cannot get data of empty `elem[{key!r}]`")
-            out_data[key] = elem.data
-
-        return out_data
-
-    def require_data(self) -> Mapping[str, NestedTensors]:
-        if (data := self.get_data()) is None:
-            raise RuntimeError("Cannot get data of empty item")
-
-        return data
-
-    # These methods create a new item to avoid mutating cached items in place
-    def with_data(self, data: Mapping[str, NestedTensors]):
-        return MultiModalKwargsItem({
-            key: replace(elem, data=data[key])
-            for key, elem in self.items()
-        })
-
-    def without_data(self):
-        return MultiModalKwargsItem({
-            key: replace(elem, data=None)
-            for key, elem in self.items()
-        })
+    def get_data(self) -> Mapping[str, NestedTensors]:
+        return {key: elem.data for key, elem in self.items()}
 
 
 # NOTE: UserDict is for V0 compatibility.
