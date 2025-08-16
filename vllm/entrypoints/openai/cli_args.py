@@ -257,6 +257,11 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if hasattr(args, "subparser") and args.subparser != "serve":
         return
 
+    # Handle model_tag from positional argument (V1 engine compatibility)
+    # If model is specified as positional arg, it takes precedence
+    if hasattr(args, 'model_tag') and args.model_tag is not None:
+        args.model = args.model_tag
+
     # Ensure that the chat template is valid; raises if it likely isn't
     validate_chat_template(args.chat_template)
 
