@@ -123,7 +123,7 @@ class ToolParserManager:
             module: Union[type, None] = None) -> Union[type, Callable]:
         """
         Register module with the given name or name list. it can be used as a
-        decoder(with module as None) or normal function(with module as not 
+        decoder(with module as None) or normal function(with module as not
         None).
         """
         if not isinstance(force, bool):
