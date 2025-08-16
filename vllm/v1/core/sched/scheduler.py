@@ -885,9 +885,26 @@ class Scheduler(SchedulerInterface):
 
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
-            self.running = [
-                req for req in self.running if req not in stopped_running_reqs
-            ]
+            # Optimized removal: single request removal is much faster
+            # than list comprehension for the common case
+            if len(stopped_running_reqs) == 1:
+                # Fast path for single request removal (most common case)
+                stopped_req = next(iter(stopped_running_reqs))
+                try:
+                    self.running.remove(stopped_req)
+                except ValueError:
+                    # Request not in running list - log for debugging
+                    logger.warning(
+                        "Request %s marked as stopped but not found in running "
+                        "queue. This may indicate a state management issue.",
+                        stopped_req.request_id)
+            else:
+                # For multiple requests, use the original approach
+                # as it's more predictable performance-wise
+                self.running = [
+                    req for req in self.running
+                    if req not in stopped_running_reqs
+                ]
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
