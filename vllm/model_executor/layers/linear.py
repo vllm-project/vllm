@@ -224,6 +224,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
                     "32 and 16.")
                 layer.use_cpu_sgl = False
 
+        # required by torch.compile
+        layer.weight = Parameter(layer.weight.data, requires_grad=False)
+
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
