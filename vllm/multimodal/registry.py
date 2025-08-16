@@ -139,7 +139,7 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         *,
-        cache: Optional[CachedMultiModalInputExchanger],
+        cache: Optional[CachedMultiModalInputExchanger] = None,
     ) -> Mapping[str, int]:
         """
         Get the maximum number of tokens per data item from each modality based
@@ -166,7 +166,7 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         *,
-        cache: Optional[CachedMultiModalInputExchanger],
+        cache: Optional[CachedMultiModalInputExchanger] = None,
     ) -> Mapping[str, int]:
         """
         Get the maximum number of tokens per data item from each modality based
@@ -222,7 +222,7 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         *,
-        cache: Optional[CachedMultiModalInputExchanger],
+        cache: Optional[CachedMultiModalInputExchanger] = None,
     ) -> Mapping[str, int]:
         """
         Get the maximum number of multi-modal input instances for each modality
@@ -299,7 +299,7 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
         *,
         tokenizer: Optional[AnyTokenizer] = None,
-        cache: Optional[CachedMultiModalInputExchanger],
+        cache: Optional[CachedMultiModalInputExchanger] = None,
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """
         Create a multi-modal processor for a specific model and tokenizer.
@@ -320,7 +320,7 @@ class MultiModalRegistry:
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
         *,
-        cache: Optional[CachedMultiModalInputExchanger],
+        cache: Optional[CachedMultiModalInputExchanger] = None,
     ) -> DummyDecoderData:
         """
         Create dummy data for profiling the memory usage of a model.
@@ -346,7 +346,7 @@ class MultiModalRegistry:
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
         *,
-        cache: Optional[CachedMultiModalInputExchanger],
+        cache: Optional[CachedMultiModalInputExchanger] = None,
     ) -> DummyEncoderData:
         """
         Create dummy data for profiling the memory usage of a model.

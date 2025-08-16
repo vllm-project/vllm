@@ -190,8 +190,8 @@ def compute_encoder_budget(
     """
     if mm_registry.supports_multimodal_inputs(model_config):
         max_tokens_by_modality = mm_registry \
-            .get_max_tokens_per_item_by_nonzero_modality(model_config,
-                                                         cache=None)
+            .get_max_tokens_per_item_by_nonzero_modality(model_config)
+
         return compute_mm_encoder_budget(
             scheduler_config,
             max_tokens_by_modality,

@@ -911,7 +911,7 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
 
-    processor = MULTIMODAL_REGISTRY.create_processor(model_config, cache=None)
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
     processor._supported_mm_limits = {"image": num_supported}
 
     profiler = MultiModalProfiler(processor)
@@ -925,7 +925,6 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
         profiler.get_decoder_dummy_data(
             model_config.max_model_len,
             mm_counts=limit_mm_per_prompt,
-            cache=None,
         )
 
 

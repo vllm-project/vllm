@@ -251,10 +251,12 @@ class LLMEngine:
         self.generation_config_fields = (
             self.model_config.try_get_generation_config())
 
-        self.input_preprocessor = InputPreprocessor(self.model_config,
-                                                    self.tokenizer,
-                                                    mm_registry)
-        self.mm_input_io = CachedMultiModalInputReceiver(self.model_config)
+        self.input_preprocessor = InputPreprocessor(
+            self.model_config,
+            self.tokenizer,
+            mm_registry,
+            mm_input_cache=CachedMultiModalInputReceiver(self.model_config),
+        )
 
         self.model_executor = executor_class(vllm_config=vllm_config)
 
@@ -842,7 +844,7 @@ class LLMEngine:
 
     def reset_mm_cache(self) -> bool:
         """Reset the multi-modal cache."""
-        self.mm_input_io.clear_cache()
+        self.input_preprocessor.clear_cache()
         return True
 
     def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:

@@ -45,16 +45,21 @@ class Processor:
 
         self.generation_config_fields = (
             self.model_config.try_get_generation_config())
-        self.input_preprocessor = InputPreprocessor(self.model_config,
-                                                    self.tokenizer,
-                                                    mm_registry)
-
-        self.mm_input_cache = CachedMultiModalInputExchanger.for_p0(
-            vllm_config, mm_registry)
+        self.input_preprocessor = InputPreprocessor(
+            self.model_config,
+            self.tokenizer,
+            mm_registry,
+            mm_input_cache=CachedMultiModalInputExchanger.for_p0(
+                vllm_config, mm_registry),
+        )
 
     @property
     def mm_registry(self):
         return self.input_preprocessor.mm_registry
+
+    @property
+    def mm_input_cache(self):
+        return self.input_preprocessor.mm_input_cache
 
     def _validate_logprobs(
         self,
