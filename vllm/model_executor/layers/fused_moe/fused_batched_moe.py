@@ -697,10 +697,6 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
-        num = torch.isnan(hidden_states).sum()
-        if num != 0:
-            print(f"FBM NAN {num}, {hidden_states.numel()}")
-
         num_local_experts = w1.size(0)
         assert num_local_experts == w1.size(0), (
             f"{num_local_experts} == {w1.size(0)}")
@@ -739,8 +735,6 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 w2_dq = w2[expert]
 
             output[expert, :num, :] = tmp @ w2_dq.transpose(0, 1).to(tmp.dtype)
-
-        #assert torch.isnan(output).sum() == 0
 
 
 def batched_moe_kernel_quantize_input(

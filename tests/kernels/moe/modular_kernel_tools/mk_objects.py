@@ -74,7 +74,7 @@ common_float_types: list[Union[torch.dtype, str]] = [
     torch.float8_e4m3fn, torch.bfloat16, torch.float16, torch.float32
 ]
 common_float_and_int_types = common_float_types + [torch.int8]
-nv_fp4_types = ["nvfp4"]
+nvfp4_types = ["nvfp4"]
 fp8_types = [torch.float8_e4m3fn]
 
 
@@ -227,7 +227,7 @@ if (has_flashinfer_cutlass_fused_moe()
     register_prepare_and_finalize(
         FlashInferCutlassMoEPrepareAndFinalize,
         standard_format,
-        nv_fp4_types,
+        nvfp4_types,
         blocked_quantization_support=True,
         backend=None,
         force_multigpu=True,
@@ -237,7 +237,7 @@ if (has_flashinfer_cutlass_fused_moe()
     register_experts(
         FlashInferExperts,
         standard_format,
-        nv_fp4_types,
+        nvfp4_types,
         blocked_quantization_support=True,
         supports_chunking=True,
         # Note: this is a hack to get it to run for now
@@ -314,7 +314,7 @@ if cutlass_fp4_supported():
     register_experts(
         CutlassExpertsFp4,
         standard_format,
-        nv_fp4_types,
+        nvfp4_types,
         blocked_quantization_support=True,
         supports_chunking=True,
         supports_expert_map=False,
