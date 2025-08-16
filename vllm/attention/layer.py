@@ -308,6 +308,15 @@ class Attention(nn.Module):
         if hasattr(self.impl, "process_weights_after_loading"):
             self.impl.process_weights_after_loading(act_dtype)
 
+        # FlashInfer requires attention sinks to be float32
+        if (self.backend == _Backend.FLASHINFER_VLLM_V1
+                and hasattr(self.impl, 'sinks')):
+            from vllm.v1.attention.backends.flashinfer import FlashInferImpl
+            assert isinstance(self.impl, FlashInferImpl)
+            if (self.impl.sinks is not None
+                    and self.impl.sinks.dtype != torch.float32):
+                self.impl.sinks = self.impl.sinks.to(torch.float32)
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
