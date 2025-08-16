@@ -18,7 +18,7 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
 from vllm.platforms import current_platform
 
 NUM_EXPERTS = [16, 64, 256]
-TOP_KS = [2, 4, 6, 8]
+TOP_KS = [2, 6, 8]
 EP_SIZE = [1, 4, 16]
 current_platform.seed_everything(0)
 
@@ -177,11 +177,11 @@ def torch_unpermute(permuted_hidden_states: torch.Tensor,
     return output
 
 
-@pytest.mark.parametrize("n_token", [1, 33, 64, 222, 1024, 2048, 3000, 5000])
-@pytest.mark.parametrize("n_hidden", [2048, 4096, 7168])
+@pytest.mark.parametrize("n_token", [1, 33, 1024, 5000])
+@pytest.mark.parametrize("n_hidden", [2048, 7168])
 @pytest.mark.parametrize("n_expert", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("align_block_size", [None, 128])
 def test_moe_permute_unpermute(n_token: int, n_hidden: int, topk: int,

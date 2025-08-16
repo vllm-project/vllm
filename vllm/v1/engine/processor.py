@@ -17,6 +17,7 @@ from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
+from vllm.utils import is_list_of
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MultiModalInputCacheClient
 from vllm.v1.structured_output.backend_guidance import (
@@ -295,7 +296,7 @@ class Processor:
             pooling_params = params.clone()
 
         # Multimodal related.
-        sorted_mm_inputs: Optional[list[MultiModalKwargsItem]] = None
+        sorted_mm_inputs: Optional[list[Optional[MultiModalKwargsItem]]] = None
         sorted_mm_positions: Optional[list[PlaceholderRange]] = None
         sorted_mm_hashes: Optional[list[str]] = None
         if decoder_inputs["type"] == "multimodal":
@@ -308,7 +309,7 @@ class Processor:
             # in the input sequence.
             sorted_mm_idxs = argsort_mm_positions(decoder_mm_positions)
 
-            sorted_mm_inputs = [
+            orig_sorted_mm_inputs = [
                 decoder_mm_inputs.get_item(modality, idx)
                 for modality, idx in sorted_mm_idxs
             ]
@@ -323,9 +324,12 @@ class Processor:
 
             if sorted_mm_hashes is not None:
                 sorted_mm_inputs = self.mm_input_cache_client.get_and_update(
-                    sorted_mm_inputs,
+                    orig_sorted_mm_inputs,
                     sorted_mm_hashes,
                 )
+            else:
+                assert is_list_of(orig_sorted_mm_inputs, MultiModalKwargsItem)
+                sorted_mm_inputs = orig_sorted_mm_inputs
 
         return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
