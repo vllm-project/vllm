@@ -11,9 +11,9 @@ This script provides precise timing measurements for:
 
 Usage examples:
 # Basic prefill/decode benchmark:
-torchrun --nproc-per-node=1 HTTP/benchmark_prefill_decode.py --tensor-parallel-size 1 --batch-size 4 --input-length 512 --output-length 128
+torchrun --nproc-per-node=2 HTTP/benchmark_prefill_decode.py --tensor-parallel-size 2 --batch-size 4 --input-length 512 --output-length 128
 
-# With token parallelism:
+# With token parallelism: (TODO)
 torchrun --nproc-per-node=1 HTTP/benchmark_prefill_decode.py --tensor-parallel-size 1 --enable-token-parallel --token-parallel-size 1 --batch-size 2 --input-length 1024 --output-length 256
 """
 

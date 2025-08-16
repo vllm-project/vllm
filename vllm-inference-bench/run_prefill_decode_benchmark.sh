@@ -11,7 +11,7 @@ torchrun --nproc-per-node=1 HTTP/benchmark_prefill_decode.py \
     --batch-size 1 \
     --input-length 512 \
     --output-length 128 \
-    --num-iterations 3 \
+    --num-iterations 5 \
     --warmup-iterations 1
 
 echo -e "\n\n2. Larger batch benchmark (batch=4, input=1024, output=256):"

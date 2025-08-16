@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """
 Alternative approach for measuring prefill and decode phases separately.
@@ -40,6 +38,8 @@ def parse_args():
                         help="Number of token parallel processes (default: 1)")
     parser.add_argument("--enable-token-parallel", action="store_true",
                         help="Enable token parallelism")
+    parser.add_argument("--expert-parallel-size", type=int, default=1,
+                        help="Number of expert parallel processes (default: 1)")
     parser.add_argument("--max-model-len", type=int, default=8192,
                         help="Maximum model length (default: 8192)")
     parser.add_argument("--seed", type=int, default=42,
@@ -52,7 +52,7 @@ def parse_args():
                         help="Input sequence length in tokens (default: 512)")
     parser.add_argument("--output-length", type=int, default=128,
                         help="Output sequence length in tokens (default: 128)")
-    parser.add_argument("--data-path", type=str, default="HTTP/benchmark_results",
+    parser.add_argument("--data-path", type=str, default="vllm-inference-bench/benchmark_results",
                         help="Directory to save results (default: current directory)")
     parser.add_argument("--temperature", type=float, default=0.0,
                         help="Sampling temperature (default: 0.0)")
@@ -142,8 +142,8 @@ def measure_prefill_decode_separately(llm: LLM, prompts: List[str], output_lengt
         
         # Create new prompts with the first generated token
         # decode_prompts = []
-        for i, output in enumerate(prefill_outputs):
-            first_token = output.outputs[0].text
+        # for i, output in enumerate(prefill_outputs):
+        #     first_token = output.outputs[0].text
             # extended_prompt = prompts[i] + first_token
             # decode_prompts.append(extended_prompt)
         
@@ -231,6 +231,7 @@ def write_results_to_csv(results: List[Dict[str, Any]], output_file: str):
         "pipeline_parallel_size",
         "data_parallel_size",
         "token_parallel_size",
+        "expert_parallel_size",
         "batch_size",
         "sequence_length",
         "prefill_latency_ms",
@@ -263,6 +264,7 @@ def main():
         "tensor_parallel_size": args.tensor_parallel_size,
         "pipeline_parallel_size": args.pipeline_parallel_size,
         "data_parallel_size": args.data_parallel_size,
+        # "expert_parallel_size": args.expert_parallel_size,
         "distributed_executor_backend": "external_launcher",
         "max_model_len": args.max_model_len,
         "seed": args.seed,
@@ -329,6 +331,7 @@ def main():
             "pipeline_parallel_size": args.pipeline_parallel_size,
             "data_parallel_size": args.data_parallel_size,
             "token_parallel_size": args.token_parallel_size if args.enable_token_parallel else 1,
+            "expert_parallel_size": args.expert_parallel_size,
             "batch_size": args.batch_size,
             "sequence_length": args.input_length,
             "prefill_latency_ms": f"{metrics['prefill_latency_ms']:.2f}",

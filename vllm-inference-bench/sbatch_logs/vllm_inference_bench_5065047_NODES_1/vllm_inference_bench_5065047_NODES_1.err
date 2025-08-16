@@ -1,0 +1,65 @@
+Traceback (most recent call last):
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 376, in <module>
+    main()
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 279, in main
+    llm = LLM(**llm_kwargs)
+  File "/home/sshrestha/workspace/vllm-distributed/vllm/entrypoints/llm.py", line 244, in __init__
+    engine_args = EngineArgs(
+TypeError: EngineArgs.__init__() got an unexpected keyword argument 'expert_parallel_size'
+Traceback (most recent call last):
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 376, in <module>
+    main()
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 279, in main
+    llm = LLM(**llm_kwargs)
+  File "/home/sshrestha/workspace/vllm-distributed/vllm/entrypoints/llm.py", line 244, in __init__
+    engine_args = EngineArgs(
+TypeError: EngineArgs.__init__() got an unexpected keyword argument 'expert_parallel_size'
+Traceback (most recent call last):
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 376, in <module>
+    main()
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 279, in main
+    llm = LLM(**llm_kwargs)
+  File "/home/sshrestha/workspace/vllm-distributed/vllm/entrypoints/llm.py", line 244, in __init__
+    engine_args = EngineArgs(
+TypeError: EngineArgs.__init__() got an unexpected keyword argument 'expert_parallel_size'
+Traceback (most recent call last):
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 376, in <module>
+    main()
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 279, in main
+    llm = LLM(**llm_kwargs)
+  File "/home/sshrestha/workspace/vllm-distributed/vllm/entrypoints/llm.py", line 244, in __init__
+    engine_args = EngineArgs(
+TypeError: EngineArgs.__init__() got an unexpected keyword argument 'expert_parallel_size'
+Traceback (most recent call last):
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 376, in <module>
+    main()
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 279, in main
+    llm = LLM(**llm_kwargs)
+  File "/home/sshrestha/workspace/vllm-distributed/vllm/entrypoints/llm.py", line 244, in __init__
+    engine_args = EngineArgs(
+TypeError: EngineArgs.__init__() got an unexpected keyword argument 'expert_parallel_size'
+Traceback (most recent call last):
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 376, in <module>
+    main()
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 279, in main
+    llm = LLM(**llm_kwargs)
+  File "/home/sshrestha/workspace/vllm-distributed/vllm/entrypoints/llm.py", line 244, in __init__
+    engine_args = EngineArgs(
+TypeError: EngineArgs.__init__() got an unexpected keyword argument 'expert_parallel_size'
+Traceback (most recent call last):
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 376, in <module>
+    main()
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 279, in main
+    llm = LLM(**llm_kwargs)
+  File "/home/sshrestha/workspace/vllm-distributed/vllm/entrypoints/llm.py", line 244, in __init__
+    engine_args = EngineArgs(
+TypeError: EngineArgs.__init__() got an unexpected keyword argument 'expert_parallel_size'
+Traceback (most recent call last):
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 376, in <module>
+    main()
+  File "/mounted_ws/vllm-inference-bench/benchmark_prefill_decode_v2.py", line 279, in main
+    llm = LLM(**llm_kwargs)
+  File "/home/sshrestha/workspace/vllm-distributed/vllm/entrypoints/llm.py", line 244, in __init__
+    engine_args = EngineArgs(
+TypeError: EngineArgs.__init__() got an unexpected keyword argument 'expert_parallel_size'
+Aug 15 15:06:03.745803 2585160 slurmstepd   0x15555186c640: error: *** STEP 5065047.0 ON cw-dfw-h100-002-279-012 CANCELLED AT 2025-08-15T15:06:03 ***
