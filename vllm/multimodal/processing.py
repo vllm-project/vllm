@@ -1360,8 +1360,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     )
                     mm_missing_next_idx[modality] += 1
                 else:
-                    # Should be replaced by get_and_update()
-                    # before sending to P1
+                    # Should be replaced by get_and_update() in P1 cache
                     kw_item = MultiModalKwargsItem.dummy(modality)
 
                 merged_items[modality].append(kw_item)
