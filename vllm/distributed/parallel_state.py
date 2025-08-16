@@ -1315,36 +1315,35 @@ def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],
     shm = None
 
     try:
-        with contextlib.suppress(OSError):
-            if rank == source_rank:
-                # create a shared memory segment
-                shm = shared_memory.SharedMemory(create=True, size=128)
-                shm.buf[:len(magic_message)] = magic_message
-                if isinstance(pg, ProcessGroup):
-                    torch.distributed.broadcast_object_list(
-                        [shm.name], src=ranks[source_rank], group=pg)
-                else:
-                    pg.broadcast_obj(shm.name, src=source_rank)
-                is_in_the_same_node[rank] = 1
+        if rank == source_rank:
+            # create a shared memory segment
+            shm = shared_memory.SharedMemory(create=True, size=128)
+            shm.buf[:len(magic_message)] = magic_message
+            if isinstance(pg, ProcessGroup):
+                torch.distributed.broadcast_object_list([shm.name],
+                                                        src=ranks[source_rank],
+                                                        group=pg)
             else:
-                # try to open the shared memory segment
-                if isinstance(pg, ProcessGroup):
-                    recv = [None]
-                    torch.distributed.broadcast_object_list(
-                        recv, src=ranks[source_rank], group=pg)
-                    name = recv[0]
-                else:
-                    name = pg.broadcast_obj(None, src=source_rank)
-                # fix to https://stackoverflow.com/q/62748654/9191338
-                # Python incorrectly tracks shared memory even if it is not
-                # created by the process. The following patch is a workaround.
-                with patch("multiprocessing.resource_tracker.register",
-                           lambda *args, **kwargs: None):
-                    shm = shared_memory.SharedMemory(name=name)
-                if shm.buf[:len(magic_message)] == magic_message:
-                    is_in_the_same_node[rank] = 1
-    except Exception as e:
-        logger.error("Error ignored in is_in_the_same_node: %s", e)
+                pg.broadcast_obj(shm.name, src=source_rank)
+            is_in_the_same_node[rank] = 1
+        else:
+            # try to open the shared memory segment
+            if isinstance(pg, ProcessGroup):
+                recv = [None]
+                torch.distributed.broadcast_object_list(recv,
+                                                        src=ranks[source_rank],
+                                                        group=pg)
+                name = recv[0]
+            else:
+                name = pg.broadcast_obj(None, src=source_rank)
+            # fix to https://stackoverflow.com/q/62748654/9191338
+            # Python incorrectly tracks shared memory even if it is not
+            # created by the process. The following patch is a workaround.
+            with patch("multiprocessing.resource_tracker.register",
+                       lambda *args, **kwargs: None):
+                shm = shared_memory.SharedMemory(name=name)
+            if shm.buf[:len(magic_message)] == magic_message:
+                is_in_the_same_node[rank] = 1
     finally:
         if shm:
             shm.close()
