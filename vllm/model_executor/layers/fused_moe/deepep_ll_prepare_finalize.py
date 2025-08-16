@@ -184,7 +184,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     ) -> mk.PrepareResultType:
         hook()
 
-        assert torch.isnan(expert_x).sum() == 0
+        if isinstance(expert_x, tuple):
+            assert torch.isnan(expert_x[0]).sum() == 0
+        else:
+            assert torch.isnan(expert_x).sum() == 0
 
         expert_x, expert_x_scale = self._do_quant(expert_x, a1.dtype,
                                                   quant_config)

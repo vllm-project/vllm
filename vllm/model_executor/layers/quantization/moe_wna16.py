@@ -8,7 +8,7 @@ import torch
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig, int4_w4a16_moe_quant_config,
-    int8_w8a16_moe_quant_confg)
+    int8_w8a16_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEConfig, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase,
@@ -292,7 +292,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         has_zp = self.quant_config.has_zp
         assert weight_bits == 4 or weight_bits == 8
         config_builder = (int4_w4a16_moe_quant_config
-                          if weight_bits == 4 else int8_w8a16_moe_quant_confg)
+                          if weight_bits == 4 else int8_w8a16_moe_quant_config)
 
         return config_builder(
             w1_scale=layer.w13_scales,

@@ -573,7 +573,7 @@ def run_modular_kernel(
     assert isinstance(config.Ms, int)
     assert isinstance(config.topks, int)
 
-    print(f"NLE {config.num_local_experts}")
+    #print(f"NLE {config.num_local_experts}")
 
     # weights for rank
     rank_weights = weights.slice_weights(pgi.rank, config.num_local_experts)

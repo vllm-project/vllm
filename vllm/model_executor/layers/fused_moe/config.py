@@ -64,6 +64,8 @@ def _quant_flags_to_group_shape(
     per_out_ch_quant: bool,
     block_shape: Optional[list[int]],
 ) -> tuple[Optional[GroupShape], Optional[GroupShape]]:
+    a_shape: Optional[GroupShape]
+    w_shape: Optional[GroupShape]
     if block_shape is not None:
         assert not per_act_token_quant
         assert not per_out_ch_quant
@@ -72,7 +74,6 @@ def _quant_flags_to_group_shape(
         w_shape = GroupShape(row=block_shape[0], col=block_shape[1])
     else:
         w_shape = None
-
         a_shape = None if quant_dtype is None else GroupShape.PER_TENSOR
 
         if per_act_token_quant:
@@ -205,7 +206,7 @@ class FusedMoEQuantConfig:
     @property
     def w1_precision(self) -> Optional["PrecisionConfig"]:
         assert self._w1.scale is None or isinstance(self._w1.scale,
-                                                    "PrecisionConfig")
+                                                    PrecisionConfig)
         return self._w1.scale
 
     @property
@@ -229,7 +230,7 @@ class FusedMoEQuantConfig:
     @property
     def w2_precision(self) -> Optional["PrecisionConfig"]:
         assert self._w2.scale is None or isinstance(self._w2.scale,
-                                                    "PrecisionConfig")
+                                                    PrecisionConfig)
         return self._w2.scale
 
     @property
