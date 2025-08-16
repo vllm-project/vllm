@@ -125,14 +125,17 @@ class Request:
         block_hasher: Optional[Callable[["Request"], list["BlockHash"]]]
     ) -> "Request":
         if request.mm_kwargs is not None:
-            assert is_list_of(request.mm_kwargs, MultiModalKwargsItem), (
+            mm_kwargs_lst = list(request.mm_kwargs)
+            assert is_list_of(mm_kwargs_lst, MultiModalKwargsItem), (
                 "mm_kwargs was not updated in EngineCore.add_request")
+        else:
+            mm_kwargs_lst = None
 
         return cls(
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
-            multi_modal_kwargs=request.mm_kwargs,
+            multi_modal_kwargs=mm_kwargs_lst,
             multi_modal_hashes=request.mm_hashes,
             multi_modal_placeholders=request.mm_placeholders,
             sampling_params=request.sampling_params,
