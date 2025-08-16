@@ -24,7 +24,6 @@ def fix_case(text: str) -> str:
         "llm": "LLM",
         "mae": "MAE",
         "tpu": "TPU",
-        "aqlm": "AQLM",
         "gguf": "GGUF",
         "lora": "LoRA",
         "rlhf": "RLHF",
