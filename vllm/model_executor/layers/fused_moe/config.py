@@ -110,6 +110,7 @@ class FusedMoEQuantDesc:
 # e.g. for specific arguments bias, precision, etc.
 @dataclass
 class FusedMoEQuantConfig:
+    # TODO(bnell) make sure a1_scales/a2_scales don't interfere with chunking
     _a1: FusedMoEQuantDesc
     _a2: FusedMoEQuantDesc
 
