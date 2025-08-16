@@ -881,6 +881,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
                     cutlass_moe_fp8)
                 assert per_act_token == per_channel_quant
+                assert self.moe_quant_config is not None
                 return cutlass_moe_fp8(
                     x,
                     layer.w13_weight,
