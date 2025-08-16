@@ -3,7 +3,7 @@
 
 import itertools
 from abc import abstractmethod
-from typing import Any, Callable, Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -157,7 +157,7 @@ class LinearMethodBase(QuantizeMethodBase):
                        input_size_per_partition: int,
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
-                       weight_loader: Callable, **extra_weight_attrs):
+                       **extra_weight_attrs):
         """Create weights for a linear layer. 
            The weights will be set as attributes of the layer.
 
@@ -190,7 +190,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        input_size_per_partition: int,
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
-                       weight_loader: Callable, **extra_weight_attrs):
+                       **extra_weight_attrs):
+        weight_loader = extra_weight_attrs.pop("weight_loader")
         weight = ModelWeightParameter(data=torch.empty(
             sum(output_partition_sizes),
             input_size_per_partition,
