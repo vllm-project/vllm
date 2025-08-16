@@ -25,7 +25,7 @@ def _dummy_item(modality: str, size_by_key: dict[str, int]):
 
 
 def _dummy_kw(size_by_key_modality: dict[str, dict[str, int]]):
-    return MultiModalKwargs.from_items([
+    return MultiModalKwargs([
         _dummy_item(modality, size_by_key)
         for modality, size_by_key in size_by_key_modality.items()
     ])
