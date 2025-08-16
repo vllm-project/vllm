@@ -9,7 +9,7 @@ from torch.nn.parameter import Parameter
 
 from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.config import get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -20,7 +20,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateShapeCalculator)
+    MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
@@ -56,6 +56,8 @@ class MambaMixer(MambaBase, CustomOp):
                  rms_norm_eps: float = 1e-5,
                  activation="silu",
                  is_lora_enabled: bool = False,
+                 model_config: Optional[ModelConfig] = None,
+                 cache_config: Optional[CacheConfig] = None,
                  prefix: str = ""):
         super().__init__()
         self.time_step_rank = time_step_rank
@@ -153,6 +155,8 @@ class MambaMixer(MambaBase, CustomOp):
             # The inner tuple is (conv_state, ssm_state)
             self.kv_cache = [(torch.tensor([]), torch.tensor([]))]
 
+        self.model_config = model_config
+        self.cache_config = cache_config
         self.prefix = prefix
 
     def _ssm_transform(
@@ -368,6 +372,15 @@ class MambaMixer(MambaBase, CustomOp):
             out = self.out_proj(scan_outputs_combined.transpose(-2, -1))[0]
 
         return out
+
+    def get_state_dtype(self) -> tuple[torch.dtype]:
+        assert self.model_config is not None
+        assert self.cache_config is not None
+        return MambaStateDtypeCalculator.mamba1_state_dtype(
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
+        )
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
         return MambaStateShapeCalculator.mamba1_state_shape(

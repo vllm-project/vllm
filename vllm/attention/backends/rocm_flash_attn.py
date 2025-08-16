@@ -4,7 +4,7 @@
 import itertools
 from dataclasses import dataclass
 from functools import cache
-from typing import TYPE_CHECKING, List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Type
 
 import torch
 
@@ -22,9 +22,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.platforms import current_platform
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 logger = init_logger(__name__)
 _PARTITION_SIZE_ROCM = 256
@@ -260,69 +257,6 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             qs = self._cached_decode_metadata.query_start_loc
             self._cached_decode_metadata.query_start_loc = qs - qs[0]
         return self._cached_decode_metadata
-
-    def advance_step(self,
-                     model_input: "ModelInputForGPUWithSamplingMetadata",
-                     sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int,
-                     num_seqs: int,
-                     num_queries: int,
-                     turn_prefills_into_decodes: bool = False):
-        """
-        Update metadata in-place to advance one decode step.
-        """
-
-        assert not turn_prefills_into_decodes, \
-            ("Chunked prefill is not supported with rocm_flash_attn yet."
-             "turn_prefills_into_decodes is a Multi-Step + Chunked-Prefill "
-             "specific parameter.")
-
-        # When using cudagraph, the num_seqs is padded to the next captured
-        # batch sized, but num_queries tracks the actual number of requests in
-        # the batch. For --enforce-eager mode, num_seqs == num_queries
-        if num_seqs != num_queries:
-            assert num_seqs > num_queries
-            assert self.use_cuda_graph
-
-        assert self.num_prefills == 0
-        assert self.num_prefill_tokens == 0
-        assert self.num_decode_tokens == num_seqs
-        assert self.slot_mapping.shape == (num_seqs, )
-
-        assert self.seq_lens is not None
-        assert len(self.seq_lens) == num_seqs
-        assert self.seq_lens_tensor is not None
-        assert self.seq_lens_tensor.shape == (num_seqs, )
-        assert self.max_query_len == 1
-        assert self.max_prefill_seq_len == 0
-        assert self.max_decode_seq_len == max(self.seq_lens)
-
-        assert self.query_start_loc is not None
-        assert self.query_start_loc.shape == (num_queries + 1, )
-        assert self.seq_start_loc is not None
-        assert self.seq_start_loc.shape == (num_seqs + 1, )
-
-        assert self.context_lens_tensor is not None
-        assert self.context_lens_tensor.shape == (num_queries, )
-
-        assert self.block_tables is not None
-        assert self.block_tables.shape[0] == num_seqs
-
-        # Update query lengths. Note that we update only queries and not seqs,
-        # since tensors may be padded due to captured cuda graph batch size
-        for i in range(num_queries):
-            self.seq_lens[i] += 1
-        self.max_decode_seq_len = max(self.seq_lens)
-
-        ops.advance_step_flashattn(num_seqs=num_seqs,
-                                   num_queries=num_queries,
-                                   block_size=block_size,
-                                   input_tokens=model_input.input_tokens,
-                                   sampled_token_ids=sampled_token_ids,
-                                   input_positions=model_input.input_positions,
-                                   seq_lens=self.seq_lens_tensor,
-                                   slot_mapping=self.slot_mapping,
-                                   block_tables=self.block_tables)
 
 
 class ROCmFlashAttentionMetadataBuilder(
