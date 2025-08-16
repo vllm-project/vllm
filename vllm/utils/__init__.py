@@ -443,7 +443,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         else:
             lru_key = next(iter(self.order))
         value = self.pop(cast(_K, lru_key))
-        return (lru_key, value)
+        return lru_key, value
 
     def clear(self) -> None:
         while len(self) > 0:

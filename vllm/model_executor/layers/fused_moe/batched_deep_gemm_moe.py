@@ -252,7 +252,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                        max(K, N))
         workspace2 = (num_experts, max_num_tokens * num_dispatchers, (N // 2))
         output = (num_experts, max_num_tokens * num_dispatchers, K)
-        return (workspace13, workspace2, output, a.dtype)
+        return workspace13, workspace2, output, a.dtype
 
     def apply(
         self,

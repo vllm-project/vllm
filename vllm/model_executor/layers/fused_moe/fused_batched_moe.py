@@ -685,7 +685,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13 = (num_experts, self.max_num_tokens * num_dp, K)
         workspace2 = (self.max_num_tokens * num_dp, N)
         output = workspace13
-        return (workspace13, workspace2, output, a.dtype)
+        return workspace13, workspace2, output, a.dtype
 
     def dequant(self, t: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         assert self.quant_config.is_quantized
@@ -910,7 +910,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13 = (num_experts, max_num_tokens * num_dp, max(K, N))
         workspace2 = (num_experts, max_num_tokens * num_dp, (N // 2))
         output = (num_experts, max_num_tokens * num_dp, K)
-        return (workspace13, workspace2, output, a.dtype)
+        return workspace13, workspace2, output, a.dtype
 
     def apply(
         self,

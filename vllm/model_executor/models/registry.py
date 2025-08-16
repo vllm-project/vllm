@@ -634,7 +634,7 @@ class _ModelRegistry:
             normalized_arch = self._normalize_arch(arch, model_config)
             model_info = self._try_inspect_model_cls(normalized_arch)
             if model_info is not None:
-                return (model_info, arch)
+                return model_info, arch
 
         # Fallback to transformers impl (before resolving runner_type)
         if (all(arch not in self.models for arch in architectures)
@@ -682,7 +682,7 @@ class _ModelRegistry:
             normalized_arch = self._normalize_arch(arch, model_config)
             model_cls = self._try_load_model_cls(normalized_arch)
             if model_cls is not None:
-                return (model_cls, arch)
+                return model_cls, arch
 
         # Fallback to transformers impl (before resolving runner_type)
         if (all(arch not in self.models for arch in architectures)

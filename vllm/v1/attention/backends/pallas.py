@@ -65,7 +65,7 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         padded_head_size = cdiv(
             head_size, TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
-        return (num_blocks, block_size, num_kv_heads * 2, padded_head_size)
+        return num_blocks, block_size, num_kv_heads * 2, padded_head_size
 
     @staticmethod
     def swap_blocks(

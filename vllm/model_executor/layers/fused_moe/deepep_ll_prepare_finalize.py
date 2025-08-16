@@ -164,7 +164,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None)
 
-        return (expert_x, expert_x_scale, expert_tokens_meta, None, None)
+        return expert_x, expert_x_scale, expert_tokens_meta, None, None
 
     def finalize(
         self,

@@ -103,11 +103,11 @@ class FusedMoEQuantConfig:
                 assert self.block_shape is not None
                 _, block_k = self.block_shape
                 k_tiles = cdiv(hidden_dim, block_k)
-                return (max_tokens, k_tiles)
+                return max_tokens, k_tiles
             elif self.is_per_act_token:
-                return (max_tokens, 1)
+                return max_tokens, 1
             else:
-                return (1, 1)
+                return 1, 1
         else:
             return None
 
@@ -120,7 +120,7 @@ class FusedMoEQuantConfig:
         if self.is_quantized:
             scale_shape = self.scale_shape(max_tokens, hidden_dim)
             assert scale_shape is not None
-            return (num_experts, *scale_shape)
+            return num_experts, *scale_shape
         else:
             return None
 

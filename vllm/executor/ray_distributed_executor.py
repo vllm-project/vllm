@@ -265,7 +265,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 should be placed first.
             """
             ip = item.ip
-            return (0 if ip == driver_ip else 1, ip_counts[ip], ip)
+            return 0 if ip == driver_ip else 1, ip_counts[ip], ip
 
         # After sorting, the workers on the same node will be
         # close to each other, and the workers on the driver

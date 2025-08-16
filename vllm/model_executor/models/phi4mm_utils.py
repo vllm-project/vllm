@@ -1608,7 +1608,7 @@ class AttBlock(BlockBase, AttModule):
 
     def memory_dims(self, max_len=False):
         """memory dimensions"""
-        return (1, self.input_size)
+        return 1, self.input_size
 
 
 def masked_softmax(

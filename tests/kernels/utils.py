@@ -792,7 +792,7 @@ def make_block_tables_slot_mapping(
         device=device,
     )
 
-    return (block_tables_tensor, slot_mapping_list, max_block_idx)
+    return block_tables_tensor, slot_mapping_list, max_block_idx
 
 
 def make_test_metadata(
