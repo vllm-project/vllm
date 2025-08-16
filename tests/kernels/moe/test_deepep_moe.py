@@ -165,7 +165,7 @@ def make_modular_kernel(
             quant_config=quant_config,
         )
     else:
-        fused_experts = TritonExperts(quant_config=quant_config, )
+        fused_experts = TritonExperts(quant_config=quant_config)
 
     mk = FusedMoEModularKernel(prepare_finalize=a2a,
                                fused_experts=fused_experts)
@@ -206,18 +206,6 @@ def deep_ep_moe_impl(
     if is_quantized:
         q_dtype = torch.float8_e4m3fn
 
-    quant_config = FusedMoEQuantConfig.make(
-        q_dtype,
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
-        per_act_token_quant=per_act_token_quant,
-    )
-
-    # Make modular kernel
-    mk: FusedMoEModularKernel = make_modular_kernel(
-        pg, pgi, low_latency_mode, hidden_size, dp_size, num_experts,
-        num_local_experts, q_dtype, use_fp8_dispatch, quant_config)
-
     out_hidden_states = torch.empty_like(test_tensors.rank_tokens)
     total_num_tokens = test_tensors.rank_tokens.size(0)
 
@@ -231,6 +219,21 @@ def deep_ep_moe_impl(
             # per act token
             rank_token_scales_chunk = rank_token_scales_chunk[
                 chunk_start:chunk_end]
+
+        print(f"RTS {rank_token_scales_chunk.shape if rank_token_scales_chunk is not None else None}")
+
+        quant_config = FusedMoEQuantConfig.make(
+            q_dtype,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            per_act_token_quant=per_act_token_quant,
+            a1_scale=rank_token_scales_chunk,
+        )
+
+        # Make modular kernel
+        mk: FusedMoEModularKernel = make_modular_kernel(
+            pg, pgi, low_latency_mode, hidden_size, dp_size, num_experts,
+            num_local_experts, q_dtype, use_fp8_dispatch, quant_config)
 
         out = mk.forward(hidden_states=rank_tokens_chunk,
                          w1=w1,
@@ -397,7 +400,7 @@ DTYPES = [torch.bfloat16, torch.float8_e4m3fn]
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("mnk", MNKs)
+@pytest.mark.parametrize("m,n,k", MNKs)
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
@@ -406,7 +409,9 @@ DTYPES = [torch.bfloat16, torch.float8_e4m3fn]
 @requires_deep_ep
 def test_deep_ep_moe(
     dtype: torch.dtype,
-    mnk: tuple[int, int, int],
+    m: int,
+    n: int,
+    k: int,
     num_experts: int,
     topk: int,
     world_dp_size: tuple[int, int],
@@ -414,7 +419,6 @@ def test_deep_ep_moe(
 ):
     low_latency_mode = False
     use_fp8_dispatch = False
-    m, n, k = mnk
 
     current_platform.seed_everything(7)
     world_size, dp_size = world_dp_size
@@ -446,20 +450,24 @@ USE_FP8_DISPATCH = [True, False]
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("mnk", MNKs)
+@pytest.mark.parametrize("m,n,k", MNKs)
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
 @pytest.mark.parametrize("use_fp8_dispatch", USE_FP8_DISPATCH)
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep
-def test_low_latency_deep_ep_moe(dtype: torch.dtype, mnk: tuple[int, int, int],
-                                 num_experts: int, topk: int,
-                                 world_dp_size: tuple[int, int],
-                                 use_fp8_dispatch: bool):
-
+def test_low_latency_deep_ep_moe(
+    dtype: torch.dtype,
+    m: int,
+    n: int,
+    k: int,
+    num_experts: int,
+    topk: int,
+    world_dp_size: tuple[int, int],
+    use_fp8_dispatch: bool,
+):
     low_latency_mode = True
-    m, n, k = mnk
 
     if (low_latency_mode
             and k not in DeepEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES):
@@ -467,6 +475,8 @@ def test_low_latency_deep_ep_moe(dtype: torch.dtype, mnk: tuple[int, int, int],
             f"Skipping test as hidden size {k} is not in list of supported "
             f"hidden sizes {DeepEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES}"
         )
+
+    print(f"DTYPE = {dtype}")
 
     current_platform.seed_everything(7)
     world_size, dp_size = world_dp_size
