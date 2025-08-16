@@ -327,7 +327,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "   int    group_size,"
       "   Tensor channel_scales,"
       "   Tensor token_scales,"
-      "   ScalarType? out_type"
+      "   ScalarType? out_type,"
+      "   str?   maybe_schedule"
       ") -> Tensor",
       {stride_tag});
   // pack scales

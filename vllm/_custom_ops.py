@@ -510,7 +510,8 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
         b_group_size: int,
         b_channel_scales: torch.Tensor,
         a_token_scales: torch.Tensor,
-        out_type: Optional[torch.dtype] = None
+        out_type: Optional[torch.dtype] = None,
+        maybe_schedule: Optional[str] = None
     ) -> torch.Tensor:
         m = a.size(0)
         n = b_q.size(1)
@@ -1074,11 +1075,12 @@ def cutlass_w4a8_mm(
         b_group_size: int,
         b_channel_scales: torch.Tensor,
         a_token_scales: torch.Tensor,
-        out_type: Optional[torch.dtype] = None) -> torch.Tensor:
+        out_type: Optional[torch.dtype] = None,
+        maybe_schedule: Optional[str] = None) -> torch.Tensor:
     return torch.ops._C.cutlass_w4a8_mm(a, b_q,
                                         b_group_scales, b_group_size,
                                         b_channel_scales, a_token_scales,
-                                        out_type)
+                                        out_type, maybe_schedule)
 
 
 def cutlass_pack_scale_fp8(scales: torch.Tensor) -> torch.Tensor:

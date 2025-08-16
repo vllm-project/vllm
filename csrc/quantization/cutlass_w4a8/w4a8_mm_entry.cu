@@ -100,12 +100,6 @@ using ElementCompute = float;         // Element type for epilogue computation
 using ArchTag = cutlass::arch::Sm90;  // Tag indicating the minimum SM that
                                       // supports the intended feature
 using OperatorClass = cutlass::arch::OpClassTensorOp;  // Operator class tag
-// // czhu: sweep
-// using TileShape =
-//     Shape<_128, _128, cute::Int<TileShapeK>>;  // Threadblock-level tile size
-// using ClusterShape =
-//     Shape<_1, _1, _1>;  // Shape of the threadblocks in a cluster
-// // end sweep
 using KernelSchedule =
     cutlass::gemm::KernelTmaWarpSpecializedCooperative;  // Kernel to launch
                                                          // based on the default
@@ -239,10 +233,8 @@ struct W4A8GemmKernel {
             epilogue_arguments
         };
 
-        // Using the arguments, query for extra workspace required
+        // Workspace
         size_t workspace_size = GemmShuffled::get_workspace_size(arguments);
-
-        // Allocate workspace memory
         cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
         
         // Run GEMM
@@ -255,25 +247,6 @@ struct W4A8GemmKernel {
     }
 
 };
-
-using DefaultTileShape = Shape<_128, _128, cute::Int<TileShapeK>>;
-using DefaultClusterShape = Shape<_1, _1, _1>;
-using DefaultKernel = W4A8GemmKernel<DefaultTileShape, DefaultClusterShape>;
-
-torch::Tensor mm(torch::Tensor const& A,
-                 torch::Tensor const& B,  // already packed
-                 torch::Tensor const& group_scales,  // already packed
-                 int64_t group_size,
-                 torch::Tensor const& channel_scales,
-                 torch::Tensor const& token_scales,
-                 std::optional<at::ScalarType> const& maybe_out_type) {
-    return DefaultKernel::mm(
-        A, B, 
-        group_scales, group_size,
-        channel_scales, token_scales,
-        maybe_out_type
-    );
-}
 
 torch::Tensor pack_scale_fp8(torch::Tensor const& scales) {
   TORCH_CHECK(scales.dtype() == torch::kFloat8_e4m3fn);
@@ -308,6 +281,107 @@ torch::Tensor encode_and_reorder_int4b(torch::Tensor const& B) {
   auto layout_B = make_layout(shape_B, LayoutRight{});
   cutlass::reorder_tensor(B_packed_ptr, layout_B, layout_B_reordered);
   return B_packed;
+}
+
+// kernels
+using Kernel_256x128_1x1x1 = W4A8GemmKernel<Shape<_256, _128, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
+using Kernel_256x64_1x1x1 = W4A8GemmKernel<Shape<_256, _64, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
+using Kernel_256x32_1x1x1 = W4A8GemmKernel<Shape<_256, _32, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
+using Kernel_256x16_1x1x1 = W4A8GemmKernel<Shape<_256, _16, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
+using Kernel_128x256_2x1x1 = W4A8GemmKernel<Shape<_128, _256, cute::Int<TileShapeK>>, Shape<_2, _1, _1>>;
+using Kernel_128x256_1x1x1 = W4A8GemmKernel<Shape<_128, _256, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
+using Kernel_128x128_1x1x1 = W4A8GemmKernel<Shape<_128, _128, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
+using Kernel_128x64_1x1x1 = W4A8GemmKernel<Shape<_128, _64, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
+using Kernel_128x32_1x1x1 = W4A8GemmKernel<Shape<_128, _32, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
+using Kernel_128x16_1x1x1 = W4A8GemmKernel<Shape<_128, _16, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
+
+torch::Tensor mm_dispatch(torch::Tensor const& A,
+                 torch::Tensor const& B,  // already packed
+                 torch::Tensor const& group_scales,  // already packed
+                 int64_t group_size,
+                 torch::Tensor const& channel_scales,
+                 torch::Tensor const& token_scales,
+                 std::optional<at::ScalarType> const& maybe_out_type,
+                 const std::string& schedule) {
+    if (schedule == "256x128_1x1x1") {
+        return Kernel_256x128_1x1x1::mm(A, B, group_scales, group_size, channel_scales, token_scales, maybe_out_type);
+    }
+    else if (schedule == "256x64_1x1x1") {
+        return Kernel_256x64_1x1x1::mm(A, B, group_scales, group_size, channel_scales, token_scales, maybe_out_type);
+    }
+    else if (schedule == "256x32_1x1x1") {
+        return Kernel_256x32_1x1x1::mm(A, B, group_scales, group_size, channel_scales, token_scales, maybe_out_type);
+    }
+    else if (schedule == "256x16_1x1x1") {
+        return Kernel_256x16_1x1x1::mm(A, B, group_scales, group_size, channel_scales, token_scales, maybe_out_type);
+    }
+    else if (schedule == "128x256_2x1x1") {
+        return Kernel_128x256_2x1x1::mm(A, B, group_scales, group_size, channel_scales, token_scales, maybe_out_type);
+    }
+    else if (schedule == "128x256_1x1x1") {
+        return Kernel_128x256_1x1x1::mm(A, B, group_scales, group_size, channel_scales, token_scales, maybe_out_type);
+    }
+    else if (schedule == "128x128_1x1x1") {
+        return Kernel_128x128_1x1x1::mm(A, B, group_scales, group_size, channel_scales, token_scales, maybe_out_type);
+    }
+    else if (schedule == "128x64_1x1x1") {
+        return Kernel_128x64_1x1x1::mm(A, B, group_scales, group_size, channel_scales, token_scales, maybe_out_type);
+    }
+    else if (schedule == "128x32_1x1x1") {
+        return Kernel_128x32_1x1x1::mm(A, B, group_scales, group_size, channel_scales, token_scales, maybe_out_type);
+    }
+    else if (schedule == "128x16_1x1x1") {
+        return Kernel_128x16_1x1x1::mm(A, B, group_scales, group_size, channel_scales, token_scales, maybe_out_type);
+    }
+    TORCH_CHECK(false, "Unknown W4A8 schedule: ", schedule);
+    return {};
+}
+// end gen
+
+torch::Tensor mm(torch::Tensor const& A,
+                 torch::Tensor const& B,  // already packed
+                 torch::Tensor const& group_scales,  // already packed
+                 int64_t group_size,
+                 torch::Tensor const& channel_scales,
+                 torch::Tensor const& token_scales,
+                 std::optional<at::ScalarType> const& maybe_out_type,
+                 std::optional<std::string> maybe_schedule) {
+    // requested a specific schedule
+    if (maybe_schedule){
+        return mm_dispatch(A, B, group_scales, group_size, channel_scales, token_scales, maybe_out_type, *maybe_schedule);
+    }
+    std::string schedule;
+    int M = A.size(0);
+    int K = A.size(1);
+    int N = B.size(1);
+    // heuristic
+    if (M <= 16) {
+        schedule = (K == 16384 && N == 18432) ? "256x16_1x1x1" : "128x16_1x1x1";
+    } else if (M <= 32) {
+        schedule = (K == 16384 && N == 18432) ? "256x32_1x1x1" : "128x32_1x1x1";
+    } else if (M <= 64) {
+        if (K == 16384 && N == 18432) schedule = "256x64_1x1x1";
+        else if (N <= 8192 && K <= 8192) schedule = "128x32_1x1x1";
+        else
+            schedule = "128x64_1x1x1";
+    } else if (M <= 128) {
+        if (K == 16384 && N == 18432) schedule = "256x128_1x1x1";
+        else if (N <= 8192) schedule = "128x64_1x1x1";
+        else
+            schedule = "128x128_1x1x1";
+    } else if (M <= 256) {
+        if (N <= 4096) schedule = "128x64_1x1x1";
+        else if (N <= 8192) schedule = "128x128_1x1x1";
+        else
+            schedule = "128x256_1x1x1";
+    } else if (M <= 512 && N <= 4096) {
+        schedule = "128x128_1x1x1";
+    } else if (M <= 1024) {
+        schedule = "128x256_1x1x1";
+    } else {
+        schedule = "128x256_2x1x1";
+    }
+    return mm_dispatch(A, B, group_scales, group_size, channel_scales, token_scales, maybe_out_type, schedule);
 }
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {

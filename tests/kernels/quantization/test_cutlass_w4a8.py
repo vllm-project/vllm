@@ -37,9 +37,13 @@ MNK_SHAPES = [
     (257, 128, 4096),
     (257, 4096, 4096),
     (1024, 4096, 8192),
-    (1024, 8192, 4096),
+    (1024, 8192, 4096)
 ]
 
+# czhu: return from fn
+SCHEDULES = ['128x16_1x1x1', '256x16_1x1x1', '128x32_1x1x1', '256x32_1x1x1',
+       '128x64_1x1x1', '256x64_1x1x1', '128x128_1x1x1', '256x128_1x1x1',
+       '128x256_1x1x1', '128x256_2x1x1']
 
 @dataclass
 class TypeConfig:
@@ -198,11 +202,12 @@ def mm_test_helper(types: TypeConfig,
                          MNK_SHAPES,
                          ids=lambda x: "x".join(str(v) for v in x))
 @pytest.mark.parametrize("types", TEST_TYPES)
-def test_cutlass_w4a8(shape, types: TypeConfig):
+@pytest.mark.parametrize("schedule", SCHEDULES)
+def test_cutlass_w4a8(shape, types: TypeConfig, schedule):
     group_sizes = [128]
     for group_size in group_sizes:
         tensors = create_test_tensors(shape, types, group_size)
-        mm_test_helper(types, tensors, group_size)
+        mm_test_helper(types, tensors, group_size, schedule)
 
 # TODO: cudagraph
 # # Test to make sure cuda graphs work

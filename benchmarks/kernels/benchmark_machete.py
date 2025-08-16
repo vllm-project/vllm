@@ -319,6 +319,7 @@ def cutlass_w4a8_create_bench_fn(
         b_group_size=bt.group_size,
         b_channel_scales=bt.w_ch_s,
         a_token_scales=bt.w_tok_s,
+        maybe_schedule=schedule
     )
 
 # impl
@@ -436,38 +437,82 @@ def bench(
             )
         )
 
+    # if sweep_schedules:
+    #     global _SWEEP_SCHEDULES_RESULTS
+
+    #     print("Finding best schedule for machete")
+    #     best = None
+    #     best_schedule = None
+    #     schedules = ops.machete_supported_schedules(
+    #         a_type=types.act_type,
+    #         b_type=types.weight_type,
+    #         group_scales_type=types.group_scale_type,
+    #         group_zeros_type=types.group_zero_type,
+    #         token_scales_type=types.token_scale_type,
+    #         channel_scales_type=types.channel_scale_type,
+    #         out_type=types.output_type,
+    #     )
+
+    #     if schedules is None or len(schedules) == 0:
+    #         raise ValueError("No schedules found to sweep")
+
+    #     for schedule in reversed(schedules):
+    #         schedule_M = int(schedule.split("_")[0].split("x")[1])
+
+    #         # Prune known bad schedules
+    #         if schedule_M >= 2 * max(m, 16) or schedule_M < m // 4:
+    #             continue
+
+    #         res = bench_fns(
+    #             label,
+    #             sub_label,
+    #             "machete_best",
+    #             [
+    #                 machete_create_bench_fn(
+    #                     bt, out_type=types.output_type, schedule=schedule
+    #                 )
+    #                 for bt in benchmark_tensors
+    #             ],
+    #         )
+
+    #         results_row = {
+    #             "M": m,
+    #             "K": k,
+    #             "N": n,
+    #             "group_size": group_size,
+    #             "schedule": schedule,
+    #             "median": res.median,
+    #         }
+    #         if _SWEEP_SCHEDULES_RESULTS is None:
+    #             _SWEEP_SCHEDULES_RESULTS = pd.DataFrame(columns=results_row.keys())
+    #         _SWEEP_SCHEDULES_RESULTS.loc[len(_SWEEP_SCHEDULES_RESULTS)] = results_row
+
+    #         print(f"  {res.median:5.5} ", schedule)
+    #         if not best or res.median < best.median:
+    #             best = res
+    #             best_schedule = schedule
+    #     print("Best schedule:", best_schedule)
+    #     timers.append(best)
+
+    # for w4a8
     if sweep_schedules:
         global _SWEEP_SCHEDULES_RESULTS
 
-        print("Finding best schedule for machete")
+        print("Finding best schedule for w4a8")
         best = None
         best_schedule = None
-        schedules = ops.machete_supported_schedules(
-            a_type=types.act_type,
-            b_type=types.weight_type,
-            group_scales_type=types.group_scale_type,
-            group_zeros_type=types.group_zero_type,
-            token_scales_type=types.token_scale_type,
-            channel_scales_type=types.channel_scale_type,
-            out_type=types.output_type,
-        )
+        schedules = ["256x256_2x1x1", "256x256_1x1x1", "256x128_2x1x1", "256x128_1x1x1", "256x64_2x1x1", "256x64_1x1x1", "256x32_2x1x1", "256x32_1x1x1", "256x16_2x1x1", "256x16_1x1x1", "128x256_2x1x1", "128x256_1x1x1", "128x128_2x1x1", "128x128_1x1x1", "128x64_2x1x1", "128x64_1x1x1", "128x32_2x1x1", "128x32_1x1x1", "128x16_2x1x1", "128x16_1x1x1"]
 
         if schedules is None or len(schedules) == 0:
             raise ValueError("No schedules found to sweep")
 
         for schedule in reversed(schedules):
-            schedule_M = int(schedule.split("_")[0].split("x")[1])
-
-            # Prune known bad schedules
-            if schedule_M >= 2 * max(m, 16) or schedule_M < m // 4:
-                continue
-
             res = bench_fns(
                 label,
                 sub_label,
-                "machete_best",
+                "cutlass_w4a8_best",
                 [
-                    machete_create_bench_fn(
+                    cutlass_w4a8_create_bench_fn(
                         bt, out_type=types.output_type, schedule=schedule
                     )
                     for bt in benchmark_tensors
