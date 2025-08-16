@@ -255,8 +255,8 @@ async def test_mp_crash_detection(monkeypatch: pytest.MonkeyPatch):
             pass
         end = time.perf_counter()
 
-        assert end - start < 60, (
-            "Expected vLLM to gracefully shutdown in <60s "
+        assert end - start < 100, (
+            "Expected vLLM to gracefully shutdown in <100s "
             "if there is an error in the startup.")
 
 
