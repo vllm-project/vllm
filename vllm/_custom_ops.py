@@ -1557,7 +1557,9 @@ if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
     def moe_wna16_marlin_gemm_fake(input: torch.Tensor,
                                    output: Optional[torch.Tensor],
                                    b_qweight: torch.Tensor,
+                                   b_bias: Optional[torch.Tensor],
                                    b_scales: torch.Tensor,
+                                   global_scale: Optional[torch.Tensor],
                                    b_qzeros: Optional[torch.Tensor],
                                    g_idx: Optional[torch.Tensor],
                                    perm: Optional[torch.Tensor],
@@ -1568,7 +1570,7 @@ if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
                                    topk_weights: torch.Tensor,
                                    moe_block_size: int, top_k: int,
                                    mul_topk_weights: bool, is_ep: bool,
-                                   b_q_type: ScalarType, size_m: int,
+                                   b_q_type_id: int, size_m: int,
                                    size_n: int, size_k: int, is_k_full: bool,
                                    use_atomic_add: bool, use_fp32_reduce: bool,
                                    is_zp_float: bool) -> torch.Tensor:
