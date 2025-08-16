@@ -9,11 +9,13 @@ import numpy as np
 import pytest
 import torch
 
+from tests.utils import create_new_process_for_each_test
 from tests.v1.sample.utils import (LogitsprocsTestFakes, create_fake_logits,
                                    create_penalty_tensor,
                                    create_prompt_tokens_tensor,
                                    fake_apply_logitsprocs,
                                    fake_update_logitsprocs_state)
+from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available
@@ -24,7 +26,7 @@ from vllm.v1.sample.logits_processor import (BatchUpdate, BatchUpdateBuilder,
                                              MinPLogitsProcessor,
                                              MinTokensLogitsProcessor,
                                              MoveDirectionality,
-                                             init_builtin_logitsprocs)
+                                             build_logitsprocs)
 # yapf: enable
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -53,6 +55,7 @@ class LogitsProcsRequestParams:
     workload_index: int
     logitproc_type: LogitprocType  # Logitproc enabled, specified by str id
     out_tokens: list[int]  # Output tokens required for min tokens test
+    prompt_tokens: list[int]  # Dummy prompt tokens placeholder
     params: SamplingParams  # Settings customized for logitproc
 
     def __init__(self, workload_index: int, logitproc_type: LogitprocType):
@@ -63,6 +66,7 @@ class LogitsProcsRequestParams:
         # don't matter *for these tests* so use 0 as a dummy value
         self.out_tokens = ([0] *
                            (MIN_TOKENS_LEN_THRESHOLD * random.randint(0, 2)))
+        self.prompt_tokens = []
         self.params = _sampling_params_from_logitproc(logitproc_type)
 
     def __str__(self):
@@ -88,11 +92,12 @@ def _generate_fake_sampling_metadata(
                               vocab_size,
                               size=np.random.randint(
                                   1, MAX_NUM_PROMPT_TOKENS)).tolist())
-    logitsprocs = init_builtin_logitsprocs(
-        pin_memory_available=PIN_MEMORY_AVAILABLE,
-        max_num_reqs=MAX_NUM_REQS + 1,
-        device=device)
-
+    logitsprocs = build_logitsprocs(
+        vllm_config=VllmConfig(),
+        device=device,
+        is_pin_memory=PIN_MEMORY_AVAILABLE,
+        is_pooling_model=False,
+    )
     fake_sampling_metadata = SamplingMetadata(
         temperature=torch.full((batch_size, ), 0.0),
         all_greedy=True,
@@ -462,7 +467,8 @@ def _generate_fake_step_update(
         # Replace as many removed requests as possible with added requests
         add_remove_idx = batch_update_builder.pop_removed()
         batch_update_builder.added.append(
-            (add_remove_idx, add_req_params.params, add_req_params.out_tokens))
+            (add_remove_idx, add_req_params.params,
+             add_req_params.prompt_tokens, add_req_params.out_tokens))
         persistent_batch[add_remove_idx] = add_req_params
 
     # Append remaining added requests to end of batch
@@ -470,7 +476,8 @@ def _generate_fake_step_update(
                                        num_step_add_replace):(wdx +
                                                               num_step_add)]
     batch_update_builder.added.extend([
-        (adx + batch_size, add_req_params.params, add_req_params.out_tokens)
+        (adx + batch_size, add_req_params.params, add_req_params.prompt_tokens,
+         add_req_params.out_tokens)
         for adx, add_req_params in enumerate(add_reqs_append)
     ])
     persistent_batch.extend(add_reqs_append)
@@ -561,6 +568,7 @@ def _assert_valid(
             step_idx=step_idx)
 
 
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("reqs_per_logitproc", [REQS_PER_LOGITPROC])
 @pytest.mark.parametrize("logitsprocs_under_test", _get_test_cases())

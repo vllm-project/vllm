@@ -43,6 +43,7 @@ from vllm.transformers_utils.config import is_interleaved
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
+from vllm.v1.sample.logits_processor import LogitsProcessor
 
 # yapf: enable
 
@@ -435,6 +436,10 @@ class EngineArgs:
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
+    logits_processors: Optional[list[Union[
+        str, type[LogitsProcessor]]]] = ModelConfig.logits_processors
+    """Custom logitproc types"""
+
     async_scheduling: bool = SchedulerConfig.async_scheduling
     # DEPRECATED
     enable_prompt_adapter: bool = False
@@ -549,6 +554,8 @@ class EngineArgs:
                                  **model_kwargs["model_impl"])
         model_group.add_argument("--override-attention-dtype",
                                  **model_kwargs["override_attention_dtype"])
+        model_group.add_argument("--logits-processors",
+                                 **model_kwargs["logits_processors"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -940,6 +947,7 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
+            logits_processors=self.logits_processors,
         )
 
     def validate_tensorizer_args(self):
