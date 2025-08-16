@@ -6,7 +6,7 @@ KV cache helper for store.
 from collections import defaultdict
 from collections.abc import Sequence
 from concurrent.futures import CancelledError, Future
-from typing import Optional, cast
+from typing import TYPE_CHECKING, Optional, cast
 
 import torch
 
@@ -15,8 +15,14 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVTransferStats)
 from vllm.logger import init_logger
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorType)
 
 logger = init_logger(__name__)
 
@@ -142,14 +148,25 @@ class KVOutputAggregator:
 
         finished_sending = set[str]()
         finished_recving = set[str]()
-        for output in outputs:
-            output = output.kv_connector_output
+        aggregated_kv_transfer_stats = dict["KVConnectorType",
+                                            KVTransferStats]()
+        for model_runner_output in outputs:
+            output = model_runner_output.kv_connector_output
             if not output:
                 continue
             update_finished_set(output.finished_sending,
                                 self._send_remaining_count, finished_sending)
             update_finished_set(output.finished_recving,
                                 self._recv_remaining_count, finished_recving)
+
+            # Aggregate kv_transfer_stats from all workers, by connector type.
+            if kv_transfer_stats := model_runner_output.kv_transfer_stats:
+                for connector_id, xfer_stats in kv_transfer_stats.items():
+                    if connector_id not in aggregated_kv_transfer_stats:
+                        aggregated_kv_transfer_stats[connector_id] = xfer_stats
+                    else:
+                        aggregated_kv_transfer_stats[connector_id].aggregate(
+                            xfer_stats)
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -158,6 +175,7 @@ class KVOutputAggregator:
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
         )
+        output.kv_transfer_stats = aggregated_kv_transfer_stats
 
         return output
 
