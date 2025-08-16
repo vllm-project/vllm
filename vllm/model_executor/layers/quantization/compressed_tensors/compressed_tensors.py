@@ -129,6 +129,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             config=config)
         sparsity_scheme_map, sparsity_ignore_list = cls._parse_sparsity_config(
             config=config)
+        kv_cache_scheme = config.get("kv_cache_scheme")
 
         return cls(
             target_scheme_map=target_scheme_map,
@@ -136,6 +137,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             quant_format=quant_format,
             sparsity_scheme_map=sparsity_scheme_map,
             sparsity_ignore_list=sparsity_ignore_list,
+            kv_cache_scheme=kv_cache_scheme,
             config=config,
         )
 
