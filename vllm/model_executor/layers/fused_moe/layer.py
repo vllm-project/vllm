@@ -1336,6 +1336,8 @@ class FusedMoE(CustomOp):
         NON_EXPERT_WEIGHTS = {
             "e_score_correction_bias",
         }
+        for name, weight in weights:
+            print(f"FusedMoE: {name} {weight.shape} {weight.dtype}")
 
         return [
             weight.view(self.local_num_experts, -1) for name, weight in weights
