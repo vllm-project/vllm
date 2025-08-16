@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that samples the next tokens from the model's outputs."""
 
-from __future__ import annotations
+from typing import Optional
 
 import torch
 import torch.nn as nn

@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 from typing import Optional
 
 import torch
@@ -82,7 +80,7 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         PyTorch-native implementation of top-k and top-p sampling.
 
@@ -103,7 +101,7 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """More optimized implementation for top-k and top-p sampling."""
         # We prefer `random_sample` over `flashinfer_sample` when sorting is
         # not needed. This is because `random_sample` does not require
