@@ -170,9 +170,12 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         torch.ops._C.silu_and_mul(intermediate_cache2,
                                   intermediate_cache1.view(-1, 2 * N))
     elif activation == "swigluoai":
-
-        torch.ops._C.swigluoai_and_mul(intermediate_cache2,
-                                       intermediate_cache1.view(-1, 2 * N))
+        torch.ops._C.swigluoai_and_mul(
+            intermediate_cache2,
+            intermediate_cache1.view(-1, 2 * N),
+            alpha=1.702,
+            limit=7.0,
+        )
     else:
         raise ValueError(f"Unsupported activation: {activation}. "
                          "Only silu and swigluoai activations are supported.")

@@ -1637,8 +1637,12 @@ def fused_experts_impl(
                                       intermediate_cache1.view(-1, N))
         elif activation == "swigluoai" and is_act_and_mul:
             # alpha = 1.702, limit = 7.0
-            torch.ops._C.swigluoai_and_mul(intermediate_cache2,
-                                           intermediate_cache1.view(-1, N))
+            torch.ops._C.swigluoai_and_mul(
+                intermediate_cache2,
+                intermediate_cache1.view(-1, N),
+                alpha=1.702,
+                limit=7.0,
+            )
         # Activation function without multiplication
         elif activation == "silu":
             intermediate_cache2 = F.silu(intermediate_cache1.view(-1, N))
