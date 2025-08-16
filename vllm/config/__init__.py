@@ -3600,9 +3600,6 @@ class VllmConfig:
                 logger.info(reason)
             self.scheduler_config.chunked_prefill_enabled = False
             self.scheduler_config.long_prefill_token_threshold = 0
-            self.scheduler_config.max_num_batched_tokens = max(
-                self.scheduler_config.max_model_len,
-                DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False
