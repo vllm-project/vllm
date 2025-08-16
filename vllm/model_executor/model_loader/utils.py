@@ -93,8 +93,56 @@ def initialize_model(
         return model_class(**kwargs)
 
 
-def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
+recorded_loader_keys = [
+    'weight_loader',
+    'load_qkv_weight',
+    'load_row_parallel_weight',
+    'load_merged_column_weight',
+    'output_dim',
+    'input_dim',
+    '_assert_and_load',
+]
+
+def process_weights_after_loading_core(model: nn.Module, model_config: ModelConfig,
                                   target_device: torch.device) -> None:
+    
+    if model_config is None and target_device is None:
+        model_config = getattr(model, 'last_model_config', None)
+        target_device = getattr(model, 'last_target_device', None)
+    else:
+        setattr(model, 'last_model_config', model_config)
+        setattr(model, 'last_target_device', target_device)
+        
+    # in the case for model reloading, etc. the function of `process_weights_after_loading`
+    # could be called before, in which case we will skip the function call this time
+    if getattr(model, 'process_weights_after_loading_already_called', False):
+        logger.debug('process_weights_after_loading already called for model %s', model)
+        return
+    
+    # save the dytpe & shape for model parameter shapes, used for 
+    if not hasattr(model, 'original_weights_rebuild_keys'):
+        model.original_weights_rebuild_keys = {}
+        for name, p in model.named_parameters():
+            model.original_weights_rebuild_keys[name] = {
+                'shape': p.shape, 
+                'stride': p.stride(), 
+                'dtype': p.dtype, 
+                'nbytes': p.untyped_storage().nbytes()
+            }
+
+    recorded_loader = {k: dict() for k in recorded_loader_keys}
+    for name, p in model.named_parameters():
+        for key in recorded_loader_keys:
+            if hasattr(p, k):
+                attr = getattr(p, k)
+                if not callable(attr):
+                    recorded_loader[k][name] = attr 
+                elif p is attr.__self__:
+                    recorded_loader[k][name] = attr.__func__ 
+                else:
+                    recorded_loader[k][name] = attr 
+    model.recorded_loader = recorded_loader
+    
     for _, module in model.named_modules():
         if isinstance(module, QKVCrossParallelLinear):
             # NOTE(Isotr0py): special case for cross QKV layer because
@@ -120,6 +168,84 @@ def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             module.process_weights_after_loading(model_config.dtype)
+
+def rebinding_and_load_weights(
+    first_time_load_weights,
+    weights,
+):
+    # after parameter loading, additionall process weights is needed 
+    setattr(model, 'process_weights_after_loading_already_called', False)
+    
+    for _, module in model.named_modules():
+        if torch.is_tensor(getattr(module, 'workspace', None)):
+            setattr(module, f'preserved_workspace', getattr(module, 'workspace'))
+    
+    existing_params = dict(model.named_parameters())
+    
+    # preserve original data, so that after parameter loading, we can put the parameter
+    # in the original tensor
+    original_param_dict = {}
+    for name, p in existing_params.items():
+        original_param_dict[name] = p.data
+    
+    # recover the parameter to the state before first loading
+    for name, (shape, stride, dtype, nbytes) in model.original_weights_rebuild_keys.items():
+        if name in existing_params:
+            existing_params[name].data = torch.empty(shape, dtype=dtype) 
+    
+    for k, loader_k in model.recorded_loader.items():
+        for n, loader in loader_k.items():
+            if not hasattr(existing_params[n], k):
+                setattr(existing_params[n], k, bond_method_to_cls(loader, existing_params[n]))
+
+    # after recovering, the weight loading can be called as usual
+    updated_params = first_time_load_weights(weights)
+    
+    # manually conducting process weights after loading
+    process_weights_after_loading_core(model, None, None)
+    setattr(model, 'process_weights_after_loading_already_called', True)
+    
+    # put the value of the newly created tensor to the original tensor 
+    for name, p in model.named_parameters():
+        assert name in original_param_dict, f'param {name} is not in original_param_dict'
+        assert original_param_dict[name].dtype == p.data.dtype, f'param {name} dtype mismatch: {original_param_dict[name].dtype} vs {p.data.dtype}'
+        assert original_param_dict[name].numel() == p.data.numel(), f'param {name} numel() mismatch: {original_param_dict[name].numel()} vs {p.data.numel()}'
+        
+        if name in updated_params:
+            trided_data = torch.as_strided(
+                p.data, 
+                original_param_dict[name].shape, 
+                original_param_dict[name].stride()
+            )
+            original_param_dict[name].copy_(trided_data)
+
+        del p.data
+        p.data = original_param_dict[name]
+    
+    del original_param_dict
+    del existing_params
+    gc.collect()
+    
+    for _, module in model.named_modules():
+        if torch.is_tensor(getattr(module, 'workspace', None)):
+            setattr(module, 'workspace', getattr(module, 'preserved_workspace'))
+            delattr(module, 'preserved_workspace')
+
+    return updated_params
+
+def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
+                                  target_device: torch.device) -> None:
+
+    process_weights_after_loading_core(model, model_config, target_device)
+    
+    if not hasattr(model, 'first_time_load_weights'):
+        from functools import partial
+        first_time_load_weights = model.load_weights
+        model.first_time_load_weights = first_time_load_weights
+        model.load_weights = partial(
+            first_time_load_weights, 
+            first_time_load_weights=first_time_load_weights,
+        )
 
 
 @contextmanager
