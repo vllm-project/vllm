@@ -68,6 +68,7 @@ class _Backend(enum.Enum):
 
 class PlatformEnum(enum.Enum):
     CUDA = enum.auto()
+    MPS = enum.auto()
     ROCM = enum.auto()
     TPU = enum.auto()
     XPU = enum.auto()
@@ -149,6 +150,9 @@ class Platform:
 
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
+
+    def is_mps(self) -> bool:
+        return self._enum == PlatformEnum.MPS
 
     def is_rocm(self) -> bool:
         return self._enum == PlatformEnum.ROCM

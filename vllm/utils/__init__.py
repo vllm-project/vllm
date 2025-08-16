@@ -2616,18 +2616,30 @@ class MemorySnapshot:
         # After `torch.cuda.reset_peak_memory_stats()`,
         # `torch.cuda.memory_reserved()` will keep growing, and only shrink
         # when we call `torch.cuda.empty_cache()` or OOM happens.
-        self.torch_peak = torch.cuda.memory_stats().get(
-            "allocated_bytes.all.peak", 0)
+        from vllm.platforms import current_platform
+        
+        if current_platform.device_type == "cuda":
+            self.torch_peak = torch.cuda.memory_stats().get(
+                "allocated_bytes.all.peak", 0)
 
-        self.free_memory, self.total_memory = torch.cuda.mem_get_info()
-        self.cuda_memory = self.total_memory - self.free_memory
+            self.free_memory, self.total_memory = torch.cuda.mem_get_info()
+            self.cuda_memory = self.total_memory - self.free_memory
 
-        # torch.cuda.memory_reserved() is how many bytes
-        # PyTorch gets from cuda (by calling cudaMalloc, etc.)
-        # this is used to measure the non-torch memory usage
-        self.torch_memory = torch.cuda.memory_reserved()
+            # torch.cuda.memory_reserved() is how many bytes
+            # PyTorch gets from cuda (by calling cudaMalloc, etc.)
+            # this is used to measure the non-torch memory usage
+            self.torch_memory = torch.cuda.memory_reserved()
 
-        self.non_torch_memory = self.cuda_memory - self.torch_memory
+            self.non_torch_memory = self.cuda_memory - self.torch_memory
+        else:
+            # For MPS and other non-CUDA devices, use placeholder values
+            self.torch_peak = 0
+            self.free_memory = current_platform.get_device_total_memory()
+            self.total_memory = current_platform.get_device_total_memory()
+            self.cuda_memory = 0
+            self.torch_memory = 0
+            self.non_torch_memory = 0
+            
         self.timestamp = time.time()
 
     def __sub__(self, other: MemorySnapshot) -> MemorySnapshot:
@@ -2717,9 +2729,12 @@ def memory_profiling(
 
     The increase of `non_torch_memory` from creating the current vLLM instance until after profiling to get (c.).
     """  # noqa
+    from vllm.platforms import current_platform
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
+    if current_platform.device_type == "cuda":
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+    # MPS doesn't have equivalent empty_cache() or reset_peak_memory_stats()
 
     result = MemoryProfilingResult()
 
@@ -2732,7 +2747,8 @@ def memory_profiling(
     yield result
 
     gc.collect()
-    torch.cuda.empty_cache()
+    if current_platform.device_type == "cuda":
+        torch.cuda.empty_cache()
 
     result.after_profile.measure()
 
