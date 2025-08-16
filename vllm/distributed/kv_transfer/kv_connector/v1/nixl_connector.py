@@ -11,7 +11,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import msgspec
 import torch
@@ -21,7 +21,7 @@ from vllm import envs
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -60,6 +60,7 @@ except ImportError:
 _NIXL_SUPPORTED_XPUS = {
     "cuda": ("cuda", ),
     "tpu": ("cpu", ),
+    "xpu": ("cpu", ),
 }
 
 
@@ -85,6 +86,54 @@ class ReqMeta:
     remote_port: int
     remote_engine_id: str
     tp_size: int
+
+
+def _make_src_and_dst_indices(
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    src_device: Union[torch.device, str],
+    dst_device: Union[torch.device, str],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    src_indices = torch.tensor(src_block_ids,
+                               device=src_device,
+                               dtype=torch.int64)
+    dst_indices = torch.tensor(dst_block_ids,
+                               device=dst_device,
+                               dtype=torch.int64)
+    return src_indices, dst_indices
+
+
+def copy_kv_blocks(
+    src_kv_caches: dict[str, torch.Tensor],
+    dst_kv_caches: dict[str, torch.Tensor],
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    direction: Literal["h2d", "d2h"],
+) -> None:
+    """Copy kv blocks between different buffers."""
+    if not src_kv_caches or not dst_kv_caches or \
+       not src_block_ids or not dst_block_ids or \
+       len(src_block_ids) != len(dst_block_ids):
+        return
+
+    src_device = next(iter(src_kv_caches.values())).device
+    dst_device = next(iter(dst_kv_caches.values())).device
+
+    src_indices, dst_indices = _make_src_and_dst_indices(
+        src_block_ids=src_block_ids,
+        dst_block_ids=dst_block_ids,
+        src_device=src_device,
+        dst_device=dst_device)
+
+    from vllm.platforms import current_platform
+    if direction == "h2d":
+        copy_fn = current_platform.insert_blocks_to_device
+    else:
+        copy_fn = current_platform.swap_out_blocks_to_host
+    for layer_name in src_kv_caches:
+        src_tensor = src_kv_caches[layer_name]
+        dst_tensor = dst_kv_caches[layer_name]
+        copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -194,10 +243,6 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
-    def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
-        assert self.connector_worker is not None
-        self.connector_worker.set_host_xfer_buffer_ops(copy_operation)
-
     def get_finished(self,
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
@@ -222,8 +267,7 @@ class NixlConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
-        if self.connector_worker.use_host_buffer and \
-           self.connector_worker.copy_blocks:
+        if self.connector_worker.use_host_buffer:
             self.connector_worker.save_kv_to_host(self._connector_metadata)
 
 
@@ -479,7 +523,7 @@ class NixlConnectorWorker:
                 "is not supported.")
 
         # Note: host xfer buffer ops when use_host_buffer is True
-        self.copy_blocks: Optional[CopyBlocksOp] = None
+        self.copy_blocks = copy_kv_blocks
 
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
         # rank will still only pull from a single remote TP worker.
@@ -651,11 +695,6 @@ class NixlConnectorWorker:
 
         self.host_xfer_buffers = xfer_buffers
 
-    def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
-        """Assign copy (d2h, h2d) operations when host buffer is used."""
-        assert self.use_host_buffer
-        self.copy_blocks = copy_operation
-
     def _background_nixl_handshake(self, req_id: str,
                                    remote_engine_id: EngineId, meta: ReqMeta):
         # Do NIXL handshake in background and add to _ready_requests when done.
@@ -717,7 +756,7 @@ class NixlConnectorWorker:
             block_shape = first_kv_cache.shape[-block_rank:]
             block_size, n_kv_heads_x_2, head_dim = block_shape
             self.slot_size_bytes = kv_elem_size * n_kv_heads_x_2 * head_dim
-        elif self.device_type == "cuda":
+        elif self.device_type in ["cuda", "xpu"]:
             assert use_mla == self.use_mla
             # TODO (NickLucche) not compatible with hybrid allocator.
             # Enforce check once it goes live, as a single kv layout
