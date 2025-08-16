@@ -11,6 +11,7 @@ from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal.cache import CachedMultiModalInputExchanger
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
@@ -18,7 +19,6 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.mm_input_cache import MultiModalInputCacheClient
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
 from vllm.v1.structured_output.backend_outlines import (
@@ -49,8 +49,8 @@ class Processor:
                                                     self.tokenizer,
                                                     mm_registry)
 
-        self.mm_input_cache_client = MultiModalInputCacheClient(
-            self.model_config, mm_registry)
+        self.mm_input_cache = CachedMultiModalInputExchanger.for_p0(
+            vllm_config, mm_registry)
 
     @property
     def mm_registry(self):
@@ -322,7 +322,7 @@ class Processor:
             ]
 
             if sorted_mm_hashes is not None:
-                sorted_mm_inputs = self.mm_input_cache_client.get_and_update(
+                sorted_mm_inputs = self.mm_input_cache.get_and_update(
                     sorted_mm_inputs,
                     sorted_mm_hashes,
                 )

@@ -20,7 +20,6 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
 from vllm.utils import flatten_2d_lists, full_groupby
 
-from .cache import MultiModalCache
 from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                      MultiModalFieldConfig, MultiModalInputs, MultiModalKwargs,
@@ -33,6 +32,7 @@ if TYPE_CHECKING:
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
+    from .cache import CachedMultiModalInputExchanger
     from .profiling import BaseDummyInputsBuilder
 
 logger = init_logger(__name__)
@@ -887,21 +887,6 @@ def find_mm_placeholders(
     return dict(full_groupby_modality(it))
 
 
-class ProcessingCache(MultiModalCache):
-
-    def __init__(self, capacity_gb: float) -> None:
-        super().__init__()
-
-        self._cache = self.get_lru_cache(capacity_gb, MultiModalKwargsItem)
-
-        self.get = self._cache.get
-        self.put = self._cache.put
-        self.reset = self._cache.clear
-
-
-_CacheItemOrHash = Union[MultiModalKwargsItem, str]
-
-
 class BaseProcessingInfo:
     """Base class to provide the information necessary for data processing."""
 
@@ -996,11 +981,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     Not to be confused with `transformers.ProcessorMixin`.
     """
 
-    def __init__(self,
-                 info: _I,
-                 dummy_inputs: "BaseDummyInputsBuilder[_I]",
-                 *,
-                 cache: Optional[ProcessingCache] = None) -> None:
+    def __init__(
+        self,
+        info: _I,
+        dummy_inputs: "BaseDummyInputsBuilder[_I]",
+        *,
+        cache: Optional["CachedMultiModalInputExchanger"] = None,
+    ) -> None:
         super().__init__()
 
         self.info = info
@@ -1313,29 +1300,28 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _get_cache_missing_items(
         self,
-        cache: ProcessingCache,
+        cache: "CachedMultiModalInputExchanger",
         mm_data_items: MultiModalDataItems,
         mm_hashes: MultiModalHashes,
-    ) -> tuple[dict[str, list[_CacheItemOrHash]], MultiModalDataItems]:
-        mm_cache_items_or_hashes: dict[str, list[_CacheItemOrHash]] = {
-            modality: [(h if (v := cache.get(h)) is None else v)
-                       for h in hashes]
+    ) -> tuple[dict[str, list[bool]], MultiModalDataItems]:
+        mm_is_cached = {
+            modality: cache.contains_items(hashes)
             for modality, hashes in mm_hashes.items()
         }
 
         mm_missing_idxs = {
             modality: [
-                idx for idx, item_or_hash in enumerate(items_or_hashes)
-                if isinstance(item_or_hash, str)
+                idx for idx, item_is_cached in enumerate(items_is_cached)
+                if not item_is_cached
             ]
-            for modality, items_or_hashes in mm_cache_items_or_hashes.items()
+            for modality, items_is_cached in mm_is_cached.items()
         }
         mm_missing_data = {
             modality: [mm_data_items[modality][idx] for idx in idxs]
             for modality, idxs in mm_missing_idxs.items()
         }
 
-        return mm_cache_items_or_hashes, self._to_mm_items(mm_missing_data)
+        return mm_is_cached, self._to_mm_items(mm_missing_data)
 
     def _hash_mm_items(
         self,
@@ -1359,24 +1345,22 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _merge_mm_kwargs(
         self,
-        cache: ProcessingCache,
-        mm_cache_items_or_hashes: dict[str, list[_CacheItemOrHash]],
+        mm_is_cached: dict[str, list[bool]],
         mm_missing_kwargs: MultiModalKwargs,
     ) -> dict[str, list[MultiModalKwargsItem]]:
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
         merged_items = defaultdict[str, list[MultiModalKwargsItem]](list)
-        for modality, items_or_hashes in mm_cache_items_or_hashes.items():
-            for item_or_hash in items_or_hashes:
-                if isinstance(item_or_hash, str):
+        for modality, items_is_cached in mm_is_cached.items():
+            for item_is_cached in items_is_cached:
+                if isinstance(item_is_cached, str):
                     kw_item = mm_missing_kwargs.get_item(
                         modality,
                         mm_missing_next_idx[modality],
                     )
-                    cache.put(item_or_hash, kw_item)
                     mm_missing_next_idx[modality] += 1
                 else:
-                    kw_item = item_or_hash
+                    kw_item = MultiModalKwargsItem.dummy(modality)
 
                 merged_items[modality].append(kw_item)
 
@@ -1442,10 +1426,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         mm_hashes = self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
                                         tokenization_kwargs)
-        (
-            mm_cache_items_or_hashes,
-            mm_missing_data_items,
-        ) = self._get_cache_missing_items(
+
+        mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
             cache=cache,
             mm_data_items=mm_data_items,
             mm_hashes=mm_hashes,
@@ -1475,8 +1457,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
 
         mm_cache_items_merged = self._merge_mm_kwargs(
-            cache,
-            mm_cache_items_or_hashes=mm_cache_items_or_hashes,
+            mm_is_cached=mm_is_cached,
             mm_missing_kwargs=mm_missing_kwargs,
         )
 

@@ -417,7 +417,7 @@ class ModelConfig:
     from `AutoProcessor.from_pretrained`. The available overrides depend on the
     model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
     """
-    mm_processor_cache_gb: int = 4
+    mm_processor_cache_gb: float = 4
     """The size (in GiB) of the multi-modal processor cache, which is used to
     avoid re-processing past multi-modal inputs.
 
@@ -846,7 +846,7 @@ class ModelConfig:
 
         return None
 
-    def set_mm_processor_cache_gb(self, value: int) -> None:
+    def set_mm_processor_cache_gb(self, value: float) -> None:
         mm_config = self.get_multimodal_config()
 
         self.mm_processor_cache_gb = value
@@ -2500,7 +2500,7 @@ class MultiModalConfig:
     `{"num_crops": 4}`.
     """
 
-    mm_processor_cache_gb: int = 4
+    mm_processor_cache_gb: float = 4
     """
     The size (in GiB) of the multi-modal processor cache, which is used to
 

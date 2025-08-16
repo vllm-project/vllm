@@ -36,6 +36,7 @@ from vllm.logits_process import get_bad_words_logits_processors
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal.cache import CachedMultiModalInputReceiver
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
@@ -253,6 +254,7 @@ class LLMEngine:
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer,
                                                     mm_registry)
+        self.mm_input_io = CachedMultiModalInputReceiver(self.model_config)
 
         self.model_executor = executor_class(vllm_config=vllm_config)
 
@@ -840,8 +842,8 @@ class LLMEngine:
 
     def reset_mm_cache(self) -> bool:
         """Reset the multi-modal cache."""
-        return self.input_preprocessor.mm_registry.reset_processor_cache(
-            self.model_config)
+        self.mm_input_io.clear_cache()
+        return True
 
     def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         """Reset prefix cache for all devices."""

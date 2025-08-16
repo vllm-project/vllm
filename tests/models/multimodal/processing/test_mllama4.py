@@ -24,12 +24,14 @@ def test_profiling(model_id: str, max_model_len: int):
     )
 
     mm_config = ctx.get_mm_config()
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config,
+                                                     cache=None)
     profiler = MultiModalProfiler(processor)
 
     decoder_dummy_data = profiler.get_decoder_dummy_data(
         max_model_len,
         mm_counts=mm_config.limit_per_prompt,
+        cache=None,
     )
     dummy_mm_data = processor.dummy_inputs.get_dummy_processor_inputs(
         max_model_len,

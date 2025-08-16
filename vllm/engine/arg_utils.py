@@ -349,7 +349,7 @@ class EngineArgs:
     mm_processor_kwargs: Optional[Dict[str, Any]] = \
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
-    mm_processor_cache_gb: int = MultiModalConfig.mm_processor_cache_gb
+    mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     # LoRA fields
     enable_lora: bool = False

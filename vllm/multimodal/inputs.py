@@ -234,6 +234,15 @@ class MultiModalFieldElem:
     in order to batch multi-modal items together for model inference.
     """
 
+    @staticmethod
+    def dummy(modality: str, key: str):
+        return MultiModalFieldElem(
+            modality=modality,
+            key=key,
+            data=None,
+            field=MultiModalDummyField(),
+        )
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, self.__class__):
             return False
@@ -322,6 +331,31 @@ class BaseMultiModalField(ABC):
             validated_data.append(elem.data)
 
         return self._reduce_data(validated_data, pin_memory=pin_memory)
+
+
+@dataclass(frozen=True)
+class MultiModalDummyField(BaseMultiModalField):
+    """
+    A dummy field used as a placeholder to be replaced during cache update.
+
+    It is also used as a convenience class for testing.
+    """
+
+    def _reduce_data(
+        self,
+        batch: list[NestedTensors],
+        *,
+        pin_memory: bool,
+    ) -> NestedTensors:
+        raise RuntimeError("Dummy items should never be merged")
+
+    def build_elems(
+        self,
+        modality: str,
+        key: str,
+        data: NestedTensors,
+    ) -> Sequence[MultiModalFieldElem]:
+        raise RuntimeError("Dummy items should never be used on real data")
 
 
 @dataclass(frozen=True)
@@ -644,6 +678,11 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
     """
 
     @staticmethod
+    def dummy(modality: str):
+        mm_elem = MultiModalFieldElem.dummy(modality, "dummy")
+        return MultiModalKwargsItem.from_elems([mm_elem])
+
+    @staticmethod
     def from_elems(elems: Sequence[MultiModalFieldElem]):
         return MultiModalKwargsItem({elem.key: elem for elem in elems})
 
@@ -758,12 +797,18 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
             for key, elem in item.items():
                 elems_by_key[key].append(elem)
 
+        # We assume that the data of MultiModalDataKwargs is used
+        # only if none of the MultiModalFieldElem are dummy items
+        # This is a temporary solution to avoid having to define
+        # a separate MultiModalKwargs class for V0 and V1.
+        # TODO: Clean this up once V0 is completely removed!
         data = {
-            key: elems[0].field.reduce_data(elems, pin_memory=pin_memory)
+            key: (None if any(e.data is None for e in elems) else
+                  elems[0].field.reduce_data(elems, pin_memory=pin_memory))
             for key, elems in elems_by_key.items() if len(elems) > 0
         }
 
-        return MultiModalKwargs(data, items=items)
+        return MultiModalKwargs(data, items=items)  # type: ignore
 
     def __init__(
         self,

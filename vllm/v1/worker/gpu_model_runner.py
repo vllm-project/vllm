@@ -43,6 +43,8 @@ from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import (CachedMultiModalInputExchanger,
+                                   CachedMultiModalInputReceiver)
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem,
                                     PlaceholderRange)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
@@ -334,11 +336,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.model_config,
             self.scheduler_config,
             self.mm_registry,
-            max_model_len=self.max_model_len,
-            max_num_reqs=self.max_num_reqs,
-        ) if self.supports_mm_inputs \
-            else None)
-
+            cache=CachedMultiModalInputReceiver(self.model_config),
+        ) if self.supports_mm_inputs else None)
         self.reorder_batch_threshold: Optional[int] = None
 
     def _init_model_kwargs(self, num_tokens: int):
@@ -656,7 +655,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             dummy_modality, _ = mm_budget.get_modality_with_max_tokens()
 
-            return self._get_mm_dummy_batch(dummy_modality, num_seqs)
+            return self._get_mm_dummy_batch(
+                dummy_modality,
+                num_seqs,
+                cache=mm_budget.cache,
+            )
 
         return {}
 
@@ -2202,12 +2205,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         modality: str,
         max_items_per_batch: int,
+        *,
+        cache: Optional[CachedMultiModalInputExchanger],
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
             seq_len=self.max_num_tokens,
             mm_counts={modality: 1},
+            cache=cache,
         )
         dummy_mm_data = dummy_decoder_data.multi_modal_data
 
@@ -2594,6 +2600,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     batched_dummy_mm_inputs = self._get_mm_dummy_batch(
                         dummy_modality,
                         max_mm_items_per_batch,
+                        cache=mm_budget.cache,
                     )
 
                     # Run multimodal encoder.
