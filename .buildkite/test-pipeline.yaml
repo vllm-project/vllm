@@ -466,7 +466,6 @@ steps:
 
 - label: LM Eval Small Models # 53min
   mirror_hardwares: [amdexperimental]
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
