@@ -78,6 +78,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
+ARG UBUNTU_MIRROR
+
+# Replace Ubuntu sources if mirror is specified
+RUN if [ -n "$UBUNTU_MIRROR" ]; then \
+    sed -i "s|http://.*archive.ubuntu.com|$UBUNTU_MIRROR|g" /etc/apt/sources.list && \
+    sed -i "s|http://.*security.ubuntu.com|$UBUNTU_MIRROR|g" /etc/apt/sources.list; \
+fi
 
 # Install Python and other dependencies
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
@@ -275,9 +282,16 @@ FROM ${FINAL_BASE_IMAGE} AS vllm-base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ARG INSTALL_KV_CONNECTORS=false
+ARG UBUNTU_MIRROR
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
+
+# Replace Ubuntu sources if mirror is specified
+RUN if [ -n "$UBUNTU_MIRROR" ]; then \
+    sed -i "s|http://.*archive.ubuntu.com|$UBUNTU_MIRROR|g" /etc/apt/sources.list && \
+    sed -i "s|http://.*security.ubuntu.com|$UBUNTU_MIRROR|g" /etc/apt/sources.list; \
+fi
 
 SHELL ["/bin/bash", "-c"]
 
