@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
-import os
 from dataclasses import replace
 from typing import Optional
 
@@ -237,10 +236,12 @@ class EagleProposer:
         # support multi-token eagle spec decode.
         if current_platform.is_rocm():
             allowed_types = (TritonAttentionMetadata, FlashAttentionMetadata)
-            if os.environ.get("VLLM_ROCM_USE_AITER") == "1":
+            try:
                 from vllm.v1.attention.backends.rocm_aiter_fa import (
                     AiterFlashAttentionMetadata)
                 allowed_types += (AiterFlashAttentionMetadata, )
+            except ImportError:
+                pass
             assert isinstance(attn_metadata, allowed_types)
         else:
             # Currently, only FlashAttention and TreeAttention support
@@ -534,19 +535,19 @@ class EagleProposer:
         """
         # E.g.
         #  common_attn_metadata.query_start_loc{_cpu}:
-        #         [0, q1, q1 + q2, q1 + q2 + q3]
+        #       [0, q1, q1 + q2, q1 + q2 + q3]
         #  common_attn_metadata.seq_lens{_cpu}: [s1, s2, s3]
         #  num_rejected_tokens: [n1, n2, n3]
         # This function computes the intermediate values:
         #  num_tokens_per_req: [q1 - n1, q2 - n2, q3 - n3]
         # And returns:
         #  common_attn_metadata.query_start_loc{_cpu}:
-        #         [0, q1 - n1, q1 + q2 - n1 - n2, q1 + q2 + q3 - n1 - n2 - n3]
+        #       [0, q1 - n1, q1 + q2 - n1 - n2, q1 + q2 + q3 - n1 - n2 - n3]
         #  common_attn_metadata.seq_lens{_cpu}:
-        #         [s1 - n1 + 1, s2 - n2 + 1, s3 - n3 + 1]
+        #       [s1 - n1 + 1, s2 - n2 + 1, s3 - n3 + 1]
         #  token_indices: [0, 1, ..., q1 - n1 - 1,
-        #                  q1, q1 + 1, ..., q1 + q2 - n2 - 1,
-        #                  q1 + q2, q1 + q2 + 1, ..., q1 + q2 + q3 - n3 - 1]
+        #                 q1, q1 + 1, ..., q1 + q2 - n2 - 1,
+        #                 q1 + q2, q1 + q2 + 1, ..., q1 + q2 + q3 - n3 - 1]
 
         device = common_attn_metadata.query_start_loc.device
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
@@ -590,9 +591,9 @@ class EagleProposer:
         old_query_start_locs_expanded = np.repeat(
             query_start_loc_cpu[:-1].numpy(), new_num_tokens_per_req_np)
         # Final token indices are:
-        # [0, 1,                                   // req 1
-        #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,         // req 2
-        #  q1 + q2 + 0, q1 + q2 + 1, q1 + q2 + 2]  // req 3
+        # [0, 1,                                // req 1
+        #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,       // req 2
+        #  q1 + q2 + 0, q1 + q2 + 1, q1 + q2 + 2] // req 3
         token_indices_np = token_offests + old_query_start_locs_expanded
         token_indices = torch.from_numpy(token_indices_np).to(
             device, non_blocking=True)
@@ -641,8 +642,8 @@ class EagleProposer:
             target_language_model = target_model
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1 \
-            and self.model.model.embed_tokens.weight.shape \
-                == target_language_model.model.embed_tokens.weight.shape:
+                and self.model.model.embed_tokens.weight.shape \
+        == target_language_model.model.embed_tokens.weight.shape:
             logger.info(
                 "Assuming the EAGLE head shares the same vocab embedding"
                 " with the target model.")
