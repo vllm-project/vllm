@@ -15,16 +15,12 @@ from transformers import (PretrainedConfig, SiglipImageProcessor,
                           SiglipVisionConfig)
 
 from vllm.config import VllmConfig
-from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.pooler import (AllPool, PoolerHead,
                                                PoolerIdentity, SimplePooler)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputs, MultiModalKwargs,
@@ -34,8 +30,10 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptInsertion, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 
+from .idefics2_vision_model import Idefics2VisionAttention, Idefics2VisionMLP
 from .interfaces import SupportsMultiModal
 from .siglip import SiglipEncoderInfo
+from .utils import AutoWeightsLoader, WeightsMapper
 
 
 class SiglipSo400mProcessingInfo(SiglipEncoderInfo):
@@ -103,8 +101,6 @@ class SiglipSo400mMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, Any],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
-            input_ids=MultiModalFieldConfig.batched("text"),
-            attention_mask=MultiModalFieldConfig.batched("text"),
             pixel_values=MultiModalFieldConfig.batched("image"),
             patch_attention_mask=MultiModalFieldConfig.batched("image"),
         )
@@ -120,12 +116,12 @@ class SiglipSo400mMultiModalProcessor(
             for i in range(mm_items.get_item_count("image"))
         ]
 
-    def _process_image(self, images: list[Image.Image]) -> MultiModalDataDict:
-        processor: SiglipImageProcessor = self.info.get_hf_processor(
-        ).image_processor
+    def _process_image(
+            self, images: list[Image.Image],
+            image_processor: SiglipImageProcessor) -> MultiModalDataDict:
         patch_size = self.info.get_patch_size()
         processed_images = [
-            processor(img, return_tensors="pt") for img in images
+            image_processor(img, return_tensors="pt") for img in images
         ]
         max_height = max(p_img.pixel_values.shape[2]
                          for p_img in processed_images)
@@ -162,8 +158,12 @@ class SiglipSo400mMultiModalProcessor(
               hf_processor_mm_kwargs: Mapping[str, object],
               tokenization_kwargs: Optional[Mapping[str, object]] = None,
               return_mm_hashes: bool = False) -> MultiModalInputs:
-        tokenizer: SiglipTokenizer = self.info.get_hf_processor().tokenizer
-        text_inputs = tokenizer(prompt, padding=True, return_tensors="pt")
+
+        processor = self.info.get_hf_processor()
+        inputs = processor(text=prompt,
+                           images=None,
+                           padding=True,
+                           return_tensors="pt")
 
         images = mm_data.get("image")
         if images and not isinstance(images, list):
@@ -171,7 +171,7 @@ class SiglipSo400mMultiModalProcessor(
 
         if images:
             image_inputs = self._process_image(images)
-            text_inputs.update(image_inputs)
+            inputs.update(image_inputs)
 
         mm_hashes = {}
         if return_mm_hashes and images:
@@ -184,122 +184,23 @@ class SiglipSo400mMultiModalProcessor(
                 hasher.update(image_bytes)
                 image_hashes.append(hasher.hexdigest())
             mm_hashes["image"] = image_hashes
-
         num_images = len(images) if images else 0
         mm_placeholders = {
             "image":
             [PlaceholderRange(offset=0, length=0) for _ in range(num_images)]
         }
-
-        final_prompt_token_ids = text_inputs["input_ids"][0].tolist()
-
+        final_prompt_token_ids = inputs["input_ids"][0].tolist()
         return MultiModalInputs(type="multimodal",
                                 prompt="",
                                 prompt_token_ids=final_prompt_token_ids,
                                 mm_kwargs=MultiModalKwargs.from_hf_inputs(
-                                    text_inputs,
+                                    inputs,
                                     self._get_mm_fields_config(None, {})),
                                 mm_placeholders=mm_placeholders,
                                 mm_hashes=mm_hashes)
 
 
-class SiglipMLP(nn.Module):
-
-    def __init__(self,
-                 config,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
-        super().__init__()
-        self.activation_fn = get_act_fn(config.hidden_act)
-        self.fc1 = ColumnParallelLinear(config.hidden_size,
-                                        config.intermediate_size,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.fc1")
-        self.fc2 = RowParallelLinear(config.intermediate_size,
-                                     config.hidden_size,
-                                     quant_config=quant_config,
-                                     prefix=f"{prefix}.fc2")
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states, _ = self.fc1(hidden_states)
-        hidden_states = self.activation_fn(hidden_states)
-        hidden_states, _ = self.fc2(hidden_states)
-        return hidden_states
-
-
-class SiglipAttention(nn.Module):
-
-    def __init__(self,
-                 config,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
-        super().__init__()
-        self.embed_dim = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        tp_size = get_tensor_model_parallel_world_size()
-        self.num_heads_per_partition = divide(self.num_heads, tp_size)
-        self.head_dim = self.embed_dim // self.num_heads
-        self.q_proj = ColumnParallelLinear(self.embed_dim,
-                                           self.embed_dim,
-                                           bias=True,
-                                           quant_config=quant_config,
-                                           prefix=f"{prefix}.q_proj")
-        self.k_proj = ColumnParallelLinear(self.embed_dim,
-                                           self.embed_dim,
-                                           bias=True,
-                                           quant_config=quant_config,
-                                           prefix=f"{prefix}.k_proj")
-        self.v_proj = ColumnParallelLinear(self.embed_dim,
-                                           self.embed_dim,
-                                           bias=True,
-                                           quant_config=quant_config,
-                                           prefix=f"{prefix}.v_proj")
-        self.out_proj = RowParallelLinear(self.embed_dim,
-                                          self.embed_dim,
-                                          bias=True,
-                                          quant_config=quant_config,
-                                          prefix=f"{prefix}.out_proj")
-        self.scale = self.head_dim**-0.5
-
-    def forward(self,
-                hidden_states: torch.Tensor,
-                attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-
-        q_trans, _ = self.q_proj(hidden_states)
-        k_trans, _ = self.k_proj(hidden_states)
-        v_trans, _ = self.v_proj(hidden_states)
-
-        # 1. Reshape Q, K, V for multi-head attention
-        batch_size, seq_len, _ = q_trans.shape
-        q_trans = q_trans.view(batch_size, seq_len,
-                               self.num_heads_per_partition,
-                               self.head_dim).transpose(1, 2)
-        k_trans = k_trans.view(batch_size, seq_len,
-                               self.num_heads_per_partition,
-                               self.head_dim).transpose(1, 2)
-        v_trans = v_trans.view(batch_size, seq_len,
-                               self.num_heads_per_partition,
-                               self.head_dim).transpose(1, 2)
-
-        # 2. Scaled Dot-Product Attention
-        attn_weights = torch.matmul(q_trans, k_trans.transpose(
-            -2, -1)) * self.scale
-
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-        attn_output = torch.matmul(attn_weights, v_trans)
-
-        # 3. Reshape and project output
-        attn_output = attn_output.transpose(1, 2).contiguous().view(
-            batch_size, seq_len, self.embed_dim)
-        attn_output, _ = self.out_proj(attn_output)
-
-        return attn_output
-
-
-class SiglipEncoderLayer(nn.Module):
+class SiglipVisionEncoderLayer(nn.Module):
 
     def __init__(self,
                  config,
@@ -308,21 +209,21 @@ class SiglipEncoderLayer(nn.Module):
         super().__init__()
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
-        self.self_attn = SiglipAttention(config,
-                                         quant_config=quant_config,
-                                         prefix=f"{prefix}.self_attn")
+        self.self_attn = Idefics2VisionAttention(config,
+                                                 quant_config=quant_config,
+                                                 prefix=f"{prefix}.self_attn")
         self.layer_norm2 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
-        self.mlp = SiglipMLP(config,
-                             quant_config=quant_config,
-                             prefix=f"{prefix}.mlp")
+        self.mlp = Idefics2VisionMLP(config,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.mlp")
 
     def forward(self,
                 hidden_states: torch.Tensor,
                 attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(hidden_states, attention_mask)
+        hidden_states = self.self_attn(hidden_states)
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
@@ -414,9 +315,9 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
                                                batch_first=True)
         self.layernorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
-        self.mlp = SiglipMLP(config=config,
-                             quant_config=quant_config,
-                             prefix=f"{prefix}.mlp")
+        self.mlp = Idefics2VisionMLP(config=config,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.mlp")
 
     def forward(self,
                 hidden_state: torch.Tensor,
@@ -449,9 +350,9 @@ class SiglipVisionTower(nn.Module):
         self.config = config
         self.embeddings = SiglipNavitVisionEmbeddings(config)
         self.encoder_layers = nn.ModuleList([
-            SiglipEncoderLayer(config,
-                               quant_config,
-                               prefix=f"{prefix}.encoder.layers.{i}")
+            SiglipVisionEncoderLayer(config,
+                                     quant_config,
+                                     prefix=f"{prefix}.encoder.layers.{i}")
             for i in range(config.num_hidden_layers)
         ])
         self.post_layernorm = nn.LayerNorm(config.hidden_size,
@@ -503,9 +404,9 @@ class SiglipTextTower(nn.Module):
         self.config = config
         self.embeddings = SiglipTextEmbeddings(config)
         self.encoder_layers = nn.ModuleList([
-            SiglipEncoderLayer(config,
-                               quant_config,
-                               prefix=f"{prefix}.encoder.layers.{i}")
+            SiglipVisionEncoderLayer(config,
+                                     quant_config,
+                                     prefix=f"{prefix}.encoder.layers.{i}")
             for i in range(config.num_hidden_layers)
         ])
         self.final_layer_norm = nn.LayerNorm(config.hidden_size,
@@ -545,6 +446,21 @@ class SiglipTextTower(nn.Module):
 class SiglipSo400mModel(nn.Module, SupportsMultiModal):
     is_pooling_model = True
     supported_tasks = ["encode", "embed"]
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "vision_model.": "vision_tower.",
+            "text_model.": "text_tower.",
+        },
+        replace=[
+            ("text_tower.encoder.layers", "text_tower.encoder_layers"),
+        ],
+        stacked_params_mapping=[
+            ("self_attn.qkv_proj", "self_attn.q_proj", "q"),
+            ("self_attn.qkv_proj", "self_attn.k_proj", "k"),
+            ("self_attn.qkv_proj", "self_attn.v_proj", "v"),
+        ],
+    )
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -605,45 +521,9 @@ class SiglipSo400mModel(nn.Module, SupportsMultiModal):
         return final_embedding.unsqueeze(1)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        hf_weights = dict(weights)
         if not self.weight_cache:
-            self.weight_cache = hf_weights.copy()
-        params_dict = dict(self.named_parameters())
-        direct_mapping = [
-            "vision_model.head.attention.in_proj_weight",
-            "vision_model.head.attention.in_proj_bias",
-            "vision_model.head.attention.out_proj.weight",
-            "vision_model.head.attention.out_proj.bias",
-            "vision_model.head.probe",
-        ]
-        for hf_name in direct_mapping:
-            if hf_name in hf_weights:
-                loaded_weight = hf_weights.pop(hf_name)
-                vllm_name = hf_name.replace("vision_model.", "vision_tower.",
-                                            1)
-                param = params_dict.get(vllm_name)
-                if param is not None:
-                    param.data.copy_(loaded_weight)
-                else:
-                    print(
-                        f"Warning: Special weight '{hf_name}' found but "
-                        f"corresponding param '{vllm_name}' not in vLLM model."
-                    )
-
-        # Load the rest of the weights
-        for name, loaded_weight in hf_weights.items():
-            if name.startswith("logit_"):
-                continue
-            if name.startswith("vision_model."):
-                vllm_name = name.replace("vision_model.", "vision_tower.", 1)
-            elif name.startswith("text_model."):
-                vllm_name = name.replace("text_model.", "text_tower.", 1)
-                vllm_name = vllm_name.replace("encoder.layers",
-                                              "encoder_layers")
-            else:
-                vllm_name = name
-            param = params_dict.get(vllm_name)
-            if param is not None:
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+            self.weight_cache = dict(weights)
+        skip_prefixes = ["logit_"]
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        return loader.load_weights(self.weight_cache.items(),
+                                   mapper=self.hf_to_vllm_mapper)
