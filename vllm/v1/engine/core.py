@@ -22,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -39,7 +40,8 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             ReconfigureDistributedRequest, ReconfigureRankType,
                             UtilityOutput, UtilityResult)
 from vllm.v1.engine.mm_input_cache import MultiModalInputCacheServer
-from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
+from vllm.v1.engine.utils import (EngineHandshakeMetadata, EngineZmqAddresses,
+                                  get_device_indices)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
@@ -1156,22 +1158,22 @@ class DPEngineCoreActor(DPEngineCoreProc):
         # https://github.com/ray-project/ray/pull/40461/files#diff-31e8159767361e4bc259b6d9883d9c0d5e5db780fcea4a52ead4ee3ee4a59a78R1860 # noqa: E501
         # and get_accelerator_ids_for_accelerator_resource() in worker.py
         # of ray.
-        self._set_cuda_visible_devices(vllm_config, local_dp_rank)
+        if not current_platform.is_xpu():
+            self._set_visible_devices(vllm_config, local_dp_rank)
 
         super().__init__(vllm_config, local_client, "", executor_class,
                          log_stats)
 
-    def _set_cuda_visible_devices(self, vllm_config: VllmConfig,
-                                  local_dp_rank: int):
+    def _set_visible_devices(self, vllm_config: VllmConfig,
+                             local_dp_rank: int):
         from vllm.platforms import current_platform
         device_control_env_var = current_platform.device_control_env_var
         world_size = vllm_config.parallel_config.world_size
         # Set CUDA_VISIBLE_DEVICES or equivalent.
         try:
-            os.environ[device_control_env_var] = ",".join(
-                str(current_platform.device_id_to_physical_device_id(i))
-                for i in range(local_dp_rank *
-                               world_size, (local_dp_rank + 1) * world_size))
+            value = get_device_indices(device_control_env_var, local_dp_rank,
+                                       world_size)
+            os.environ[device_control_env_var] = value
         except IndexError as e:
             raise Exception(
                 f"Error setting {device_control_env_var}: "
