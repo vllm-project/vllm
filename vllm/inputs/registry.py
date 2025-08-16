@@ -8,10 +8,10 @@ import torch
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import TypeVar
 
-from vllm.jsontree import JSONTree, json_map_leaves
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils import get_allowed_kwarg_only_overrides
+from vllm.utils.jsontree import JSONTree, json_map_leaves
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig

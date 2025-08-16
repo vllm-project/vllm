@@ -9,7 +9,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from ...utils import build_model_context
 
 
-@pytest.mark.parametrize("model_id", ["THUDM/GLM-4.1V-9B-Thinking"])
+@pytest.mark.parametrize("model_id", ["zai-org/GLM-4.1V-9B-Thinking"])
 @pytest.mark.parametrize("expected_toks_per_frame", [299])
 @pytest.mark.parametrize("num_frames", [32, 128])
 @pytest.mark.parametrize("fps, expected_grid_t", [(1, 5), (2, 10)])
