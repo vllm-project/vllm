@@ -1353,13 +1353,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         merged_items = defaultdict[str, list[MultiModalKwargsItem]](list)
         for modality, items_is_cached in mm_is_cached.items():
             for item_is_cached in items_is_cached:
-                if isinstance(item_is_cached, str):
+                if not item_is_cached:
                     kw_item = mm_missing_kwargs.get_item(
                         modality,
                         mm_missing_next_idx[modality],
                     )
                     mm_missing_next_idx[modality] += 1
                 else:
+                    # Should be replaced by get_and_update()
+                    # before sending to P1
                     kw_item = MultiModalKwargsItem.dummy(modality)
 
                 merged_items[modality].append(kw_item)
