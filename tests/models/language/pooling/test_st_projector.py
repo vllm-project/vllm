@@ -7,7 +7,7 @@ import pytest
 from scipy.spatial.distance import cosine
 
 from ...utils import EmbedModelInfo
-from .mteb_utils import mteb_test_embed_models, MTEB_EMBED_TOL
+from .mteb_utils import MTEB_EMBED_TOL, mteb_test_embed_models
 
 
 def _get_vllm_embeddings(vllm_runner, model_info: EmbedModelInfo,
@@ -69,8 +69,11 @@ def test_embed_models_mteb(hf_runner, vllm_runner,
         # Ensure BertEmbeddingModel is used for embedding models
         vllm_extra_kwargs["trust_remote_code"] = True
 
-    mteb_test_embed_models(hf_runner, vllm_runner, model_info,
-                           vllm_extra_kwargs, atol=MTEB_EMBED_TOL)
+    mteb_test_embed_models(hf_runner,
+                           vllm_runner,
+                           model_info,
+                           vllm_extra_kwargs,
+                           atol=MTEB_EMBED_TOL)
 
 
 @pytest.mark.parametrize("model_info", ST_PROJECTOR_MODELS)

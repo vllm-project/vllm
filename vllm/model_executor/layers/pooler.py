@@ -506,28 +506,31 @@ class EmbeddingPoolerHead(PoolerHead):
 
         # Apply ST projector
         if self.projector is not None:
-            projector = cast(nn.Module, self.projector)
-            ref = pooled_data[0] if isinstance(pooled_data,
-                                               list) else pooled_data
-
-            self._sync_projector_to_ref(ref)
-
-            if not self._projector_dim_checked:
-                self._validate_projector_dimensions(ref)
-                self._projector_dim_checked = True
-
-            def _proj(x: torch.Tensor) -> torch.Tensor:
-                orig_dtype = x.dtype
-                y = projector(x.to(torch.float32))
-                return y.to(orig_dtype)
-
-            if isinstance(pooled_data, torch.Tensor):
-                pooled_data = _proj(pooled_data)
+            if isinstance(pooled_data, list) and len(pooled_data) == 0:
+                pass  # Skip projection for empty inputs
             else:
-                pooled_data = [_proj(t) for t in pooled_data]
-        
+                projector = cast(nn.Module, self.projector)
+                ref = pooled_data[0] if isinstance(pooled_data,
+                                                   list) else pooled_data
+
+                self._sync_projector_to_ref(ref)
+
+                if not self._projector_dim_checked:
+                    self._validate_projector_dimensions(ref)
+                    self._projector_dim_checked = True
+
+                def _proj(x: torch.Tensor) -> torch.Tensor:
+                    orig_dtype = x.dtype
+                    y = projector(x.to(torch.float32))
+                    return y.to(orig_dtype)
+
+                if isinstance(pooled_data, torch.Tensor):
+                    pooled_data = _proj(pooled_data)
+                else:
+                    pooled_data = [_proj(t) for t in pooled_data]
+
         pooling_params = get_pooling_params(pooling_metadata)
-        
+
         # for matryoshka representation
         dimensions_list = [
             pooling_param.dimensions for pooling_param in pooling_params

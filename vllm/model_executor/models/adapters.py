@@ -26,6 +26,7 @@ _GENERATE_SUFFIXES = [
 
 logger = init_logger(__name__)
 
+
 def _st_activation(name: Optional[str]) -> nn.Module:
     """Get activation function for Sentence-Transformers Dense layers."""
     m = (name or "").lower()
@@ -76,7 +77,8 @@ def _load_weights_to_linear(state_dict: dict, linear: nn.Linear) -> bool:
 
 def _load_st_projector(vllm_config: "VllmConfig") -> Optional[nn.Module]:
     """Load Sentence-Transformers Dense projection layers."""
-    from vllm.transformers_utils.config import get_hf_file_to_dict, get_hf_file_bytes
+    from vllm.transformers_utils.config import (get_hf_file_bytes,
+                                                get_hf_file_to_dict)
 
     model_path = vllm_config.model_config.model
     revision = vllm_config.model_config.revision
@@ -102,7 +104,8 @@ def _load_st_projector(vllm_config: "VllmConfig") -> Optional[nn.Module]:
             continue
 
         # Read config
-        cfg = get_hf_file_to_dict(f"{folder}/config.json", model_path, revision)
+        cfg = get_hf_file_to_dict(f"{folder}/config.json", model_path,
+                                  revision)
         if not cfg:
             continue
 
@@ -119,27 +122,33 @@ def _load_st_projector(vllm_config: "VllmConfig") -> Optional[nn.Module]:
         weight_loaded = False
 
         try:
-            b = get_hf_file_bytes(f"{folder}/model.safetensors", model_path, revision)
+            b = get_hf_file_bytes(f"{folder}/model.safetensors", model_path,
+                                  revision)
             if b is not None:
                 import io
+
                 from safetensors.torch import load as st_load
                 sd = st_load(b)
                 weight_loaded = _load_weights_to_linear(sd, linear)
-        except (IOError, ImportError, ValueError) as e:
+        except (OSError, ImportError, ValueError) as e:
             logger.debug("Failed to load safetensors from %s: %s", folder, e)
 
         if not weight_loaded:
             try:
-                b = get_hf_file_bytes(f"{folder}/pytorch_model.bin", model_path, revision)
+                b = get_hf_file_bytes(f"{folder}/pytorch_model.bin",
+                                      model_path, revision)
                 if b is not None:
                     import io
                     sd = torch.load(io.BytesIO(b), map_location="cpu")
                     weight_loaded = _load_weights_to_linear(sd, linear)
-            except (IOError, torch.serialization.UnpicklingError, RuntimeError, ValueError) as e:
-                logger.debug("Failed to load pytorch_model.bin from %s: %s", folder, e)
+            except (OSError, torch.serialization.UnpicklingError, RuntimeError,
+                    ValueError) as e:
+                logger.debug("Failed to load pytorch_model.bin from %s: %s",
+                             folder, e)
 
         if not weight_loaded:
-            logger.warning("Failed to load weights for Dense layer in %s", folder)
+            logger.warning("Failed to load weights for Dense layer in %s",
+                           folder)
 
         layers.append(linear)
         layers.append(activation)
