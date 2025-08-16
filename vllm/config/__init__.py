@@ -3535,15 +3535,6 @@ class VllmConfig:
                 # in V0 means the compilation level wins out.
                 self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        # if cudagraph_mode is not explicitly set by users, set default value
-        if self.compilation_config.cudagraph_mode is None:
-            if envs.VLLM_USE_V1 and self.compilation_config.level \
-                == CompilationLevel.PIECEWISE:
-                self.compilation_config.cudagraph_mode = \
-                    CUDAGraphMode.PIECEWISE
-            else:
-                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
         if self.compilation_config.pass_config.enable_async_tp:
@@ -3552,14 +3543,28 @@ class VllmConfig:
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
 
-        # disable cudagraph when enforce eager execution
-        if self.model_config is not None and self.model_config.enforce_eager:
-            logger.info("Cudagraph is disabled under eager mode")
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-        elif envs.VLLM_USE_V1:
-            self.compilation_config.cudagraph_num_of_warmups = 1
+        if current_platform.is_cuda_alike():
+            # if cudagraph_mode is not explicitly set by users, set default
+            # value
+            if self.compilation_config.cudagraph_mode is None:
+                if envs.VLLM_USE_V1 and self.compilation_config.level \
+                    == CompilationLevel.PIECEWISE:
+                    self.compilation_config.cudagraph_mode = \
+                        CUDAGraphMode.PIECEWISE
+                else:
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        self._set_cudagraph_sizes()
+            # disable cudagraph when enforce eager execution
+            if self.model_config is not None and \
+                    self.model_config.enforce_eager:
+                logger.info("Cudagraph is disabled under eager mode")
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            elif envs.VLLM_USE_V1:
+                self.compilation_config.cudagraph_num_of_warmups = 1
+
+            self._set_cudagraph_sizes()
+        else:
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if self.cache_config.cpu_offload_gb > 0 and \
             self.compilation_config.level != CompilationLevel.NO_COMPILATION \
@@ -3618,7 +3623,7 @@ class VllmConfig:
         current_platform.check_and_update_config(self)
 
         # final check of cudagraph mode after platform-specific update
-        if envs.VLLM_USE_V1:
+        if envs.VLLM_USE_V1 and current_platform.is_cuda_alike():
             if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL \
                 and self.model_config is not None and \
                 not self.model_config.disable_cascade_attn:
