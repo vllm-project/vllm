@@ -33,7 +33,8 @@ class MiniMaxVL01ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     pixel_values: torch.Tensor
     """
-    Shape: `(batch_size * num_images, num_channels, height, width)`
+    Shape: 
+    `(batch_size * num_images * num_patches, num_channels, height, width)`
 
     Note that `height` or `width` may be different per batch and image,
     in which case the data is passed as a list instead of a batched tensor.
@@ -312,7 +313,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             return MiniMaxVL01ImagePixelInputs(
                 type="pixel_values",
                 pixel_values=self._validate_pixel_values(
-                    flatten_bn(pixel_values, concat=True)),
+                    flatten_bn(flatten_bn(pixel_values), concat=True)),
             )
 
         if image_embeds is not None:
