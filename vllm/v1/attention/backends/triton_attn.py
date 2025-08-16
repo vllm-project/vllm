@@ -198,6 +198,11 @@ def use_aiter_unified_attention() -> bool:
 
 class TritonAttentionImpl(AttentionImpl):
 
+    def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
+                                     group_shape: tuple[int, int]):
+        return dtype == current_platform.fp8_dtype(
+        ) and static and group_shape == (-1, -1)  # per-tensor
+
     def __init__(
         self,
         num_heads: int,
@@ -291,11 +296,6 @@ class TritonAttentionImpl(AttentionImpl):
         """
         assert output is not None, "Output tensor must be provided."
 
-        if output_scale is not None:
-            raise NotImplementedError(
-                "fused output quantization is not yet supported"
-                " for TritonAttentionImpl")
-
         if attn_metadata is None:
             # Profiling run.
             return output
@@ -387,6 +387,7 @@ class TritonAttentionImpl(AttentionImpl):
                 alibi_slopes=self.alibi_slopes,
                 sliding_window=self.sliding_window[0],
                 sm_scale=self.scale,
+                output_scale=output_scale,
                 sinks=self.sinks,
             )
 
@@ -412,6 +413,6 @@ class TritonAttentionImpl(AttentionImpl):
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
                 sinks=self.sinks,
-            )
+                output_scale=output_scale)
 
         return output

@@ -16,7 +16,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_FP8_SUPPORTED, Fp8LinearOp, maybe_create_device_identity)
 from vllm.platforms import current_platform
 
-from .backend import TestBackend
+from .backend import TestBackend, TestPassManager
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -102,8 +102,17 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
         noop_pass = NoOpEliminationPass(vllm_config)
         fusion_pass = FusionPass.instance(vllm_config)
 
-        backend = TestBackend(noop_pass, fusion_pass)
         model = TestModel(hidden_size, eps, static, cutlass_fp8_enabled)
+
+        def check(test_pass_manager: TestPassManager):
+            # In pre-nodes, fp8 quant should be there
+            # and fused kernels should not
+            test_pass_manager.check_before_ops(model.ops_in_model_before())
+            # In post-nodes, fused kernels should be there
+            # and fp8 quant should not
+            test_pass_manager.check_after_ops(model.ops_in_model_after())
+
+        backend = TestBackend(noop_pass, fusion_pass, check_fn=check)
 
         # First dimension dynamic
         x = torch.rand(num_tokens, hidden_size)
@@ -123,9 +132,3 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
             ATOL, RTOL = (1e-2, 1e-2)
 
         torch.testing.assert_close(result, result2, atol=ATOL, rtol=RTOL)
-
-        # In pre-nodes, fp8 quant should be there and fused kernels should not
-        backend.check_before_ops(model.ops_in_model_before())
-
-        # In post-nodes, fused kernels should be there and fp8 quant should not
-        backend.check_after_ops(model.ops_in_model_after())

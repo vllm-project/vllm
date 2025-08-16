@@ -13,7 +13,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
-from .fusion import QUANT_OPS, GroupShape, QuantKey, empty_bf16, empty_fp32
+from .fusion import QUANT_OPS, GroupShape, QuantKey, empty_fp32
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
@@ -29,12 +29,14 @@ class AttentionStaticQuantPattern:
         layer_name: str,
         num_heads: int,
         head_size: int,
+        dtype: torch.dtype,
         quant_dtype: torch.dtype,
         symmetric=True,
     ):
         self.layer_name = layer_name
         self.num_heads = num_heads
         self.head_size = head_size
+        self.dtype = dtype
         self.quant_dtype = quant_dtype
         self.quant_key = QuantKey(dtype=quant_dtype,
                                   static=True,
@@ -60,14 +62,12 @@ class AttentionStaticQuantPattern:
         def pattern(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                     output_attn: torch.Tensor, output_quant: torch.Tensor,
                     scale: torch.Tensor):
-            view_7 = RESHAPE_OP(output_attn,
-                                [-1, self.num_heads, self.head_size])
 
             at1 = auto_functionalized(ATTN_OP,
                                       query=q,
                                       key=k,
                                       value=v,
-                                      output=view_7,
+                                      output=output_attn,
                                       layer_name=self.layer_name,
                                       output_scale=None)
             attn_out_view = RESHAPE_OP(at1[1],
@@ -99,10 +99,26 @@ class AttentionStaticQuantPattern:
         # That would not work for the unified_attention custom op.
         with unset_fake_temporarily(), FakeTensorMode():
             inputs = [
-                empty_bf16(5, self.num_heads, self.head_size),  # q
-                empty_bf16(5, self.num_heads, self.head_size),  # k
-                empty_bf16(5, self.num_heads, self.head_size),  # v
-                empty_bf16(5, self.num_heads * self.head_size),  # attn_output
+                torch.empty(5,
+                            self.num_heads,
+                            self.head_size,
+                            device="cuda",
+                            dtype=self.dtype),  # q
+                torch.empty(5,
+                            self.num_heads,
+                            self.head_size,
+                            device="cuda",
+                            dtype=self.dtype),  # k
+                torch.empty(5,
+                            self.num_heads,
+                            self.head_size,
+                            device="cuda",
+                            dtype=self.dtype),  # v
+                torch.empty(5,
+                            self.num_heads,
+                            self.head_size,
+                            dtype=self.dtype,
+                            device="cuda"),
                 self.empty_quant(5, self.num_heads *
                                  self.head_size),  # quant_output
                 empty_fp32(1, 1)  # scale
@@ -145,8 +161,11 @@ class AttnFusionPass(VllmInductorPass):
         self.patterns = PatternMatcherPass(pass_name="attn_fusion_pass")
 
         for key, layer in self.static_fwd_ctx.items():
+            if not isinstance(layer, Attention):
+                continue
             pattern = AttentionStaticQuantPattern(key, layer.num_heads,
                                                   layer.head_size,
+                                                  config.model_config.dtype,
                                                   current_platform.fp8_dtype())
             pattern.register_if_supported(self.patterns, layer)
         if len(self.static_fwd_ctx) == 0:
