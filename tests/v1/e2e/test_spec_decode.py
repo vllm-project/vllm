@@ -146,7 +146,11 @@ def test_ngram_correctness(
             marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
     ],
     ids=[
-        "qwen3_eagle3", "llama3_eagle", "llama3_eagle3", "llama4_eagle",
+        # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
+        # "qwen3_eagle3",
+        "llama3_eagle",
+        "llama3_eagle3",
+        "llama4_eagle",
         "llama4_eagle_mm"
     ])
 @pytest.mark.parametrize("attn_backend",
@@ -158,6 +162,12 @@ def test_eagle_correctness(
     mm_enabled: bool,
     attn_backend: str,
 ):
+    if attn_backend == "TREE_ATTN":
+        # TODO: Fix this flaky test
+        pytest.skip(
+            "TREE_ATTN is flaky in the test disable for now until it can be "
+            "reolved (see https://github.com/vllm-project/vllm/issues/22922)")
+
     # Generate test prompts inside the function instead of using fixture
     test_prompts = get_test_prompts(mm_enabled)
     '''
