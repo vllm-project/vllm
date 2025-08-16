@@ -9,6 +9,7 @@ from vllm.model_executor.layers.pooler import (CLSPool, DispatchPooler,
                                                MeanPool, PoolingType)
 from vllm.model_executor.models.bert import BertEmbeddingModel
 from vllm.model_executor.models.roberta import RobertaEmbeddingModel
+from vllm.model_executor.models.xlm_roberta import XLMRobertaEmbeddingModel
 from vllm.platforms import current_platform
 
 MAX_MODEL_LEN = 128
@@ -91,7 +92,7 @@ def test_roberta_model_loading_with_params(vllm_runner, monkeypatch):
         assert model_tokenizer.tokenizer.model_max_length == 512
 
         def check_model(model):
-            assert isinstance(model, RobertaEmbeddingModel)
+            assert isinstance(model, XLMRobertaEmbeddingModel)
             assert isinstance(pooler := model.pooler, DispatchPooler)
             assert isinstance(pooler.poolers_by_task["embed"].pooling,
                               MeanPool)
