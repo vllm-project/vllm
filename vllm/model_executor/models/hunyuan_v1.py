@@ -958,6 +958,7 @@ class HunYuanV1Base(nn.Module, SupportsLoRA, MixtureOfExperts):
             logical_replica_count: torch.Tensor,
     ) -> None:
         for layer_idx, layer in enumerate(self.moe_layers):
+            self.expert_weights.append(layer.get_expert_weights())
             # Register the expert weights.
             layer.set_eplb_state(
                 moe_layer_idx=layer_idx,
