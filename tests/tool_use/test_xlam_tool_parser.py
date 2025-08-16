@@ -51,6 +51,7 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
         "single_tool_with_think_tag",
         "single_tool_with_json_code_block",
         "single_tool_with_tool_calls_tag",
+        "single_tool_with_tool_call_xml_tags",
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
@@ -117,6 +118,20 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
                 ))
             ],
             "I'll check the weather for you.",
+        ),
+        (
+            """I'll help you check the weather.<tool_call>[{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]</tool_call>""",  # noqa: E501
+            [
+                ToolCall(function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps({
+                        "city": "Dallas",
+                        "state": "TX",
+                        "unit": "fahrenheit",
+                    }),
+                ))
+            ],
+            "I'll help you check the weather.",
         ),
     ],
 )
@@ -216,6 +231,53 @@ def test_streaming_with_list_structure(xlam_tool_parser):
         previous_text="",
         current_text=current_text,
         delta_text="]",
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=None,
+    )
+
+    # Make sure the tool is set up correctly
+    assert (xlam_tool_parser.current_tool_id
+            >= 0), "Tool index should be initialized"
+
+    # Manually set up the state for sending the tool name
+    xlam_tool_parser.current_tools_sent = [False]
+
+    # Call to send the function name
+    result = xlam_tool_parser.extract_tool_calls_streaming(
+        previous_text=current_text,
+        current_text=current_text,
+        delta_text="",
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=None,
+    )
+
+    # Check that we get a result with the proper tool call
+    if result is not None:
+        assert hasattr(result, "tool_calls")
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_current_weather"
+
+
+def test_streaming_with_tool_call_xml_tags(xlam_tool_parser):
+    """Test streaming with <tool_call>...</tool_call> XML tag format."""
+    # Reset streaming state
+    xlam_tool_parser.prev_tool_calls = []
+    xlam_tool_parser.current_tools_sent = []
+    xlam_tool_parser.streamed_args = []
+    xlam_tool_parser.current_tool_id = -1
+
+    # Simulate receiving a message with XML tag format
+    current_text = """I'll help you check the weather.<tool_call>[{"name": "get_current_weather", "arguments": {"city": "Seattle", "state": "WA", "unit": "celsius"}}]</tool_call>"""  # noqa: E501
+
+    # First call to set up the tool
+    xlam_tool_parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=current_text,
+        delta_text="</tool_call>",
         previous_token_ids=[],
         current_token_ids=[],
         delta_token_ids=[],

@@ -186,11 +186,13 @@ class xLAMToolParser(ToolParser):
         """
         Extract tool calls for streaming mode.
         """
-        # Simplify detection: if it begins with "[" treat it as a function call
-        is_function_call = (current_text.strip().startswith("["))
+        # First, check for a definitive start of a tool call block.
+        # This prevents premature parsing of incomplete output.
+        stripped_text = current_text.strip()
+        is_tool_call_block = stripped_text.startswith(
+            "[") or stripped_text.startswith("<tool_call>")
 
-        # If not a function call, return normal content
-        if not is_function_call:
+        if not is_tool_call_block:
             return DeltaMessage(content=delta_text)
 
         try:
@@ -419,7 +421,7 @@ class xLAMToolParser(ToolParser):
                                 index=current_idx,
                                 function=DeltaFunctionCall(
                                     arguments="{").model_dump(
-                                        exclude_none=True),  # type: ignore  
+                                        exclude_none=True),  # type: ignore
                             )
                         ])
                         return delta
