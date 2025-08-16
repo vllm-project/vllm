@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
@@ -197,3 +197,9 @@ class XPUPlatform(Platform):
     @classmethod
     def device_count(cls) -> int:
         return torch.xpu.device_count()
+
+    def get_global_graph_pool(self) -> Any:
+        """
+        Currently xpu does NOT support Graph model.
+        """
+        return None
