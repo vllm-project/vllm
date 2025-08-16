@@ -1,0 +1,36 @@
+# set this on your machine
+vllm-directory := "/home/rshaw/vllm/"
+
+launch_dp_ep MODEL SIZE:
+    VLLM_ALL2ALL_BACKEND="pplx" vllm serve {{MODEL}} --data-parallel-size {{SIZE}} --enable-expert-parallel --disable-log-requests --max-model-len 32000 --enforce-eager
+
+launch_tp MODEL SIZE:
+    vllm serve {{MODEL}} --tensor-parallel-size {{SIZE}} --disable-log-requests --max-model-len 32000
+
+eval MODEL:
+  lm_eval --model local-completions --tasks gsm8k \
+    --model_args model={{MODEL}},base_url=http://127.0.0.1:8000/v1/completions,num_concurrent=100,tokenized_requests=False
+
+benchmark MODEL NUM_PROMPTS:
+  python {{vllm-directory}}/benchmarks/benchmark_serving.py \
+    --model {{MODEL}} \
+    --dataset-name random \
+    --random-input-len 1000 \
+    --random-output-len 100 \
+    --num-prompts {{NUM_PROMPTS}} \
+    --percentile-metrics ttft,tpot,itl,e2el \
+    --metric-percentiles 90,95,99 \
+    --ignore-eos \
+    --seed $(date +%s)
+
+benchmark_all_decode MODEL NUM_PROMPTS:
+  python {{vllm-directory}}/benchmarks/benchmark_serving.py \
+    --model {{MODEL}} \
+    --dataset-name random \
+    --random-input-len 1 \
+    --random-output-len 1000 \
+    --num-prompts {{NUM_PROMPTS}} \
+    --percentile-metrics ttft,tpot,itl,e2el \
+    --metric-percentiles 90,95,99 \
+    --ignore-eos \
+    --seed $(date +%s)
