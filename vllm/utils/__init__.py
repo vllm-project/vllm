@@ -1315,6 +1315,11 @@ def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
     )
 
 
+def as_list(maybe_list: Iterable[T]) -> list[T]:
+    """Convert iterable to list, unless it's already a list."""
+    return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
+
+
 # `collections` helpers
 def is_list_of(
     value: object,
@@ -1640,15 +1645,19 @@ def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
     return weak_bound
 
 
-# From: https://stackoverflow.com/a/4104188/2749989
 def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
-        if not wrapper.has_run:  # type: ignore[attr-defined]
-            wrapper.has_run = True  # type: ignore[attr-defined]
-            return f(*args, **kwargs)
+        if wrapper.has_run:  # type: ignore[attr-defined]
+            return
+
+        with wrapper.lock:  # type: ignore[attr-defined]
+            if not wrapper.has_run:  # type: ignore[attr-defined]
+                wrapper.has_run = True  # type: ignore[attr-defined]
+                return f(*args, **kwargs)
 
     wrapper.has_run = False  # type: ignore[attr-defined]
+    wrapper.lock = threading.Lock()  # type: ignore[attr-defined]
     return wrapper
 
 
@@ -3241,6 +3250,24 @@ def sha256_cbor_64bit(input) -> int:
                                byteorder="big")
 
     return full_hash & ((1 << 64) - 1)
+
+
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable:
+    """Get a hash function by name, or raise an error if
+    the function is not found.
+    Args:
+        hash_fn_name: Name of the hash function.
+    Returns:
+        A hash function.
+    """
+    if hash_fn_name == "sha256":
+        return sha256
+    if hash_fn_name == "sha256_cbor_64bit":
+        return sha256_cbor_64bit
+    if hash_fn_name == "builtin":
+        return hash
+
+    raise ValueError(f"Unsupported hash function: {hash_fn_name}")
 
 
 def is_torch_equal_or_newer(target: str) -> bool:
