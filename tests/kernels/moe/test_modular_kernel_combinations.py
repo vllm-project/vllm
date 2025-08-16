@@ -105,12 +105,6 @@ def rank_worker(
                 atol = 3e-2
                 rtol = 3e-2
 
-            #torch.set_printoptions(profile="full")
-            #assert torch.isnan(ref_out).sum() == 0
-            #assert torch.isinf(ref_out).sum() == 0
-            #assert torch.isnan(mk_out).sum() == 0, f"MK_OUT = {mk_out}"
-            #assert torch.isinf(mk_out).sum() == 0, f"MK_OUT = {mk_out}"
-
             torch.testing.assert_close(ref_out, mk_out, atol=atol, rtol=rtol)
             format_result(verbose, config.describe())
         except Exception as ex:
@@ -141,10 +135,10 @@ Ms = [32, 64]
 # Also needs to be a multiple of 1024 for deep_gemm.
 Ks = [4096]
 Ns = [2048]
-TOPKs = [4]  #, 1]
+TOPKs = [4, 1]
 Es = [32]
 DTYPEs = [torch.bfloat16]
-FUSED_MOE_CHUNK_SIZEs = [None]  #[None, 16]
+FUSED_MOE_CHUNK_SIZEs = [None, 16]
 
 
 def is_nyi_config(config: Config) -> bool:
