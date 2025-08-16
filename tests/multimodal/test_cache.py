@@ -136,7 +136,7 @@ def test_ipc_enable_disable_consistency(contains_call_count):
         selected_hashes = [all_hashes[idx] for idx in item_idxs_to_select]
 
         for _ in range(contains_call_count):
-            p0_ipc_enabled.contains_items(selected_hashes)
+            p0_ipc_enabled.is_cached(selected_hashes)
         items_ipc_enabled = p0_ipc_enabled.get_and_update(
             selected_items,
             selected_hashes,
@@ -147,7 +147,7 @@ def test_ipc_enable_disable_consistency(contains_call_count):
         )
 
         for _ in range(contains_call_count):
-            p1_ipc_enabled.contains_items(selected_hashes)
+            p1_ipc_enabled.is_cached(selected_hashes)
         items_ipc_disabled = p0_ipc_disabled.get_and_update(
             selected_items,
             selected_hashes,

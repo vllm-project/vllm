@@ -111,14 +111,14 @@ class CachedMultiModalInputExchanger(ABC):
     the server in the core process (=P1). The data flow is as follows:
 
     ```
-                  contains() x N    get_and_update()
-    P0: From API ----------------> -----------------> To P1
+                  is_cached() x N    get_and_update()
+    P0: From API -----------------> -----------------> To P1
 
                  get_and_update()
     P1: From P0 -----------------> To model
     ```
 
-    `contains()` can be called any number of times in P0. However,
+    `is_cached()` can be called any number of times in P0. However,
     `get_and_update()` must be called in P0 and P1 one after another
     so that their cache eviction order remains the same.
 
@@ -152,7 +152,7 @@ class CachedMultiModalInputExchanger(ABC):
         return CachedMultiModalInputDisabled()
 
     @abstractmethod
-    def contains_item(self, mm_hash: str) -> bool:
+    def is_cached_item(self, mm_hash: str) -> bool:
         """
         Check whether a multi-modal item is
         in the underlying cache.
@@ -167,7 +167,7 @@ class CachedMultiModalInputExchanger(ABC):
         """
         raise NotImplementedError
 
-    def contains_items(self, mm_hashes: list[str]) -> list[bool]:
+    def is_cached(self, mm_hashes: list[str]) -> list[bool]:
         """
         Check whether a sequence of multi-modal items are
         in the underlying cache.
@@ -180,7 +180,7 @@ class CachedMultiModalInputExchanger(ABC):
         Returns:
             For each item, `True` if the item is cached, otherwise `False`.
         """
-        return [self.contains_item(mm_hash) for mm_hash in mm_hashes]
+        return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
 
     @abstractmethod
     def get_and_update_item(
@@ -256,7 +256,7 @@ class CachedMultiModalInputSender(CachedMultiModalInputExchanger):
         )
 
     @override
-    def contains_item(self, mm_hash: str) -> bool:
+    def is_cached_item(self, mm_hash: str) -> bool:
         return mm_hash in self._cache
 
     @override
@@ -295,7 +295,7 @@ class CachedMultiModalInputReceiver(CachedMultiModalInputExchanger):
         )
 
     @override
-    def contains_item(self, mm_hash: str) -> bool:
+    def is_cached_item(self, mm_hash: str) -> bool:
         return mm_hash in self._cache
 
     @override
@@ -320,7 +320,7 @@ class CachedMultiModalInputDisabled(CachedMultiModalInputExchanger):
     """Return the passed items without applying any caching."""
 
     @override
-    def contains_item(self, mm_hash: str) -> bool:
+    def is_cached_item(self, mm_hash: str) -> bool:
         return False
 
     @override

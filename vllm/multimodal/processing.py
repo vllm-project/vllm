@@ -1305,7 +1305,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_hashes: MultiModalHashes,
     ) -> tuple[dict[str, list[bool]], MultiModalDataItems]:
         mm_is_cached = {
-            modality: cache.contains_items(hashes)
+            modality: cache.is_cached(hashes)
             for modality, hashes in mm_hashes.items()
         }
 
