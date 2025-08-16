@@ -1690,10 +1690,7 @@ class EngineArgs:
                         default_max_num_batched_tokens[usage_context]
             else:
                 if not self.enable_chunked_prefill:
-                    tentative_max_seqs = self.max_num_seqs or \
-                        default_max_num_seqs.get(usage_context, 1)
-                    self.max_num_batched_tokens = model_config.max_model_len *\
-                                                    tentative_max_seqs
+                    self.max_num_batched_tokens = model_config.max_model_len
                 else:
                     self.max_num_batched_tokens = \
                         default_max_num_batched_tokens[usage_context]
