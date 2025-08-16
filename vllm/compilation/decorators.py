@@ -32,11 +32,11 @@ def ignore_torch_compile(cls: _T) -> _T:
     a support_torch_compile decorator, but we don't want to
     compile the class `cls` that inherits the parent class.
     This only ignores compiling the forward of the class the
-    decorator is applied to. 
+    decorator is applied to.
 
     If the parent has ignore_torch_compile but the child has
     support_torch_compile, the child will still be compiled.
-    
+
     If the class has one or more submodules
     that have support_torch_compile decorator applied, compile will
     not be ignored for those submodules.
@@ -241,11 +241,12 @@ def _support_torch_compile(
         # compiled function and let torch.compile handle the dispatching,
         # with the overhead of guard evaluation and recompilation.
         if len(self.compiled_codes) < 1 or not self.use_custom_dispatcher:
-            # it seems Dynamo reuse the compilation across instances,
-            # while we need to make sure the compiled code is not reused.
-            # we need to control all the compilation of the model.
-            torch._dynamo.eval_frame.remove_from_cache(
-                self.original_code_object)
+            if not self.vllm_config.compilation_config.load_dynamo_cache:
+                # it seems Dynamo reuse the compilation across instances,
+                # while we need to make sure the compiled code is not reused.
+                # we need to control all the compilation of the model.
+                torch._dynamo.eval_frame.remove_from_cache(
+                    self.original_code_object)
 
             # collect all relevant files traced by Dynamo,
             # so that the compilation cache can trigger re-compilation
