@@ -142,7 +142,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         workspace: torch.Tensor,
         sm_scale: float,
         num_kv_splits: int,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         assert (q_nope.ndim == 3
                 ), f"q_nope must be a 3D tensor, but got {q_nope.ndim}"
         assert (
@@ -196,9 +196,13 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         ), f"page_table.dtype needs to be int32 but got {page_table.dtype}."
 
         out = q_nope.new_empty((B_q, MAX_HEADS, D_latent))
+        lse = torch.empty((B_q, MAX_HEADS),
+                          dtype=torch.float32,
+                          device=q_nope.device)
 
         ops.sm100_cutlass_mla_decode(
             out,
+            lse,
             q_nope,
             q_pe,
             kv_c_and_k_pe_cache,
@@ -208,7 +212,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
             sm_scale,
             num_kv_splits,
         )
-        return out[:, :H].contiguous()
+        return out[:, :H].contiguous(), lse
 
     def _sm100_forward_decode(
         self,
@@ -218,7 +222,6 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         attn_metadata: MLACommonMetadata,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
-        assert attn_metadata.decode is not None
 
         if self.kv_cache_dtype.startswith("fp8"):
             raise NotImplementedError("FP8 Cutlass MLA not yet supported")
@@ -232,13 +235,13 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         q_nope = q_nope.clone()
         q_pe = q_pe.clone()
 
-        o = self._sm100_cutlass_mla_decode(q_nope, q_pe, kv_c_and_k_pe_cache,
-                                           attn_metadata.decode.seq_lens,
-                                           attn_metadata.decode.block_table,
-                                           self._workspace.get_buf(),
-                                           self.scale, self._num_kv_splits)
+        assert attn_metadata.decode is not None
+        o, lse = self._sm100_cutlass_mla_decode(
+            q_nope, q_pe, kv_c_and_k_pe_cache,
+            attn_metadata.decode.seq_lens, attn_metadata.decode.block_table,
+            self._workspace.get_buf(), self.scale, self._num_kv_splits)
 
-        return self._v_up_proj(o)
+        return o, lse
 
     # TODO: Currently we leave it here only for backup in case something is
     #       wrong with the new SM100 CUTLASS MLA kernel
@@ -272,13 +275,14 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         return self._v_up_proj(o)
 
-    def _forward_decode(
+    def _forward_decode_local(
         self,
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
-    ) -> torch.Tensor:
+        return_lse: bool,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         if self._use_old_cutlass_mla:
             # TODO: Remove the old cutlass MLA kernel after more extensive
             #       testing
