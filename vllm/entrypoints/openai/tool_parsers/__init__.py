@@ -20,6 +20,7 @@ from .pythonic_tool_parser import PythonicToolParser
 from .qwen3coder_tool_parser import Qwen3CoderToolParser
 from .step3_tool_parser import Step3ToolParser
 from .xlam_tool_parser import xLAMToolParser
+from .generic_tool_parser import GenericToolParser
 
 __all__ = [
     "ToolParser",
@@ -42,4 +43,5 @@ __all__ = [
     "Glm4MoeModelToolParser",
     "Qwen3CoderToolParser",
     "Step3ToolParser",
+    "GenericToolParser",
 ]
