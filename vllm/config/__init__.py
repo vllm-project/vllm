@@ -1153,12 +1153,6 @@ class ModelConfig:
             # Verify quantization configurations.
             if self.quantization is None:
                 self.quantization = quant_method
-            elif self.quantization != quant_method:
-                raise ValueError(
-                    "Quantization method specified in the model config "
-                    f"({quant_method}) does not match the quantization "
-                    f"method specified in the `quantization` argument "
-                    f"({self.quantization}).")
 
         if self.quantization is not None:
             if self.quantization not in supported_quantization:
@@ -2586,24 +2580,24 @@ class PoolerConfig:
     ## for embeddings models
     normalize: Optional[bool] = None
     """
-    Whether to normalize the embeddings outputs. 
+    Whether to normalize the embeddings outputs.
     """
     dimensions: Optional[int] = None
     """
-    Reduce the dimensions of embeddings if model 
+    Reduce the dimensions of embeddings if model
     support matryoshka representation.
     """
 
     ## for classification models
     activation: Optional[bool] = None
     """
-    Whether to apply activation function to the classification outputs. 
+    Whether to apply activation function to the classification outputs.
     """
 
     ## for reward models
     softmax: Optional[bool] = None
     """
-    Whether to apply softmax to the reward outputs. 
+    Whether to apply softmax to the reward outputs.
     """
     step_tag_id: Optional[int] = None
     """

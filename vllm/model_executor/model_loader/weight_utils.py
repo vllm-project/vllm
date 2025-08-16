@@ -20,6 +20,7 @@ import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
+from pydantic import SkipValidation
 
 from vllm.config import LoadConfig, ModelConfig
 from vllm.distributed import get_tensor_model_parallel_rank
@@ -28,6 +29,7 @@ from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.platforms import current_platform
 from vllm.utils import PlaceholderModule
+from vllm.model_executor.layers.quantization import QuantizationMethods
 
 try:
     from runai_model_streamer import SafetensorsStreamer
@@ -167,7 +169,15 @@ def get_quant_config(model_config: ModelConfig,
         hf_quant_config = getattr(model_config.hf_config, "compression_config",
                                   None)
     if hf_quant_config is not None:
+        # if hf_quant_config is None, we will try to get config from hf_overrides
+        hf_overrides = model_config.hf_overrides
+        quant_config = hf_overrides.get("quantization_config", None)
+        if quant_config is not None:
+            quantization_config_file = quant_config.get("quantization_config_file", None)
+            if quantization_config_file is not None:
+                return quant_cls.from_config_file(quantization_config_file)
         return quant_cls.from_config(hf_quant_config)
+
     # Inflight BNB quantization
     if model_config.quantization == "bitsandbytes":
         return quant_cls.from_config({})
@@ -726,7 +736,9 @@ def initialize_dummy_weights(
                                                generator=generator).to(dtype)
                 param.data.copy_(tmp_param)
             else:
-                param.uniform_(low, high, generator=generator)
+                # temp comment
+                # param.uniform_(low, high, generator=generator)
+                pass
 
 
 def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:

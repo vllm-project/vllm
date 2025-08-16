@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
+import json
 
 logger = init_logger(__name__)
 
@@ -112,6 +113,13 @@ class TorchAOConfig(QuantizationConfig):
 
         return cls(ao_config, skip_modules)
 
+    @classmethod
+    def from_config_file(cls, config_file: Optional[str]) -> "TorchAOConfig":
+        with open(config_file, "r") as f:
+            config_dict = json.loads(f.read())
+        hf_config = {"quant_type": {"default": config_dict}}
+        return cls.from_config(hf_config)
+
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         if not isinstance(layer, LinearBase):
@@ -138,6 +146,15 @@ class TorchAOConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> list[str]:
         return []
 
+    def quantize_param(self, param):
+        # temp hack: most of quant requires bfloat16 dtype
+        param = param.to(torch.bfloat16)
+        param = torchao_quantize_param_data(
+            torch.nn.Parameter(param, requires_grad=False),
+            self.torchao_config
+        )
+        return param
+
 
 def torchao_quantize_param_data(param: torch.Tensor,
                                 torchao_config: Any) -> torch.nn.Parameter:
@@ -152,8 +169,8 @@ def torchao_quantize_param_data(param: torch.Tensor,
     from torchao.quantization import quantize_
 
     assert isinstance(torchao_config, AOBaseConfig), f"{torchao_config}"
-    """ 
-    Avoid real weight allocation for faster load, since we will 
+    """
+    Avoid real weight allocation for faster load, since we will
     end up setting it to param.
     """
     with torch.device("meta"):
