@@ -29,6 +29,8 @@ FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
     "FLASHINFER_CUBINS_REPOSITORY",
     "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
 )
+# This is the path to the pre-dowloaded cubins.
+FLASHINFER_CUBIN_DIR = os.environ.get("FLASHINFER_CUBIN_DIR", None)
 
 
 @functools.cache
@@ -132,6 +134,11 @@ def has_nvidia_artifactory() -> bool:
     This checks connectivity to the kernel inference library artifactory
     which is required for downloading certain cubin kernels like TRTLLM FHMA.
     """
+    # Since FLASHINFER_CUBIN_DIR defines the pre-downloaded cubins path, when
+    # it's true, we could assume the cubins are available.
+    if FLASHINFER_CUBIN_DIR is not None:
+        return True
+
     try:
         # Use a short timeout to avoid blocking for too long
         response = requests.get(FLASHINFER_CUBINS_REPOSITORY, timeout=5)
