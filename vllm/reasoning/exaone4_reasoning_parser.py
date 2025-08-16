@@ -9,25 +9,21 @@ from transformers import PreTrainedTokenizerBase
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage)
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning import ReasoningParserManager
+from vllm.reasoning.deepseek_r1_reasoning_parser import (
+    DeepSeekR1ReasoningParser)
 
 logger = init_logger(__name__)
 
 
-@ReasoningParserManager.register_module("deepseek_r1")
-class DeepSeekR1ReasoningParser(ReasoningParser):
+@ReasoningParserManager.register_module("exaone4")
+class Exaone4ReasoningParser(DeepSeekR1ReasoningParser):
     """
-    Reasoning parser for DeepSeek R1 model.
+    Reasoning parser for EXAONE 4.0 model.
 
-    The DeepSeek R1 model uses <think>...</think> tokens to denote reasoning
+    The EXAONE 4.0 model uses <think>...</think> tokens to denote reasoning
     text. This parser extracts the reasoning content from the model output.
     """
-
-    start_token_id: int
-    end_token_id: int
-
-    start_token: str = "<think>"
-    end_token: str = "</think>"
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
         super().__init__(tokenizer)
@@ -41,20 +37,8 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         self.end_token_id = self.vocab.get(self.end_token)
         if self.start_token_id is None or self.end_token_id is None:
             raise RuntimeError(
-                "DeepSeek R1 reasoning parser could not locate think start/end "
+                "EXAONE 4.0 reasoning parser could not locate think start/end "
                 "tokens in the tokenizer!")
-
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        return self.end_token_id in input_ids
-
-    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        """
-        Extract the content after the end tokens
-        """
-        if self.end_token_id not in input_ids[:-1]:
-            return []
-        else:
-            return input_ids[input_ids.index(self.end_token_id) + 1:]
 
     def extract_reasoning_content_streaming(
         self,
@@ -120,7 +104,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         else:
             # No <think> in previous or delta, also need to check for </think>.
             # Because the model may have generated </think> without <think>
-            # Ref https://huggingface.co/deepseek-ai/DeepSeek-R1/commit/8a58a132790c9935686eb97f042afa8013451c9f
+            # Ref https://huggingface.co/LGAI-EXAONE/EXAONE-4.0-32B/blob/main/chat_template.jinja#L139-L146
             if self.end_token_id in delta_token_ids:
                 # </think> in delta with more tokens,
                 # extract reasoning content and content
@@ -135,8 +119,14 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 # </think> in previous, thinking content ends
                 return DeltaMessage(content=delta_text)
             else:
-                # no </think> in previous or delta, reasoning content continues
-                return DeltaMessage(reasoning_content=delta_text)
+                # no </think> in previous or delta, 
+                # use `enable_thinking` to determine if the model is thinking
+                if request is not None and \
+                   request.chat_template_kwargs is not None and \
+                   request.chat_template_kwargs.get("enable_thinking"):
+                    return DeltaMessage(reasoning_content=delta_text)
+                else:
+                    return DeltaMessage(content=delta_text)
 
     def extract_reasoning_content(
             self, model_output: str, request: ChatCompletionRequest
@@ -158,17 +148,15 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         model_output = model_output_parts[2] if model_output_parts[
             1] else model_output_parts[0]
 
-        # DeepSeek R1 doesn't generate <think> now.
-        # Thus we assume the reasoning content is always at the start.
-        # Ref https://huggingface.co/deepseek-ai/DeepSeek-R1/commit/8a58a132790c9935686eb97f042afa8013451c9f
+        # EXAONE 4.0 doesn't generate <think> tokens.
+        # Ref https://huggingface.co/LGAI-EXAONE/EXAONE-4.0-32B/blob/main/chat_template.jinja#L139-L146
         if self.end_token not in model_output:
-            return model_output, None
+            if model_output_parts[1]:
+                return model_output, None
+            return None, model_output
         else:
             reasoning_content, _, content = model_output.partition(
                 self.end_token)
-            # If the end token is not found, return the model output as is.
-            # It should not happen since we already checked for the presence
-            # of the end token.
-            # If generation stops right after end-of-think, return null content
+
             final_content = content or None
             return reasoning_content, final_content
