@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.multimodal.cache import (CachedMultiModalInputExchanger,
                                    MultiModalCache,
                                    MultiModalCacheItemMetadata)
@@ -80,45 +80,42 @@ def test_cache_item_size(item, expected_size):
     assert cache.currsize == expected_size
 
 
-def _create_vllm_config(*, mm_processor_cache_gb: float):
-    return VllmConfig(model_config=ModelConfig(
-        mm_processor_cache_gb=mm_processor_cache_gb), )
+def _create_vllm_config(
+    *,
+    mm_processor_cache_gb: float,
+    enable_ipc: bool,
+):
+    return VllmConfig(
+        model_config=ModelConfig(mm_processor_cache_gb=mm_processor_cache_gb),
+        parallel_config=ParallelConfig(
+            data_parallel_size=1 if enable_ipc else 2),
+    )
 
 
-@pytest.mark.parametrize("contains_call_count", [1, 2, 3])
-def test_ipc_enable_disable_consistency(contains_call_count):
-    cache_size_gb = 1 / (1 << 20)
-
-    vllm_config_ipc_enabled = _create_vllm_config(
-        mm_processor_cache_gb=cache_size_gb)
-    vllm_config_ipc_disabled = _create_vllm_config(mm_processor_cache_gb=0)
+def _compare_caches(
+    config_0: VllmConfig,
+    config_1: VllmConfig,
+    *,
+    item_capacity: int = 8,
+    hit_rate: float = 0.5,
+    max_items_per_iter: int = 3,
+    is_cached_calls_per_iter: int,
+    n_iter: int = 100,
+    seed: int = 0,
+):
     mm_registry = MultiModalRegistry()
+    cache_0_p0 = CachedMultiModalInputExchanger.for_p0(config_0, mm_registry)
+    cache_0_p1 = CachedMultiModalInputExchanger.for_p1(config_0, mm_registry)
+    cache_1_p0 = CachedMultiModalInputExchanger.for_p0(config_1, mm_registry)
+    cache_1_p1 = CachedMultiModalInputExchanger.for_p1(config_1, mm_registry)
 
-    p0_ipc_enabled = CachedMultiModalInputExchanger.for_p0(
-        vllm_config_ipc_enabled,
-        mm_registry,
+    cache_size_gb = max(
+        config_0.model_config.mm_processor_cache_gb,
+        config_1.model_config.mm_processor_cache_gb,
     )
-    p1_ipc_enabled = CachedMultiModalInputExchanger.for_p1(
-        vllm_config_ipc_enabled,
-        mm_registry,
-    )
-
-    p0_ipc_disabled = CachedMultiModalInputExchanger.for_p0(
-        vllm_config_ipc_disabled,
-        mm_registry,
-    )
-    p1_ipc_disabled = CachedMultiModalInputExchanger.for_p1(
-        vllm_config_ipc_disabled,
-        mm_registry,
-    )
-
-    n_iter = 100
-    item_capacity = 8
     item_size_gb = int(cache_size_gb / item_capacity)
-    hit_rate = 0.5
-    max_items_per_iter = 3
 
-    rng = np.random.RandomState(0)
+    rng = np.random.RandomState(seed)
     all_items = [
         _dummy_item("item", {"key": item_size_gb}, rng=rng)
         for _ in range(int(item_capacity / hit_rate))
@@ -135,26 +132,52 @@ def test_ipc_enable_disable_consistency(contains_call_count):
         selected_items = [all_items[idx] for idx in item_idxs_to_select]
         selected_hashes = [all_hashes[idx] for idx in item_idxs_to_select]
 
-        for _ in range(contains_call_count):
-            p0_ipc_enabled.is_cached(selected_hashes)
-        items_ipc_enabled = p0_ipc_enabled.get_and_update(
-            selected_items,
-            selected_hashes,
-        )
-        result_ipc_enabled = p1_ipc_enabled.get_and_update(
-            items_ipc_enabled,
-            selected_hashes,
-        )
+        for _ in range(is_cached_calls_per_iter):
+            cache_0_p0.is_cached(selected_hashes)
+        cache_0_p0_out = cache_0_p0.get_and_update(selected_items,
+                                                   selected_hashes)
+        cache_1_p0_out = cache_1_p0.get_and_update(cache_0_p0_out,
+                                                   selected_hashes)
 
-        for _ in range(contains_call_count):
-            p1_ipc_enabled.is_cached(selected_hashes)
-        items_ipc_disabled = p0_ipc_disabled.get_and_update(
-            selected_items,
-            selected_hashes,
-        )
-        result_ipc_disabled = p1_ipc_disabled.get_and_update(
-            items_ipc_disabled,
-            selected_hashes,
-        )
+        for _ in range(is_cached_calls_per_iter):
+            cache_0_p1.is_cached(selected_hashes)
+        cache_0_p1_out = cache_0_p1.get_and_update(selected_items,
+                                                   selected_hashes)
+        cache_1_p1_out = cache_1_p1.get_and_update(cache_0_p1_out,
+                                                   selected_hashes)
 
-        assert result_ipc_enabled == result_ipc_disabled, f"Failed at {it=}"
+        assert cache_1_p0_out == cache_1_p1_out, f"Failed at {it=}"
+
+
+@pytest.mark.parametrize("is_cached_calls_per_iter", [1, 2, 3])
+def test_ipc_enable_disable_consistency(is_cached_calls_per_iter):
+    cache_size_gb = 1 / (1 << 20)
+
+    vllm_config_cache_disabled = _create_vllm_config(
+        mm_processor_cache_gb=cache_size_gb,
+        enable_ipc=True,
+    )
+    vllm_config_ipc_enabled = _create_vllm_config(
+        mm_processor_cache_gb=cache_size_gb,
+        enable_ipc=True,
+    )
+    vllm_config_ipc_disabled = _create_vllm_config(
+        mm_processor_cache_gb=0,
+        enable_ipc=False,
+    )
+
+    _compare_caches(
+        vllm_config_cache_disabled,
+        vllm_config_ipc_enabled,
+        is_cached_calls_per_iter=is_cached_calls_per_iter,
+    )
+    _compare_caches(
+        vllm_config_ipc_enabled,
+        vllm_config_ipc_disabled,
+        is_cached_calls_per_iter=is_cached_calls_per_iter,
+    )
+    _compare_caches(
+        vllm_config_ipc_disabled,
+        vllm_config_cache_disabled,
+        is_cached_calls_per_iter=is_cached_calls_per_iter,
+    )

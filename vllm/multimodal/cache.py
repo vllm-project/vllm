@@ -134,10 +134,20 @@ class CachedMultiModalInputExchanger(ABC):
     ) -> "CachedMultiModalInputExchanger":
         model_config = vllm_config.model_config
 
-        if mm_registry.enable_mm_input_cache(model_config):
-            return CachedMultiModalInputSender(model_config)
+        if not mm_registry.supports_multimodal_inputs(model_config):
+            return CachedMultiModalInputDisabled()
 
-        return CachedMultiModalInputReceiver(model_config)
+        mm_config = model_config.get_multimodal_config()
+        if mm_config.mm_processor_cache_gb == 0:
+            return CachedMultiModalInputDisabled()
+
+        parallel_config = vllm_config.parallel_config
+        supports_ipc_cache = (parallel_config.data_parallel_size == 1
+                              or parallel_config.data_parallel_external_lb)
+        if not supports_ipc_cache:
+            return CachedMultiModalInputReceiver(model_config)
+
+        return CachedMultiModalInputSender(model_config)
 
     @staticmethod
     def for_p1(
@@ -146,10 +156,20 @@ class CachedMultiModalInputExchanger(ABC):
     ) -> "CachedMultiModalInputExchanger":
         model_config = vllm_config.model_config
 
-        if mm_registry.enable_mm_input_cache(model_config):
-            return CachedMultiModalInputReceiver(model_config)
+        if not mm_registry.supports_multimodal_inputs(model_config):
+            return CachedMultiModalInputDisabled()
 
-        return CachedMultiModalInputDisabled()
+        mm_config = model_config.get_multimodal_config()
+        if mm_config.mm_processor_cache_gb == 0:
+            return CachedMultiModalInputDisabled()
+
+        parallel_config = vllm_config.parallel_config
+        supports_ipc_cache = (parallel_config.data_parallel_size == 1
+                              or parallel_config.data_parallel_external_lb)
+        if not supports_ipc_cache:
+            return CachedMultiModalInputDisabled()
+
+        return CachedMultiModalInputReceiver(model_config)
 
     @abstractmethod
     def is_cached_item(self, mm_hash: str) -> bool:
@@ -250,8 +270,10 @@ class CachedMultiModalInputSender(CachedMultiModalInputExchanger):
     def __init__(self, model_config: "ModelConfig") -> None:
         super().__init__()
 
+        mm_config = model_config.get_multimodal_config()
+
         self._cache = MultiModalCache.get_lru_cache(
-            model_config.get_mm_input_cache_gb(),
+            mm_config.mm_processor_cache_gb,
             MultiModalCacheItemMetadata,
         )
 
@@ -289,8 +311,10 @@ class CachedMultiModalInputReceiver(CachedMultiModalInputExchanger):
     def __init__(self, model_config: "ModelConfig") -> None:
         super().__init__()
 
+        mm_config = model_config.get_multimodal_config()
+
         self._cache = MultiModalCache.get_lru_cache(
-            model_config.get_mm_input_cache_gb(),
+            mm_config.mm_processor_cache_gb,
             Mapping[str, NestedTensors],  # type: ignore[type-abstract]
         )
 

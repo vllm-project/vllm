@@ -846,12 +846,6 @@ class ModelConfig:
 
         return None
 
-    def set_mm_processor_cache_gb(self, value: float) -> None:
-        mm_config = self.get_multimodal_config()
-
-        self.mm_processor_cache_gb = value
-        mm_config.mm_processor_cache_gb = value
-
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
             self.model, self.revision)
@@ -1646,31 +1640,6 @@ class ModelConfig:
     @property
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
-
-    @property
-    def processor_return_mm_hashes(self) -> bool:
-        """Whether the multi-modal processor should output hashes."""
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return False
-
-        return mm_config.mm_processor_cache_gb > 0
-
-    @property
-    def enable_mm_processor_cache(self) -> bool:
-        """Whether the multi-modal processor cache should be enabled."""
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return False
-
-        return mm_config.mm_processor_cache_gb > 0
-
-    def get_mm_input_cache_gb(self) -> int:
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return 0
-
-        return envs.VLLM_MM_INPUT_CACHE_GIB
 
     @property
     def is_cross_encoder(self) -> bool:
