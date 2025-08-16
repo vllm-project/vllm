@@ -3,6 +3,8 @@
 
 import asyncio
 import atexit
+import itertools
+import math
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
@@ -454,6 +456,190 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
                                                          dim=0)
     vision_embeddings = vision_embeddings[:num_chunks, ...]
     return vision_embeddings
+
+
+def get_load_balance_assignment(sizes: list[int], num_gpus: int = 2):
+    """
+    Generate load balancing assignment and metadata 
+    for distributing data across GPUs.
+    The load is determined by the total image sizes,
+    not the number of images.
+    
+    Args:
+        sizes: List or tensor of flatten image sizes
+        num_gpus: Number of GPUs to balance across
+    
+    Returns:
+        shuffle_indices: 
+            Indices to reorder data for balanced loading
+        gpu_sample_counts: 
+            Number of samples assigned to each GPU
+        image_is_in_rank: 
+            Boolean tensor [num_gpus, num_samples] indicating assignment
+        grouped_sizes_per_gpu: 
+            Total size assigned to each GPU
+    """
+    import torch
+
+    n_samples = len(sizes)
+
+    # Handle edge cases
+    if n_samples == 0:
+        empty_assignment = torch.zeros((num_gpus, 0), dtype=torch.bool)
+        return [], [0] * num_gpus, empty_assignment, [0] * num_gpus
+
+    # Use greedy algorithm - balance by total size, not sample count
+    gpu_assignments = [list[int]() for _ in range(num_gpus)]
+    gpu_loads = [0] * num_gpus  # This tracks total SIZE, not sample count
+
+    # Sort indices by size (largest first for better load balancing)
+    large_to_small_indices = sorted(range(n_samples),
+                                    key=lambda i: sizes[i],
+                                    reverse=True)
+
+    for idx in large_to_small_indices:
+        # Find GPU with minimum current load (by total size)
+        min_gpu = min(range(num_gpus), key=lambda i: gpu_loads[i])
+        gpu_assignments[min_gpu].append(idx)
+        gpu_loads[min_gpu] += sizes[idx]  # Add the SIZE, not just count
+
+    # Create shuffle indices and counts
+    shuffle_indices = list[int]()
+    gpu_sample_counts = list[int]()
+    for gpu_id in range(num_gpus):
+        shuffle_indices.extend(gpu_assignments[gpu_id])
+        gpu_sample_counts.append(len(gpu_assignments[gpu_id]))
+
+    # Create assignment matrix
+    image_is_in_rank = torch.zeros((num_gpus, n_samples), dtype=torch.bool)
+    current_idx = 0
+    for rank in range(num_gpus):
+        count = gpu_sample_counts[rank]
+        if count > 0:
+            rank_images = shuffle_indices[current_idx:current_idx + count]
+            image_is_in_rank[rank, rank_images] = True
+            current_idx += count
+
+    # The grouped_sizes_per_gpu is just the gpu_loads we already calculated
+    grouped_sizes_per_gpu = gpu_loads.copy()
+
+    return (shuffle_indices, gpu_sample_counts, image_is_in_rank,
+            grouped_sizes_per_gpu)
+
+
+def run_dp_sharded_mrope_vision_model(
+    vision_model: torch.nn.Module,
+    pixel_values: torch.Tensor,
+    grid_thw_list: list[list[int]],
+) -> torch.Tensor:
+    """Run a vision model with data parallelism (DP) sharding. 
+    The function will shard the input image tensor on the 
+    first dimension and run the vision model.
+    This function is used to run the vision model with mrope.
+    
+    Args:
+        vision_model (torch.nn.Module): Vision model.
+        pixel_values (torch.Tensor): Image/Video input tensor.
+        grid_thw_list: List of grid dimensions for each image
+    Returns:
+        torch.Tensor: Output image embeddings
+    """
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank_local = get_tensor_model_parallel_rank()
+
+    patches_per_image = [math.prod(grid_thw) for grid_thw in grid_thw_list]
+    cum_patches_per_image = [0, *itertools.accumulate(patches_per_image)]
+
+    # Get load balancing assignment with all metadata
+    (image_to_tp_rank, gpu_sample_counts, image_is_in_rank,
+     grouped_pixel_values_len) = get_load_balance_assignment(
+         patches_per_image, tp_size)
+
+    # Get the local images assigned to this rank
+    image_idxs_local = image_is_in_rank[tp_rank_local].nonzero().squeeze(-1)
+
+    # Get the pixel values for the local images based on the image_idxs_local
+    if len(image_idxs_local) > 0:
+        pixel_values_local = torch.cat([
+            pixel_values[cum_patches_per_image[i]:cum_patches_per_image[i + 1]]
+            for i in image_idxs_local.tolist()
+        ])
+    else:
+        # Handle case where this rank has no images
+        pixel_values_local = torch.empty((0, pixel_values.shape[1]),
+                                         device=pixel_values.device,
+                                         dtype=pixel_values.dtype)
+
+    embed_dim_reduction_factor = (vision_model.spatial_merge_size *
+                                  vision_model.spatial_merge_size)
+
+    # Find the max length across all ranks
+    max_len_per_rank = max(
+        grouped_pixel_values_len) // embed_dim_reduction_factor
+    local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local.tolist()]
+
+    # Run the vision model on the local pixel_values_local
+    if pixel_values_local.shape[0] > 0:
+        image_embeds_local = vision_model(pixel_values_local,
+                                          local_grid_thw_list)
+    else:
+        # Handle empty case
+        image_embeds_local = torch.empty((0, vision_model.out_hidden_size),
+                                         device=pixel_values.device,
+                                         dtype=pixel_values.dtype)
+
+    # Pad the output based on max_len_per_rank
+    current_len = image_embeds_local.shape[0]
+    if current_len < max_len_per_rank:
+        padding_size = max_len_per_rank - current_len
+        padding = torch.empty((padding_size, image_embeds_local.shape[1]),
+                              dtype=image_embeds_local.dtype,
+                              device=image_embeds_local.device)
+        image_embeds_local_padded = torch.cat([image_embeds_local, padding],
+                                              dim=0)
+    else:
+        image_embeds_local_padded = image_embeds_local
+
+    # Do all_gather to collect embeddings from all ranks
+    gathered_embeds = tensor_model_parallel_all_gather(
+        image_embeds_local_padded, dim=0)
+
+    # Remove padding and reconstruct per-rank embeddings
+    rank_embeddings = []
+    for rank in range(tp_size):
+        start_idx = rank * max_len_per_rank
+        end_idx = start_idx + (grouped_pixel_values_len[rank] //
+                               embed_dim_reduction_factor)
+        rank_embeddings.append(gathered_embeds[start_idx:end_idx])
+
+    # Reconstruct embeddings in the shuffled order
+    shuffled_embeddings = []
+    current_idx = 0
+    for rank in range(tp_size):
+        count = gpu_sample_counts[rank]
+        if count > 0:
+            # Get images assigned to this rank in shuffled order
+            rank_images = image_to_tp_rank[current_idx:current_idx + count]
+            rank_embed = rank_embeddings[rank]
+            # Split rank embeddings back to individual images
+            embed_start = 0
+            for img_idx in rank_images:
+                img_patches = (patches_per_image[img_idx] //
+                               embed_dim_reduction_factor)
+                img_embed = rank_embed[embed_start:embed_start + img_patches]
+                shuffled_embeddings.append(img_embed)
+                embed_start += img_patches
+            current_idx += count
+
+    # Unshuffle to restore original order
+    original_order_embeddings = [None] * len(shuffled_embeddings)
+    for original_idx, shuffled_idx in enumerate(image_to_tp_rank):
+        original_order_embeddings[original_idx] = shuffled_embeddings[
+            shuffled_idx]
+
+    # Concatenate all embeddings in original order
+    final_embeddings = torch.cat(original_order_embeddings, dim=0)
+    return final_embeddings
 
 
 def fetch_audio(
