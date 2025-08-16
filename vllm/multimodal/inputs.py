@@ -320,31 +320,6 @@ class BaseMultiModalField(ABC):
 
 
 @dataclass(frozen=True)
-class MultiModalDummyField(BaseMultiModalField):
-    """
-    A dummy field used as a placeholder to be replaced during cache update.
-
-    It is also used as a convenience class for testing.
-    """
-
-    def _reduce_data(
-        self,
-        batch: list[NestedTensors],
-        *,
-        pin_memory: bool,
-    ) -> NestedTensors:
-        raise AssertionError("Dummy items should never be merged")
-
-    def build_elems(
-        self,
-        modality: str,
-        key: str,
-        data: NestedTensors,
-    ) -> Sequence[MultiModalFieldElem]:
-        raise AssertionError("Dummy items should never be used on real data")
-
-
-@dataclass(frozen=True)
 class MultiModalBatchedField(BaseMultiModalField):
     """
     Info:
