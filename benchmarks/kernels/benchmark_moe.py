@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import time
 from contextlib import nullcontext
 from datetime import datetime
@@ -542,6 +543,7 @@ def save_configs(
     use_fp8_w8a8: bool,
     use_int8_w8a16: bool,
     block_quant_shape: list[int],
+    save_dir: str,
 ) -> None:
     dtype_str = get_config_dtype_str(
         dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
@@ -552,7 +554,8 @@ def save_configs(
     filename = get_config_file_name(
         num_experts, shard_intermediate_size // 2, dtype_str, block_quant_shape
     )
-
+    os.makedirs(save_dir, exist_ok=True)
+    filename = os.path.join(save_dir, filename)
     print(f"Writing best config to {filename}...")
     with open(filename, "w") as f:
         json.dump(configs, f, indent=4)
@@ -707,6 +710,7 @@ def main(args: argparse.Namespace):
             use_fp8_w8a8,
             use_int8_w8a16,
             block_quant_shape,
+            args.save_dir,
         )
         end = time.time()
         print(f"Tuning took {end - start:.2f} seconds")
@@ -748,6 +752,9 @@ if __name__ == "__main__":
         "--dtype", type=str, choices=["auto", "fp8_w8a8", "int8_w8a16"], default="auto"
     )
     parser.add_argument("--use-deep-gemm", action="store_true")
+    parser.add_argument(
+        "--save-dir", type=str, default="./", help="Directory to save tuned results"
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, nargs="+", required=False)
     parser.add_argument("--tune", action="store_true")
