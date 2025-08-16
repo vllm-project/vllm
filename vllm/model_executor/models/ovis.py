@@ -308,6 +308,10 @@ class OvisDummyInputsBuilder(BaseDummyInputsBuilder[OvisProcessingInfo]):
 
 class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
 
+    @property
+    def requires_out_mm_kwargs(self) -> bool:
+        return True
+
     def image_indicators_to_visual_tokens(
         self,
         image_indicators: list[int],

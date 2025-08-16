@@ -569,6 +569,10 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
 class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
                                  ):
 
+    @property
+    def requires_out_mm_kwargs(self) -> bool:
+        return True
+
     def _call_hf_processor(
         self,
         prompt: str,

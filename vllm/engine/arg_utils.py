@@ -350,7 +350,7 @@ class EngineArgs:
     mm_processor_kwargs: Optional[Dict[str, Any]] = \
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
-    mm_processor_cache_gb: int = MultiModalConfig.mm_processor_cache_gb
+    mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     # LoRA fields
     enable_lora: bool = False
@@ -1252,18 +1252,6 @@ class EngineArgs:
             enable_multimodal_encoder_data_parallel=self.
             enable_multimodal_encoder_data_parallel,
         )
-
-        if model_config.is_multimodal_model:
-            dp_supports_mm_processor_cache = (self.data_parallel_size == 1
-                                              or data_parallel_external_lb)
-            if (not dp_supports_mm_processor_cache
-                    and model_config.mm_processor_cache_gb > 0):
-                logger.warning(
-                    "Multi-modal processor cache is disabled because "
-                    "it is not compatible with data parallelism when "
-                    "there does not exist a one-to-one correspondance "
-                    "between API and engine core processes.")
-                model_config.set_mm_processor_cache_gb(0)
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,

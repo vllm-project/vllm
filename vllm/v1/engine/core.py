@@ -22,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import CachedMultiModalInputExchanger
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -38,7 +39,6 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
                             ReconfigureDistributedRequest, ReconfigureRankType,
                             UtilityOutput, UtilityResult)
-from vllm.v1.engine.mm_input_cache import MultiModalInputCacheServer
 from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -127,8 +127,9 @@ class EngineCore:
             log_stats=self.log_stats,
         )
 
-        self.mm_input_cache_server = MultiModalInputCacheServer(
-            vllm_config.model_config, MULTIMODAL_REGISTRY)
+        self.mm_registry = MULTIMODAL_REGISTRY
+        self.mm_input_cache = CachedMultiModalInputExchanger.for_p1(
+            vllm_config, self.mm_registry)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -362,7 +363,7 @@ class EngineCore:
             logger.warning("Resetting the multi-modal cache when requests are "
                            "in progress may lead to desynced internal caches.")
 
-        self.mm_input_cache_server.reset()
+        self.mm_input_cache.clear_cache()
 
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
@@ -429,7 +430,7 @@ class EngineCore:
             # Note on thread safety: no race condition.
             # `mm_input_cache_server` is reset at the end of LLMEngine init,
             # and will only accessed in the input processing thread afterwards.
-            request.mm_kwargs = self.mm_input_cache_server.get_and_update(
+            request.mm_kwargs = self.mm_input_cache.get_and_update(
                 request.mm_kwargs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request,

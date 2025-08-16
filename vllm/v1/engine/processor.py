@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal, Optional, Union
 
 from vllm.config import VllmConfig
@@ -11,15 +11,15 @@ from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal.cache import (CachedMultiModalInputDisabled,
+                                   CachedMultiModalInputExchanger)
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
-from vllm.utils import is_list_of
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.mm_input_cache import MultiModalInputCacheClient
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
 from vllm.v1.structured_output.backend_outlines import (
@@ -46,16 +46,17 @@ class Processor:
 
         self.generation_config_fields = (
             self.model_config.try_get_generation_config())
-        self.input_preprocessor = InputPreprocessor(self.model_config,
-                                                    self.tokenizer,
-                                                    mm_registry)
 
-        self.mm_input_cache_client = MultiModalInputCacheClient(
-            self.model_config, mm_registry)
+        self.mm_registry = mm_registry
+        self.mm_input_cache = CachedMultiModalInputExchanger.for_p0(
+            vllm_config, mm_registry)
 
-    @property
-    def mm_registry(self):
-        return self.input_preprocessor.mm_registry
+        self.input_preprocessor = InputPreprocessor(
+            self.model_config,
+            self.tokenizer,
+            mm_registry,
+            mm_input_cache=self.mm_input_cache,
+        )
 
     def _validate_logprobs(
         self,
@@ -253,8 +254,9 @@ class Processor:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
-        return_mm_hashes = (self.model_config.processor_return_mm_hashes
-                            or bool(self.cache_config.enable_prefix_caching))
+        return_mm_hashes = (
+            not isinstance(self.mm_input_cache, CachedMultiModalInputDisabled)
+            or bool(self.cache_config.enable_prefix_caching))
         processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
@@ -296,7 +298,8 @@ class Processor:
             pooling_params = params.clone()
 
         # Multimodal related.
-        sorted_mm_inputs: Optional[list[Optional[MultiModalKwargsItem]]] = None
+        sorted_mm_inputs: Optional[Sequence[
+            Optional[MultiModalKwargsItem]]] = None
         sorted_mm_positions: Optional[list[PlaceholderRange]] = None
         sorted_mm_hashes: Optional[list[str]] = None
         if decoder_inputs["type"] == "multimodal":
@@ -309,7 +312,7 @@ class Processor:
             # in the input sequence.
             sorted_mm_idxs = argsort_mm_positions(decoder_mm_positions)
 
-            orig_sorted_mm_inputs = [
+            sorted_mm_inputs = [
                 decoder_mm_inputs.get_item(modality, idx)
                 for modality, idx in sorted_mm_idxs
             ]
@@ -321,15 +324,6 @@ class Processor:
                 decoder_mm_hashes[modality][idx]
                 for modality, idx in sorted_mm_idxs
             ]
-
-            if sorted_mm_hashes is not None:
-                sorted_mm_inputs = self.mm_input_cache_client.get_and_update(
-                    orig_sorted_mm_inputs,
-                    sorted_mm_hashes,
-                )
-            else:
-                assert is_list_of(orig_sorted_mm_inputs, MultiModalKwargsItem)
-                sorted_mm_inputs = orig_sorted_mm_inputs
 
         return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,

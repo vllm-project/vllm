@@ -1185,6 +1185,10 @@ class KeyeDummyInputsBuilder(BaseDummyInputsBuilder[KeyeProcessingInfo]):
 
 class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
 
+    @property
+    def requires_out_mm_kwargs(self) -> bool:
+        return True
+
     def _get_data_parser(self) -> MultiModalDataParser:
         return KeyeMultiModalDataParser()
 

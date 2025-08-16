@@ -728,6 +728,10 @@ _I = TypeVar("_I", bound=BaseInternVLProcessingInfo)
 class BaseInternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
     """Basic image-only DummyInputsBuilder for InternVL-style models."""
 
+    @property
+    def requires_out_mm_kwargs(self) -> bool:
+        return True
+
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 

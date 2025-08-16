@@ -737,6 +737,24 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
 
         return MultiModalKwargs(data, items=items)
 
+    @staticmethod
+    def from_items_by_modality(
+        items_by_modality: "MultiModalKwargs",
+        *,
+        pin_memory: bool = False,
+    ):
+        valid_items = list[MultiModalKwargsItem]()
+
+        for modality, items in items_by_modality.items():
+            for i, item in enumerate(items):
+                assert item is not None, (
+                    f"Cannot build data from empty "
+                    f"`items_by_modality[{modality}][{i}]`")
+
+                valid_items.append(item)
+
+        return MultiModalKwargs.from_items(valid_items, pin_memory=pin_memory)
+
     def __init__(
         self,
         data: Mapping[str, NestedTensors],
