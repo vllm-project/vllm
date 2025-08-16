@@ -9,48 +9,78 @@
 #include "quantization/fp8/common.cuh"
 #include "dispatch_utils.h"
 #include "cub_helpers.h"
+#include "quantization/vectorization_utils.cuh"
 
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
 
 namespace vllm {
 
-// TODO(woosuk): Further optimize this kernel.
+
+template <typename T>
+__device__ __forceinline__ T warp_sum(T v) {
+#ifdef __HIP_PLATFORM_AMD__
+  const unsigned long long m = 0xffffffffffffffffull;  // HIP needs 64-bit mask
+#else
+  const unsigned           m = 0xffffffffu;
+#endif
+  constexpr int kWidth = 32;  // keep reduction over 32 lanes everywhere
+  v += __shfl_down_sync(m, v, 16, kWidth);
+  v += __shfl_down_sync(m, v,  8, kWidth);
+  v += __shfl_down_sync(m, v,  4, kWidth);
+  v += __shfl_down_sync(m, v,  2, kWidth);
+  v += __shfl_down_sync(m, v,  1, kWidth);
+  return v;
+}
+
+// kernel unchanged (uses warp_sum + same math as unfused)
 template <typename scalar_t, typename fp8_type>
 __global__ void rms_norm_static_fp8_quant_kernel(
-    fp8_type* __restrict__ out,          // [..., hidden_size]
-    const scalar_t* __restrict__ input,  // [..., hidden_size]
-    const int input_stride,
-    const scalar_t* __restrict__ weight,  // [hidden_size]
+    fp8_type* __restrict__ out,           // [T, H]
+    const scalar_t* __restrict__ input,   // [T, last_dim], may be strided
+    const int input_stride,           // <-- int64_t
+    const scalar_t* __restrict__ weight,  // [H]
     const float* __restrict__ scale,      // [1]
-    const float epsilon, const int num_tokens, const int hidden_size) {
-  __shared__ float s_variance;
-  float variance = 0.0f;
+    const float epsilon,
+    const int /*num_tokens*/,
+    const int hidden_size) {
 
-  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    const float x = (float)input[blockIdx.x * input_stride + idx];
-    variance += x * x;
+  const scalar_t* __restrict__ in_row = input + blockIdx.x * input_stride;
+
+  using acc_t = float;
+  acc_t sumsq = acc_t(0);
+  for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+    acc_t x = static_cast<acc_t>(in_row[i]);
+    sumsq += x * x;
   }
 
-  using BlockReduce = cub::BlockReduce<float, 1024>;
-  __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
+  // identical reduction to unfused
+  acc_t wsum = warp_sum<acc_t>(sumsq);
+  __shared__ acc_t warp_sums_sh[32];
+  if ((threadIdx.x & 31) == 0) warp_sums_sh[threadIdx.x >> 5] = wsum;
+  __syncthreads();
 
-  if (threadIdx.x == 0) {
-    s_variance = rsqrtf(variance / hidden_size + epsilon);
+  if (threadIdx.x < 32) {
+    acc_t v = (threadIdx.x < (blockDim.x + 31) / 32) ? warp_sums_sh[threadIdx.x] : acc_t(0);
+    acc_t total = warp_sum<acc_t>(v);
+    if (threadIdx.x == 0) warp_sums_sh[0] = total;
   }
   __syncthreads();
 
-  // invert scale to avoid division
-  float const scale_inv = 1.0f / *scale;
+  const float inv_rms =
+      rsqrtf(static_cast<float>(warp_sums_sh[0] / static_cast<acc_t>(hidden_size)) + epsilon);
 
-  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)input[blockIdx.x * input_stride + idx];
-    float const out_norm = ((scalar_t)(x * s_variance)) * weight[idx];
-    out[blockIdx.x * hidden_size + idx] =
-        scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
+  const float scale_inv = 1.0f / (*scale);
+
+  for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+    const float    x_f = static_cast<float>(in_row[i]);
+    const scalar_t xn  = static_cast<scalar_t>(x_f * inv_rms); // fp32 normalize → cast to T
+    const scalar_t z   = xn * weight[i];                       // multiply in T
+    out[blockIdx.x * hidden_size + i] =
+        scaled_fp8_conversion<true, fp8_type>(static_cast<float>(z), scale_inv);
   }
 }
+
 
 /* Function specialization in the case of FP16/BF16 tensors.
    Additional optimizations we can make in this case are
@@ -71,7 +101,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
 
   const int vec_hidden_size = hidden_size / width;
-  const int vec_input_stride = input_stride / width;
+  const int64_t vec_input_stride = input_stride / width;
   __shared__ float s_variance;
   float variance = 0.0f;
   /* These and the argument pointers are all declared `restrict` as they are
@@ -164,32 +194,52 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 
 }  // namespace vllm
 
-void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
-                               torch::Tensor& input,   // [..., hidden_size]
-                               torch::Tensor& weight,  // [hidden_size]
+
+
+// --- shared: match unfused launch exactly ---
+static inline int ln_block_threads_unified(int hidden_size) {
+  int threads = (hidden_size >= 1024) ? 256
+             : (hidden_size >= 512)  ? 512
+                                      : std::min(1024, ((hidden_size + 31) / 32) * 32);
+  // warp-align and clamp to [128, 1024]
+  threads = std::min(1024, std::max(128, ((threads + 31) / 32) * 32));
+  return threads;
+}
+
+void rms_norm_static_fp8_quant(torch::Tensor& out,     // [T, H]
+                               torch::Tensor& input,   // [T, last_dim]
+                               torch::Tensor& weight,  // [H]
                                torch::Tensor& scale,   // [1]
                                double epsilon) {
   TORCH_CHECK(out.is_contiguous());
-  int hidden_size = input.size(-1);
-  int input_stride = input.stride(-2);
-  int num_tokens = input.numel() / hidden_size;
+  TORCH_CHECK(weight.is_contiguous());
+  TORCH_CHECK(input.stride(-1) == 1, "last dim must be contiguous");
+
+  const int      hidden_size  = input.size(-1);
+  const int input_stride = input.stride(-2);  // row stride (== last_dim when 2D)
+  const int      num_tokens   = input.numel() / hidden_size;
 
   dim3 grid(num_tokens);
-  dim3 block(std::min(hidden_size, 1024));
+  dim3 block(ln_block_threads_unified(hidden_size));  // <-- match unfused
+
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
-      input.scalar_type(), "rms_norm_kernel_scalar_type", [&] {
-        VLLM_DISPATCH_FP8_TYPES(
-            out.scalar_type(), "rms_norm_kernel_fp8_type", [&] {
-              vllm::rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t>
-                  <<<grid, block, 0, stream>>>(
-                      out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
-                      input_stride, weight.data_ptr<scalar_t>(),
-                      scale.data_ptr<float>(), epsilon, num_tokens,
-                      hidden_size);
-            });
-      });
+
+  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel_scalar_type", [&] {
+    VLLM_DISPATCH_FP8_TYPES(out.scalar_type(), "rms_norm_kernel_fp8_type", [&] {
+      vllm::rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t>
+          <<<grid, block, 0, stream>>>(
+              out.data_ptr<fp8_t>(),
+              input.data_ptr<scalar_t>(),
+              input_stride,
+              weight.data_ptr<scalar_t>(),
+              scale.data_ptr<float>(),
+              static_cast<float>(epsilon),
+              num_tokens,
+              hidden_size);
+    });
+  });
+  // TORCH_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 #define LAUNCH_FUSED_ADD_RMS_NORM(width)                                     \
