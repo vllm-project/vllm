@@ -1,241 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import dataclasses
-from abc import ABC, abstractmethod
-from collections.abc import Iterator, Sequence
-from dataclasses import dataclass, field
-from enum import Enum
-from itertools import chain
-from typing import Optional, Union
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Optional
 
 import torch
-from torch._prims_common import DeviceLikeType
 
-from vllm import PoolingParams, SamplingParams
-from vllm.logger import init_logger
+from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
+                                                       LogitsProcessor,
+                                                       MoveDirectionality)
 
-logger = init_logger(__name__)
-
-
-class MoveDirectionality(Enum):
-    # One-way i1->i2 req move within batch
-    UNIDIRECTIONAL = 0
-    # Two-way i1<->i2 req swap within batch
-    SWAP = 1
-
-
-# (index, params, output_tok_ids) tuples for new
-# requests added to the batch.
-AddedRequest = tuple[int, Union[SamplingParams, PoolingParams], list[int]]
-# (index 1, index 2, directionality) tuples representing
-# one-way moves or two-way swaps of requests in batch
-MovedRequest = tuple[int, int, MoveDirectionality]
-# Batch indices of any removed requests.
-RemovedRequest = int
-
-
-@dataclasses.dataclass(frozen=True)
-class BatchUpdate:
-    """Persistent batch state change info for logitsprocs"""
-    batch_size: int  # Current num reqs in batch
-
-    # Metadata for requests added to, removed from, and moved
-    # within the persistent batch.
-    #
-    # Note: each added request is represented as
-    # (index, params, output_tok_ids)
-    # Key assumption: output_tok_ids is a reference to the
-    # request's running output tokens list; in this way
-    # the logits processors always see the latest list of
-    # generated tokens
-    removed: Sequence[RemovedRequest]
-    moved: Sequence[MovedRequest]
-    added: Sequence[AddedRequest]
-
-
-class BatchUpdateBuilder:
-    """Helps track persistent batch state changes and build
-    a batch update data structure for logitsprocs
-    
-    Assumptions:
-    * All information about requests removed from persistent batch
-      during a step is aggregated in self._removed through calls to
-      self.removed_append() at the beginning of a step. This must happen
-      before the first time that self.removed, self.pop_removed()
-      or self.peek_removed() are invoked in a given step
-    * After the first time that self.removed, self.pop_removed()
-      or self.peek_removed() are read in a step, no new removals
-      are registered using self.removed_append()
-    * Elements of self._removed are never directly modified, added or
-      removed (i.e. modification is only via self.removed_append() and
-      self.pop_removed())
-    
-    Guarantees under above assumptions:
-    * self.removed is always sorted in descending order
-    * self.pop_removed() and self.peek_removed() both return
-      the lowest removed request index in the current step
-    """
-
-    _removed: list[RemovedRequest]
-    _is_removed_sorted: bool
-    moved: list[MovedRequest]
-    added: list[AddedRequest]
-
-    def __init__(
-        self,
-        removed: Optional[list[RemovedRequest]] = None,
-        moved: Optional[list[MovedRequest]] = None,
-        added: Optional[list[AddedRequest]] = None,
-    ) -> None:
-        self._removed = removed or []
-        self.moved = moved or []
-        self.added = added or []
-        self._is_removed_sorted = False
-
-    def _ensure_removed_sorted(self) -> None:
-        """Sort removed request indices in
-        descending order.
-        
-        Idempotent after first call in a
-        given step, until reset.
-        """
-        if not self._is_removed_sorted:
-            self._removed.sort(reverse=True)
-            self._is_removed_sorted = True
-
-    @property
-    def removed(self) -> list[RemovedRequest]:
-        """Removed request indices sorted in
-        descending order"""
-        self._ensure_removed_sorted()
-        return self._removed
-
-    def removed_append(self, index: int) -> None:
-        """Register the removal of a request from
-        the persistent batch.
-
-        Must not be called after the first time
-        self.removed, self.pop_removed() or
-        self.peek_removed() are invoked.
-        
-        Args:
-          index: request index
-        """
-        if self._is_removed_sorted:
-            raise RuntimeError("Cannot register new removed request after"
-                               " self.removed has been read.")
-        self._removed.append(index)
-
-    def has_removed(self) -> bool:
-        return bool(self._removed)
-
-    def peek_removed(self) -> Optional[int]:
-        """Return lowest removed request index"""
-        if self.has_removed():
-            self._ensure_removed_sorted()
-            return self._removed[-1]
-        return None
-
-    def pop_removed(self) -> Optional[int]:
-        """Pop lowest removed request index"""
-        if self.has_removed():
-            self._ensure_removed_sorted()
-            return self._removed.pop()
-        return None
-
-    def get_and_reset(self, batch_size: int) -> Optional[BatchUpdate]:
-        """Generate a logitsprocs batch update data structure
-        and reset internal batch update builder state.
-        
-        Args:
-          batch_size: current persistent batch size
-
-        Returns:
-          Frozen logitsprocs batch update instance; `None` if no updates
-        """
-        # Reset removal-sorting logic
-        self._is_removed_sorted = False
-        if not any((self._removed, self.moved, self.added)):
-            # No update; short-circuit
-            return None
-        # Build batch state update
-        batch_update = BatchUpdate(
-            batch_size=batch_size,
-            removed=self._removed,
-            moved=self.moved,
-            added=self.added,
-        )
-        # Reset removed/moved/added update lists
-        self._removed = []
-        self.moved = []
-        self.added = []
-        return batch_update
-
-
-class LogitsProcessor(ABC):
-
-    @abstractmethod
-    def apply(self, logits: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
-
-    @abstractmethod
-    def is_argmax_invariant(self) -> bool:
-        """True if logits processor has no impact on the
-        argmax computation in greedy sampling.
-        NOTE: may or may not have the same value for all
-        instances of a given LogitsProcessor subclass,
-        depending on subclass implementation.
-        TODO(andy): won't be utilized until logits
-        processors are user-extensible
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def update_state(
-        self,
-        batch_update: Optional[BatchUpdate],
-    ) -> None:
-        """Called when there are new output tokens, prior
-        to each forward pass.
-
-        Args:
-            batch_update is non-None iff there have been
-            changes to the batch makeup.
-        """
-        raise NotImplementedError
-
-
-@dataclass
-class LogitsProcessorManager:
-    """Encapsulates initialized logitsproc objects."""
-    argmax_invariant: list[LogitsProcessor] = field(
-        default_factory=list)  # argmax-invariant logitsprocs
-    non_argmax_invariant: list[LogitsProcessor] = field(
-        default_factory=list)  # non-argmax-invariant logitsprocs
-
-    @property
-    def all(self) -> Iterator[LogitsProcessor]:
-        """Iterator over all logits processors."""
-        return chain(self.argmax_invariant, self.non_argmax_invariant)
-
-
-###### ----- Built-in LogitsProcessor impls below here
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 class MinPLogitsProcessor(LogitsProcessor):
 
-    def __init__(self, max_num_reqs: int, pin_memory: bool,
-                 device: DeviceLikeType):
-        super().__init__()
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
+                 is_pin_memory: bool):
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.min_p_count: int = 0
 
         self.min_p_cpu_tensor = torch.zeros((max_num_reqs, ),
                                             dtype=torch.float32,
                                             device="cpu",
-                                            pin_memory=pin_memory)
+                                            pin_memory=is_pin_memory)
         self.min_p_cpu = self.min_p_cpu_tensor.numpy()
 
-        self.use_double_tensor = torch.device("cpu") != torch.device(device)
+        self.use_double_tensor = torch.device(device).type != "cpu"
 
         if self.use_double_tensor:
             # Pre-allocated device tensor
@@ -260,8 +51,8 @@ class MinPLogitsProcessor(LogitsProcessor):
 
         needs_update = False
         # Process added requests.
-        for index, params, _ in batch_update.added:
-            min_p = params.min_p if isinstance(params, SamplingParams) else 0.0
+        for index, params, _, _ in batch_update.added:
+            min_p = params.min_p
             if self.min_p_cpu[index] != min_p:
                 needs_update = True
                 self.min_p_cpu[index] = min_p
@@ -316,11 +107,10 @@ class MinPLogitsProcessor(LogitsProcessor):
 
 class LogitBiasLogitsProcessor(LogitsProcessor):
 
-    def __init__(self, pin_memory: bool, device: torch.device):
-        super().__init__()
-        self.biases: dict[int, dict[int, float]] = {}
+    def __init__(self, _, device: torch.device, is_pin_memory: bool):
         self.device = device
-        self.pin_memory = pin_memory
+        self.pin_memory = is_pin_memory
+        self.biases: dict[int, dict[int, float]] = {}
 
         self.bias_tensor: torch.Tensor = torch.tensor(())
         self.logits_slice = (self._device_tensor([], torch.int32),
@@ -337,9 +127,8 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
 
         needs_update: bool = False
         # Process added requests.
-        for index, params, _ in batch_update.added:
-            if isinstance(params, SamplingParams) and (lb :=
-                                                       params.logit_bias):
+        for index, params, _, _ in batch_update.added:
+            if lb := params.logit_bias:
                 self.biases[index] = lb
                 needs_update = True
             else:
@@ -400,12 +189,12 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
 
 class MinTokensLogitsProcessor(LogitsProcessor):
 
-    def __init__(self, pin_memory: bool, device: torch.device):
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
+                 is_pin_memory: bool):
         # index -> (min_toks, output_token_ids, stop_token_ids)
-        super().__init__()
-        self.min_toks: dict[int, tuple[int, Sequence[int], set[int]]] = {}
         self.device = device
-        self.pin_memory = pin_memory
+        self.pin_memory = is_pin_memory
+        self.min_toks: dict[int, tuple[int, Sequence[int], set[int]]] = {}
 
         # (req_idx_tensor,eos_tok_id_tensor)
         self.logits_slice: tuple[torch.Tensor,
@@ -424,9 +213,8 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
         if batch_update:
             # Process added requests.
-            for index, params, output_tok_ids in batch_update.added:
-                if (isinstance(params, SamplingParams)
-                        and (min_tokens := params.min_tokens)
+            for index, params, _, output_tok_ids in batch_update.added:
+                if ((min_tokens := params.min_tokens)
                         and len(output_tok_ids) < min_tokens):
                     # Replace request metadata at batch index
                     self.min_toks[index] = (min_tokens, output_tok_ids,
@@ -499,35 +287,3 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             # Inhibit EOS token for requests which have not reached min length
             logits[self.logits_slice] = -float("inf")
         return logits
-
-
-def init_builtin_logitsprocs(pin_memory_available: bool, max_num_reqs: int,
-                             device: torch.device) -> LogitsProcessorManager:
-    """Construct 'builtin' vLLM logitsprocs which the engine
-    loads by default.
-
-    Args:
-      pin_memory_available: pinned memory is available for use
-                            for use by logitsproc
-      max_num_reqs: ceiling on request count in persistent batch
-      device: inference device
-
-    Returns:
-      Data structure encapsulating loaded logitsprocs
-    """
-    min_tokens_logitproc = MinTokensLogitsProcessor(
-        pin_memory=pin_memory_available, device=device)
-    logit_bias_logitproc = LogitBiasLogitsProcessor(
-        pin_memory=pin_memory_available, device=device)
-    min_p_logitproc = MinPLogitsProcessor(
-        pin_memory=pin_memory_available,
-        device=device,
-        # +1 for temporary swap space
-        max_num_reqs=max_num_reqs + 1)
-    return LogitsProcessorManager(
-        non_argmax_invariant=[
-            min_tokens_logitproc,
-            logit_bias_logitproc,
-        ],
-        argmax_invariant=[min_p_logitproc],
-    )
