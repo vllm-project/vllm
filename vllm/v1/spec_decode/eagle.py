@@ -171,7 +171,7 @@ class EagleProposer:
         for layer_name in self.attn_layer_names:
             per_layer_attn_metadata[layer_name] = attn_metadata
         if self.use_cuda_graph and \
-            num_tokens <= self.cudagraph_batch_sizes[-1]:
+                num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
         else:
             num_input_tokens = num_tokens
@@ -253,7 +253,7 @@ class EagleProposer:
         draft_token_ids_list = [draft_token_ids]
 
         if self.use_cuda_graph and \
-            batch_size <= self.cudagraph_batch_sizes[-1]:
+                batch_size <= self.cudagraph_batch_sizes[-1]:
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
         else:
             input_batch_size = batch_size
@@ -474,7 +474,7 @@ class EagleProposer:
                 num_tokens, -1)
 
             if self.use_cuda_graph and \
-                num_tokens <= self.cudagraph_batch_sizes[-1]:
+                    num_tokens <= self.cudagraph_batch_sizes[-1]:
                 num_input_tokens = self.vllm_config.pad_for_cudagraph(
                     num_tokens)
             else:
@@ -644,17 +644,15 @@ class EagleProposer:
             and self.model.model.embed_tokens.weight.shape \
                 == target_language_model.model.embed_tokens.weight.shape:
             logger.info(
-                "Assuming the EAGLE head shares the same vocab embedding" \
-                " with the target model."
-            )
+                "Assuming the EAGLE head shares the same vocab embedding"
+                " with the target model.")
             del self.model.model.embed_tokens
             self.model.model.embed_tokens = (
                 target_language_model.model.embed_tokens)
         else:
             logger.info(
-                "The EAGLE head's vocab embedding will be loaded separately" \
-                " from the target model."
-            )
+                "The EAGLE head's vocab embedding will be loaded separately"
+                " from the target model.")
 
         # share lm_head with the target model if needed
         # some model definition do not define lm_head explicitly
