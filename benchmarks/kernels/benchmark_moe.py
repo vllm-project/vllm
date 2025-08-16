@@ -554,6 +554,7 @@ def save_configs(
     filename = get_config_file_name(
         num_experts, shard_intermediate_size // 2, dtype_str, block_quant_shape
     )
+    os.makedirs(save_dir, exist_ok=True)
     filename = os.path.join(save_dir, filename)
     print(f"Writing best config to {filename}...")
     with open(filename, "w") as f:
