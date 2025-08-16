@@ -131,7 +131,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("fatrelu_and_mul", torch::kCUDA, &fatrelu_and_mul);
 
   ops.def(
-      "swigluoai_and_mul(Tensor! out, Tensor input, float alpha, float limit) "
+      "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
+      "limit=7.0) "
       "-> ()");
   ops.impl("swigluoai_and_mul", torch::kCUDA, &swigluoai_and_mul);
 
