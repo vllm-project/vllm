@@ -358,7 +358,8 @@ class CachedMultiModalInputDisabled(
         mm_item: Optional[MultiModalKwargsItem],
         mm_hash: str,
     ) -> MultiModalKwargsItem:
-        assert mm_item is not None, f"Expected an item from P0 for {mm_hash=}"
+        assert mm_item is not None, ("CachedMultiModalInputSender should not "
+                                     "be used when caching is disabled")
 
         return mm_item
 
