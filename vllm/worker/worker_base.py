@@ -14,6 +14,7 @@ import torch.nn as nn
 from vllm.config import (ObservabilityConfig, VllmConfig,
                          set_current_vllm_config)
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
+from vllm.distributed.kv_transfer import ensure_kv_transfer_shutdown
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -518,6 +519,12 @@ class WorkerWrapperBase:
                 # note: lazy import to avoid importing torch before initializing
                 from vllm.utils import init_cached_hf_modules
                 init_cached_hf_modules()
+
+    def __del__(self):
+        self.shutdown()
+
+    def shutdown(self) -> None:
+        ensure_kv_transfer_shutdown()
 
     def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
         """
