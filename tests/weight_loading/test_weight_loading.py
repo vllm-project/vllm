@@ -22,6 +22,19 @@ MIN_CAPABILITY = os.environ.get("MIN_CAPABILITY", "80")
 @pytest.mark.skipif(
     not current_platform.has_device_capability(int(MIN_CAPABILITY)),
     reason="Current system does not have minimum capability.")
+@pytest.mark.skipif(
+    current_platform.is_rocm() and
+    (QUANTIZATION in ("gptq_marlin", "awq_marlin", "marlin", "qqq", "hqq")
+     or MODEL_NAME in (
+         "nm-testing/tinyllama-oneshot-w4a16-group128-v2",
+         "nm-testing/tinyllama-oneshot-w8a16-per-channel",
+         "neuralmagic/Phi-3-medium-128k-instruct-quantized.w4a16",
+         "nm-testing/TinyLlama-1.1B-Chat-v1.0-actorder-group",
+         "nm-testing/SparseLlama-3.1-8B-gsm8k-pruned.2of4-FP8-Dynamic-testing",
+         "nm-testing/SparseLlama-3.1-8B-gsm8k-pruned.2of4-W8A8-testing",
+         "casperhansen/mixtral-instruct-awq",
+     )),
+    reason="These quantized models currently are not supported on ROCm")
 def test_weight_loading(vllm_runner):
     """
     Test parameter weight loading with tp>1.
