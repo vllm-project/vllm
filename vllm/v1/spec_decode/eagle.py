@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
 from dataclasses import replace
-from typing import Optional
+from typing import Optional, Tuple, Type
 
 import numpy as np
 import torch
@@ -235,7 +235,8 @@ class EagleProposer:
         # On ROCm, both AiterFlashAttention and TritonAttention
         # support multi-token eagle spec decode.
         if current_platform.is_rocm():
-            allowed_types = (TritonAttentionMetadata, FlashAttentionMetadata)
+            allowed_types: Tuple[Type, ...] = (TritonAttentionMetadata,
+                                               FlashAttentionMetadata)
             try:
                 from vllm.v1.attention.backends.rocm_aiter_fa import (
                     AiterFlashAttentionMetadata)
