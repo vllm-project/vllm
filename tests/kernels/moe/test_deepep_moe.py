@@ -220,8 +220,6 @@ def deep_ep_moe_impl(
             rank_token_scales_chunk = rank_token_scales_chunk[
                 chunk_start:chunk_end]
 
-        print(f"RTS {rank_token_scales_chunk.shape if rank_token_scales_chunk is not None else None}")
-
         quant_config = FusedMoEQuantConfig.make(
             q_dtype,
             w1_scale=w1_scale,
@@ -475,8 +473,6 @@ def test_low_latency_deep_ep_moe(
             f"Skipping test as hidden size {k} is not in list of supported "
             f"hidden sizes {DeepEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES}"
         )
-
-    print(f"DTYPE = {dtype}")
 
     current_platform.seed_everything(7)
     world_size, dp_size = world_dp_size
