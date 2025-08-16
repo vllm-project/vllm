@@ -40,13 +40,19 @@ become available.
       <td><code>wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv</code></td>
     </tr>
     <tr>
-      <td><strong>Sonnet</strong></td>
+      <td><strong>Sonnet (deprecated)</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
       <td>Local file: <code>benchmarks/sonnet.txt</code></td>
     </tr>
     <tr>
       <td><strong>Random</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>synthetic</code></td>
+    </tr>
+    <tr>
+      <td><strong>Prefix Repetition</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
       <td><code>synthetic</code></td>
@@ -590,6 +596,20 @@ python3 benchmarks/benchmark_prefix_caching.py \
   --num-prompts 20 \
   --repeat-count 5 \
   --input-length-range 128:256
+```
+
+### Prefix Repetition Dataset
+
+```bash
+vllm bench serve \
+  --backend openai \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --dataset-name prefix_repetition \
+  --num-prompts 100 \
+  --prefix-repetition-prefix-len 512 \
+  --prefix-repetition-suffix-len 128 \
+  --prefix-repetition-num-prefixes 5 \
+  --prefix-repetition-output-len 128 
 ```
 
 </details>
