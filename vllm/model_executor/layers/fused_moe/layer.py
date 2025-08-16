@@ -285,6 +285,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         prepare_finalize: FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
+        assert self.moe_quant_config is not None
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
             logger.debug("BatchedTritonExperts %s", self.moe)
@@ -972,6 +973,9 @@ class FusedMoE(CustomOp):
         self.quant_method = quant_method
         self.quant_method.moe_quant_config = (
             quant_method.get_fused_moe_quant_config(self))
+
+        # Stash away for warmup code.
+        self.moe_quant_config = self.quant_method.moe_quant_config
 
         if self.enable_eplb:
             from vllm.model_executor.layers.quantization.fp8 import (

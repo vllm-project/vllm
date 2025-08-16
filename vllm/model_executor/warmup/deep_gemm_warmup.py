@@ -82,8 +82,9 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
 
 def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     if not (isinstance(module, FusedMoE)
-            and module.moe_config.quant_dtype == torch.float8_e4m3fn
-            and module.moe_config.block_shape == deep_gemm_block_shape()):
+            and module.moe_quant_config is not None
+            and module.moe_quant_config.quant_dtype == torch.float8_e4m3fn and
+            module.moe_quant_config.block_shape == deep_gemm_block_shape()):
         return False
 
     if not isinstance(module.quant_method.fused_experts,

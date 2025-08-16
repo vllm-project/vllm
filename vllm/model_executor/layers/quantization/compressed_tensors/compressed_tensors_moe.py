@@ -322,6 +322,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        assert self.moe_quant_config is not None
         """Return the appropriate GEMM experts implementation."""
         experts = select_nvfp4_gemm_impl(
             self.moe,
@@ -725,6 +726,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         # cutlass path
+        assert self.moe_quant_config is not None
         if self.use_cutlass:
             from vllm.model_executor.layers.fused_moe import (
                 CutlassBatchedExpertsFp8, CutlassExpertsFp8)
@@ -770,20 +772,20 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         assert not self.rocm_aiter_moe_enabled and not self.use_marlin
 
-        logger.debug("BatchedTritonExperts(%s)", self.__class__.__name__)
-
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
             max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank(
             )
             assert max_num_tokens_per_rank is not None
 
+            logger.debug("BatchedTritonExperts(%s)", self.__class__.__name__)
             return BatchedTritonExperts(
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
                 quant_config=self.moe_quant_config,
             )
         else:
+            logger.debug("TritonExperts(%s)", self.__class__.__name__)
             return TritonExperts(self.moe_quant_config)
 
     def get_fused_moe_quant_config(
@@ -855,6 +857,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         # cutlass path
         if self.use_cutlass:
+            assert self.moe_quant_config is not None
+
             # small-batch fallback on SM100
             if self.is_fp8_w8a8_sm100 and topk_ids.shape[0] <= 8:
                 from vllm.model_executor.layers.fused_moe import fused_experts
@@ -908,6 +912,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
                 rocm_aiter_fused_experts)
             assert per_act_token == per_channel_quant
+            assert self.moe_quant_config is not None
             return rocm_aiter_fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -941,6 +946,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 workspace=layer.workspace)
 
         assert per_act_token == per_channel_quant
+        assert self.moe_quant_config is not None
         return fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,

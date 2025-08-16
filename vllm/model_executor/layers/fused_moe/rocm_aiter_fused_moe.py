@@ -332,7 +332,7 @@ def rocm_aiter_fused_experts(
         expert_mask = None
 
     # w8a8 per-channel quantization
-    if (quant_config.per_channel_quant and apply_router_weight_on_input
+    if (quant_config.per_act_token_quant and apply_router_weight_on_input
             and quant_config.use_fp8_w8a8):
         # AITER tkw1 kernel for FP8 models with `apply_router_weight_on_input`
         # This applies topk_weights on the GEMM output of the first FC layer

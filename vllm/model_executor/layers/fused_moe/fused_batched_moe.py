@@ -693,8 +693,6 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
-        print("GOT HERE")
-
         assert hidden_states.dim() == 3
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
@@ -740,9 +738,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
             output[expert, :num, :] = tmp @ w2_dq.transpose(0, 1).to(tmp.dtype)
 
-        assert torch.isnan(output).sum() == 0
-
-        print("GOT HERE END")
+        #assert torch.isnan(output).sum() == 0
 
 
 def batched_moe_kernel_quantize_input(
