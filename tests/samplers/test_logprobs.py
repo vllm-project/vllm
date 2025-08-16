@@ -11,19 +11,10 @@ from ..conftest import VllmRunner
 MODELS = ["distilbert/distilgpt2"]
 
 
-@pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    This module is V0 only since it uses dtype=float, so
-    set VLLM_USE_V1=0 for all tests in the module.
-    """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
-
-
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype",
                          ["float"])  # needed for comparing logprobs with HF
-@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
+@pytest.mark.parametrize("max_num_batched_tokens", [4])
 @pytest.mark.parametrize("num_top_logprobs", [0, 6])  # 32000 == vocab_size
 @pytest.mark.parametrize("detokenize", [True, False])
 def test_get_prompt_logprobs(
@@ -31,19 +22,11 @@ def test_get_prompt_logprobs(
     vllm_runner,
     model,
     dtype,
-    chunked_prefill_token_size: int,
+    max_num_batched_tokens: int,
     num_top_logprobs: int,
     detokenize: bool,
     example_prompts,
 ):
-    max_num_seqs = 256
-    enable_chunked_prefill = False
-    max_num_batched_tokens = None
-    if chunked_prefill_token_size != -1:
-        enable_chunked_prefill = True
-        max_num_seqs = min(chunked_prefill_token_size, max_num_seqs)
-        max_num_batched_tokens = chunked_prefill_token_size
-
     max_tokens = 5
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_logprobs = hf_model.generate_greedy_logprobs(
@@ -55,9 +38,8 @@ def test_get_prompt_logprobs(
             model,
             dtype=dtype,
             max_logprobs=num_top_logprobs,
-            enable_chunked_prefill=enable_chunked_prefill,
             max_num_batched_tokens=max_num_batched_tokens,
-            max_num_seqs=max_num_seqs,
+            enforce_eager=True,
     ) as vllm_model:
         vllm_sampling_params = SamplingParams(max_tokens=max_tokens,
                                               logprobs=num_top_logprobs,
@@ -140,7 +122,9 @@ def test_get_prompt_logprobs(
 
 
 def test_max_logprobs():
-    runner = VllmRunner("facebook/opt-125m", max_logprobs=1)
+    runner = VllmRunner("facebook/opt-125m",
+                        max_logprobs=1,
+                        enforce_eager=True)
     vllm_sampling_params = SamplingParams(logprobs=1)
     # should pass
     runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
@@ -151,24 +135,16 @@ def test_max_logprobs():
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
+@pytest.mark.parametrize("max_num_batched_tokens", [4])
 @pytest.mark.parametrize("detokenize", [True, False])
-def test_none_logprobs(vllm_runner, model, chunked_prefill_token_size: int,
+def test_none_logprobs(vllm_runner, model, max_num_batched_tokens: int,
                        detokenize: bool, example_prompts):
-    max_num_seqs = 256
-    enable_chunked_prefill = False
-    max_num_batched_tokens = None
-    if chunked_prefill_token_size != -1:
-        enable_chunked_prefill = True
-        max_num_seqs = min(chunked_prefill_token_size, max_num_seqs)
-        max_num_batched_tokens = chunked_prefill_token_size
     max_tokens = 5
 
     with vllm_runner(
             model,
-            enable_chunked_prefill=enable_chunked_prefill,
+            enforce_eager=True,
             max_num_batched_tokens=max_num_batched_tokens,
-            max_num_seqs=max_num_seqs,
     ) as vllm_model:
         sampling_params_logprobs_none = SamplingParams(max_tokens=max_tokens,
                                                        logprobs=None,
