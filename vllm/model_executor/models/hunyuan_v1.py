@@ -929,7 +929,7 @@ class HunYuanV1Base(nn.Module, SupportsLoRA, MixtureOfExperts):
 
         # Set MoE hyperparameters
         self.expert_weights = []
-        self.num_expert_groups = config.n_group
+        self.num_expert_groups = 1
         self.moe_layers: list[FusedMoE] = []
         example_layer = None
         for layer in self.model.layers:
