@@ -32,13 +32,15 @@ class OpenAIServingTranscription(OpenAISpeechToText):
         *,
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
+        log_error_stack: bool = False,
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids,
-                         task_type="transcribe")
+                         task_type="transcribe",
+                         log_error_stack=log_error_stack)
 
     async def create_transcription(
         self, audio_data: bytes, request: TranscriptionRequest,
@@ -88,13 +90,15 @@ class OpenAIServingTranslation(OpenAISpeechToText):
         *,
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
+        log_error_stack: bool = False,
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids,
-                         task_type="translate")
+                         task_type="translate",
+                         log_error_stack=log_error_stack)
 
     async def create_translation(
         self, audio_data: bytes, request: TranslationRequest,

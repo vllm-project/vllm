@@ -205,6 +205,7 @@ class OpenAIServing:
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
         enable_force_include_usage: bool = False,
+        log_error_stack: bool = False,
     ):
         super().__init__()
 
@@ -222,6 +223,7 @@ class OpenAIServing:
 
         self._async_tokenizer_pool: dict[AnyTokenizer,
                                          AsyncMicrobatchTokenizer] = {}
+        self.log_error_stack = log_error_stack
 
     def _get_async_tokenizer(self, tokenizer) -> AsyncMicrobatchTokenizer:
         """
@@ -412,6 +414,13 @@ class OpenAIServing:
             message: str,
             err_type: str = "BadRequestError",
             status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
+        if self.log_error_stack:
+            import traceback
+            exc_type, _, _ = sys.exc_info()
+            if exc_type is not None:
+                traceback.print_exc()
+            else:
+                traceback.print_stack()
         return ErrorResponse(error=ErrorInfo(
             message=message, type=err_type, code=status_code.value))
 

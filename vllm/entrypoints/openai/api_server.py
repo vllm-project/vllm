@@ -1680,6 +1680,7 @@ async def init_app_state(
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
+        log_error_stack=args.log_error_stack,
     ) if "generate" in supported_tasks else None
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
@@ -1697,6 +1698,7 @@ async def init_app_state(
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
+        log_error_stack=args.log_error_stack,
     ) if "generate" in supported_tasks else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
@@ -1706,6 +1708,7 @@ async def init_app_state(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
+        log_error_stack=args.log_error_stack,
     ) if "generate" in supported_tasks else None
     state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,
@@ -1714,6 +1717,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
+        log_error_stack=args.log_error_stack,
     ) if "encode" in supported_tasks else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
@@ -1722,12 +1726,14 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
+        log_error_stack=args.log_error_stack,
     ) if "embed" in supported_tasks else None
     state.openai_serving_classification = ServingClassification(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
+        log_error_stack=args.log_error_stack,
     ) if "classify" in supported_tasks else None
 
     enable_serving_reranking = ("classify" in supported_tasks and getattr(
@@ -1737,6 +1743,7 @@ async def init_app_state(
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
+        log_error_stack=args.log_error_stack,
     ) if ("embed" in supported_tasks or enable_serving_reranking) else None
 
     state.openai_serving_tokenization = OpenAIServingTokenization(
@@ -1746,18 +1753,21 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
+        log_error_stack=args.log_error_stack,
     )
     state.openai_serving_transcription = OpenAIServingTranscription(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
+        log_error_stack=args.log_error_stack,
     ) if "transcription" in supported_tasks else None
     state.openai_serving_translation = OpenAIServingTranslation(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
+        log_error_stack=args.log_error_stack,
     ) if "transcription" in supported_tasks else None
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
