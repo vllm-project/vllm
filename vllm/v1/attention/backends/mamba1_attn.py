@@ -2,16 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import Optional
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.config import VllmConfig
-from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
-                                              CommonAttentionMetadata,
+from vllm.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.mamba_attn import (
+    BaseMambaAttentionMetadataBuilder)
+from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               split_decodes_and_prefills)
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 
 class Mamba1AttentionBackend(AttentionBackend):
@@ -34,21 +34,7 @@ class Mamba1AttentionMetadata:
 
 
 class Mamba1AttentionMetadataBuilder(
-        AttentionMetadataBuilder[Mamba1AttentionMetadata]):
-    reorder_batch_threshold: ClassVar[int] = 1
-
-    def __init__(
-        self,
-        kv_cache_spec: AttentionSpec,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        layer_names: list[str],
-    ):
-        assert isinstance(kv_cache_spec, MambaSpec)
-        self.kv_cache_spec = kv_cache_spec
-        self.device = device
-        self.vllm_config = vllm_config
-        self.layer_names = layer_names
+        BaseMambaAttentionMetadataBuilder[Mamba1AttentionMetadata]):
 
     def build(
         self,
@@ -70,6 +56,15 @@ class Mamba1AttentionMetadataBuilder(
 
         if num_prefills > 0:
             has_initial_states = context_lens_tensor > 0
+        elif num_decodes > 0 and num_decodes <= self.decode_cudagraph_max_bs:
+            state_indices_for_decode = state_indices_tensor[:num_decodes]
+            num_padded_decodes = self.vllm_config.pad_for_cudagraph(
+                num_decodes)
+            self.state_indices_tensor[:num_decodes].copy_(
+                state_indices_for_decode, non_blocking=True)
+            padded_state_indices = self.state_indices_tensor[:
+                                                             num_padded_decodes]
+            padded_state_indices[num_decodes:] = PAD_SLOT_ID
 
         return Mamba1AttentionMetadata(
             query_start_loc=query_start_loc,
