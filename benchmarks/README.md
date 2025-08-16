@@ -194,6 +194,7 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct
 ```bash
 vllm bench serve \
   --backend openai-chat \
+  --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
@@ -230,6 +231,7 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct
 ```bash
 vllm bench serve \
   --backend openai-chat \
+  --endpoint-type openai-chat \  
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
@@ -244,6 +246,7 @@ vllm bench serve \
 ```bash
 vllm bench serve \
   --backend openai-chat \
+  --endpoint-type openai-chat \  
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
