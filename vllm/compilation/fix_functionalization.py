@@ -27,16 +27,19 @@ class FixFunctionalizationPass(VllmInductorPass):
     """
 
     def __call__(self, graph: torch.fx.Graph):
+        # XPU does not support auto-functionalization yet.
+        # Will enable this when switch to vllm-xpu-kernels.
+        if current_platform.is_xpu():
+            logger.debug("XPU platform does not support fix functionality"
+                         "pass currently.")
+            return
+
         self.begin()
         self.dump_graph(graph, "before_fix_functionalization")
 
         self.nodes_to_remove: list[torch.fx.Node] = []
         count = 0
         for node in graph.nodes:
-            # XPU does not support auto-functionalization yet.
-            # Will enable this when switch to vllm-xpu-kernels.
-            if current_platform.is_xpu():
-                continue
             if not is_func(node, auto_functionalized):
                 continue  # Avoid deep if-elif nesting
 
