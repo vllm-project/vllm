@@ -153,10 +153,6 @@ def _compare_caches(
 def test_ipc_enable_disable_consistency(is_cached_calls_per_iter):
     cache_size_gb = 1 / (1 << 20)
 
-    vllm_config_cache_disabled = _create_vllm_config(
-        mm_processor_cache_gb=cache_size_gb,
-        enable_ipc=True,
-    )
     vllm_config_ipc_enabled = _create_vllm_config(
         mm_processor_cache_gb=cache_size_gb,
         enable_ipc=True,
@@ -165,13 +161,12 @@ def test_ipc_enable_disable_consistency(is_cached_calls_per_iter):
         mm_processor_cache_gb=0,
         enable_ipc=False,
     )
+    vllm_config_cache_disabled = _create_vllm_config(
+        mm_processor_cache_gb=cache_size_gb,
+        enable_ipc=True,
+    )
 
     _compare_caches(
-        vllm_config_cache_disabled,
-        vllm_config_ipc_enabled,
-        is_cached_calls_per_iter=is_cached_calls_per_iter,
-    )
-    _compare_caches(
         vllm_config_ipc_enabled,
         vllm_config_ipc_disabled,
         is_cached_calls_per_iter=is_cached_calls_per_iter,
@@ -179,5 +174,10 @@ def test_ipc_enable_disable_consistency(is_cached_calls_per_iter):
     _compare_caches(
         vllm_config_ipc_disabled,
         vllm_config_cache_disabled,
+        is_cached_calls_per_iter=is_cached_calls_per_iter,
+    )
+    _compare_caches(
+        vllm_config_cache_disabled,
+        vllm_config_ipc_enabled,
         is_cached_calls_per_iter=is_cached_calls_per_iter,
     )
