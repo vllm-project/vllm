@@ -94,7 +94,6 @@ These models primarily support the [`LLM.embed`](./pooling_models.md#llmembed) a
 |--------------|--------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `SiglipModel` | SigLIP-So400M | I | `HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit` | ✅︎ | ✅︎ | ✅︎ |
 
-
 ## Offline Inference
 
 The [LLM][vllm.LLM] class provides various methods for offline inference.
