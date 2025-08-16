@@ -585,6 +585,24 @@ class MixtureOfExperts(Protocol):
     ) -> None:
         ...
 
+    def update_expert_load_view(
+        self,
+        expert_load_view: Tensor,
+    ) -> None:
+        """
+        Update the expert load view tensor in the MoE model.
+        
+        This method allows updating the expert load metrics tensor that tracks
+        the load (e.g., token count) processed by each physical expert during
+        inference. This is useful when the expert load view tensor needs to be
+        resized or updated due to changes in the number of physical experts.
+        
+        Args:
+            expert_load_view: A tensor containing expert load metrics.
+                            Shape: (num_moe_layers, num_physical_experts)
+        """
+        ...
+
 
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
     return isinstance(model, MixtureOfExperts)
