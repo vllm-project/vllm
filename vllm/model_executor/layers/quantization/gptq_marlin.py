@@ -10,7 +10,7 @@ import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported,
+    FusedMoE, FusedMoEConfig, FusedMoEMethodBase, FusedMoeWeightScaleSupported,
     UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override, get_linear_quant_method, override_config)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported, check_moe_marlin_supports_layer,
-    marlin_make_workspace_new, marlin_moe_permute_scales,
+    marlin_make_workspace_new, marlin_moe_permute_scales, marlin_permute_bias,
     marlin_repeat_scales_on_all_ranks, verify_marlin_supported)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
@@ -375,7 +375,12 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
 class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     """MoE Marlin method with quantization."""
 
-    def __init__(self, quant_config: GPTQMarlinConfig) -> None:
+    def __init__(
+        self,
+        quant_config: GPTQMarlinConfig,
+        moe: FusedMoEConfig,
+    ) -> None:
+        super().__init__(moe)
         self.quant_config = quant_config
         if self.quant_config.quant_type.size_bits == 4:
             self.quant_type = scalar_types.uint4b8
@@ -618,6 +623,12 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         replace_parameter(layer, "w2_scales", marlin_w2_scales)
 
+        if hasattr(layer, "w13_bias") and layer.w13_bias is not None:
+            layer.w13_bias.data = marlin_permute_bias(layer.w13_bias)
+
+        if hasattr(layer, "w2_bias") and layer.w2_bias is not None:
+            layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -640,6 +651,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `GPTQMarlinMoEMethod` yet.")
@@ -656,12 +669,15 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
 
         return torch.ops.vllm.fused_marlin_moe(
             x,
             layer.w13_qweight,
             layer.w2_qweight,
+            getattr(layer, "w13_bias", None),
+            getattr(layer, "w2_bias", None),
             layer.w13_scales,
             layer.w2_scales,
             router_logits,

@@ -4,13 +4,17 @@
 import importlib
 from typing import TYPE_CHECKING, Callable
 
+# yapf: disable
 import vllm.envs as envs
-from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.kv_transfer.kv_connector.base import (
+    KVConnectorBase, KVConnectorBaseType)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.logger import init_logger
 
+# yapf: enable
+
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import KVTransferConfig, VllmConfig
 
 logger = init_logger(__name__)
 
@@ -42,17 +46,7 @@ class KVConnectorFactory:
                              f"but found {envs.VLLM_USE_V1=}")
 
         kv_transfer_config = config.kv_transfer_config
-        connector_name = kv_transfer_config.kv_connector
-        if connector_name in cls._registry:
-            connector_cls = cls._registry[connector_name]()
-        else:
-            connector_module_path = kv_transfer_config.kv_connector_module_path
-            if connector_module_path is None:
-                raise ValueError(
-                    f"Unsupported connector type: {connector_name}")
-            connector_module = importlib.import_module(connector_module_path)
-            connector_cls = getattr(connector_module, connector_name)
-        assert issubclass(connector_cls, KVConnectorBase)
+        connector_cls = cls.get_connector_class(kv_transfer_config)
         logger.info("Creating v1 connector with name: %s and engine_id: %s",
                     connector_cls.__name__, kv_transfer_config.engine_id)
         # NOTE(Kuntai): v1 connector is explicitly separated into two roles.
@@ -64,6 +58,23 @@ class KVConnectorFactory:
         # - Should only be used inside the forward context & attention layer
         # We build separately to enforce strict separation
         return connector_cls(config, role)
+
+    @classmethod
+    def get_connector_class(
+            cls, kv_transfer_config: "KVTransferConfig"
+    ) -> type[KVConnectorBaseType]:
+        """Get the connector class by name."""
+        connector_name = kv_transfer_config.kv_connector
+        if connector_name in cls._registry:
+            connector_cls = cls._registry[connector_name]()
+        else:
+            connector_module_path = kv_transfer_config.kv_connector_module_path
+            if connector_module_path is None:
+                raise ValueError(
+                    f"Unsupported connector type: {connector_name}")
+            connector_module = importlib.import_module(connector_module_path)
+            connector_cls = getattr(connector_module, connector_name)
+        return connector_cls
 
 
 # Register various connectors here.

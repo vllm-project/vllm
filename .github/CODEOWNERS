@@ -9,7 +9,7 @@
 /vllm/worker/worker_base.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
 /vllm/worker/worker.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
 /vllm/model_executor/layers/sampler.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
-/vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth
+/vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256
 /vllm/multimodal @DarkLight1337 @ywang96
 /vllm/vllm_flash_attn @LucasWilkinson
 /vllm/lora @jeejeelee
@@ -20,7 +20,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
-/vllm/config.py @simon-mo @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor
+/vllm/config @simon-mo @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg
 
 # vLLM V1
 /vllm/v1 @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat
@@ -34,16 +34,15 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
 /tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @simon-mo @aarnphm
-/tests/kernels @tlrmchlsmth @WoosukKwon
+/tests/kernels @tlrmchlsmth @WoosukKwon @yewentao256
 /tests/models @DarkLight1337 @ywang96
-/tests/multi_step @alexm-redhat @comaniac
 /tests/multimodal @DarkLight1337 @ywang96
 /tests/prefix_caching @comaniac @KuntaiDu
-/tests/quantization @mgoin @robertgshaw2-redhat
+/tests/quantization @mgoin @robertgshaw2-redhat @yewentao256
 /tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/v1/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
 /tests/v1/structured_output @mgoin @russellb @aarnphm
-/tests/weight_loading @mgoin @youkaichao
+/tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
 
 # Docs

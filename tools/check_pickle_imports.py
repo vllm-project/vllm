@@ -32,7 +32,7 @@ ALLOWED_FILES = set([
     'vllm/multimodal/hasher.py',
     'vllm/transformers_utils/config.py',
     'vllm/model_executor/models/registry.py',
-    'tests/test_utils.py',
+    'tests/utils_/test_utils.py',
     'tests/tokenization/test_cached_tokenizer.py',
     'vllm/distributed/utils.py',
     'vllm/distributed/parallel_state.py',

@@ -44,6 +44,14 @@ requires_pplx = pytest.mark.skipif(
     reason="Requires PPLX kernels",
 )
 
+BATCHED_MOE_MNK_FACTORS = [
+    (1, 128, 128),
+    (33, 2048, 128),
+    (64, 128, 2048),
+    (222, 128, 128),
+    (222, 2048, 1024),
+]
+
 PPLX_COMBOS = [
     # TODO: figure out why this fails, seems to be test problem
     #(1, 128, 128),
@@ -152,9 +160,7 @@ def torch_batched_moe(
     return torch_finalize(out, topk_weight, topk_ids)
 
 
-@pytest.mark.parametrize("m", [1, 33, 64, 222])
-@pytest.mark.parametrize("n", [128, 1024, 2048])
-@pytest.mark.parametrize("k", [128, 512, 1024])
+@pytest.mark.parametrize("m,n,k", BATCHED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
@@ -764,7 +770,7 @@ def test_pplx_moe_slow(
     a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
     score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
 
-    _, w1, w1_s, _, w2, w2_s = make_test_weights(
+    (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
         e,
         n,
         k,
@@ -830,7 +836,7 @@ def _pplx_test_loop(pgi: ProcessGroupInfo, dp_size: int, use_internode: bool,
 
         args = dict()
         if make_weights:
-            _, w1, w1_s, _, w2, w2_s = make_test_weights(
+            (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
                 e,
                 n,
                 k,

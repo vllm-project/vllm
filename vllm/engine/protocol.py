@@ -3,7 +3,7 @@
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, Mapping, Optional
+from typing import AsyncGenerator, Iterable, Mapping, Optional, Union
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import DecodingConfig, ModelConfig, VllmConfig
@@ -229,11 +229,12 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def abort(self, request_id: str) -> None:
+    async def abort(self, request_id: Union[str, Iterable[str]]) -> None:
         """Abort a request.
 
         Args:
-            request_id: The unique id of the request.
+            request_id: The unique id of the request,
+                        or an iterable of such ids.
         """
         ...
 

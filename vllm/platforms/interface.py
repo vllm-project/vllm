@@ -7,7 +7,7 @@ import random
 import sys
 from datetime import timedelta
 from platform import uname
-from typing import TYPE_CHECKING, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import numpy as np
 import torch
@@ -137,6 +137,8 @@ class Platform:
 
     additional_env_vars: list[str] = []
 
+    _global_graph_pool: Optional[Any] = None
+
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         """Returns the supported dtypes for the current platform."""
@@ -196,8 +198,8 @@ class Platform:
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+                             block_size: int, use_v1: bool, use_mla: bool,
+                             has_sink: bool) -> str:
         """Get the attention backend class of a device."""
         return ""
 
@@ -522,6 +524,15 @@ class Platform:
             " attribute.", self.device_type, key)
             return None
 
+    def get_global_graph_pool(self) -> Any:
+        """
+        Return the global graph pool for the this platform.
+        """
+        cls = self.__class__
+        if cls._global_graph_pool is None:
+            cls._global_graph_pool = self.graph_pool_handle()
+        return cls._global_graph_pool
+
     @classmethod
     def get_cu_count(cls, device_id: int = 0) -> int:
         """
@@ -530,11 +541,11 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
-    def get_piecewise_backend_cls(cls) -> str:
+    def get_static_graph_wrapper_cls(cls) -> str:
         """
-        Get piecewise backend class for piecewise graph.
+        Get static graph wrapper class for static graph.
         """
-        return "vllm.compilation.base_piecewise_backend.AbstractPiecewiseBackend"  # noqa
+        return "vllm.compilation.base_static_graph.AbstractStaticGraphWrapper"
 
     @classmethod
     def stateless_init_device_torch_dist_pg(

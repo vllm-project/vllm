@@ -224,10 +224,14 @@ class Llama4Attention(nn.Module):
 
         if self.rotary_emb is not None:
             q, k = self.rotary_emb(positions, q, k)
+
         if self.qk_norm is not None:
-            q = q.reshape(-1, self.num_heads, self.head_dim)
+            # Normalization is applied on the head_dim dimension. The rest of
+            # the dimensions are collapsed into a single dimension to support
+            # custom rms_norm cuda kernel.
+            q = q.reshape(-1, self.head_dim)
             q = self.qk_norm(q.float()).reshape(-1, self.q_size).to(q.dtype)
-            k = k.reshape(-1, self.num_kv_heads, self.head_dim)
+            k = k.reshape(-1, self.head_dim)
             k = self.qk_norm(k.float()).reshape(-1, self.kv_size).to(k.dtype)
 
         # We are applying temperature tuning (https://arxiv.org/abs/2501.19399)
