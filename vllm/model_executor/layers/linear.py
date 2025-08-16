@@ -288,6 +288,7 @@ class ReplicatedLinear(LinearBase):
         prefix: The name of the layer in the state dict, including all parents
                         (e.g. model.layers.0.qkv_proj)
         return_bias: If true, return bias together with outputs in forward pass.
+        disable_tp: Take no effect for replicated linear layers.
     """
 
     def __init__(
@@ -460,7 +461,9 @@ class ColumnParallelLinear(LinearBase):
         output_sizes: list of output sizes packed into one output, like for QKV
                        the list would be size 3.
         prefix: The name of the layer in the state dict, including all parents
-                        (e.g. model.layers.0.qkv_proj) 
+                        (e.g. model.layers.0.qkv_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
+        disable_tp: If true, weights matrix won't be sharded through tp rank.
     """
 
     def __init__(
@@ -626,6 +629,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         prefix: The name of the layer in the state dict, including all parents
                         (e.g. model.layers.0.qkv_proj)
         return_bias: If true, return bias together with outputs in forward pass.
+        disable_tp: If true, all weights matrix won't be sharded, this layer
+                    will be treated as a "Replicated" MergedLinear.
     """
 
     def __init__(
@@ -910,6 +915,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         prefix: The name of the layer in the state dict, including all parents
                         (e.g. model.layers.0.qkv_proj)
         return_bias: If true, return bias together with outputs in forward pass.
+        disable_tp: If true, weights matrix won't be sharded through tp rank.
     """
 
     def __init__(
@@ -1265,6 +1271,7 @@ class RowParallelLinear(LinearBase):
         prefix: The name of the layer in the state dict, including all parents
                         (e.g. model.layers.0.down_proj)
         return_bias: If true, return bias together with outputs in forward pass.
+        disable_tp: If true, weights matrix won't be sharded through tp rank.
     """
 
     def __init__(

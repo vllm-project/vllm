@@ -669,35 +669,21 @@ class Step3VisionAttention(nn.Module):
 
         self.q_size = self.num_heads * self.head_dim
 
-        if use_data_parallel:
-            self.qkv_proj = ReplicatedLinear(
-                self.embed_dim,
-                3 * self.q_size,
-                bias=True,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-            self.out_proj = ReplicatedLinear(
-                self.total_num_heads * self.head_dim,
-                self.embed_dim,
-                bias=True,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-        else:
-            self.qkv_proj = QKVParallelLinear(
-                self.embed_dim,
-                self.head_dim,
-                self.total_num_heads,
-                bias=True,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-            self.out_proj = RowParallelLinear(self.embed_dim,
-                                              self.embed_dim,
-                                              bias=True,
-                                              quant_config=quant_config,
-                                              prefix=prefix)
+        self.qkv_proj = QKVParallelLinear(
+            self.embed_dim,
+            self.head_dim,
+            self.total_num_heads,
+            bias=True,
+            quant_config=quant_config,
+            prefix=prefix,
+            disable_tp=use_data_parallel,
+        )
+        self.out_proj = RowParallelLinear(self.embed_dim,
+                                          self.embed_dim,
+                                          bias=True,
+                                          quant_config=quant_config,
+                                          prefix=prefix,
+                                          disable_tp=use_data_parallel)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads,
