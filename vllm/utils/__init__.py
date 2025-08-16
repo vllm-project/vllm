@@ -173,6 +173,7 @@ CYAN = '\033[1;36m'
 RESET = '\033[0;0m'
 
 STR_DTYPE_TO_TORCH_DTYPE = {
+    "float32": torch.float32,
     "half": torch.half,
     "bfloat16": torch.bfloat16,
     "float": torch.float,
@@ -709,8 +710,28 @@ class AsyncMicrobatchTokenizer:
 
 
 def cancel_task_threadsafe(task: Task):
-    if task and not task.done() and not (loop := task.get_loop()).is_closed():
-        loop.call_soon_threadsafe(task.cancel)
+    if task and not task.done():
+        run_in_loop(task.get_loop(), task.cancel)
+
+
+def close_sockets(sockets: Sequence[Union[zmq.Socket, zmq.asyncio.Socket]]):
+    for sock in sockets:
+        if sock is not None:
+            sock.close(linger=0)
+
+
+def run_in_loop(loop: AbstractEventLoop, function: Callable, *args):
+    if in_loop(loop):
+        function(*args)
+    elif not loop.is_closed():
+        loop.call_soon_threadsafe(function, *args)
+
+
+def in_loop(event_loop: AbstractEventLoop) -> bool:
+    try:
+        return asyncio.get_running_loop() == event_loop
+    except RuntimeError:
+        return False
 
 
 def make_async(
@@ -1294,6 +1315,11 @@ def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
     )
 
 
+def as_list(maybe_list: Iterable[T]) -> list[T]:
+    """Convert iterable to list, unless it's already a list."""
+    return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
+
+
 # `collections` helpers
 def is_list_of(
     value: object,
@@ -1619,15 +1645,19 @@ def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
     return weak_bound
 
 
-# From: https://stackoverflow.com/a/4104188/2749989
 def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
-        if not wrapper.has_run:  # type: ignore[attr-defined]
-            wrapper.has_run = True  # type: ignore[attr-defined]
-            return f(*args, **kwargs)
+        if wrapper.has_run:  # type: ignore[attr-defined]
+            return
+
+        with wrapper.lock:  # type: ignore[attr-defined]
+            if not wrapper.has_run:  # type: ignore[attr-defined]
+                wrapper.has_run = True  # type: ignore[attr-defined]
+                return f(*args, **kwargs)
 
     wrapper.has_run = False  # type: ignore[attr-defined]
+    wrapper.lock = threading.Lock()  # type: ignore[attr-defined]
     return wrapper
 
 
@@ -3220,6 +3250,24 @@ def sha256_cbor_64bit(input) -> int:
                                byteorder="big")
 
     return full_hash & ((1 << 64) - 1)
+
+
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable:
+    """Get a hash function by name, or raise an error if
+    the function is not found.
+    Args:
+        hash_fn_name: Name of the hash function.
+    Returns:
+        A hash function.
+    """
+    if hash_fn_name == "sha256":
+        return sha256
+    if hash_fn_name == "sha256_cbor_64bit":
+        return sha256_cbor_64bit
+    if hash_fn_name == "builtin":
+        return hash
+
+    raise ValueError(f"Unsupported hash function: {hash_fn_name}")
 
 
 def is_torch_equal_or_newer(target: str) -> bool:
