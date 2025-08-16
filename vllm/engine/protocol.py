@@ -78,6 +78,16 @@ class EngineClient(ABC):
         tokenizer_group = preprocessor.get_tokenizer_group()
         tokenizer = await tokenizer_group.get_lora_tokenizer_async()
 
+        # Load stop tokens
+        stop_token_ids = [tokenizer.eos_token_id]
+        if params.stop_token_ids:
+            stop_token_ids.extend(params.stop_token_ids)
+
+        stop = None
+        if params.stop:
+            stop = [params.stop] if isinstance(params.stop,
+                                               str) else params.stop
+
         if is_explicit_encoder_decoder_prompt(prompt):
             raise NotImplementedError
         else:
@@ -153,8 +163,10 @@ class EngineClient(ABC):
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
                     for token_id, logprob_obj in logprobs.items():
-                        if token_id == tokenizer.eos_token_id and \
-                            not ignore_eos:
+                        if (token_id in stop_token_ids) or \
+                            (stop is not None and
+                             tokenizer.decode([token_id]) in stop) \
+                                and not ignore_eos:
                             completed.append(
                                 BeamSearchSequence(
                                     tokens=current_beam.tokens +
@@ -165,7 +177,7 @@ class EngineClient(ABC):
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
                                     finish_reason="stop",
-                                    stop_reason=tokenizer.eos_token_id))
+                                    stop_reason=token_id))
                         else:
                             new_beams.append(
                                 BeamSearchSequence(
