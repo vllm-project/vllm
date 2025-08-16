@@ -3,9 +3,10 @@
 
 import enum
 import time
-from typing import TYPE_CHECKING, Any, Optional, Union
+from functools import partial
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_list_of
@@ -16,6 +17,7 @@ from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
+    from vllm.v1.core.kv_cache_utils import BlockHash
 
 
 class Request:
@@ -24,7 +26,7 @@ class Request:
         self,
         request_id: str,
         prompt_token_ids: list[int],
-        multi_modal_inputs: Optional[list[MultiModalKwargs]],
+        multi_modal_kwargs: Optional[list[MultiModalKwargsItem]],
         multi_modal_hashes: Optional[list[str]],
         multi_modal_placeholders: Optional[list[PlaceholderRange]],
         sampling_params: Optional[SamplingParams],
@@ -36,6 +38,8 @@ class Request:
         structured_output_request: Optional["StructuredOutputRequest"] = None,
         cache_salt: Optional[str] = None,
         priority: int = 0,
+        block_hasher: Optional[Callable[["Request"],
+                                        list["BlockHash"]]] = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -84,15 +88,15 @@ class Request:
 
         # Multi-modal related
         self.mm_positions = multi_modal_placeholders or []
-        self.mm_inputs = multi_modal_inputs or []
+        self.mm_kwargs = multi_modal_kwargs or []
         self.mm_hashes: list[str] = multi_modal_hashes or []
-        self.num_encoder_inputs = len(self.mm_inputs)
+        self.num_encoder_inputs = len(self.mm_kwargs)
         self.has_encoder_inputs = self.num_encoder_inputs > 0
 
         # Sanity check
-        assert len(self.mm_inputs) == len(self.mm_positions)
+        assert len(self.mm_kwargs) == len(self.mm_positions)
         if self.mm_hashes:
-            assert len(self.mm_inputs) == len(self.mm_hashes)
+            assert len(self.mm_kwargs) == len(self.mm_hashes)
 
         # Read-only views
         # Prevent directly appending to these lists since
@@ -108,18 +112,30 @@ class Request:
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
 
+        self.block_hashes: list[BlockHash] = []
+        self.get_hash_new_full_blocks: Optional[Callable[
+            [], list[BlockHash]]] = None
+        if block_hasher is not None:
+            self.get_hash_new_full_blocks = partial(block_hasher, self)
+            self.block_hashes = self.get_hash_new_full_blocks()
+
     @classmethod
-    def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
-        if request.mm_inputs is not None:
-            assert isinstance(request.mm_inputs, list)
-            assert is_list_of(request.mm_inputs, MultiModalKwargs), (
-                "mm_inputs was not updated in EngineCore.add_request")
+    def from_engine_core_request(
+        cls, request: EngineCoreRequest,
+        block_hasher: Optional[Callable[["Request"], list["BlockHash"]]]
+    ) -> "Request":
+        if request.mm_kwargs is not None:
+            mm_kwargs_lst = list(request.mm_kwargs)
+            assert is_list_of(mm_kwargs_lst, MultiModalKwargsItem), (
+                "mm_kwargs was not updated in EngineCore.add_request")
+        else:
+            mm_kwargs_lst = None
 
         return cls(
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
-            multi_modal_inputs=request.mm_inputs,
+            multi_modal_kwargs=mm_kwargs_lst,
             multi_modal_hashes=request.mm_hashes,
             multi_modal_placeholders=request.mm_placeholders,
             sampling_params=request.sampling_params,
@@ -132,6 +148,7 @@ class Request:
                     if request.sampling_params else None,
             cache_salt=request.cache_salt,
             priority=request.priority,
+            block_hasher=block_hasher,
         )
 
     def append_output_token_ids(
@@ -144,6 +161,9 @@ class Request:
         else:
             self._output_token_ids.extend(token_ids)
             self._all_token_ids.extend(token_ids)
+
+        if self.get_hash_new_full_blocks is not None:
+            self.block_hashes.extend(self.get_hash_new_full_blocks())
 
     @property
     def is_output_corrupted(self) -> bool:
