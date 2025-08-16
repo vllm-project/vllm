@@ -28,6 +28,8 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
                                ChatCompletionToolMessageParam)
 from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
+from openai.types.chat.chat_completion_message_tool_call_param import (
+    Function as FunctionCallTool)
 from openai.types.responses import ResponseInputImageParam
 from openai_harmony import Message as OpenAIHarmonyMessage
 from PIL import Image
@@ -1347,3 +1349,29 @@ def apply_mistral_chat_template(
 
 def random_tool_call_id() -> str:
     return f"chatcmpl-tool-{random_uuid()}"
+
+
+def parse_chat_tool_call(item: dict[str, Any]) -> ChatCompletionMessageParam:
+    if item.get("type") == "function_call":
+        # Append the function call as a tool call.
+        return ChatCompletionAssistantMessageParam(
+                role="assistant",
+                tool_calls=[
+                    ChatCompletionMessageToolCallParam(
+                        id=item.get("call_id"),
+                        function=FunctionCallTool(
+                            name=item.get("name"),
+                            arguments=item.get("arguments", "{}"),
+                        ),
+                        type="function",
+                    )
+                ],
+            )
+    elif item.get("type") == "function_call_output":
+        # Append the function call output as a tool message.
+        return ChatCompletionToolMessageParam(
+                role="tool",
+                content=item.get("output", ""),
+                tool_call_id=item.get("call_id"),
+            )
+    return item  # type: ignore
