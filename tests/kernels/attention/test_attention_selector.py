@@ -28,7 +28,7 @@ DEVICE_MLA_BACKENDS = {
 }
 
 DEVICE_REGULAR_ATTN_BACKENDS = {
-    "cuda": ["XFORMERS", "FLASHINFER"],
+    "cuda": ["FLASHINFER"],
     "hip": ["ROCM_FLASH"],
     "cpu": ["TORCH_SDPA"],
 }
@@ -217,10 +217,14 @@ def test_fp32_fallback(
         elif device == "cuda":
             with patch("vllm.attention.selector.current_platform",
                        CudaPlatform()):
-                backend = get_attn_backend(16, torch.float32, torch.float32,
-                                           16, False)
-            assert (backend.get_name() == "FLEX_ATTENTION"
-                    if use_v1 else "XFORMERS")
+                if use_v1:
+                    backend = get_attn_backend(16, torch.float32, torch.float32,
+                                               16, False)
+                    assert backend.get_name() == "FLEX_ATTENTION"
+                else:
+                    with pytest.raises(ValueError):
+                        get_attn_backend(16, torch.float32, torch.float32,
+                                         16, False)
 
 
 def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
