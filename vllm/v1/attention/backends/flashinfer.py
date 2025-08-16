@@ -677,10 +677,6 @@ class FlashInferImpl(AttentionImpl):
                 "fused output quantization is not yet supported"
                 " for FlashInferImpl")
 
-        # Cast sinks to float32 if needed (FlashInfer requirement)
-        if self.sinks is not None and self.sinks.dtype != torch.float32:
-            self.sinks = self.sinks.to(torch.float32)
-
         if attn_metadata is None:
             # Profiling run.
             return output
