@@ -31,10 +31,6 @@ def models_list(*, all: bool = True, keywords: Optional[list[str]] = None):
     ]
 
     if all:
-        if is_quant_method_supported("aqlm"):
-            TEST_MODELS.append(("ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf", {
-                "quantization": "aqlm"
-            }))
 
         # TODO: figure out why this fails.
         if False and is_quant_method_supported("gguf"):  # noqa: SIM223

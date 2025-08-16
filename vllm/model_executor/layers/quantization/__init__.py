@@ -7,7 +7,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
 QuantizationMethods = Literal[
-    "aqlm",
     "awq",
     "deepspeedfp",
     "tpu_int8",
@@ -88,7 +87,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     # lazy import to avoid triggering `torch.compile` too early
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
-    from .aqlm import AQLMConfig
     from .auto_round import AutoRoundConfig
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
@@ -120,7 +118,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .tpu_int8 import Int8TpuConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
-        "aqlm": AQLMConfig,
         "awq": AWQConfig,
         "deepspeedfp": DeepSpeedFPConfig,
         "tpu_int8": Int8TpuConfig,
