@@ -94,10 +94,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         num_experts, max_tokens, hidden_dim = x.size()
 
-        #assert torch.isnan(x).sum() == 0
-        assert quant_config.a1_scale is None or torch.isnan(
-            quant_config.a1_scale).sum() == 0
-
         # TODO (varun): Optimization - Use a batched version of quant
         x = x.view((-1, hidden_dim))
         x, x_scales = moe_kernel_quantize_input(
@@ -124,9 +120,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
                Optional[torch.Tensor]]:
 
-        #assert (quant_config.quant_dtype is None or quant_config.is_per_tensor
-        #        or quant_config.is_block_quantized), f"XXXXXXX {quant_config}"
-
         hidden_size = a1.size(1)
         assert hidden_size in self.SUPPORTED_HIDDEN_SIZES, \
             (f"Hidden Size {hidden_size} not in supported list of hidden sizes"
@@ -150,15 +143,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        assert torch.isnan(a1).sum() == 0
-
-        # print(f"FP8 dispatch= {self.use_fp8_dispatch}")
-        # print(f"TPR {self.max_tokens_per_rank}")
-        # print(f"NE {num_experts}")
-        # print(f"A1 {a1.shape}")
-        # print(f"AND {self.num_dispatchers_}")
-        # print(f"TOPK {topk_ids.shape}")
-
         # Dispatch
         expert_x, expert_num_tokens, self.handle, event, hook = \
                 self.buffer.low_latency_dispatch(a1,
@@ -169,21 +153,11 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                 async_finish=False,
                                                 return_recv_hook=False)
 
-        if isinstance(expert_x, tuple):
-            num = torch.isnan(expert_x[0]).sum()
-        else:
-            num = torch.isnan(expert_x).sum()
-        #assert num == 0, f"nans= {num}, numel={expert_x[0].numel()}"
-        if num != 0:
-            print(f"NANS= {num}, numel={expert_x[0].numel()}")
-
         expert_x, expert_x_scale = self._do_quant(expert_x, a1.dtype,
                                                   quant_config)
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None)
-
-        #assert torch.isnan(expert_x).sum() == 0
 
         return (expert_x, expert_x_scale, expert_tokens_meta, None, None)
 
@@ -196,8 +170,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        #print(f"FINALIZE {self.handle}")
-
         assert isinstance(
             weight_and_reduce_impl, TopKWeightAndReduceDelegate
         ), ("Weight application and reduction happens in the combine kernel.")
@@ -218,9 +190,3 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             zero_copy=False,
             return_recv_hook=False,
             out=output)
-
-        # self.buffer.clean_low_latency_buffer(
-        #     num_max_dispatch_tokens_per_rank=self.max_tokens_per_rank,
-        #     hidden=fused_expert_output.shape[-1],
-        #     num_experts=fused_expert_output.shape[0],
-        # )
