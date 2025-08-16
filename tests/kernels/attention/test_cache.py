@@ -117,6 +117,40 @@ def test_copy_blocks(
                                                cloned_value_caches):
         torch.testing.assert_close(value_cache, cloned_value_cache)
 
+    # Test copy_blocks_between_layers
+    num_source_layers = num_layers // 4
+    source_layers = random.sample(range(num_layers), num_source_layers)
+    target_layers = random.sample(range(num_layers), num_source_layers)
+
+    # Get source and target key/value caches using list comprehension
+    src_key_caches = [key_caches[i] for i in source_layers]
+    src_value_caches = [value_caches[i] for i in source_layers]
+    dst_key_caches = [key_caches[i] for i in target_layers]
+    dst_value_caches = [value_caches[i] for i in target_layers]
+
+    opcheck(torch.ops._C_cache_ops.copy_blocks_between_layers,
+            (src_key_caches, src_value_caches, dst_key_caches,
+             dst_value_caches, block_mapping_tensor),
+            test_utils=DEFAULT_OPCHECK_TEST_UTILS,
+            cond=(head_size == HEAD_SIZES[0]))
+    ops.copy_blocks_between_layers(src_key_caches, src_value_caches,
+                                   dst_key_caches, dst_value_caches,
+                                   block_mapping_tensor)
+    # Run the reference implementation for copy_blocks_between_layers
+    for src, dst in block_mapping:
+        for src_layer, dst_layer in zip(source_layers, target_layers):
+            cloned_key_caches[dst_layer][dst].copy_(
+                cloned_key_caches[src_layer][src])
+            cloned_value_caches[dst_layer][dst].copy_(
+                cloned_value_caches[src_layer][src])
+
+    # Compare the results for copy_blocks_between_layers
+    for src_layer, dst_layer in zip(source_layers, target_layers):
+        torch.testing.assert_close(key_caches[dst_layer],
+                                   cloned_key_caches[dst_layer])
+        torch.testing.assert_close(value_caches[dst_layer],
+                                   cloned_value_caches[dst_layer])
+
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
