@@ -282,8 +282,8 @@ class RTNMoEMethod(FusedMoEMethodBase):
         return config_builder(
             w1_scale=layer.w13_scale,
             w2_scale=layer.w2_scale,
-            a1_scale=None,
-            a2_scale=None,
+            w1_zp=None,
+            w2_zp=None,
             block_shape=[0, group_size],
         )
 
