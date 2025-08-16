@@ -871,6 +871,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
             "Marlin and ROCm AITER are not supported with all2all yet.")
 
+        assert self.moe_quant_config is not None
+
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
             max_num_tokens_per_rank = (
@@ -884,9 +886,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             return BatchedTritonOrDeepGemmExperts(
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
-                use_fp8_w8a8=True,
-                block_shape=self.quant_config.weight_block_size,
-                per_act_token_quant=False,
+                quant_config=self.moe_quant_config,
                 allow_deep_gemm=self.allow_deep_gemm,
             )
         else:
@@ -895,8 +895,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 self.__class__.__name__, self.quant_config.weight_block_size,
                 False)
             return TritonOrDeepGemmExperts(
-                use_fp8_w8a8=True,
-                block_shape=self.quant_config.weight_block_size,
+                quant_config=self.moe_quant_config,
                 allow_deep_gemm=self.allow_deep_gemm,
             )
 

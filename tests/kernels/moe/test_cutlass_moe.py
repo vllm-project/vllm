@@ -184,8 +184,8 @@ def run_with_expert_maps(num_experts: int, num_local_experts: int,
                 cutlass_moe_kwargs[k] = t[s:e]
 
             new_quant_config = copy.deepcopy(quant_config)
-            new_quant_config.w1.scale = quant_config.w1_scale[s:e]
-            new_quant_config.w2.scale = quant_config.w2_scale[s:e]
+            new_quant_config._w1.scale = quant_config.w1_scale[s:e]
+            new_quant_config._w2.scale = quant_config.w2_scale[s:e]
 
             cutlass_moe_kwargs["quant_config"] = new_quant_config
 
