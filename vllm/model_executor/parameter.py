@@ -7,7 +7,8 @@ from typing import Callable, Optional, Union
 import torch
 from torch.nn import Parameter
 
-from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 from vllm.model_executor.utils import _make_synced_weight_loader
 
@@ -19,6 +20,10 @@ __all__ = [
 
 logger = init_logger(__name__)
 
+PartitionId = Union[int, str]
+WeightLoader = Callable[
+    ["BasevLLMParameter", torch.Tensor, Optional[PartitionId]], None]
+
 
 class BasevLLMParameter(Parameter):
     """
@@ -27,11 +32,13 @@ class BasevLLMParameter(Parameter):
     into the parameter when the provided weight loader is called.
     """
 
-    def __new__(cls, data: torch.Tensor, **kwargs):
+    weight_loader: WeightLoader
+
+    def __new__(cls, data: Optional[torch.Tensor], **kwargs):
 
         return super().__new__(cls, data=data, requires_grad=False)
 
-    def __init__(self, data: torch.Tensor, weight_loader: Callable):
+    def __init__(self, data: torch.Tensor, weight_loader: WeightLoader):
         """
         Initialize the BasevLLMParameter
 
@@ -81,6 +88,20 @@ class BasevLLMParameter(Parameter):
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         self._assert_and_load(loaded_weight)
 
+    def _shard_id_as_int(self, shard_id: Optional[PartitionId]) -> int:
+        if isinstance(shard_id, int):
+            return shard_id
+
+        if shard_id is None:
+            return 0
+
+        # if not int, assume shard_id for qkv
+        # map to int and return
+        mapping = {"q": 0, "k": 1, "v": 2}
+        assert isinstance(shard_id, str)
+        assert shard_id in mapping
+        return mapping[shard_id]
+
 
 class _ColumnvLLMParameter(BasevLLMParameter):
     """
@@ -113,6 +134,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
 
         shard_offset = kwargs.get("shard_offset")
         shard_size = kwargs.get("shard_size")
+        # TODO: move these to PackedColumnParameter and PackedvLLMParameter
         if isinstance(
                 self,
             (PackedColumnParameter,
@@ -137,6 +159,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         shard_id = kwargs.get("shard_id")
         num_heads = kwargs.get("num_heads")
 
+        # TODO: move these to PackedColumnParameter and PackedvLLMParameter
         if isinstance(
                 self,
             (PackedColumnParameter,
@@ -223,20 +246,6 @@ class PerTensorScaleParameter(BasevLLMParameter):
     process_weights_after_loading 
     """
 
-    def __init__(self, **kwargs):
-        self.qkv_idxs = {"q": 0, "k": 1, "v": 2}
-        super().__init__(**kwargs)
-
-    def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
-        if isinstance(shard_id, int):
-            return shard_id
-
-        # if not int, assume shard_id for qkv
-        # map to int and return
-        assert isinstance(shard_id, str)
-        assert shard_id in self.qkv_idxs
-        return self.qkv_idxs[shard_id]
-
     # For row parallel layers, no sharding needed
     # load weight into parameter as is
     def load_row_parallel_weight(self, *args, **kwargs):
@@ -257,7 +266,6 @@ class PerTensorScaleParameter(BasevLLMParameter):
         Slice the parameter data based on the shard id for 
         loading.
         """
-
         param_data = self.data
         shard_id = self._shard_id_as_int(shard_id)
 
@@ -371,6 +379,122 @@ class BlockQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
     """
 
     pass
+
+
+class PartitionedLinearWeightParameter(BasevLLMParameter):
+    """
+    Parameter for weights whose partitions (shards) must be separate tensors.
+
+    For example, when applying transforms to the "gate" and "up" partitions of
+    `MergedColumnParallelLinear`, the tranform weights must stay separate
+    tensors in order to allow for tensor memory sharing between layers.
+    """
+    partitions: dict[int, Union[ModelWeightParameter, Parameter]]
+
+    def __new__(cls, **kwargs):
+        instance = super().__new__(cls, data=None, **kwargs)
+        return instance
+
+    def __init__(self, input_dim: int = 1, output_dim: int = 0, **kwargs):
+        super().__init__(data=None, weight_loader=kwargs.get("weight_loader"))
+
+        self.partitions = {}
+        self.kwargs = {
+            "input_dim": input_dim,
+            "output_dim": output_dim,
+            "weight_loader": self._fake_weight_loader
+        }
+
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = get_tensor_model_parallel_world_size()
+
+        if self.tp_size > 1:
+            raise NotImplementedError(f"{self.__class__.__name__} does not "
+                                      "currently support tensor parallelism")
+
+    def add_partition(self, index: int, data: torch.Tensor):
+        self.partitions[index] = ModelWeightParameter(data=data, **self.kwargs)
+
+    def _weight_loader(self,
+                       param: BasevLLMParameter,
+                       loaded_weight: torch.Tensor,
+                       loaded_shard_id: Optional[int | str] = None):
+        # this is provided for backwards compatibility with weight_loader_v1
+        # this method cannot support tensor parallelism, since this method
+        # does not know if we're column parallel or row parallel, and the
+        # weight loader passed by the parent module is not reliable because
+        # it assumes that the weight is fused, separate tensors
+        key = self._shard_id_as_int(loaded_shard_id)
+        partition = self.partitions[key]
+
+        assert partition.data.shape == loaded_weight.shape
+        partition.data.copy_(loaded_weight)
+
+    def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
+        assert len(self.partitions) == 1 and 0 in self.partitions
+        partition = self.partitions[0]
+
+        ModelWeightParameter.load_column_parallel_weight(
+            partition, loaded_weight)
+
+    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+        assert len(self.partitions) == 1 and 0 in self.partitions
+        partition = self.partitions[0]
+
+        ModelWeightParameter.load_row_parallel_weight(partition, loaded_weight)
+
+    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        partition_id = kwargs.pop("shard_id")
+        partition_id = self._shard_id_as_int(partition_id)
+        partition = self.partitions[partition_id]
+
+        input_dim = self.kwargs.get("input_dim")
+        shard_size = partition.data.size(input_dim) // self.tp_size
+        shard_offset = self.tp_rank * shard_size
+
+        ModelWeightParameter.load_merged_column_weight(
+            partition,
+            loaded_weight,
+            shard_offset=shard_offset,
+            shard_size=shard_size)
+
+    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        partition_id = self._shard_id_as_int(kwargs.pop("shard_id"))
+        partition = self.partitions[partition_id]
+
+        input_dim = self.kwargs.get("input_dim")
+        shard_size = partition.data.size(input_dim) // self.tp_size
+        shard_offset = self.tp_rank * shard_size
+        shard_id = "q"  # fake first partition
+        num_heads = kwargs.get("num_heads")
+
+        ModelWeightParameter.load_qkv_weight(
+            partition,
+            loaded_weight,
+            shard_offset=shard_offset,
+            shard_size=shard_size,
+            shard_id=shard_id,
+            num_heads=num_heads,
+        )
+
+    def process_weights_after_loading(self):
+        for key in self.partitions:
+            self.partitions[key] = torch.nn.Parameter(
+                data=self.partitions[key].data, requires_grad=False)
+
+    @property
+    def data(self):
+        raise ValueError("Accessing `data` of a "
+                         "`PartitionedModelWeightParameter` is not allowed. "
+                         "Instead, use `get_partition` to get the weight of "
+                         "the particular partition you want to access")
+
+    def _fake_weight_loader(self, param: BasevLLMParameter,
+                            loaded_weight: torch.Tensor,
+                            loaded_weight_shard_id: Optional[PartitionId]):
+        raise ValueError("When loading partition weights of "
+                         f"{self.__class__.__name__}, use methods provided by "
+                         f"{self.__class__.__name__}, not partition loader")
 
 
 def permute_param_layout_(param: BasevLLMParameter, input_dim: int,
