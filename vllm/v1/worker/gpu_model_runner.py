@@ -500,17 +500,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 second_per_grid_ts = []
                 audio_feature_lengths = []
                 use_audio_in_video = False
-                for item in self.requests[req_id].mm_kwargs:
-                    if item.get("image_grid_thw") is not None:
-                        image_grid_thw.append(item["image_grid_thw"].tolist())
-                    if item.get("video_grid_thw") is not None:
-                        video_grid_thw.append(item["video_grid_thw"].tolist())
-                    if item.get("second_per_grid_ts") is not None:
-                        second_per_grid_ts.append(item["second_per_grid_ts"])
-                    if item.get("audio_feature_lengths") is not None:
+                for mm_item in self.requests[req_id].mm_kwargs:
+                    mm_input = mm_item.get_data()
+                    if mm_input.get("image_grid_thw") is not None:
+                        image_grid_thw.append(
+                            mm_input["image_grid_thw"].tolist())
+                    if mm_input.get("video_grid_thw") is not None:
+                        video_grid_thw.append(
+                            mm_input["video_grid_thw"].tolist())
+                    if mm_input.get("second_per_grid_ts") is not None:
+                        second_per_grid_ts.append(
+                            mm_input["second_per_grid_ts"])
+                    if mm_input.get("audio_feature_lengths") is not None:
                         audio_feature_lengths.append(
-                            item["audio_feature_lengths"])
-                    if item.get("use_audio_in_video") is True:
+                            mm_input["audio_feature_lengths"])
+                    if mm_input.get("use_audio_in_video") is True:
                         use_audio_in_video = True
 
                 hf_config = self.model_config.hf_config
