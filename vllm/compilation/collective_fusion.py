@@ -396,10 +396,10 @@ if flashinfer_comm is not None:
     # Max size of the input tensor per world size
     # to use flashinfer fused allreduce
     _FI_MAX_SIZES = {
-        2: 64 * MiB,  # 64MB
-        4: MiB,  # 1MB
-        6: MiB // 2,  # 512KB
-        8: MiB // 2,  # 512KB
+        2: 8 * MiB,  # 8MB
+        4: 3 * MiB,  # 3MB
+        6: 2 * MiB,  # 2MB
+        8: 2 * MiB,  # 2MB
     }
     # opt for a more conservative default value
     # when world size is not in _FI_MAX_SIZES
@@ -417,7 +417,6 @@ if flashinfer_comm is not None:
         fp32_acc: bool,
         max_token_num: int,
         pattern_code: int,
-        fuse_rms_quant: bool,
         norm_out: Optional[torch.Tensor] = None,
         quant_out: Optional[torch.Tensor] = None,
         scale_out: Optional[torch.Tensor] = None,
@@ -470,8 +469,7 @@ if flashinfer_comm is not None:
             )
         else:
             allreduce_out = tensor_model_parallel_all_reduce(allreduce_in)
-            if (scale_factor is not None and scale_out is None
-                    and fuse_rms_quant):
+            if (scale_factor is not None and scale_out is None):
                 # Do fused rms norm static fp8 quant fused op
                 if norm_out is None:
                     torch.ops._C.fused_add_rms_norm_static_fp8_quant(
@@ -490,12 +488,9 @@ if flashinfer_comm is not None:
                     torch.ops._C.rms_norm(norm_out, allreduce_out, rms_gamma,
                                           rms_eps)
                 if scale_factor is not None:
-                    if scale_out is not None:
-                        torch.ops._C.scaled_fp4_quant(quant_out, norm_out,
-                                                      scale_out, scale_factor)
-                    else:
-                        torch.ops._C.static_scaled_fp8_quant(
-                            quant_out, norm_out, scale_factor)
+                    assert scale_out is not None
+                    torch.ops._C.scaled_fp4_quant(quant_out, norm_out,
+                                                  scale_out, scale_factor)
             if scale_factor is None or norm_out is not None:
                 # we need to return allreduce outpput
                 # in cases of non quant fused AR + RMS norm
@@ -514,7 +509,6 @@ if flashinfer_comm is not None:
             fp32_acc: bool,
             max_token_num: int,
             pattern_code: int,
-            fuse_rms_quant: bool,
             norm_out: Optional[torch.Tensor] = None,
             quant_out: Optional[torch.Tensor] = None,
             scale_out: Optional[torch.Tensor] = None,
@@ -547,7 +541,6 @@ class FlashInferFusedAllReduceParams:
         world_size: int,
         use_fp32_lamport: bool = False,
         max_token_num: int = 1024,
-        fuse_rms_quant: bool = False,
     ):
         self.rank = rank
         self.world_size = world_size
@@ -555,9 +548,7 @@ class FlashInferFusedAllReduceParams:
         self.trigger_completion_at_end = True
         self.launch_with_pdl = True
         self.fp32_acc = True
-        self.use_oneshot = False
         self.max_token_num = max_token_num
-        self.fuse_rms_quant = fuse_rms_quant
 
     def get_trtllm_fused_allreduce_kwargs(self):
         return {
@@ -567,7 +558,6 @@ class FlashInferFusedAllReduceParams:
             "trigger_completion_at_end": self.trigger_completion_at_end,
             "fp32_acc": self.fp32_acc,
             "max_token_num": self.max_token_num,
-            "fuse_rms_quant": self.fuse_rms_quant,
         }
 
 
@@ -1103,10 +1093,7 @@ class AllReduceFusionPass(VllmInductorPass):
             world_size=self.tp_size,
             use_fp32_lamport=use_fp32_lamport,
             max_token_num=max_num_token,
-            # fuse rms norm static fp8 quant fused op
-            # in fallback path, when we don't use flashinfer
-            fuse_rms_quant=config.compilation_config.pass_config.enable_fusion)
-
+        )
         for epsilon in [1e-5, 1e-6]:
             AllReduceFusedRMSNormStaticQuantFP8Pattern(
                 epsilon,
