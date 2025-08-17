@@ -240,6 +240,10 @@ class EagleProposer:
         # there's a multi-layer MTP module.
         assert isinstance(attn_metadata, self.allowed_attn_types)
 
+        # The mypy errors are caused because mypy cannot infer the type of
+        # attn_metadata. We add this assert to help mypy.
+        assert isinstance(attn_metadata, FlashAttentionMetadata)
+
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
