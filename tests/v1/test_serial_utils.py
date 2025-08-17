@@ -148,7 +148,7 @@ def test_multimodal_kwargs():
 
     # check the tensor contents and layout in the main dict
     mm_data = mm.get_data()
-    decoded_data = mm.get_data()
+    decoded_data = decoded.get_data()
     assert all(nested_equal(mm_data[k], decoded_data[k]) for k in mm_data)
 
 
