@@ -7,8 +7,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.compilation.collective_fusion import AllReduceFusionPass
-from vllm.compilation.fix_functionalization import FixFunctionalizationPass
-from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import (CompilationConfig, CompilationLevel, DeviceConfig,
                          ModelConfig, PassConfig, VllmConfig)
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -21,7 +19,7 @@ from vllm.platforms import current_platform
 from vllm.utils import update_environment_variables
 
 from ..utils import has_module_attribute, multi_gpu_test
-from .backend import TestBackend
+from .backend import TestBackend, TestPassManager
 
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
@@ -213,13 +211,16 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
                                            seed=42)
 
     all_reduce_fusion_pass = AllReduceFusionPass(vllm_config)
-    noop_pass = NoOpEliminationPass(vllm_config)
-    func_pass = FixFunctionalizationPass(vllm_config)
-
-    backend = TestBackend(all_reduce_fusion_pass, noop_pass, func_pass)
 
     token_num = batch_size * seq_len
     model = test_model_cls(hidden_size, token_num)
+
+    def check(test_pass_manager: TestPassManager):
+        test_pass_manager.check_before_ops(model.ops_in_model_before(),
+                                           fully_replaced=False)
+        test_pass_manager.check_after_ops(model.ops_in_model_after())
+
+    backend = TestBackend(all_reduce_fusion_pass, check_fn=check)
 
     hidden_states = torch.randn((token_num, hidden_size), requires_grad=False)
     residual = torch.randn((token_num, hidden_size), requires_grad=False)
@@ -227,6 +228,4 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
     compiled_model = torch.compile(model, backend=backend)
     compiled_model(hidden_states, residual)
 
-    backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
-    backend.check_after_ops(model.ops_in_model_after())
     del all_reduce_fusion_pass
