@@ -3,6 +3,7 @@
 
 import enum
 import time
+from collections.abc import Sequence
 from typing import Any, Optional, Union
 
 import msgspec
@@ -47,7 +48,7 @@ class EngineCoreRequest(
 
     request_id: str
     prompt_token_ids: list[int]
-    mm_kwargs: Optional[list[MultiModalKwargsItem]]
+    mm_kwargs: Optional[Sequence[Optional[MultiModalKwargsItem]]]
     mm_hashes: Optional[list[str]]
     mm_placeholders: Optional[list[PlaceholderRange]]
     sampling_params: Optional[SamplingParams]

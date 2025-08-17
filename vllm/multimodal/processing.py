@@ -1480,7 +1480,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_missing_kwargs=mm_missing_kwargs,
         )
 
-        mm_kwargs = MultiModalKwargs.from_items([
+        mm_kwargs = MultiModalKwargs([
             item for cache_items in mm_cache_items_merged.values()
             for item in cache_items
         ])
