@@ -15,6 +15,10 @@ from vllm.utils import FlexibleArgumentParser
 
 
 def main(args: dict):
+    # get common args
+    seed = args.get("seed")
+    model_name = args.get("model")
+
     # Pop sampling arguments
     max_tokens = args.pop("max_tokens")
     temperature = args.pop("temperature")
@@ -27,7 +31,6 @@ def main(args: dict):
     max_samples = args.pop("max_samples")
     output_path = args.pop("output_path")
     config_path = args.pop("config_path")
-    seed = args.pop("seed")
     batch_size = args.pop("batch_size")
 
     # Create an LLM with remaining args
@@ -36,7 +39,6 @@ def main(args: dict):
     llm = LLM(**args)
 
     # Load tokenizer for chat template
-    model_name = args.get("model")
     print(f"Loading tokenizer from {model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
@@ -74,7 +76,7 @@ def main(args: dict):
 
     # Model info for saving
     model_info = {
-        "model": args.get("model"),
+        "model": model_name,
         "split": split,
         "subject": subject,
         "max_samples": max_samples,
@@ -143,11 +145,11 @@ def create_parser():
         conflict_handler="resolve",
     )
 
-    # Add common benchmark arguments first (with default values)
-    parser = add_common_benchmark_args(parser, framework="vllm")
-
-    # Add engine args (this will override conflicting arguments with vLLM defaults)
+    # Add engine args first (these provide base vLLM functionality)
     EngineArgs.add_cli_args(parser)
+
+    # Add common benchmark arguments (these will override conflicting vLLM defaults)
+    parser = add_common_benchmark_args(parser, framework="vllm")
 
     return parser
 

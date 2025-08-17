@@ -11,6 +11,7 @@ import json
 import os
 import random
 import re
+from collections import defaultdict
 from typing import Any, Callable
 
 import numpy as np
@@ -468,11 +469,9 @@ def run_benchmark(
 
     # Group results by subject if multiple subjects
     if subject is None:
-        subject_results: dict[str, list[dict]] = {}
+        subject_results: dict[str, list[dict]] = defaultdict(list)
         for result in results:
             subj = result.get("subject", "unknown")
-            if subj not in subject_results:
-                subject_results[subj] = []
             subject_results[subj].append(result)
 
         print("\nResults by Subject:")
@@ -533,12 +532,15 @@ def load_benchmark_dataset(
     print("Loading MMMU dataset from HuggingFace Hub...")
     print(f"Split: {split}, Subject: {subject}")
 
-    dataset = load_mmmu_dataset(subset=split, subject=subject)
+    datasets_dict = load_mmmu_dataset(subset=split, subject=subject)
 
     # Convert dataset samples to our format
     samples = []
-    for sample in dataset:
-        samples.append(process_single_sample(sample))
+    for subject, dataset in datasets_dict.items():
+        for sample in dataset:
+            sample = process_single_sample(sample)
+            sample["subject"] = subject
+            samples.append(sample)
 
     # Limit number of samples if specified
     if max_samples > 0:
@@ -585,13 +587,13 @@ def load_benchmark_config(config_path: str = "eval_config.yaml"):
     return config
 
 
-def add_common_benchmark_args(parser, framework: str = "common"):
+def add_common_benchmark_args(parser, framework: str = "hf"):
     """
     Add common benchmark arguments to a parser.
 
     Args:
         parser: ArgumentParser instance
-        framework: "hf", "vllm", or "common"
+        framework: "hf", "vllm"
     """
     defaults = BenchmarkDefaults()
 
