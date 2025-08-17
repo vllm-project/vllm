@@ -232,8 +232,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # The convention is different.
         # self.cudagraph_batch_sizes sorts in ascending order.
         # The batch sizes in the config are in descending order.
-        self.cudagraph_batch_sizes = list(
-            reversed(self.compilation_config.cudagraph_capture_sizes))
+        if self.compilation_config.cudagraph_capture_sizes and \
+                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            self.cudagraph_batch_sizes = list(
+                reversed(self.compilation_config.cudagraph_capture_sizes))
 
         # Cache the device properties.
         self._init_device_properties()
