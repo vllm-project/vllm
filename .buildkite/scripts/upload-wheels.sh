@@ -47,7 +47,9 @@ python3 .buildkite/generate_index.py --wheel "$normal_wheel"
 aws s3 cp "$wheel" "s3://vllm-wheels/$BUILDKITE_COMMIT/"
 aws s3 cp "$normal_wheel" "s3://vllm-wheels/$BUILDKITE_COMMIT/"
 
-if [[ $normal_wheel == *"cu118"* ]]; then
+if [[ "${SKIP_UPLOAD_INDEX_HTML}" == "1" ]]; then
+    echo "Skipping index files because SKIP_UPLOAD_INDEX_HTML is set"
+elif [[ $normal_wheel == *"cu118"* ]]; then
     # if $normal_wheel matches cu118, do not upload the index.html
     echo "Skipping index files for cu118 wheels"
 elif [[ $normal_wheel == *"cu126"* ]]; then
@@ -63,7 +65,9 @@ fi
 aws s3 cp "$wheel" "s3://vllm-wheels/nightly/"
 aws s3 cp "$normal_wheel" "s3://vllm-wheels/nightly/"
 
-if [[ $normal_wheel == *"cu118"* ]]; then
+if [[ "${SKIP_UPLOAD_INDEX_HTML}" == "1" ]]; then
+    echo "Skipping index files because SKIP_UPLOAD_INDEX_HTML is set"
+elif [[ $normal_wheel == *"cu118"* ]]; then
     # if $normal_wheel matches cu118, do not upload the index.html
     echo "Skipping index files for cu118 wheels"
 elif [[ $normal_wheel == *"cu126"* ]]; then
