@@ -1800,6 +1800,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             draft_token_ids = self._draft_token_ids.cpu().numpy()
         else:
             draft_token_ids = self._draft_token_ids
+        self._draft_token_ids = None
         return DraftTokenIds(req_ids, draft_token_ids)
 
     def propose_draft_token_ids(
