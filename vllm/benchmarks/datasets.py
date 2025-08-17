@@ -76,6 +76,7 @@ class SampleRequest:
         Union[MultiModalDataDict, dict, list[dict]]
     ] = None
     lora_request: Optional[LoRARequest] = None
+    request_id: Optional[str] = None
 
 
 # -----------------------------------------------------------------------------
