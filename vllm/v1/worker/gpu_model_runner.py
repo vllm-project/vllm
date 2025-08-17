@@ -347,7 +347,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.reorder_batch_threshold: Optional[int] = None
 
         # Cached outputs.
-        self._draft_token_ids: Optional[Union[list[np.ndarray],
+        self._draft_token_ids: Optional[Union[list[list[int]],
                                               torch.Tensor]] = None
 
     def _init_model_kwargs(self, num_tokens: int):
@@ -1797,7 +1797,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return None
         req_ids = self.input_batch.req_ids
         if isinstance(self._draft_token_ids, torch.Tensor):
-            draft_token_ids = self._draft_token_ids.cpu().numpy()
+            draft_token_ids = self._draft_token_ids.tolist()
         else:
             draft_token_ids = self._draft_token_ids
         self._draft_token_ids = None
@@ -1813,7 +1813,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         aux_hidden_states: Optional[torch.Tensor],
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         common_attn_metadata: CommonAttentionMetadata,
-    ) -> Union[list[np.ndarray], torch.Tensor]:
+    ) -> Union[list[list[int]], torch.Tensor]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
@@ -1939,7 +1939,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if drafter_output is None or len(drafter_output) == 0:
                 draft_token_ids.append([])
             else:
-                draft_token_ids.append(drafter_output)
+                draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:

@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import NamedTuple, Optional, Union
+from typing import NamedTuple, Optional
 
-import numpy as np
 import torch
 
 
@@ -121,7 +120,7 @@ class DraftTokenIds:
     # [num_reqs]
     req_ids: list[str]
     # num_reqs x num_draft_tokens
-    draft_token_ids: Union[list[np.ndarray], np.ndarray]
+    draft_token_ids: list[list[int]]
 
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],

@@ -954,27 +954,25 @@ class Scheduler(SchedulerInterface):
         self,
         draft_token_ids: DraftTokenIds,
     ) -> None:
-        req_ids = draft_token_ids.req_ids
-        spec_token_ids = draft_token_ids.draft_token_ids
-        num_reqs = len(req_ids)
-        for i in range(num_reqs):
-            token_ids = spec_token_ids[i]
-            if len(token_ids) == 0:
+        for req_id, spec_token_ids in zip(
+                draft_token_ids.req_ids,
+                draft_token_ids.draft_token_ids,
+        ):
+            if not spec_token_ids:
                 continue
-            request = self.requests.get(req_ids[i])
+            request = self.requests.get(req_id)
             if request is None:
                 # The request may have been finished. Skip.
                 continue
-            token_ids = token_ids.tolist()
 
             # Add newly generated spec token ids to the request.
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 # Needs to happen after new_token_ids are accepted.
                 request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
-                    token_ids)
+                    spec_token_ids)
             else:
-                request.spec_token_ids = token_ids
+                request.spec_token_ids = spec_token_ids
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
