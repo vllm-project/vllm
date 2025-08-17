@@ -27,9 +27,10 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     select_nvfp4_gemm_impl)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend, apply_flashinfer_per_tensor_scale_fp8,
-    build_flashinfer_cutlass_moe_fp8_prepare_finalize, register_moe_scaling_factors,
-    select_cutlass_fp8_gemm_impl, get_flashinfer_moe_backend,
-    rotate_flashinfer_fp8_moe_weights, swap_w13_to_w31)
+    build_flashinfer_cutlass_moe_fp8_prepare_finalize,
+    get_flashinfer_moe_backend, register_moe_scaling_factors,
+    rotate_flashinfer_fp8_moe_weights, select_cutlass_fp8_gemm_impl,
+    swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear, is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin, prepare_moe_fp4_layer_for_marlin)
@@ -175,7 +176,7 @@ class ModelOptFp8Config(QuantizationConfig):
         elif isinstance(layer, Attention):
             return ModelOptFp8KVCacheMethod(self)
         elif isinstance(layer, FusedMoE):
-            return ModelOptFp8MoEMethod(self, layer.moe_config)
+            return ModelOptFp8MoEMethod(self, layer)
         return None
 
 
@@ -274,9 +275,10 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     def __init__(
         self,
         quant_config: ModelOptFp8Config,
-        moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> None:
-        super().__init__(moe)
+        super().__init__(layer.moe_config)
+        self.layer = layer
         self.quant_config = quant_config
         from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
             cutlass_fp8_supported)
@@ -294,7 +296,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self,
         moe: FusedMoEConfig,
     ) -> Optional[mk.FusedMoEPrepareAndFinalize]:
-        if not self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+        if self.fused_experts is not None or \
+            self.flashinfer_moe_backend != FlashinferMoeBackend.CUTLASS:
             return super().maybe_make_prepare_finalize(moe)
 
         prepare_finalize = build_flashinfer_cutlass_moe_fp8_prepare_finalize(
@@ -464,6 +467,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight,
                                                   layer.w2_weight)
+            elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+                self.init_prepare_finalize()
 
     def apply(
         self,
@@ -487,8 +492,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        assert self.fused_experts is None
-
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptFp8MoEMethod` yet.")
@@ -531,8 +534,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 f"Expected 'silu' activation but got {activation}")
             return self.fused_experts(
                 x,
-                layer.w13_weights,
-                layer.w2_weights,
+                layer.w13_weight,
+                layer.w2_weight,
                 topk_weights,
                 topk_ids,
                 inplace=False,

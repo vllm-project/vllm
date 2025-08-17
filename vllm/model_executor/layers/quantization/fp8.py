@@ -25,10 +25,10 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend, apply_flashinfer_per_tensor_scale_fp8,
-    build_flashinfer_fp8_cutlass_moe_kernel,
-    flashinfer_fp8_cutlass_moe_forward, get_flashinfer_moe_backend,
-    register_moe_scaling_factors,
-    rotate_flashinfer_fp8_moe_weights, swap_w13_to_w31)
+    build_flashinfer_cutlass_moe_fp8_prepare_finalize,
+    get_flashinfer_moe_backend, register_moe_scaling_factors,
+    rotate_flashinfer_fp8_moe_weights, select_cutlass_fp8_gemm_impl,
+    swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
@@ -149,7 +149,7 @@ class Fp8Config(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return Fp8LinearMethod(self)
         elif isinstance(layer, FusedMoE):
-            return Fp8MoEMethod(self, layer.moe_config)
+            return Fp8MoEMethod(self, layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
@@ -486,8 +486,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         quant_config: The quantization config.
     """
 
-    def __init__(self, quant_config: Fp8Config, moe: FusedMoEConfig):
-        super().__init__(moe)
+    def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
+        super().__init__(layer.moe_config)
+        self.layer = layer
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
 
@@ -538,10 +539,19 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 "CutlassBlockScaledGroupedGemm not supported on the current "
                 "platform.")
 
-    def maybe_swap_experts_impl(self, moe_parallel_config):
-        if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            self.fused_experts = build_flashinfer_fp8_cutlass_moe_kernel(
-                moe_parallel_config)
+    def maybe_make_prepare_finalize(
+        self,
+        moe: FusedMoEConfig,
+    ) -> Optional[mk.FusedMoEPrepareAndFinalize]:
+        if self.flashinfer_moe_backend != FlashinferMoeBackend.CUTLASS:
+            return super().maybe_make_prepare_finalize(moe)
+
+        prepare_finalize = build_flashinfer_cutlass_moe_fp8_prepare_finalize(
+            moe,
+            a1_gscale=self.layer.w13_input_scale,
+        )
+        logger.debug_once("%s", prepare_finalize.__class__.__name__)
+        return prepare_finalize
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
@@ -698,9 +708,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     layer.w13_weight_scale_inv.data)
                 w2_weight = layer.w2_weight.data
                 w2_weight_scale_inv = layer.w2_weight_scale_inv.data
-                if not self.block_quant:
-                    register_moe_scaling_factors(layer)
-                    rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
             else:
                 w13_weight = layer.w13_weight.data
                 w13_weight_scale_inv = layer.w13_weight_scale_inv.data
@@ -915,6 +922,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 per_act_token_quant=False,
                 allow_deep_gemm=self.allow_deep_gemm,
             )
+        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            experts = select_cutlass_fp8_gemm_impl(
+                moe,
+                self.layer,
+            )
+            logger.debug_once("Using %s", experts.__class__.__name__)
+            return experts
         else:
             logger.debug(
                 "TritonOrDeepGemmExperts(%s): block_size=%s, per_act_token=%s",
@@ -1062,12 +1076,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert scoring_func == 'sigmoid', (
                 f"Expected 'sigmoid' scoring func but got {scoring_func}")
 
-            return flashinfer_fp8_cutlass_moe_forward(
-                self.fused_experts,
-                layer,
+            return self.fused_experts(
                 x,
+                layer.w13_weight,
+                layer.w2_weight,
                 topk_weights,
                 topk_ids,
+                inplace=False,
                 activation=activation,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,

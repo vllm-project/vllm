@@ -60,8 +60,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 block_shape=None,
             ))
         assert quant_dtype in ("nvfp4", torch.float8_e4m3fn), (
-            "Only nvfp4,fp8 quantization are currently supported."
-        )
+            "Only nvfp4,fp8 quantization are currently supported.")
         self.ep_rank = ep_rank
         self.ep_size = ep_size
         self.tp_rank = tp_rank
@@ -121,8 +120,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         aq_m, aq_n = aq.shape
         workspace2 = ()
-        output_shape = (aq_m, aq_n * 2) if not self.use_fp8_w8a8 else (aq_m,
-                                                                       aq_n)
+        output_shape = (aq_m, aq_n * 2) if self.quant_dtype != \
+            torch.float8_e4m3fn else (aq_m, aq_n)
         workspace_dtype = a.dtype
         workspace1 = output_shape
         # The workspace is determined by `aq`, since it comes after any
@@ -153,10 +152,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         if self.quant_dtype == torch.float8_e4m3fn:
             quant_scales = [
-                self.g1_alphas, self.a2_gscale, self.g2_alphas,
-                self.a1_gscale
+                self.g1_alphas, self.a2_gscale, self.g2_alphas, self.a1_gscale
             ]
-            
+
             a1q_scale = None  # not passing input_sf in fp8
             fc1_expert_weights = w1
             fc2_expert_weights = w2
@@ -178,7 +176,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             # FlashInfer API requires weight to be long for nvfp4
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
-
 
         _ = flashinfer_cutlass_fused_moe(
             input=hidden_states,

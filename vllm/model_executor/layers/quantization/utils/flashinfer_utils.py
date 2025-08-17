@@ -8,7 +8,6 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts)
@@ -164,8 +163,7 @@ def register_moe_scaling_factors(layer: torch.nn.Module) -> None:
         torch.nn.Parameter(output2_scales, requires_grad=False))
     layer.register_parameter(
         'w2_input_scale_inv',
-        torch.nn.Parameter(1.0 / layer.w2_input_scale, requires_grad=False)
-    )
+        torch.nn.Parameter(1.0 / layer.w2_input_scale, requires_grad=False))
 
 
 def build_flashinfer_cutlass_moe_fp8_prepare_finalize(
@@ -182,7 +180,7 @@ def select_cutlass_fp8_gemm_impl(
     layer: torch.nn.Module,
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
     """Return a GEMM *experts* implementation for fused-MoE layers"""
-    
+
     from vllm.model_executor.models.llama4 import Llama4MoE
     assert layer.custom_routing_function == Llama4MoE.custom_routing_function, \
         "FusedMoE flashinfer kernels are only supported for Llama4"

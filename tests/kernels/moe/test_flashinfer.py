@@ -6,14 +6,19 @@ import pytest
 import torch
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+# yapf: disable
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig, FusedMoEParallelConfig)
+# yapf: enable
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEModularKernel)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_flashinfer_per_tensor_scale_fp8,
-    build_flashinfer_fp8_cutlass_moe_kernel,
-    flashinfer_fp8_cutlass_moe_forward, rotate_flashinfer_fp8_moe_weights,
-    swap_w13_to_w31)
+    build_flashinfer_cutlass_moe_fp8_prepare_finalize,
+    register_moe_scaling_factors, rotate_flashinfer_fp8_moe_weights,
+    select_cutlass_fp8_gemm_impl, swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     input_to_float8)
 from vllm.model_executor.models.llama4 import Llama4MoE
@@ -94,6 +99,8 @@ class TestData:
         layer.w2_input_scale = a2_scale
         layer.w13_weight_scale = w13_weight_scale
         layer.w2_weight_scale = w2_weight_scale
+
+        register_moe_scaling_factors(layer)
 
         # flashinfer expects swapped rows for w13
         layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
@@ -227,20 +234,36 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             apply_router_weight_on_input=True,
         )
 
-        cutlass_fused_experts = build_flashinfer_fp8_cutlass_moe_kernel(
-            FusedMoEParallelConfig(tp_size=1,
-                                   dp_size=1,
-                                   ep_size=1,
-                                   tp_rank=0,
-                                   dp_rank=0,
-                                   ep_rank=0,
-                                   use_ep=False))
+        parallel_config = FusedMoEParallelConfig(tp_size=1,
+                                                 dp_size=1,
+                                                 ep_size=1,
+                                                 tp_rank=0,
+                                                 dp_rank=0,
+                                                 ep_rank=0,
+                                                 use_ep=False)
+
+        moe = FusedMoEConfig(num_experts=e,
+                             experts_per_token=e,
+                             hidden_dim=k,
+                             num_local_experts=e,
+                             moe_parallel_config=parallel_config,
+                             in_dtype=torch.bfloat16)
+
+        prepare_finalize = build_flashinfer_cutlass_moe_fp8_prepare_finalize(
+            moe, td.a1_scale)
         td.layer.dp_size = 1
 
-        flashinfer_cutlass_output = flashinfer_fp8_cutlass_moe_forward(
-            cutlass_fused_experts,
-            td.layer,
+        experts = select_cutlass_fp8_gemm_impl(moe, td.layer)
+
+        cutlass_fused_experts = FusedMoEModularKernel(
+            prepare_finalize,
+            experts,
+        )
+
+        flashinfer_cutlass_output = cutlass_fused_experts(
             td.hidden_states,
+            td.layer.w13_weight,
+            td.layer.w2_weight,
             topk_weights,
             topk_ids,
             activation="silu",
