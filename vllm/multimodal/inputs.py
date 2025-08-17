@@ -825,12 +825,17 @@ class MultiModalKwargs:
     def get(self, key: str, /, default=None):
         return self.get_data().get(key, default)
 
-    def pop(self, key: str, *args, **kwargs) -> None:
+    def pop(self, key: str, *args, **kwargs):
+        data = dict(self.get_data())
+        res = data.pop(key, *args, **kwargs)
+
         for items in self._items_by_modality.values():
             for item in items:
                 item.pop(key, *args, **kwargs)
 
         self._data = None
+
+        return res
 
     def __iter__(self):
         return iter(self.get_data())
