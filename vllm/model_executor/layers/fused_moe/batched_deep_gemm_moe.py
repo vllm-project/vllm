@@ -310,6 +310,14 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
+        # Monitor expert_num_tokens for workspace allocation analysis
+        logger.info(
+            "[MoE Monitor] expert_num_tokens shape: %s, sum: %s, max: %s, "
+            "values: %s", expert_num_tokens.shape,
+            expert_num_tokens.sum().item(),
+            expert_num_tokens.max().item(),
+            expert_num_tokens.cpu().numpy())
+
         assert hidden_states.ndim == 3
         assert self.block_shape is not None
 
