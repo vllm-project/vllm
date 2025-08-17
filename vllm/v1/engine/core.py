@@ -285,13 +285,6 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-
-        if self.use_spec_decode:
-            # Get the draft token ids from the PREVIOUS step.
-            draft_token_ids = self.model_executor.get_draft_token_ids()
-            if draft_token_ids is not None:
-                self.scheduler.update_draft_token_ids(draft_token_ids)
-
         scheduler_output = self.scheduler.schedule()
         model_output = self.execute_model_with_error_logging(
             self.model_executor.execute_model,  # type: ignore
@@ -301,6 +294,13 @@ class EngineCore:
 
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
+
+    def post_step(self) -> None:
+        if self.use_spec_decode:
+            # Get the draft token ids.
+            draft_token_ids = self.model_executor.get_draft_token_ids()
+            if draft_token_ids is not None:
+                self.scheduler.update_draft_token_ids(draft_token_ids)
 
     def step_with_batch_queue(
             self) -> tuple[Optional[dict[int, EngineCoreOutputs]], bool]:
@@ -754,6 +754,8 @@ class EngineCoreProc(EngineCore):
         # Put EngineCoreOutputs into the output queue.
         for output in (outputs.items() if outputs else ()):
             self.output_queue.put_nowait(output)
+        # Post-step hook.
+        self.post_step()
 
         return model_executed
 
