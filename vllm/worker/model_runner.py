@@ -508,8 +508,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if inter_data.is_prompt:
             context_len = seq_data.get_num_computed_tokens()
             seq_len = min(seq_len, context_len + token_chunk_size)
-        elif self.runner.scheduler_config.is_multi_step or \
-            self.runner.model_config.is_encoder_decoder:
+        elif self.runner.model_config.is_encoder_decoder:
             context_len = seq_len - 1
         else:
             context_len = seq_data.get_num_computed_tokens()
@@ -763,8 +762,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         has Prefills (if any). The rest of the steps are guaranteed to be all
         decodes. In this case, we set up the padding as if all the sequences
         are decodes so we may run all steps except the first step in CUDA graph
-        mode. The padding is accounted for in the multi-step `advance_step`
-        family of functions.
+        mode.
 
         Args:
             num_seqs (int): Number of sequences scheduled to run.
@@ -778,9 +776,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             int: Returns the determined number of padding sequences. If
                 CUDA graphs is not viable, returns -1.
         """
-        is_mscp: bool = self.runner.scheduler_config.is_multi_step and \
-                    self.runner.scheduler_config.chunked_prefill_enabled
-        decode_only = self.decode_only or is_mscp
+        decode_only = self.decode_only
         if not decode_only:
             # Early exit so we can treat num_seqs as the batch_size below.
             return -1

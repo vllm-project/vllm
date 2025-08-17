@@ -13,6 +13,7 @@ import tempfile
 import time
 import warnings
 from contextlib import contextmanager, suppress
+from multiprocessing import Process
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Union
 
@@ -76,6 +77,23 @@ VLLM_PATH = Path(__file__).parent.parent
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
 
+    def _start_server(self, model: str, vllm_serve_args: list[str],
+                      env_dict: Optional[dict[str, str]]) -> None:
+        """Subclasses override this method to customize server process launch
+        """
+        env = os.environ.copy()
+        # the current process might initialize cuda,
+        # to be safe, we should use spawn method
+        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+        if env_dict is not None:
+            env.update(env_dict)
+        self.proc: subprocess.Popen = subprocess.Popen(
+            ["vllm", "serve", model, *vllm_serve_args],
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+
     def __init__(self,
                  model: str,
                  vllm_serve_args: list[str],
@@ -128,18 +146,7 @@ class RemoteOpenAIServer:
             model_loader = get_model_loader(load_config)
             model_loader.download_model(model_config)
 
-        env = os.environ.copy()
-        # the current process might initialize cuda,
-        # to be safe, we should use spawn method
-        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
-        if env_dict is not None:
-            env.update(env_dict)
-        self.proc = subprocess.Popen(
-            ["vllm", "serve", model, *vllm_serve_args],
-            env=env,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-        )
+        self._start_server(model, vllm_serve_args, env_dict)
         max_wait_seconds = max_wait_seconds or 240
         self._wait_for_server(url=self.url_for("health"),
                               timeout=max_wait_seconds)
@@ -155,6 +162,10 @@ class RemoteOpenAIServer:
             # force kill if needed
             self.proc.kill()
 
+    def _poll(self) -> Optional[int]:
+        """Subclasses override this method to customize process polling"""
+        return self.proc.poll()
+
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check
         start = time.time()
@@ -169,7 +180,7 @@ class RemoteOpenAIServer:
                 # which means the server is not ready yet.
                 # the stack trace is not useful, so we suppress it
                 # by using `raise from None`.
-                result = self.proc.poll()
+                result = self._poll()
                 if result is not None and result != 0:
                     raise RuntimeError("Server exited unexpectedly.") from None
 
@@ -203,6 +214,48 @@ class RemoteOpenAIServer:
                                   api_key=self.DUMMY_API_KEY,
                                   max_retries=0,
                                   **kwargs)
+
+
+class RemoteOpenAIServerCustom(RemoteOpenAIServer):
+    """Launch test server with custom child process"""
+
+    def _start_server(self, model: str, vllm_serve_args: list[str],
+                      env_dict: Optional[dict[str, str]]) -> None:
+        self.proc: Process = Process(
+            target=self.child_process_fxn,
+            args=(env_dict, model,
+                  vllm_serve_args))  # type: ignore[assignment]
+        self.proc.start()
+
+    def __init__(self,
+                 model: str,
+                 vllm_serve_args: list[str],
+                 child_process_fxn: Callable[
+                     [Optional[dict[str, str]], str, list[str]], None],
+                 *,
+                 env_dict: Optional[dict[str, str]] = None,
+                 seed: Optional[int] = 0,
+                 auto_port: bool = True,
+                 max_wait_seconds: Optional[float] = None) -> None:
+        """Store custom child process function then invoke superclass
+        constructor which will indirectly launch it."""
+        self.child_process_fxn = child_process_fxn
+        super().__init__(model=model,
+                         vllm_serve_args=vllm_serve_args,
+                         env_dict=env_dict,
+                         seed=seed,
+                         auto_port=auto_port,
+                         max_wait_seconds=max_wait_seconds)
+
+    def _poll(self) -> Optional[int]:
+        return self.proc.exitcode
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.proc.terminate()
+        self.proc.join(8)
+        if self.proc.is_alive():
+            # force kill if needed
+            self.proc.kill()
 
 
 def _test_completion(
