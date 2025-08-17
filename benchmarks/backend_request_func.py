@@ -72,6 +72,7 @@ async def async_request_tgi(
             "inputs": request_func_input.prompt,
             "parameters": params,
         }
+        headers = None
         if request_func_input.request_id:
             headers = {"x-request-id": request_func_input.request_id}
         output = RequestFuncOutput()
@@ -150,6 +151,7 @@ async def async_request_trt_llm(
         }
         if request_func_input.ignore_eos:
             payload["min_length"] = request_func_input.output_len
+        headers = None
         if request_func_input.request_id:
             headers = {"x-request-id": request_func_input.request_id}
         output = RequestFuncOutput()

@@ -197,7 +197,7 @@ class BenchmarkDataset(ABC):
             )
             for i in range(len(additional)):
                 req = additional[i]
-                req.request_id = request_id_prefix + len(requests) + i
+                req.request_id = request_id_prefix + str(len(requests) + i)
             requests.extend(additional)
             logger.info("Oversampled requests to reach %d total samples.", num_requests)
 
@@ -533,7 +533,7 @@ class CustomDataset(BenchmarkDataset):
         **kwargs,
     ) -> list:
         sampled_requests = []
-        for item in self.data:
+        for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["prompt"]
@@ -547,16 +547,14 @@ class CustomDataset(BenchmarkDataset):
                 )
 
             prompt_len = len(tokenizer(prompt).input_ids)
-            ind = 0
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
-                    request_id=request_id_prefix + str(ind),
+                    request_id=request_id_prefix + str(i),
                 )
             )
-            ind += 1
         self.maybe_oversample_requests(
             sampled_requests, num_requests, request_id_prefix
         )
