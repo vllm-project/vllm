@@ -240,19 +240,6 @@ class EagleProposer:
         # there's a multi-layer MTP module.
         assert isinstance(attn_metadata, self.allowed_attn_types)
 
-        # On ROCm, both AiterFlashAttention and TritonAttention
-        # support multi-token eagle spec decode.
-        if current_platform.is_rocm():
-            assert isinstance(
-                attn_metadata,
-                (TritonAttentionMetadata, AiterFlashAttentionMetadata,
-                 FlashAttentionMetadata))
-        else:
-            # Currently, only FlashAttention supports multi-token eagle spec
-            # decode. This is because the code below makes assumptions about
-            # attn_metadata attributes available.
-            assert isinstance(attn_metadata, FlashAttentionMetadata)
-
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
@@ -630,7 +617,7 @@ class EagleProposer:
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1 \
                 and self.model.model.embed_tokens.weight.shape \
-        == target_language_model.model.embed_tokens.weight.shape:
+            == target_language_model.model.embed_tokens.weight.shape:
             logger.info(
                 "Assuming the EAGLE head shares the same vocab embedding"
                 " with the target model.")
