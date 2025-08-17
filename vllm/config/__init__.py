@@ -11,7 +11,7 @@ import json
 import textwrap
 import uuid
 import warnings
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
 from functools import cached_property, lru_cache
@@ -471,7 +471,7 @@ class ModelConfig:
     """One or more logits processors' fully-qualified class names or class
     definitions"""
 
-    def compute_hash(self, extra_ignored_fields: list[str] | set[str] = []) -> str:
+    def compute_hash(self, extra_ignored_fields: Iterable[str] = ()) -> str:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -493,7 +493,8 @@ class ModelConfig:
             "seed",
             "allowed_local_media_path",
             "tokenizer_revision",
-            "spec_target_max_model_len", # TODO: if max_model_len needs hashing, why not this?
+            # TODO: if max_model_len needs hashing, why not spec_target_?
+            "spec_target_max_model_len",
             "ehforce_eager",
             "logprobs_mode",
             "disable_cascade_attn",
