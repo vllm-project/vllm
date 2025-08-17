@@ -2,11 +2,14 @@
 ARG REMOTE_VLLM="0"
 ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-private:rocm7.0_rc1_base_0729
+ARG AITER_BRANCH="6b92d30de680ec10e1e1463b609ed0f228f999f3"
+ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
 FROM ${BASE_IMAGE} AS base
 
 ARG ARG_PYTORCH_ROCM_ARCH
 ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
+ENV AITER_ROCM_ARCH=gfx942;gfx950
 
 # Install some basic utilities
 RUN apt-get update -q -y && apt-get install -q -y \
@@ -18,6 +21,21 @@ RUN python3 -m pip install --upgrade pip
 RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
 ARG COMMON_WORKDIR
 WORKDIR ${COMMON_WORKDIR}
+
+# --------------
+# DLL: TEMP since aiter is volatile.  When base is locked still build aiter
+FROM base AS build_aiter
+ARG AITER_BRANCH
+ARG AITER_REPO
+# RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+#     pip install /install/*.whl
+RUN git clone --recursive ${AITER_REPO}
+RUN cd aiter \
+    && git checkout ${AITER_BRANCH} \
+    && git submodule update --init --recursive \
+    && pip install -r requirements.txt
+RUN pip install pyyaml && cd aiter && PREBUILD_KERNELS=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist && ls /app/aiter/dist/*.whl
+RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
 
 # -----------------------
@@ -43,8 +61,10 @@ RUN cd vllm \
     && python3 -m pip install -r requirements/rocm.txt \
     && python3 setup.py clean --all  \
     && python3 setup.py bdist_wheel --dist-dir=dist
+
 FROM scratch AS export_vllm
 ARG COMMON_WORKDIR
+COPY --from=build_aiter /app/install/*.whl /
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/dist/*.whl /
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/requirements /requirements
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
