@@ -54,11 +54,11 @@ class Request:
             time.time()
 
         self.status = RequestStatus.WAITING
-        if sampling_params and sampling_params.guided_decoding is not None:
+        self.use_structured_output = (sampling_params is not None
+                                      and sampling_params.guided_decoding
+                                      is not None)
+        if self.use_structured_output:
             self.status = RequestStatus.WAITING_FOR_FSM
-            self.use_structured_output = True
-        else:
-            self.use_structured_output = False
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
 
