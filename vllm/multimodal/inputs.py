@@ -835,6 +835,18 @@ class MultiModalKwargs(dict[str, NestedTensors]):
 
         return super().__getitem__(key)
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, self.__class__):
+            return False
+
+        for k in self:
+            if k not in other:
+                return False
+            if not nested_tensors_equal(self[k], other[k]):
+                return False
+
+        return True
+
 
 MultiModalPlaceholderDict: TypeAlias = Mapping[str, Sequence[PlaceholderRange]]
 """
