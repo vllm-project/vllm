@@ -801,7 +801,6 @@ def get_default_config(
     K: int,
     topk: int,
     dtype: Optional[str],
-    is_marlin: bool,
     block_shape: Optional[list[int]] = None,
 ) -> dict[str, int]:
     if dtype == "fp8_w8a8" and block_shape is not None:
@@ -832,11 +831,6 @@ def get_default_config(
             config = {"BLOCK_SIZE_M": 32, "GROUP_SIZE_M": 1}
         else:
             config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1}
-    elif is_marlin:
-        for block_size_m in [8, 16, 32, 48, 64]:
-            if M * topk / E / block_size_m < 0.9:
-                break
-        return {"BLOCK_SIZE_M": block_size_m}
     elif M <= E:
         config = {
             "BLOCK_SIZE_M": 16,
@@ -860,7 +854,6 @@ def try_get_optimal_moe_config(
     top_k: int,
     dtype: Optional[str],
     M: int,
-    is_marlin: bool = False,
     block_shape: Optional[list[int]] = None,
 ) -> dict[str, int]:
     from vllm.model_executor.layers.fused_moe import get_config
@@ -883,7 +876,7 @@ def try_get_optimal_moe_config(
         else:
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
-                                        is_marlin, block_shape)
+                                        block_shape)
     return config
 
 
