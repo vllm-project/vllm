@@ -471,7 +471,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 expert_map=expert_map)
 
         assert _can_support_mxfp4(
-            use_grouped_topk, topk_group, num_expert_group, expert_map,
+            use_grouped_topk, topk_group, num_expert_group,
             custom_routing_function, e_score_correction_bias,
             apply_router_weight_on_input, scoring_func, activation,
             expert_load_view, logical_to_physical_map,

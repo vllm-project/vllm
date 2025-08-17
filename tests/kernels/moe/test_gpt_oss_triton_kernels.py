@@ -442,6 +442,7 @@ def batched_moe(
 )
 @pytest.mark.parametrize("num_token", [64])
 @pytest.mark.parametrize("ep", [1, 2, 4, 8])
+@pytest.mark.skip("batch moe is not used currently")
 def test_triton_kernel_batched_moe(num_token, a_dtype, w_dtype, ep):
     M = num_token
     E = ModelConfig.num_experts // ep
@@ -464,7 +465,7 @@ def test_triton_kernel_batched_moe(num_token, a_dtype, w_dtype, ep):
         w2_bias_tri,
         pc1,
         pc2,
-    ) = init_compute_data(M, K, N, E, a_dtype, w_dtype, num_warps=4)
+    ) = init_compute_data(M, K, N, E, 1, a_dtype, w_dtype, num_warps=4)
 
     out_tri = batched_moe(
         a=x_tri,

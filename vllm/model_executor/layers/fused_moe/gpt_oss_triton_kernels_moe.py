@@ -114,7 +114,7 @@ def triton_kernel_moe_forward(
 ) -> torch.Tensor:
 
     # we only use expert_map tp test if ep is enabled
-    if expert_map:
+    if expert_map is not None:
         routing_data, gather_idx, scatter_idx = ep_routing_naive(gating_output,
                                                              topk,
                                                              sm_first=not renormalize)
