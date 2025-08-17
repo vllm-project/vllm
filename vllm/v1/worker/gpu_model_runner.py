@@ -68,6 +68,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
@@ -80,7 +81,6 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from ..sample.logits_processor import LogitsProcessorManager
 from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
                     gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
@@ -221,6 +221,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
+            logitsprocs=build_logitsprocs(
+                self.vllm_config, self.device, self.pin_memory,
+                self.is_pooling_model,
+                self.vllm_config.model_config.logits_processors),
+            is_pooling_model=self.is_pooling_model,
         )
 
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
@@ -500,8 +505,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 second_per_grid_ts = []
                 audio_feature_lengths = []
                 use_audio_in_video = False
-                for item in self.requests[req_id].mm_kwargs:
-                    mm_input = item.require_data()
+                for mm_item in self.requests[req_id].mm_kwargs:
+                    mm_input = mm_item.get_data()
                     if mm_input.get("image_grid_thw") is not None:
                         image_grid_thw.append(
                             mm_input["image_grid_thw"].tolist())
@@ -1337,9 +1342,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         out_indices = []
 
         # Reorder the bitmask to match the order of the requests in the batch.
-        sorted_bitmask = np.zeros_like(grammar_bitmask,
-                                       shape=(logits.shape[0],
-                                              grammar_bitmask.shape[1]))
+        sorted_bitmask = np.full(shape=(logits.shape[0],
+                                        grammar_bitmask.shape[1]),
+                                 fill_value=-1,
+                                 dtype=grammar_bitmask.dtype)
         cumulative_index = 0
         seq = sorted(scheduler_output.structured_output_request_ids.items(),
                      key=lambda x: x[1])
@@ -1354,10 +1360,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             cumulative_index += 1 + num_spec_tokens
         grammar_bitmask = sorted_bitmask
 
-        # If the grammar bitmask and the logits have the same shape
+        # If the length of out indices and the logits have the same shape
         # we don't need to pass indices to the kernel,
         # since the bitmask is already aligned with the logits.
-        skip_out_indices = grammar_bitmask.shape[0] == logits.shape[0]
+        skip_out_indices = len(out_indices) == logits.shape[0]
 
         # Serialization of np.ndarray is much more efficient than a tensor,
         # so we receive it in that format.
@@ -2191,7 +2197,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     high=self.model_config.get_vocab_size(),
                     dtype=input_ids.dtype)
 
-            logger.debug("Randomizing dummy data for DP Rank")
+            logger.debug_once("Randomizing dummy data for DP Rank")
             input_ids.copy_(rand_input_ids()[:input_ids.size(0)],
                             non_blocking=True)
             yield
@@ -2446,7 +2452,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             output_token_ids=[[] for _ in range(num_reqs)],
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
-            logitsprocs=LogitsProcessorManager(),
+            logitsprocs=LogitsProcessors(),
         )
         try:
             sampler_output = self.sampler(logits=logits,
@@ -2967,6 +2973,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
+                logitsprocs=self.input_batch.logitsprocs,
+                is_pooling_model=self.is_pooling_model,
             )
 
     def _allocate_kv_cache_tensors(
