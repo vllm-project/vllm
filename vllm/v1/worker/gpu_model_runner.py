@@ -911,7 +911,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     common_attn_metadata=common_attn_metadata,
                 ))
 
-                use_cascade_attn |= attn_metadata_i.use_cascade
+                use_cascade_attn |= getattr(attn_metadata_i, "use_cascade",
+                                            False)
 
                 fast_prefill_metadata = attn_metadata_i
                 if (self.cache_config.kv_sharing_fast_prefill
