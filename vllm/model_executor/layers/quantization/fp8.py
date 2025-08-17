@@ -125,6 +125,10 @@ class Fp8Config(QuantizationConfig):
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         weight_block_size = cls.get_from_keys_or(config, ["weight_block_size"],
                                                  None)
+        if not ignored_layers:
+            ignored_layers = cls.get_from_keys_or(config,
+                                                  ["modules_to_not_convert"],
+                                                  None)
         return cls(is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
                    activation_scheme=activation_scheme,
                    ignored_layers=ignored_layers,
