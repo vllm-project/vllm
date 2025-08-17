@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, Optional, Union
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.sample.logits_processor.builtin import (LogitBiasLogitsProcessor,
-                                                     MinPLogitsProcessor,
-                                                     MinTokensLogitsProcessor)
+from vllm.v1.sample.logits_processor.builtin import (
+    LogitBiasLogitsProcessor, MinPLogitsProcessor, MinTokensLogitsProcessor,
+    ThinkingTokenBudgetLogitsProcessor)
 from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
                                                        LogitsProcessor,
                                                        MoveDirectionality)
@@ -33,6 +33,7 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
+    ThinkingTokenBudgetLogitsProcessor,
 ]
 
 
@@ -179,7 +180,8 @@ def build_logitsprocs(
 
 __all__ = [
     "LogitsProcessor", "LogitBiasLogitsProcessor", "MinPLogitsProcessor",
-    "MinTokensLogitsProcessor", "BatchUpdate", "BatchUpdateBuilder",
-    "MoveDirectionality", "LogitsProcessors", "build_logitsprocs",
-    "STR_POOLING_REJECTS_LOGITSPROCS", "LOGITSPROCS_GROUP"
+    "ThinkingTokenBudgetLogitsProcessor", "MinTokensLogitsProcessor",
+    "BatchUpdate", "BatchUpdateBuilder", "MoveDirectionality",
+    "LogitsProcessors", "build_logitsprocs", "STR_POOLING_REJECTS_LOGITSPROCS",
+    "LOGITSPROCS_GROUP"
 ]
