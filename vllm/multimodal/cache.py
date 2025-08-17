@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, LRUCache
 from vllm.utils.jsontree import json_map_leaves, json_reduce_leaves
 
-from .inputs import MultiModalKwargs, MultiModalKwargsItem, NestedTensors
+from .inputs import MultiModalKwargsItem, MultiModalKwargsItems, NestedTensors
 
 logger = init_logger(__name__)
 
@@ -26,7 +26,7 @@ class MultiModalCacheItemMetadata:
 
 
 MultiModalCacheValue = Union[
-    MultiModalKwargs,
+    MultiModalKwargsItems,
     MultiModalKwargsItem,
     Mapping[str, NestedTensors],
     MultiModalCacheItemMetadata,
@@ -45,7 +45,7 @@ class MultiModalCache:
         debug: bool = False,
     ) -> int:
         # MultiModalKwargs is not a subclass of dict
-        if isinstance(leaf, MultiModalKwargs):
+        if isinstance(leaf, MultiModalKwargsItems):
             return cls.get_item_size(leaf.get_data(), debug=debug)
 
         # MultiModalKwargsItem is not a subclass of dict
