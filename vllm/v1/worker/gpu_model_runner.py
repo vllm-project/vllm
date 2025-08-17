@@ -2860,9 +2860,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def initialize_cudagraph_capture(self) -> None:
         """
-        Resolve the cudagraph_mode when there are multiple
-        attention backends with conflicting CUDA graph support.
-        Initialize the cudagraph_dispatcher based on the resolved
+        Resolve the cudagraph_mode when there are multiple attention 
+        backends with potential conflicting CUDA graph support.
+        Then initialize the cudagraph_dispatcher based on the resolved
         cudagraph_mode.
         """
         min_cg_support = AttentionCGSupport.ALWAYS
