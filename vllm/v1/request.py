@@ -56,6 +56,9 @@ class Request:
         self.status = RequestStatus.WAITING
         if sampling_params and sampling_params.guided_decoding is not None:
             self.status = RequestStatus.WAITING_FOR_FSM
+            self.use_structured_output = True
+        else:
+            self.use_structured_output = False
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
 
@@ -191,11 +194,6 @@ class Request:
         assert input_id < len(self.mm_positions)
         num_tokens = self.mm_positions[input_id].length
         return num_tokens
-
-    @property
-    def use_structured_output(self) -> bool:
-        return self.sampling_params is not None and \
-            self.sampling_params.guided_decoding is not None
 
     def record_event(
         self,
