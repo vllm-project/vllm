@@ -46,7 +46,7 @@ class MultiModalCache:
         debug: bool = False,
     ) -> int:
         if isinstance(leaf, MultiModalFieldElem):
-            return cls.get_item_size(leaf.data)
+            return cls.get_item_size(leaf.data)  # type: ignore
 
         # sys.getsizeof doesn't work for tensors
         if isinstance(leaf, torch.Tensor):
