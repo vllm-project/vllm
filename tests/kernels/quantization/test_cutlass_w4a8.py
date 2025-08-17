@@ -143,7 +143,7 @@ def create_test_tensors(shape: tuple[int, int, int],
     if w.dtype.itemsize == 1:
         w = w.to(torch.float16)
 
-    w_ref, w_q_packed, w_s, w_zp = cutlass_quantize_and_pack(
+    w_ref, w_q_packed, w_s, _ = cutlass_quantize_and_pack(
         a.dtype, w, types.weight_type, types.group_scale_type, group_size,
         False)
 
@@ -209,54 +209,60 @@ def test_cutlass_w4a8(shape, types: TypeConfig, schedule):
         tensors = create_test_tensors(shape, types, group_size)
         mm_test_helper(types, tensors, group_size, schedule)
 
-# TODO: cudagraph
-# # Test to make sure cuda graphs work
-# class W4A8Layer(torch.nn.Module):
 
-#     def __init__(self, **kwargs):
-#         super().__init__()
-#         self.kwargs = kwargs
+# Test to make sure cuda graphs work
+class W4A8Layer(torch.nn.Module):
 
-#     def forward(self, a):
-#         return ops.machete_mm(a=a, **self.kwargs)
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.kwargs = kwargs
 
+    def forward(self, a):
+        return ops.cutlass_w4a8_mm(a=a, **self.kwargs)
 
-# @pytest.mark.skipif(not IS_SUPPORTED_BY_GPU,
-#                     reason="Machete is not supported on this GPU type.")
-# def test_machete_cuda_graph():
-#     m, n, k = 512, 4096, 4096
+@pytest.mark.skipif(not IS_SUPPORTED_BY_GPU,
+                    reason="CUTLASS W4A8 is not supported on this GPU type.")
+def test_w4a8_cuda_graph():
+    m, n, k = 512, 4096, 4096
 
-#     a = rand_data((m, k), torch.float16)
-#     b = rand_data((k, n), torch.float16)
-#     wtype = scalar_types.uint4b8
-#     stype = torch.float16
-#     group_size = 128
-#     zero_points = False
+    a = to_fp8(torch.randn((m, k), device="cuda"))
+    b = to_fp8(torch.randn((k, n), device="cuda"))
 
-#     w_ref, w_q_packed, w_s, w_zp = machete_quantize_and_pack(
-#         a.dtype, b, wtype, stype, group_size, zero_points)
+    wtype = scalar_types.int4
+    stype = torch.float8_e4m3fn
+    group_size = 128
+    zero_points = False
 
-#     # Construct a trivial model with a single layer that calls a machete kernel
-#     model = W4A8Layer(
-#         b_q=w_q_packed,
-#         b_type=wtype,
-#         b_group_scales=w_s,
-#         b_group_size=group_size,
-#     )
+    w_ref, w_q_packed, w_s, _ = cutlass_quantize_and_pack(
+        a.dtype, b.to(torch.float16), wtype, stype, group_size, zero_points)
 
-#     output_ref = torch.matmul(a, w_ref)
+    w_tok_s = torch.randn((m,), device='cuda', dtype=torch.float32)
+    w_ch_s = torch.ones((n,), device='cuda', dtype=torch.float32)
 
-#     # Run the model with a cuda graph
-#     stream = torch.cuda.Stream()
-#     with torch.cuda.stream(stream):
-#         g = torch.cuda.CUDAGraph()
-#         with torch.cuda.graph(g):
-#             output = model(a)
-#     output.zero_()
-#     g.replay()
+    # Construct a trivial model with a single layer that calls the kernel
+    model = W4A8Layer(
+        b_q=w_q_packed,
+        b_group_scales=w_s,
+        b_group_size=group_size,
+        b_channel_scales=w_ch_s,
+        a_token_scales=w_tok_s,
+    )
 
-#     # Relax atol as our reduction dim becomes larger (more rounding error)
-#     # Relax atol when we have zeropoints since the way machete applies
-#     #  zeropoints (after scales) causes noise around 0
-#     atol = 1 if zero_points else min(5e-2 * math.sqrt(k), 1)
-#     torch.testing.assert_close(output, output_ref, rtol=1e-1, atol=atol)
+    output_ref = torch._scaled_mm(a,
+                                  w_ref.to(a.dtype).t().contiguous().t(), # col major
+                                  w_tok_s.unsqueeze(1),
+                                  w_ch_s.unsqueeze(0),
+                                  out_dtype=torch.bfloat16,
+                                  use_fast_accum=True)
+
+    # Run the model with a cuda graph
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            output = model(a)
+
+    output.zero_()
+    g.replay()
+
+    torch.testing.assert_close(output, output_ref, rtol=1e-3, atol=1e-3)

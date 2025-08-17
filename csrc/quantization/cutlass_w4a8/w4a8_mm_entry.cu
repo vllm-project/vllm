@@ -1,4 +1,6 @@
 #include <iostream>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include "core/scalar_type.hpp"
 #include <torch/all.h>
 #include <Python.h>
@@ -176,7 +178,9 @@ struct W4A8GemmKernel {
         int n = B.size(1);
 
         // Allocate output
+        const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
         auto device = A.device();
+        auto stream = at::cuda::getCurrentCUDAStream(device.index());
         torch::Tensor D =
             torch::empty({m, n},
                         torch::TensorOptions()
@@ -235,13 +239,14 @@ struct W4A8GemmKernel {
 
         // Workspace
         size_t workspace_size = GemmShuffled::get_workspace_size(arguments);
-        cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+        torch::Tensor workspace = torch::empty(
+            workspace_size, torch::TensorOptions().dtype(torch::kU8).device(device));
         
         // Run GEMM
         GemmShuffled gemm;
         CUTLASS_CHECK(gemm.can_implement(arguments));
-        CUTLASS_CHECK(gemm.initialize(arguments, workspace.get()));
-        CUTLASS_CHECK(gemm.run());
+        CUTLASS_CHECK(gemm.initialize(arguments, workspace.data_ptr(), stream));
+        CUTLASS_CHECK(gemm.run(stream));
 
         return D;
     }
