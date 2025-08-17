@@ -471,7 +471,7 @@ class ModelConfig:
     """One or more logits processors' fully-qualified class names or class
     definitions"""
 
-    def compute_hash(self) -> str:
+    def compute_hash(self, extra_ignored_fields: list[str] | set[str] = []) -> str:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -480,26 +480,55 @@ class ModelConfig:
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        excluding anything before input ids/embeddings, after
+        the final hidden states, or specified as an argument.
         """
         factors: list[Any] = []
-        factors.append(self.model)
-        factors.append(self.dtype)
-        factors.append(self.quantization)
-        factors.append(self.revision)
-        factors.append(self.code_revision)
-        factors.append(self.max_model_len)
-        factors.append(self.max_logprobs)
-        factors.append(self.disable_sliding_window)
-        factors.append(self.trust_remote_code)
-        factors.append(self.generation_config)
-        factors.append(self.model_impl)
-        factors.append(self.override_generation_config)
-        factors.append(self.rope_scaling)
-        factors.append(self.rope_theta)
-        # hf_config can control how the model looks!
-        factors.append(self.hf_config.to_json_string())
+        ignored_factors = {
+            "runner",
+            "convert",
+            "task",
+            "tokenizer",
+            "tokenizer_mode",
+            "seed",
+            "allowed_local_media_path",
+            "tokenizer_revision",
+            "spec_target_max_model_len", # TODO: if max_model_len needs hashing, why not this?
+            "ehforce_eager",
+            "logprobs_mode",
+            "disable_cascade_attn",
+            "skip_tokenizer_init",
+            "enable_prompt_embeds",
+            "served_model_name",
+            "limit_mm_per_prompt",
+            "interleave_mm_strings",
+            "skip_mm_profiling",
+            "media_io_kwargs",
+            "use_async_output_proc",
+            "config_format",
+            "hf_token",
+            "hf_overrides",
+            "mm_processor_kwargs",
+            "mm_processor_cache_gb",
+            "override_neuron_config",
+            "pooler_config",
+            "override_pooler_config",
+            "logits_processor_pattern",
+            "enable_sleep_mode",
+            "override_attention_dtype",
+            "logits_processors"
+        }
+        all_ignored_factors = ignored_factors.union(set(extra_ignored_fields))
+        all_fields = set([i.name for i in fields(self)])
+        all_hashed_fields = list(all_fields - all_ignored_factors)
+
+        for field_name in all_hashed_fields:
+            field_v = getattr(self, field_name)
+            if field_name == "hf_config":
+                factors.append(field_v.to_json_string())
+            else:
+                factors.append(field_v)
+
         str_factors = str(factors)
         assert_hashable(str_factors)
         return hashlib.sha256(str(factors).encode()).hexdigest()
