@@ -2260,7 +2260,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             skip_eplb: If True, skip EPLB state update.
             is_profile: If True, this is a profile run.
         """
-        assert cudagraph_runtime_mode.vaild_runtime_modes()
+        assert cudagraph_runtime_mode.valid_runtime_modes()
 
         # Padding for DP
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)

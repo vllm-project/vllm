@@ -68,7 +68,7 @@ class CUDAGraphMode(enum.Enum):
     def separate_routine(self) -> bool:
         return isinstance(self.value, tuple)
 
-    def vaild_runtime_modes(self) -> bool:
+    def valid_runtime_modes(self) -> bool:
         return self in [
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         ]
