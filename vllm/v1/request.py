@@ -54,8 +54,7 @@ class Request:
             time.time()
 
         self.status = RequestStatus.WAITING
-        if sampling_params and sampling_params.guided_decoding is not None:
-            self.status = RequestStatus.WAITING_FOR_FSM
+        self.use_structured_output = False
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
 
@@ -63,12 +62,15 @@ class Request:
         self.kv_transfer_params: Optional[dict[str, Any]] = None
 
         if pooling_params is not None:
+            # Pooling models.
             self.max_tokens = 1
         elif sampling_params is not None:
+            # Generative models.
             assert sampling_params.max_tokens is not None
             self.max_tokens = sampling_params.max_tokens
             if sampling_params.guided_decoding is not None:
                 self.status = RequestStatus.WAITING_FOR_FSM
+                self.use_structured_output = True
 
             if sampling_params.extra_args is not None:
                 self.kv_transfer_params = \
@@ -191,11 +193,6 @@ class Request:
         assert input_id < len(self.mm_positions)
         num_tokens = self.mm_positions[input_id].length
         return num_tokens
-
-    @property
-    def use_structured_output(self) -> bool:
-        return self.sampling_params is not None and \
-            self.sampling_params.guided_decoding is not None
 
     def record_event(
         self,
