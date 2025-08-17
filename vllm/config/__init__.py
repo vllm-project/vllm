@@ -3619,13 +3619,21 @@ class VllmConfig:
 
         # final check of cudagraph mode after platform-specific update
         if envs.VLLM_USE_V1:
-            if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL \
+            if self.compilation_config.cudagraph_mode.has_full_cudagraphs()\
                 and self.model_config is not None and \
                 not self.model_config.disable_cascade_attn:
-                logger.info("CUDAGraphMode.FULL is not supported with "
-                            "cascade attention currently. Disabling cascade"
-                            "attention.")
-                self.model_config.disable_cascade_attn = True
+                warn_msg = ("Cascade attention is not supported with full "
+                            "cudagraphs currently. ")
+                if self.compilation_config.cudagraph_mode.\
+                    has_piecewise_cudagraphs():
+                    logger.warning_once(
+                        warn_msg + "It will dispatched to "
+                        "piecewise cudagraphs if a batch runs into cascade "
+                        "attentions")
+                else:
+                    logger.warning_once(
+                        warn_msg + "It will fallback to eager execution if a "
+                        "batch runs into cascade attentions")
 
             if self.compilation_config.cudagraph_mode\
                 .requires_piecewise_compilation():

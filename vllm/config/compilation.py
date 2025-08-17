@@ -62,8 +62,16 @@ class CUDAGraphMode(enum.Enum):
     def has_full_cudagraphs(self) -> bool:
         return self.max_cudagraph_mode() == CUDAGraphMode.FULL
 
+    def has_piecewise_cudagraphs(self) -> bool:
+        return self.requires_piecewise_compilation()
+
     def separate_routine(self) -> bool:
         return isinstance(self.value, tuple)
+
+    def vaild_runtime_modes(self) -> bool:
+        return self in [
+            CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
+        ]
 
 
 @config
@@ -544,20 +552,37 @@ class CompilationConfig:
             # full cudagraph outside the fx graph. This reduces some cpu
             # overhead when the runtime batch_size is not cudagraph captured.
             # see https://github.com/vllm-project/vllm/pull/20059 for details.
-            self.splitting_ops = self._attention_ops
+            if self.pass_config.enable_attn_fusion:
+                self.splitting_ops = []
+                if self.cudagraph_mode.has_piecewise_cudagraphs():
+                    logger.warning_once(
+                        "When enable_attn_fusion, splitting_ops will be set "
+                        "to empty list, and cudagraph_mode containing "
+                        "PIECEWISE will be treated as FULL cudagraph_mode. "
+                        "Please ensure you are using attention backends that "
+                        "support cudagraph or set cudagraph_mode to NONE "
+                        "explicitly if encountering any problems.")
+                    self.cudagraph_mode = CUDAGraphMode.FULL
+            else:
+                self.splitting_ops = self._attention_ops
         elif len(self.splitting_ops) == 0:
             logger.warning_once("Using piecewise compilation with empty "
                                 "splitting_ops.")
-            if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            if self.cudagraph_mode.has_piecewise_cudagraphs():
                 logger.warning_once(
                     "When compilation level is piecewise with empty "
-                    "splitting_ops, PIECEWISE cudagraph_mode will be "
-                    "treated as FULL cudagraph_mode. Please ensure you are "
+                    "splitting_ops, cudagraph_mode containing PIECEWISE will "
+                    "be treated as FULL cudagraph_mode. Please ensure you are "
                     "using attention backends that support cudagraph or set "
                     "cudagraph_mode to NONE explicitly if encountering "
                     "any problems.")
                 self.cudagraph_mode = CUDAGraphMode.FULL
             self.splitting_ops = []
+        else:  # len(self.splitting_ops) > 0:
+            assert not self.pass_config.enable_attn_fusion or \
+                not self.splitting_ops_contain_attention(), (
+                "attention ops should not be in splitting_ops "
+                "when enable_attn_fusion is True")
 
     def splitting_ops_contain_attention(self) -> bool:
         return self.splitting_ops is not None and all(
