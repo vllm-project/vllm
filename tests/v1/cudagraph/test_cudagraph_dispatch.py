@@ -131,6 +131,16 @@ class TestCudagraphDispatcher:
         assert rt_mode == CUDAGraphMode.NONE
         assert key is None
 
+        # 4. Cascade attention should have a fall back mode
+        desc_full_exact = BatchDescriptor(num_tokens=8, uniform_decode=False)
+        rt_mode, key = dispatcher.dispatch(desc_full_exact,
+                                           use_cascade_attn=True)
+        if "PIECEWISE" in params["cudagraph_mode"]:  # string contains check
+            assert rt_mode == CUDAGraphMode.PIECEWISE
+            assert key == desc_full_exact.non_uniform
+        else:
+            assert rt_mode == CUDAGraphMode.NONE
+
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
 class TestCUDAGraphWrapper:
