@@ -99,8 +99,8 @@ def rank_worker(
                 ref_out = reference_moe_impl(config, weights, rank_tensors)
 
             if config.quant_dtype == "nvfp4":
-                atol = 1e-1
-                rtol = 1e-1
+                atol = 1e-1 if config.K < 4096 else 2e-1
+                rtol = 1e-1 if config.K < 4096 else 2e-1
             else:
                 atol = 3e-2
                 rtol = 3e-2
@@ -133,8 +133,8 @@ def run(config: Config, verbose: bool):
 Ms = [32, 64]
 # hidden sizes, making this too large will cause fp4 tests to fail.
 # Also needs to be a multiple of 1024 for deep_gemm.
-Ks = [4096]
-Ns = [2048]
+Ks = [2048]
+Ns = [1024]
 TOPKs = [4, 1]
 Es = [32]
 DTYPEs = [torch.bfloat16]

@@ -337,7 +337,8 @@ class FusedMoEQuantConfig:
         return quant_config
 
 
-# TODO better doc
+# TODO better doc + most of these could probably
+# call `make` with the proper type
 
 
 def fp8_w8a8_moe_quant_config(
