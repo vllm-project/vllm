@@ -522,7 +522,7 @@ class ModelConfig:
         all_fields = set([i.name for i in fields(self)])
         all_hashed_fields = list(all_fields - all_ignored_factors)
 
-        for field_name in all_hashed_fields:
+        for field_name in sorted(all_hashed_fields):
             field_v = getattr(self, field_name)
             if field_name == "hf_config":
                 factors.append(field_v.to_json_string())
