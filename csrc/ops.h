@@ -145,22 +145,6 @@ void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_quick(torch::Tensor& out, torch::Tensor& input);
 
-void advance_step_flashattn(int64_t num_seqs, int64_t num_queries,
-                            int64_t block_size, torch::Tensor& input_tokens,
-                            torch::Tensor& sampled_token_ids,
-                            torch::Tensor& input_positions,
-                            torch::Tensor& seq_lens,
-                            torch::Tensor& slot_mapping,
-                            torch::Tensor& block_tables);
-
-void advance_step_flashinfer(
-    int64_t num_seqs, int64_t num_queries, int64_t block_size,
-    torch::Tensor& input_tokens, torch::Tensor& sampled_token_ids,
-    torch::Tensor& input_positions, torch::Tensor& seq_lens,
-    torch::Tensor& slot_mapping, torch::Tensor& block_tables,
-    torch::Tensor& paged_kv_indices, torch::Tensor& paged_kv_indptr,
-    torch::Tensor& paged_kv_last_page_len, torch::Tensor& block_table_bounds);
-
 void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
                         torch::Tensor const& q_pe,
                         torch::Tensor const& kv_c_and_k_pe_cache,
@@ -170,15 +154,6 @@ void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
 #ifndef USE_ROCM
-torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
-                        const torch::Tensor& codebooks,
-                        const torch::Tensor& scales,
-                        const std::vector<int64_t>& codebook_partition_sizes,
-                        const std::optional<torch::Tensor>& bias);
-
-torch::Tensor aqlm_dequant(
-    const torch::Tensor& codes, const torch::Tensor& codebooks,
-    const std::vector<int64_t>& codebook_partition_sizes);
 
 torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
                        torch::Tensor _scaling_factors, torch::Tensor _zeros,

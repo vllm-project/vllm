@@ -8,7 +8,7 @@ import torch
 
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -587,7 +587,7 @@ def test_preempt_during_execution():
                                  block_size=16,
                                  num_blocks=11,
                                  enable_prefix_caching=False)
-    requests = create_requests(num_requests=2, num_tokens=80)
+    requests = create_requests(num_requests=2, num_tokens=80, block_size=16)
 
     # Schedule the first request.
     scheduler.add_request(requests[0])
@@ -760,7 +760,7 @@ def _assert_right_scheduler_output(
 
 def _assert_right_kv_cache_manager(
     scheduler: Scheduler,
-    req_ids: list[str],
+    requests: list[Request],
     num_tokens: int,
     block_size: int,
     num_requests: int,
@@ -770,12 +770,12 @@ def _assert_right_kv_cache_manager(
 
     # Make sure the request stats are right.
     EXPECTED_TOTAL_BLOCKS = num_tokens // block_size
-    for req_id in req_ids:
+    for req in requests:
         blocks = (scheduler.kv_cache_manager.coordinator.
-                  single_type_managers[0].req_to_blocks[req_id])
-        hashes = scheduler.kv_cache_manager.req_to_block_hashes[req_id]
+                  single_type_managers[0].req_to_blocks[req.request_id])
+        hashes = req.block_hashes
         assert (scheduler.kv_cache_manager.coordinator.single_type_managers[0].
-                num_cached_block[req_id] == EXPECTED_TOTAL_BLOCKS)
+                num_cached_block[req.request_id] == EXPECTED_TOTAL_BLOCKS)
         assert len(blocks) == EXPECTED_TOTAL_BLOCKS
         assert len(hashes) == EXPECTED_TOTAL_BLOCKS
 
@@ -838,7 +838,8 @@ def test_kv_connector_basic():
     MAX_TOKENS = 3
     requests = create_requests(num_requests=NUM_REQUESTS,
                                num_tokens=NUM_TOKENS,
-                               max_tokens=MAX_TOKENS)
+                               max_tokens=MAX_TOKENS,
+                               block_size=BLOCK_SIZE)
     req_ids = []
     req_to_index = {}
     for i, request in enumerate(requests):
@@ -866,7 +867,7 @@ def test_kv_connector_basic():
     )
 
     # Ensure KVCacheManager is correct.
-    _assert_right_kv_cache_manager(scheduler, req_ids, NUM_TOKENS, BLOCK_SIZE,
+    _assert_right_kv_cache_manager(scheduler, requests, NUM_TOKENS, BLOCK_SIZE,
                                    NUM_REQUESTS, NUM_TOTAL_BLOCKS)
 
     # Continue Generation until done.
@@ -884,7 +885,8 @@ def test_kv_connector_basic():
     NUM_TOKENS = NUM_TOKENS_PREFIX * 2
     requests = create_requests(num_requests=NUM_REQUESTS,
                                num_tokens=NUM_TOKENS,
-                               max_tokens=MAX_TOKENS)
+                               max_tokens=MAX_TOKENS,
+                               block_size=BLOCK_SIZE)
     req_ids = []
     req_to_index = {}
     for i, request in enumerate(requests):
@@ -913,7 +915,7 @@ def test_kv_connector_basic():
                                        NUM_MATCHED_NEW_TOKENS))
 
     # Ensure KVCacheManager is correct.
-    _assert_right_kv_cache_manager(scheduler, req_ids, NUM_TOKENS, BLOCK_SIZE,
+    _assert_right_kv_cache_manager(scheduler, requests, NUM_TOKENS, BLOCK_SIZE,
                                    NUM_REQUESTS, NUM_TOTAL_BLOCKS)
 
     # Continue Generation until done.
@@ -951,7 +953,8 @@ def test_kv_connector_unable_to_allocate():
     MAX_TOKENS = 2
     requests = create_requests(num_requests=NUM_REQUESTS,
                                num_tokens=NUM_TOKENS,
-                               max_tokens=MAX_TOKENS)
+                               max_tokens=MAX_TOKENS,
+                               block_size=BLOCK_SIZE)
     req_ids = []
     req_to_index = {}
     for i, request in enumerate(requests):
@@ -1032,7 +1035,8 @@ def test_kv_connector_handles_preemption():
     MAX_TOKENS = BLOCK_SIZE * 2
     requests = create_requests(num_requests=NUM_REQUESTS,
                                num_tokens=NUM_TOKENS,
-                               max_tokens=MAX_TOKENS)
+                               max_tokens=MAX_TOKENS,
+                               block_size=BLOCK_SIZE)
     req_ids = []
     req_to_index = {}
     for i, request in enumerate(requests):
@@ -1160,7 +1164,6 @@ def assert_scheduler_empty(scheduler: Scheduler):
     # KVCache Manager.
     assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                req_to_blocks) == 0
-    assert len(scheduler.kv_cache_manager.req_to_block_hashes) == 0
     assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                num_cached_block) == 0
     num_free_blocks = (
@@ -1304,7 +1307,7 @@ def create_requests_with_priority(
         priorities: list[int],
         arrival_times: Optional[list[float]] = None,
         num_tokens: int = 10,
-        mm_positions: Optional[list[PlaceholderRange]] = None,
+        mm_positions: Optional[list[list[PlaceholderRange]]] = None,
         max_tokens: int = 16,
         stop_token_ids: Optional[list[int]] = None,
         prompt_logprobs: Optional[int] = None):
@@ -1323,16 +1326,17 @@ def create_requests_with_priority(
     for i in range(num_requests):
         if mm_positions is not None:
             mm_position = mm_positions[i]
-            mm_inputs = [MultiModalKwargs({})] * len(mm_position)
+            mm_item = MultiModalKwargsItem.dummy("dummy_m")
+            mm_kwargs = [mm_item] * len(mm_position)
         else:
             mm_position = None
-            mm_inputs = None
+            mm_kwargs = None
         request = Request(
             request_id=f"{i}",
             prompt_token_ids=[i] * num_tokens,
             sampling_params=sampling_params,
             pooling_params=None,
-            multi_modal_inputs=mm_inputs,
+            multi_modal_kwargs=mm_kwargs,
             multi_modal_placeholders=mm_position,
             multi_modal_hashes=None,
             eos_token_id=EOS_TOKEN_ID,
@@ -1816,7 +1820,7 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     request = Request(
         request_id="0",
         prompt_token_ids=[0, 1],
-        multi_modal_inputs=None,
+        multi_modal_kwargs=None,
         multi_modal_hashes=None,
         multi_modal_placeholders=None,
         sampling_params=sampling_params,
