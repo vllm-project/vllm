@@ -1225,7 +1225,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return []
-            return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
         # tensor correspoending to a multimodal data item (image or video).
