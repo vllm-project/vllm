@@ -62,6 +62,7 @@ if TYPE_CHECKING:
         QuantizationConfig)
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.sample.logits_processor import LogitsProcessor
 
     HfOverrides = Union[dict, Callable[[type], type]]
 else:
@@ -72,6 +73,7 @@ else:
     BaseModelLoader = Any
     LoadFormats = Any
     TensorizerConfig = Any
+    LogitsProcessor = Any
     HfOverrides = Union[dict[str, Any], Callable[[type], type]]
 
     me_quant = LazyLoader("model_executor", globals(),
@@ -465,6 +467,9 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
+    """One or more logits processors' fully-qualified class names or class
+    definitions"""
 
     def compute_hash(self) -> str:
         """
@@ -3535,15 +3540,6 @@ class VllmConfig:
                 # in V0 means the compilation level wins out.
                 self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        # if cudagraph_mode is not explicitly set by users, set default value
-        if self.compilation_config.cudagraph_mode is None:
-            if envs.VLLM_USE_V1 and self.compilation_config.level \
-                == CompilationLevel.PIECEWISE:
-                self.compilation_config.cudagraph_mode = \
-                    CUDAGraphMode.PIECEWISE
-            else:
-                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
         if self.compilation_config.pass_config.enable_async_tp:
@@ -3552,14 +3548,28 @@ class VllmConfig:
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
 
-        # disable cudagraph when enforce eager execution
-        if self.model_config is not None and self.model_config.enforce_eager:
-            logger.info("Cudagraph is disabled under eager mode")
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-        elif envs.VLLM_USE_V1:
-            self.compilation_config.cudagraph_num_of_warmups = 1
+        if current_platform.is_cuda_alike():
+            # if cudagraph_mode is not explicitly set by users, set default
+            # value
+            if self.compilation_config.cudagraph_mode is None:
+                if envs.VLLM_USE_V1 and self.compilation_config.level \
+                    == CompilationLevel.PIECEWISE:
+                    self.compilation_config.cudagraph_mode = \
+                        CUDAGraphMode.PIECEWISE
+                else:
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        self._set_cudagraph_sizes()
+            # disable cudagraph when enforce eager execution
+            if self.model_config is not None and \
+                    self.model_config.enforce_eager:
+                logger.info("Cudagraph is disabled under eager mode")
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            elif envs.VLLM_USE_V1:
+                self.compilation_config.cudagraph_num_of_warmups = 1
+
+            self._set_cudagraph_sizes()
+        else:
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if self.cache_config.cpu_offload_gb > 0 and \
             self.compilation_config.level != CompilationLevel.NO_COMPILATION \
@@ -3595,9 +3605,6 @@ class VllmConfig:
                 logger.info(reason)
             self.scheduler_config.chunked_prefill_enabled = False
             self.scheduler_config.long_prefill_token_threshold = 0
-            self.scheduler_config.max_num_batched_tokens = max(
-                self.scheduler_config.max_model_len,
-                DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False
@@ -3618,7 +3625,7 @@ class VllmConfig:
         current_platform.check_and_update_config(self)
 
         # final check of cudagraph mode after platform-specific update
-        if envs.VLLM_USE_V1:
+        if envs.VLLM_USE_V1 and current_platform.is_cuda_alike():
             if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL \
                 and self.model_config is not None and \
                 not self.model_config.disable_cascade_attn:
