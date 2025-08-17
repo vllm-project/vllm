@@ -58,7 +58,7 @@ class CachedRequestState:
     @deprecated("`mm_inputs` is superseded by `mm_kwargs` and will be "
                 "removed in v0.13. Please use `mm_kwargs` instead.")
     def mm_inputs(self) -> list[MultiModalKwargs]:
-        return [MultiModalKwargs.from_items([item]) for item in self.mm_kwargs]
+        return [MultiModalKwargs([item]) for item in self.mm_kwargs]
 
     def get_token_id(self, idx: int) -> int:
         if idx < self.num_prompt_tokens:

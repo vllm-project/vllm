@@ -100,38 +100,6 @@ class MyRequest(msgspec.Struct):
 
 
 def test_multimodal_kwargs():
-    d = {
-        "foo":
-        torch.zeros(20000, dtype=torch.float16),
-        "bar": [torch.zeros(i * 1000, dtype=torch.int8) for i in range(3)],
-        "baz": [
-            torch.rand((256), dtype=torch.float16),
-            [
-                torch.rand((1, 12), dtype=torch.float32),
-                torch.rand((3, 5, 7), dtype=torch.float64),
-            ], [torch.rand((4, 4), dtype=torch.float16)]
-        ],
-    }
-
-    # pack mm kwargs into a mock request so that it can be decoded properly
-    req = MyRequest(mm=[MultiModalKwargs(d)])
-
-    encoder = MsgpackEncoder()
-    decoder = MsgpackDecoder(MyRequest)
-
-    encoded = encoder.encode(req)
-
-    assert len(encoded) == 6
-
-    total_len = sum(memoryview(x).cast("B").nbytes for x in encoded)
-
-    # expected total encoding length, should be 44559, +-20 for minor changes
-    assert 44539 <= total_len <= 44579
-    decoded: MultiModalKwargs = decoder.decode(encoded).mm[0]
-    assert all(nested_equal(d[k], decoded[k]) for k in d)
-
-
-def test_multimodal_items_by_modality():
     e1 = MultiModalFieldElem("audio", "a0",
                              torch.zeros(1000, dtype=torch.bfloat16),
                              MultiModalBatchedField())
@@ -151,7 +119,7 @@ def test_multimodal_items_by_modality():
     audio = MultiModalKwargsItem.from_elems([e1])
     video = MultiModalKwargsItem.from_elems([e2])
     image = MultiModalKwargsItem.from_elems([e3, e4])
-    mm = MultiModalKwargs.from_items([audio, video, image])
+    mm = MultiModalKwargs([audio, video, image])
 
     # pack mm kwargs into a mock request so that it can be decoded properly
     req = MyRequest([mm])

@@ -117,16 +117,9 @@ class MsgpackEncoder:
             return self._encode_mm_item(obj)
 
         if isinstance(obj, MultiModalKwargs):
-            mm: MultiModalKwargs = obj
-            if not mm.modalities:
-                # just return the main dict if there are no modalities.
-                return dict(mm)
-
-            # ignore the main dict, it will be re-indexed.
-            # Any tensors *not* indexed by modality will be ignored.
             return [
                 self._encode_mm_item(item)
-                for itemlist in mm._items_by_modality.values()
+                for itemlist in obj._items_by_modality.values()
                 for item in itemlist
             ]
 
@@ -268,13 +261,7 @@ class MsgpackDecoder:
             if issubclass(t, MultiModalKwargsItem):
                 return self._decode_mm_item(obj)
             if issubclass(t, MultiModalKwargs):
-                if isinstance(obj, list):
-                    return MultiModalKwargs.from_items(
-                        self._decode_mm_items(obj))
-                return MultiModalKwargs({
-                    k: self._decode_nested_tensors(v)
-                    for k, v in obj.items()
-                })
+                return MultiModalKwargs(self._decode_mm_items(obj))
             if t is UtilityResult:
                 return self._decode_utility_result(obj)
         return obj

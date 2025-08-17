@@ -524,7 +524,7 @@ class Sequence:
         if self.inputs["type"] == "multimodal":
             return self.inputs["mm_kwargs"]
 
-        return MultiModalKwargs({})
+        return MultiModalKwargs()
 
     @property
     def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
@@ -780,7 +780,7 @@ class SequenceGroup:
             return self.first_seq.multi_modal_data
         elif self.encoder_seq is not None:
             return self.encoder_seq.multi_modal_data
-        return MultiModalKwargs({})
+        return MultiModalKwargs()
 
     @property
     def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:

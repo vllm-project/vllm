@@ -653,7 +653,7 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
     def from_elems(elems: Sequence[MultiModalFieldElem]):
         return MultiModalKwargsItem({elem.key: elem for elem in elems})
 
-    def __init__(self, data: Mapping[str, MultiModalFieldElem]) -> None:
+    def __init__(self, data: Mapping[str, MultiModalFieldElem] = {}) -> None:
         super().__init__(data)
 
         modalities = {elem.modality for elem in self.data.values()}
@@ -668,9 +668,7 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
         return {key: elem.data for key, elem in self.items()}
 
 
-# NOTE: UserDict is for V0 compatibility.
-# V1 should access individual items via `get_item`.
-class MultiModalKwargs(UserDict[str, NestedTensors]):
+class MultiModalKwargs:
     """
     A dictionary that represents the keyword arguments to
     [`torch.nn.Module.forward`][].
@@ -714,39 +712,15 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
                 elems = [v[item_idx] for v in elems_in_modality.values()]
                 items.append(MultiModalKwargsItem.from_elems(elems))
 
-        return MultiModalKwargs.from_items(items)
+        return MultiModalKwargs(items)
 
-    @staticmethod
-    def from_items(
-        items: Sequence[MultiModalKwargsItem],
-        *,
-        pin_memory: bool = False,
-    ):
-        """Construct a new
-        [`MultiModalKwargs`][vllm.multimodal.inputs.MultiModalKwargs]
-        from multiple items."""
-        elems_by_key = defaultdict[str, list[MultiModalFieldElem]](list)
-        for item in items:
-            for key, elem in item.items():
-                elems_by_key[key].append(elem)
+    def __init__(self, items: Sequence[MultiModalKwargsItem] = ()) -> None:
+        super().__init__()
 
-        data = {
-            key: elems[0].field.reduce_data(elems, pin_memory=pin_memory)
-            for key, elems in elems_by_key.items() if len(elems) > 0
-        }
-
-        return MultiModalKwargs(data, items=items)
-
-    def __init__(
-        self,
-        data: Mapping[str, NestedTensors],
-        *,
-        items: Optional[Sequence[MultiModalKwargsItem]] = None,
-    ) -> None:
-        super().__init__(data)
-
-        items_by_modality = full_groupby(items or [], key=lambda x: x.modality)
+        items_by_modality = full_groupby(items, key=lambda x: x.modality)
         self._items_by_modality = dict(items_by_modality)
+
+        self._data: Optional[Mapping[str, NestedTensors]] = None
 
     @property
     def modalities(self):
@@ -839,22 +813,41 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
 
         return cast(BatchedTensorInputs, json_mapped)
 
-    def __delitem__(self, key: str) -> None:
-        super().__delitem__(key)
+    def keys(self):
+        return self.get_data().keys()
+
+    def values(self):
+        return self.get_data().values()
+
+    def items(self):
+        return self.get_data().items()
+
+    def get(self, key: str, /, default=None):
+        return self.get_data().get(key, default)
+
+    def pop(self, key: str, *args, **kwargs):
+        data = dict(self.get_data())
+        res = data.pop(key, *args, **kwargs)
 
         for items in self._items_by_modality.values():
             for item in items:
-                item.pop(key, None)
+                item.pop(key, *args, **kwargs)
+
+        self._data = None
+
+        return res
+
+    def __iter__(self):
+        return iter(self.get_data())
+
+    def __getitem__(self, key: str):
+        return self.get_data()[key]
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, self.__class__):
             return False
-        if self._items_by_modality != other._items_by_modality:
-            return False
 
-        ks = self.keys()
-        return (ks == other.keys()
-                and all(nested_tensors_equal(self[k], other[k]) for k in ks))
+        return self._items_by_modality == other._items_by_modality
 
     def _validate_modality(self, method_name: str, modality: str) -> None:
         if not self._items_by_modality:
@@ -887,6 +880,25 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         """
         self._validate_modality("get_items", modality)
         return self._items_by_modality[modality]
+
+    def get_data(self,
+                 *,
+                 pin_memory: bool = False) -> Mapping[str, NestedTensors]:
+        if self._data is not None:
+            return self._data
+
+        elems_by_key = defaultdict[str, list[MultiModalFieldElem]](list)
+        for items in self._items_by_modality.values():
+            for item in items:
+                for key, elem in item.items():
+                    elems_by_key[key].append(elem)
+
+        data = {
+            key: elems[0].field.reduce_data(elems, pin_memory=pin_memory)
+            for key, elems in elems_by_key.items() if len(elems) > 0
+        }
+        self._data = data
+        return data
 
 
 MultiModalPlaceholderDict: TypeAlias = Mapping[str, Sequence[PlaceholderRange]]
