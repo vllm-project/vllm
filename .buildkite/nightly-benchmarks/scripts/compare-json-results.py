@@ -3,8 +3,11 @@
 import argparse
 import json
 import os
+from importlib import util
 
 import pandas as pd
+
+plotly_found = util.find_spec("plotly.express") is not None
 
 
 def compare_data_columns(
@@ -279,8 +282,7 @@ if __name__ == "__main__":
                 text_file.write(html_msgs_for_data_cols[i])
                 text_file.write(html)
 
-                if plot is True:
-                    import pandas as pd
+                if plot is True and plotly_found is True:
                     import plotly.express as px
 
                     df = group[raw_data_cols]
