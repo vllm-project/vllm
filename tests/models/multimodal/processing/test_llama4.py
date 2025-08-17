@@ -80,6 +80,6 @@ def test_processor_override(
     num_patches_per_chunk = processor.info.get_patch_per_chunk(
         config.vision_config)
     assert prompt_token_ids.count(config.image_token_index) \
-        == mm_data["patches_per_image"].sum() * num_patches_per_chunk
-    assert mm_data["pixel_values"].shape[0] \
-        == mm_data["patches_per_image"].sum()
+        == sum(mm_data["patches_per_image"]) * num_patches_per_chunk
+    assert len(mm_data["pixel_values"]) \
+        == sum(mm_data["patches_per_image"])
