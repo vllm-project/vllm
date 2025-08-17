@@ -38,11 +38,12 @@ class MedusaProposer:
         self,
         target_hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
+    ) -> list[list[int]]:
         # Generate blocks and compute logits
         blocks = self.model(target_hidden_states)
         logits = self.model.compute_logits(blocks, None)
 
+        # TODO(woosuk): Return GPU tensor without GPU-CPU synchronization.
         # Get draft tokens and transpose the result
         draft_tokens = [logit.argmax(dim=-1).tolist() for logit in logits]
         return [list(row) for row in zip(*draft_tokens)]
