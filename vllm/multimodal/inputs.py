@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from collections import UserDict, defaultdict
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -630,7 +630,7 @@ class MultiModalFieldConfig:
         return self.field.build_elems(self.modality, key, batch)
 
 
-class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
+class MultiModalKwargsItem(dict[str, MultiModalFieldElem]):
     """
     A collection of
     [`MultiModalFieldElem`][vllm.multimodal.inputs.MultiModalFieldElem]
@@ -656,7 +656,7 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
     def __init__(self, data: Mapping[str, MultiModalFieldElem] = {}) -> None:
         super().__init__(data)
 
-        modalities = {elem.modality for elem in self.data.values()}
+        modalities = {elem.modality for elem in self.values()}
         assert len(modalities) == 1, f"Found different modalities={modalities}"
         self._modality = next(iter(modalities))
 
@@ -668,7 +668,7 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
         return {key: elem.data for key, elem in self.items()}
 
 
-class MultiModalKwargsItems(UserDict[str, Sequence[MultiModalKwargsItem]]):
+class MultiModalKwargsItems(dict[str, Sequence[MultiModalKwargsItem]]):
     """
     A dictionary of
     [`MultiModalKwargsItem`][vllm.multimodal.inputs.MultiModalKwargsItem]s
@@ -735,7 +735,7 @@ class MultiModalKwargsItems(UserDict[str, Sequence[MultiModalKwargsItem]]):
         })
 
 
-class MultiModalKwargs(UserDict[str, NestedTensors]):
+class MultiModalKwargs(dict[str, NestedTensors]):
     """
     A dictionary that represents the keyword arguments to
     [`torch.nn.Module.forward`][].
