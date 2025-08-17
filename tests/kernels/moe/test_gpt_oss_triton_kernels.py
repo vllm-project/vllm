@@ -27,7 +27,8 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-    BatchedOAITritonExperts, triton_kernel_moe_forward, ep_routing_naive, triton_kernel_fused_experts)
+    BatchedOAITritonExperts, ep_routing_naive, triton_kernel_fused_experts,
+    triton_kernel_moe_forward)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.model_executor.layers.utils import shuffle_weight
@@ -41,25 +42,29 @@ def deshuffle(w: torch.Tensor):
     deshuffled = torch.concat((first, second), dim=-1)
     return deshuffled
 
+
 def convert_into_ep_data(
-    w1_tri, w2_tri,
-    w1_bias_tri, w2_bias_tri,
-    ep_world, ep_rank, 
+    w1_tri,
+    w2_tri,
+    w1_bias_tri,
+    w2_bias_tri,
+    ep_world,
+    ep_rank,
 ):
     num_local_experts = w1_tri.shape[0] // ep_world
     rank_start = ep_rank * num_local_experts
     rank_end = (ep_rank + 1) * num_local_experts
 
-    w1 = w1_tri[rank_start: rank_end, ...].clone()
-    w2 = w2_tri[rank_start: rank_end, ...].clone()
-    w1_bias = w1_bias_tri[rank_start: rank_end, ...].clone()
-    w2_bias = w2_bias_tri[rank_start: rank_end, ...].clone()
+    w1 = w1_tri[rank_start:rank_end, ...].clone()
+    w2 = w2_tri[rank_start:rank_end, ...].clone()
+    w1_bias = w1_bias_tri[rank_start:rank_end, ...].clone()
+    w2_bias = w2_bias_tri[rank_start:rank_end, ...].clone()
 
     w_layout, w_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
-            mx_axis=1)
+        mx_axis=1)
     w_scale_layout, w_scale_layout_opts = (
-        layout.make_default_matmul_mxfp4_w_scale_layout(
-            mx_axis=1, num_warps=8))
+        layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=1,
+                                                        num_warps=8))
 
     w1_tri, w1_scale_tri = downcast_to_mxfp(w1, torch.uint8, axis=1)
     w1_ref = upcast_from_mxfp(w1_tri, w1_scale_tri, torch.bfloat16, axis=1)
@@ -67,9 +72,8 @@ def convert_into_ep_data(
     w2_tri, w2_scale_tri = downcast_to_mxfp(w2, torch.uint8, axis=1)
     w2_ref = upcast_from_mxfp(w2_tri, w2_scale_tri, torch.bfloat16, axis=1)
 
-
     w1_tri = convert_layout(wrap_torch_tensor(w1_tri, FP4), w_layout,
-                                **w_layout_opts)
+                            **w_layout_opts)
     w1_scale_tri = convert_layout(
         wrap_torch_tensor(w1_scale_tri),
         w_scale_layout,
@@ -85,9 +89,9 @@ def convert_into_ep_data(
     )
 
     pc1 = PrecisionConfig(weight_scale=w1_scale_tri,
-                            flex_ctx=FlexCtx(rhs_data=InFlexData()))
+                          flex_ctx=FlexCtx(rhs_data=InFlexData()))
     pc2 = PrecisionConfig(weight_scale=w2_scale_tri,
-                            flex_ctx=FlexCtx(rhs_data=InFlexData()))
+                          flex_ctx=FlexCtx(rhs_data=InFlexData()))
 
     return w1_ref, w2_ref, {
         "w1_tri": w1_tri,
@@ -99,7 +103,8 @@ def convert_into_ep_data(
     }
 
 
-def init_compute_data(M, K, N, E, EP, a_dtype: str, w_dtype: str, num_warps: int):
+def init_compute_data(M, K, N, E, EP, a_dtype: str, w_dtype: str,
+                      num_warps: int):
     randbits = [torch.randperm(E) for _ in range(M)]
     x_list = [
         (-1)**i *
@@ -189,11 +194,12 @@ def init_compute_data(M, K, N, E, EP, a_dtype: str, w_dtype: str, num_warps: int
         ref_torch_data_w1 = []
         ref_torch_data_w2 = []
         for i in range(EP):
-            w1, w2, data_triton = convert_into_ep_data(
-                w1_tri, w2_tri,
-                w1_bias_tri, w2_bias_tri,
-                ep_world=EP, ep_rank=i
-            )
+            w1, w2, data_triton = convert_into_ep_data(w1_tri,
+                                                       w2_tri,
+                                                       w1_bias_tri,
+                                                       w2_bias_tri,
+                                                       ep_world=EP,
+                                                       ep_rank=i)
             ref_torch_data_w1.append(w1)
             ref_torch_data_w2.append(w2)
             triton_kernel_data.append(data_triton)
@@ -210,17 +216,8 @@ def init_compute_data(M, K, N, E, EP, a_dtype: str, w_dtype: str, num_warps: int
         w1 = w1.transpose(-1, -2).contiguous()
         w2 = w2.transpose(-1, -2).contiguous()
 
-        return (
-            x,
-            w1,
-            w1_bias,
-            w2,
-            w2_bias,
-            exp_data,
-            x_tri,
-            exp_data_tri,
-            triton_kernel_data
-        )
+        return (x, w1, w1_bias, w2, w2_bias, exp_data, x_tri, exp_data_tri,
+                triton_kernel_data)
 
 
 @dataclass
@@ -303,7 +300,8 @@ class Case:
     ],
 )
 @pytest.mark.parametrize("num_token", [2])
-@pytest.mark.parametrize("tp, ep", [(1, 1), (2, 1), (4, 1), (8, 1), (1, 2), (1, 4), (1, 8)])
+@pytest.mark.parametrize("tp, ep", [(1, 1), (2, 1), (4, 1), (8, 1), (1, 2),
+                                    (1, 4), (1, 8)])
 def test_equiv(num_token, a_dtype, w_dtype, tp, ep):
     torch.cuda.manual_seed(42)
     M = num_token
@@ -312,28 +310,29 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, ep):
     N = ModelConfig.intermediate_size // tp
     topk = ModelConfig.experts_per_token
 
-    (
-        x,
-        w1,
-        w1_bias,
-        w2,
-        w2_bias,
-        exp_data,
-        x_tri,
-        exp_data_tri,
-        triton_kernel_data
-    ) = init_compute_data(M, K, N, E, ep, a_dtype, w_dtype, num_warps=8)
+    (x, w1, w1_bias, w2, w2_bias, exp_data, x_tri, exp_data_tri,
+     triton_kernel_data) = init_compute_data(M,
+                                             K,
+                                             N,
+                                             E,
+                                             ep,
+                                             a_dtype,
+                                             w_dtype,
+                                             num_warps=8)
 
     if ep != 1:
         out_triton = torch.zeros_like(x_tri)
         for ep_rank, per_rank_ep_data in enumerate(triton_kernel_data):
             # we manually inject ep rank info, so no need for distributed launch
-            routing_data, gather_idx, scatter_idx = ep_routing_naive(exp_data_tri,
-                                                             topk,
-                                                             sm_first=False, ep_rank=ep_rank, ep_size=ep)
+            routing_data, gather_idx, scatter_idx = ep_routing_naive(
+                exp_data_tri,
+                topk,
+                sm_first=False,
+                ep_rank=ep_rank,
+                ep_size=ep)
             # no token routed only apply to ep
             if torch.count_nonzero(routing_data.gate_scal) == 0:
-                out_triton_monolithic =  torch.zeros_like(x_tri)
+                out_triton_monolithic = torch.zeros_like(x_tri)
             else:
                 out_triton_monolithic = triton_kernel_fused_experts(
                     None,
@@ -365,7 +364,6 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, ep):
             w2_precision=rank_data["pc2"],
         )
 
-
     out_triton = out_triton[..., :K]
 
     out_ref = oai_moe_forward(
@@ -377,10 +375,7 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, ep):
         gating_output=exp_data,
         topk=topk,
     )
-    assert_close(ref=out_ref,
-                 tri=out_triton,
-                 maxtol=0.025,
-                 rmstol=0.005)
+    assert_close(ref=out_ref, tri=out_triton, maxtol=0.025, rmstol=0.005)
 
 
 def batched_moe(

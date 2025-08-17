@@ -5,11 +5,11 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.utils import has_triton_kernels
-from vllm.distributed import get_ep_group
 
 logger = init_logger(__name__)
 
@@ -18,9 +18,10 @@ if has_triton_kernels():
         import triton_kernels.swiglu
         from triton_kernels.matmul_ogs import (FnSpecs, FusedActivation,
                                                matmul_ogs)
-        from triton_kernels.routing import routing
+        from triton_kernels.routing import (GatherIndx, RoutingData,
+                                            ScatterIndx, compute_expt_data,
+                                            routing)
         from triton_kernels.topk import topk
-        from triton_kernels.routing import RoutingData, GatherIndx, ScatterIndx, compute_expt_data
     except ModuleNotFoundError:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
@@ -29,7 +30,8 @@ if has_triton_kernels():
 if TYPE_CHECKING:
     from triton_kernels.matmul_ogs import PrecisionConfig
 
-# code reference: 
+
+# code reference:
 # https://github.com/triton-lang/triton/blob/main/python/triton_kernels/bench/distributed.py#L212
 def ep_routing_naive(
     logits: torch.Tensor,
@@ -48,10 +50,13 @@ def ep_routing_naive(
         ep_rank = get_ep_group().rank_in_group
 
     if sm_first:
-            logits = torch.softmax(logits, dim=-1)
-    expt_scal, expt_indx, _ = topk(logits, top_k, apply_softmax=not sm_first, n_rows=n_rows)
+        logits = torch.softmax(logits, dim=-1)
+    expt_scal, expt_indx, _ = topk(logits,
+                                   top_k,
+                                   apply_softmax=not sm_first,
+                                   n_rows=n_rows)
     expt_indx = expt_indx.int()
-    
+
     expt_indx, sort_indices = torch.sort(expt_indx, dim=1, stable=True)
     expt_scal = torch.gather(expt_scal, 1, sort_indices)
 
@@ -74,20 +79,25 @@ def ep_routing_naive(
     topk_indx[~mask] = -1
     gate_indx[gate_indx >= mask.sum()] = -1
     gate_scal = expt_scal[topk_indx]
-    hist = torch.histc(expt_indx[mask], bins=num_local_expert, min=0, max=num_local_expert - 1)
+    hist = torch.histc(expt_indx[mask],
+                       bins=num_local_expert,
+                       min=0,
+                       max=num_local_expert - 1)
 
     # Pack the matmul data structures
-    gather_indx = GatherIndx(src_indx=topk_indx.int(), dst_indx=gate_indx.int())
-    scatter_indx = ScatterIndx(src_indx=gate_indx.int(), dst_indx=topk_indx.int())
+    gather_indx = GatherIndx(src_indx=topk_indx.int(),
+                             dst_indx=gate_indx.int())
+    scatter_indx = ScatterIndx(src_indx=gate_indx.int(),
+                               dst_indx=topk_indx.int())
     n_gates = mask.sum().item()
     expt_data = compute_expt_data(hist, num_local_expert, n_gates)
 
-    return RoutingData(
-            gate_scal, 
-            hist, 
-            num_local_expert, 
-            top_k, 
-            expt_data=expt_data), gather_indx,scatter_indx,
+    return RoutingData(gate_scal,
+                       hist,
+                       num_local_expert,
+                       top_k,
+                       expt_data=expt_data), gather_indx, scatter_indx,
+
 
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
@@ -115,16 +125,14 @@ def triton_kernel_moe_forward(
 
     # we only use expert_map tp test if ep is enabled
     if expert_map is not None:
-        routing_data, gather_idx, scatter_idx = ep_routing_naive(gating_output,
-                                                             topk,
-                                                             sm_first=not renormalize)
+        routing_data, gather_idx, scatter_idx = ep_routing_naive(
+            gating_output, topk, sm_first=not renormalize)
         # no token routed only apply to ep
         if torch.count_nonzero(routing_data.gate_scal) == 0:
             return torch.zeros_like(hidden_states)
     else:
-        routing_data, gather_idx, scatter_idx = routing(gating_output,
-                                                        topk,
-                                                        sm_first=not renormalize)
+        routing_data, gather_idx, scatter_idx = routing(
+            gating_output, topk, sm_first=not renormalize)
 
     return triton_kernel_fused_experts(
         None,
