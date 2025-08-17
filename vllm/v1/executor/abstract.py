@@ -89,7 +89,6 @@ class Executor(ExecutorBase):
         return output[0]
 
     def get_draft_token_ids(self) -> Optional[DraftTokenIds]:
-        # TODO(woosuk): Optimize this.
         output = self.collective_rpc("get_draft_token_ids")
         return output[0]
 
