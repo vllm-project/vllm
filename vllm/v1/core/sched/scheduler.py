@@ -969,7 +969,6 @@ class Scheduler(SchedulerInterface):
                 request.spec_token_ids.clear()
             elif self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
-                # Needs to happen after new_token_ids are accepted.
                 request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
                     spec_token_ids)
             else:
