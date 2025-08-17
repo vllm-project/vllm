@@ -56,8 +56,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import (
-    cached_image_processor_from_config)
 
 from .ernie45_vl_moe import Ernie4_5_VLMoeForCausalLM
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -1039,6 +1037,39 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
 class Ernie4_5VLMultiModalProcessor(
         BaseMultiModalProcessor[Ernie4_5_VLProcessingInfo]):
 
+    def _pixel_values_norm(
+        self,
+        pixel_values: torch.Tensor,
+        mm_kwargs: object,
+    ) -> torch.Tensor:
+        hf_config = self.info.get_hf_config()
+        vision_config = hf_config.vision_config
+        image_processor = self.info.get_image_processor(**mm_kwargs)
+        image_mean_tensor = torch.tensor(image_processor.image_mean,
+                                         dtype=torch.float32).reshape(
+                                             [1, 3, 1, 1])
+        image_std_tensor = torch.tensor(image_processor.image_std,
+                                        dtype=torch.float32).reshape(
+                                            [1, 3, 1, 1])
+        rescale_factor = torch.tensor(image_processor.rescale_factor,
+                                      dtype=torch.float32)
+        patch_size_squared = vision_config.patch_size**2
+
+        image_mean_tensor = (image_mean_tensor.squeeze(
+            [-2, -1]).repeat_interleave(patch_size_squared, -1))
+        image_std_tensor = (image_std_tensor.squeeze(
+            [-2, -1]).repeat_interleave(patch_size_squared, -1))
+
+        if not image_mean_tensor.is_contiguous():
+            image_mean_tensor = image_mean_tensor.contiguous()
+        if not image_std_tensor.is_contiguous():
+            image_std_tensor = image_std_tensor.contiguous()
+
+        pixel_values = (rescale_factor * pixel_values.to(torch.float32) -
+                        image_mean_tensor) / image_std_tensor
+        pixel_values = pixel_values.to(hf_config.torch_dtype)
+        return pixel_values
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -1069,6 +1100,10 @@ class Ernie4_5VLMultiModalProcessor(
 
         # Divide the processor_output into two modalities: image and video.
         if processor_output is not None:
+            pixel_values = processor_output['images']
+            if pixel_values is not None:
+                processor_output['images'] = self._pixel_values_norm(
+                    pixel_values, mm_kwargs)
             for key in list(processor_output.keys()):
                 if processor_output[key] is None:
                     del processor_output[key]
@@ -1273,8 +1308,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-        self._add_image_processor(vllm_config)
-
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -1284,64 +1317,11 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def _add_image_processor(self, vllm_config):
-
-        vision_config = vllm_config.model_config.hf_config.vision_config
-
-        image_processor = cached_image_processor_from_config(
-            vllm_config.model_config)
-        device = vllm_config.device_config.device
-
-        image_processor.image_mean_tensor = torch.tensor(
-            image_processor.image_mean, dtype=torch.float32,
-            device=device).reshape([1, 3, 1, 1])
-
-        image_processor.image_std_tensor = torch.tensor(
-            image_processor.image_std, dtype=torch.float32,
-            device=device).reshape([1, 3, 1, 1])
-
-        image_processor.rescale_factor = torch.tensor(
-            image_processor.rescale_factor, dtype=torch.float32, device=device)
-
-        patch_size_squared = vision_config.patch_size**2
-
-        image_processor.image_mean_tensor = (
-            image_processor.image_mean_tensor.squeeze(
-                [-2, -1]).repeat_interleave(patch_size_squared, -1))
-
-        image_processor.image_std_tensor = (
-            image_processor.image_std_tensor.squeeze(
-                [-2, -1]).repeat_interleave(patch_size_squared, -1))
-
-        if not image_processor.image_mean_tensor.is_contiguous():
-            image_processor.image_mean_tensor = \
-                image_processor.image_mean_tensor.contiguous()
-        if not image_processor.image_std_tensor.is_contiguous():
-            image_processor.image_std_tensor = \
-                image_processor.image_std_tensor.contiguous()
-
-        self.image_processor = image_processor
-
     def _vision_forward(
         self,
-        pixel_values,
-        grid_thw,
-    ):
-        if self.image_processor is not None:
-            current_device = pixel_values.device
-            self.image_processor.image_mean_tensor = (
-                self.image_processor.image_mean_tensor.to(current_device))
-            self.image_processor.image_std_tensor = (
-                self.image_processor.image_std_tensor.to(current_device))
-            pixel_values = self.image_processor.rescale_factor * \
-                            pixel_values.to(torch.float32)
-            pixel_values = (pixel_values -
-                            self.image_processor.image_mean_tensor
-                            ) / self.image_processor.image_std_tensor
-            pixel_values = pixel_values.to(self.vision_model.dtype)
-        else:
-            assert pixel_values.dtype == torch.bfloat16, pixel_values.dtype
-
+        pixel_values: torch.Tensor,
+        grid_thw: torch.Tensor,
+    ) -> torch.Tensor:
         if grid_thw is not None:
             grid_thw = grid_thw[grid_thw > 0]
             if grid_thw.numel() % 3 != 0:
