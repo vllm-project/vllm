@@ -49,7 +49,8 @@ def quant_fp8_per_tensor_batches(a):
     a_scales = []
 
     for i in range(num_batches):
-        a_fp8, a_global_sf = 1.0 / input_to_float8(a[i])
+        a_fp8, a_global_sf = input_to_float8(a[i])
+        a_global_sf = 1.0 / a_global_sf
         a_quant.append(a_fp8)
         a_scales.append(a_global_sf)
 
@@ -79,7 +80,8 @@ class TestData:
         w2 = torch.randn((e, k, n), device="cuda", dtype=torch.bfloat16)
 
         # Scale to fp8
-        _, a1_scale = 1.0 / input_to_float8(hidden_states)
+        _, a1_scale = input_to_float8(hidden_states)
+        a1_scale = 1.0 / a1_scale
         a2_scale = torch.scalar_tensor(1.0).to(device="cuda").to(
             dtype=torch.float32)
         w13_quantized, w13_weight_scale = quant_fp8_per_tensor_batches(w13)
