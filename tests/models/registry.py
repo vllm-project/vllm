@@ -555,7 +555,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "EagleQwen2ForCausalLM": _HfExamplesInfo("Qwen/Qwen2-0.5B-Instruct",
                                              trust_remote_code=True,
                                              speculative_model="reinforce20001/QwQ-32B-Eagle",
-                                             tokenizer="Qwen/Qwen2-0.5B-Instruct"),   
+                                             tokenizer="Qwen/Qwen2-0.5B-Instruct"),
     "Glm4MoeMTPModel": _HfExamplesInfo("zai-org/GLM-4.5",
                                         speculative_model="zai-org/GLM-4.5",
                                         min_transformers_version="4.54",
