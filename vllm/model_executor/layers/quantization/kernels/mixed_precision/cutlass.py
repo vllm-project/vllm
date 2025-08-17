@@ -9,49 +9,18 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            permute_param_layout_)
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
-# czhu: on the fly dynamic fp8 quant
-def fp8_per_token(
-    x_bf16: torch.Tensor,
-    safety: float = 0.95,         # shrink range a bit to avoid infs
-    eps: float = 1e-12,
-    fake: bool = True
-):
-    """
-    Per-token 'fake' FP8 quantization of activations (row = token).
-    x_bf16: [M, K] BF16 tensor
-    Returns: (x_bf16_fake, scales_bf16) where x_bf16_fake is BF16 after FP8 Q/DQ
-    """
-
-    assert x_bf16.dim() == 2, "expected [M, K]"
-    assert x_bf16.dtype == torch.bfloat16, "input must be BF16"
-    fp8_dtype = torch.float8_e4m3fn
-
-    # Compute per-token amax in FP32 for stability
-    x_f32 = x_bf16.to(torch.float32)
-    amax = torch.amax(x_f32.abs(), dim=1)  # [M]
-
-    # Scale so that per-row max maps near FP8 max (with a safety margin)
-    alpha = torch.finfo(fp8_dtype).max  # FP8 max finite value
-    # avoid divide-by-zero; if a row is all zeros, set scale=1
-    scales = torch.where(amax > 0, amax / (alpha * safety), torch.ones_like(amax))
-
-    # Apply scaling, Q->DQ through FP8
-    inv_scales = (1.0 / (scales + eps)).to(torch.float32)      # [M]
-    x_scaled = x_f32 * inv_scales.unsqueeze(1)                  # [M, K]
-    x_fp8 = x_scaled.to(fp8_dtype)                              # quantize
-                        # dequantize to BF16
-    if fake:
-        x_dq = x_fp8.to(torch.bfloat16)         
-        # x_out = (x_dq * scales.to(torch.bfloat16).unsqueeze(1))     # re-apply scale
-        return x_dq, scales.to(torch.bfloat16)
-    else:
-        return x_fp8, scales.to(torch.bfloat16)
 
 class CutlassW4A8LinearKernel(MPLinearKernel):
+    # hack the fp8 quant op here
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.quant_fp8 = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -138,17 +107,16 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         else:
             w_zp = None
 
-        # dynamic fp8 quant for now
-        x_2d, act_scales = fp8_per_token(x_2d, fake=False)
+        # per-tok quant
+        x_2d, act_scales = self.quant_fp8(
+            x_2d,
+        )
         output = ops.cutlass_w4a8_mm(a=x_2d,
                                      b_q=w_q,
                                      b_group_scales=w_s,
                                      b_group_size=c.group_size,
-                                     a_token_scales=act_scales.to(torch.float32),
+                                     a_token_scales=act_scales,
                                      b_channel_scales=self.w_ch_s)
-
-        # simulate per-row fp8 quant, apply in fp32
-        # output = ((output.to(torch.float32)) * (act_scales.to(torch.float32).unsqueeze(1))).to(torch.bfloat16)
 
         if bias is not None:
             output.add_(bias)  # In-place add
