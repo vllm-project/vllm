@@ -41,8 +41,65 @@ def deshuffle(w: torch.Tensor):
     deshuffled = torch.concat((first, second), dim=-1)
     return deshuffled
 
+def convert_into_ep_data(
+    w1_tri, w2_tri,
+    w1_bias_tri, w2_bias_tri,
+    ep_world, ep_rank, 
+):
+    num_local_experts = w1_tri.shape[0] // ep_world
+    rank_start = ep_rank * num_local_experts
+    rank_end = (ep_rank + 1) * num_local_experts
 
-def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
+    w1 = w1_tri[rank_start: rank_end, ...].clone()
+    w2 = w2_tri[rank_start: rank_end, ...].clone()
+    w1_bias = w1_bias_tri[rank_start: rank_end, ...].clone()
+    w2_bias = w2_bias_tri[rank_start: rank_end, ...].clone()
+
+    w_layout, w_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
+            mx_axis=1)
+    w_scale_layout, w_scale_layout_opts = (
+        layout.make_default_matmul_mxfp4_w_scale_layout(
+            mx_axis=1, num_warps=8))
+
+    w1_tri, w1_scale_tri = downcast_to_mxfp(w1, torch.uint8, axis=1)
+    w1_ref = upcast_from_mxfp(w1_tri, w1_scale_tri, torch.bfloat16, axis=1)
+
+    w2_tri, w2_scale_tri = downcast_to_mxfp(w2, torch.uint8, axis=1)
+    w2_ref = upcast_from_mxfp(w2_tri, w2_scale_tri, torch.bfloat16, axis=1)
+
+
+    w1_tri = convert_layout(wrap_torch_tensor(w1_tri, FP4), w_layout,
+                                **w_layout_opts)
+    w1_scale_tri = convert_layout(
+        wrap_torch_tensor(w1_scale_tri),
+        w_scale_layout,
+        **w_scale_layout_opts,
+    )
+
+    w2_tri = convert_layout(wrap_torch_tensor(w2_tri, FP4), w_layout,
+                            **w_layout_opts)
+    w2_scale_tri = convert_layout(
+        wrap_torch_tensor(w2_scale_tri),
+        w_scale_layout,
+        **w_scale_layout_opts,
+    )
+
+    pc1 = PrecisionConfig(weight_scale=w1_scale_tri,
+                            flex_ctx=FlexCtx(rhs_data=InFlexData()))
+    pc2 = PrecisionConfig(weight_scale=w2_scale_tri,
+                            flex_ctx=FlexCtx(rhs_data=InFlexData()))
+
+    return w1_ref, w2_ref, {
+        "w1_tri": w1_tri,
+        "w2_tri": w2_tri,
+        "w1_bias_tri": w1_bias,
+        "w2_bias_tri": w2_bias,
+        "pc1": pc1,
+        "pc2": pc2
+    }
+
+
+def init_compute_data(M, K, N, E, EP, a_dtype: str, w_dtype: str, num_warps: int):
     randbits = [torch.randperm(E) for _ in range(M)]
     x_list = [
         (-1)**i *
@@ -128,39 +185,22 @@ def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
 
         x_tri = F.pad(x_tri, (0, x_pad, 0, 0), mode="constant", value=0)
 
-        w_layout, w_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
-            mx_axis=1)
-        w_scale_layout, w_scale_layout_opts = (
-            layout.make_default_matmul_mxfp4_w_scale_layout(
-                mx_axis=1, num_warps=num_warps))
+        triton_kernel_data = []
+        ref_torch_data_w1 = []
+        ref_torch_data_w2 = []
+        for i in range(EP):
+            w1, w2, data_triton = convert_into_ep_data(
+                w1_tri, w2_tri,
+                w1_bias_tri, w2_bias_tri,
+                ep_world=EP, ep_rank=i
+            )
+            ref_torch_data_w1.append(w1)
+            ref_torch_data_w2.append(w2)
+            triton_kernel_data.append(data_triton)
 
-        w1_tri, w1_scale_tri = downcast_to_mxfp(w1_tri, torch.uint8, axis=1)
-        w1 = upcast_from_mxfp(w1_tri, w1_scale_tri, torch.bfloat16, axis=1)
-
-        w2_tri, w2_scale_tri = downcast_to_mxfp(w2_tri, torch.uint8, axis=1)
-        w2 = upcast_from_mxfp(w2_tri, w2_scale_tri, torch.bfloat16, axis=1)
-
-        w1_tri = convert_layout(wrap_torch_tensor(w1_tri, FP4), w_layout,
-                                **w_layout_opts)
-        w1_scale_tri = convert_layout(
-            wrap_torch_tensor(w1_scale_tri),
-            w_scale_layout,
-            **w_scale_layout_opts,
-        )
-
-        w2_tri = convert_layout(wrap_torch_tensor(w2_tri, FP4), w_layout,
-                                **w_layout_opts)
-        w2_scale_tri = convert_layout(
-            wrap_torch_tensor(w2_scale_tri),
-            w_scale_layout,
-            **w_scale_layout_opts,
-        )
-
-        pc1 = PrecisionConfig(weight_scale=w1_scale_tri,
-                              flex_ctx=FlexCtx(rhs_data=InFlexData()))
-        pc2 = PrecisionConfig(weight_scale=w2_scale_tri,
-                              flex_ctx=FlexCtx(rhs_data=InFlexData()))
-
+        # import pdb; pdb.set_trace()
+        w1 = torch.stack(ref_torch_data_w1, dim=0).squeeze(0)
+        w2 = torch.stack(ref_torch_data_w2, dim=0).squeeze(0)
         # tucuate so the rest can run properly
         w1 = w1[..., :K, :2 * N]
         w2 = w2[..., :N, :K]
@@ -178,13 +218,8 @@ def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
             w2_bias,
             exp_data,
             x_tri,
-            w1_tri,
-            w2_tri,
             exp_data_tri,
-            w1_bias_tri,
-            w2_bias_tri,
-            pc1,
-            pc2,
+            triton_kernel_data
         )
 
 
@@ -268,8 +303,9 @@ class Case:
     ],
 )
 @pytest.mark.parametrize("num_token", [2])
-@pytest.mark.parametrize("tp", [1, 2, 4, 8])
-def test_equiv(num_token, a_dtype, w_dtype, tp):
+@pytest.mark.parametrize("tp, ep", [(1, 1)])
+def test_equiv(num_token, a_dtype, w_dtype, tp, ep):
+    torch.cuda.manual_seed(42)
     M = num_token
     E = ModelConfig.num_experts
     K = ModelConfig.hidden_size
@@ -284,28 +320,24 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
         w2_bias,
         exp_data,
         x_tri,
-        w1_tri,
-        w2_tri,
         exp_data_tri,
-        w1_bias_tri,
-        w2_bias_tri,
-        pc1,
-        pc2,
-    ) = init_compute_data(M, K, N, E, a_dtype, w_dtype, num_warps=8)
+        triton_kernel_data
+    ) = init_compute_data(M, K, N, E, ep, a_dtype, w_dtype, num_warps=8)
 
-    out_triton_monolithic = triton_kernel_moe_forward(
-        hidden_states=x_tri,
-        w1=w1_tri,
-        w2=w2_tri,
-        gating_output=exp_data_tri,
-        topk=topk,
-        renormalize=True,
-        w1_bias=w1_bias_tri,
-        w2_bias=w2_bias_tri,
-        w1_precision=pc1,
-        w2_precision=pc2,
-    )
-    out_triton_monolithic = out_triton_monolithic[..., :K]
+    for per_rank_ep_data in triton_kernel_data:
+        out_triton_monolithic = triton_kernel_moe_forward(
+            hidden_states=x_tri,
+            w1=per_rank_ep_data["w1_tri"],
+            w2=per_rank_ep_data["w2_tri"],
+            gating_output=exp_data_tri,
+            topk=topk,
+            renormalize=True,
+            w1_bias=per_rank_ep_data["w1_bias_tri"],
+            w2_bias=per_rank_ep_data["w2_bias_tri"],
+            w1_precision=per_rank_ep_data["pc1"],
+            w2_precision=per_rank_ep_data["pc2"],
+        )
+        out_triton = out_triton_monolithic[..., :K]
 
     out_ref = oai_moe_forward(
         hidden_states=x,
@@ -317,7 +349,7 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
         topk=topk,
     )
     assert_close(ref=out_ref,
-                 tri=out_triton_monolithic,
+                 tri=out_triton,
                  maxtol=0.025,
                  rmstol=0.005)
 

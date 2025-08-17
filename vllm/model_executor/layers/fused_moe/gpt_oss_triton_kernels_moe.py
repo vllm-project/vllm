@@ -31,14 +31,14 @@ if TYPE_CHECKING:
 
 
 def ep_routing_naive(
-    gating_output: torch.Tensor,
+    logits: torch.Tensor,
     top_k: int,
     sm_first: bool = False,
     n_rows: Optional[int] = None,
     ep_size: Optional[int] = None,
     ep_rank: Optional[int] = None,
 ):
-    E = gating_output.shape[0]
+    E = logits.shape[1]
     if ep_size is None:
         ep_size = get_ep_group().world_size
     if ep_rank is None:
