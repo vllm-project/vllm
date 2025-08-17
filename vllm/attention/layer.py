@@ -138,6 +138,7 @@ class Attention(nn.Module):
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
+        self.has_sink = extra_impl_args.get("sinks") is not None
 
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
@@ -165,7 +166,8 @@ class Attention(nn.Module):
                                                  kv_cache_dtype,
                                                  block_size,
                                                  is_attention_free,
-                                                 use_mla=use_mla)
+                                                 use_mla=use_mla,
+                                                 has_sink=self.has_sink)
         else:
             self.attn_backend = attn_backend
 
@@ -305,6 +307,15 @@ class Attention(nn.Module):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if hasattr(self.impl, "process_weights_after_loading"):
             self.impl.process_weights_after_loading(act_dtype)
+
+        # FlashInfer requires attention sinks to be float32
+        if (self.backend == _Backend.FLASHINFER_VLLM_V1
+                and hasattr(self.impl, 'sinks')):
+            from vllm.v1.attention.backends.flashinfer import FlashInferImpl
+            assert isinstance(self.impl, FlashInferImpl)
+            if (self.impl.sinks is not None
+                    and self.impl.sinks.dtype != torch.float32):
+                self.impl.sinks = self.impl.sinks.to(torch.float32)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend

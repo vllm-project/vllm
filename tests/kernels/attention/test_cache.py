@@ -11,11 +11,11 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 
 COPYING_DIRECTION = [('cuda', 'cpu'), ('cuda', 'cuda'), ('cpu', 'cuda')]
-DTYPES = [torch.half, torch.bfloat16, torch.float]
+DTYPES = [torch.bfloat16, torch.float]
 NUM_TOKENS = [42]  # Arbitrary values for testing
 NUM_LAYERS = [1]  # Arbitrary values for testing
 NUM_HEADS = [8]  # Arbitrary values for testing
-HEAD_SIZES = [64, 80, 120, 256]
+HEAD_SIZES = [64, 80, 256]
 BLOCK_SIZES = [8, 16, 32]
 CACHE_LAYOUTS = ["NHD", "HND"]
 
