@@ -57,8 +57,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
 from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
-    make_kv_sharing_fast_prefill_attention_metadata,
-    reorder_batch_to_split_decodes_and_prefills)
+    make_kv_sharing_fast_prefill_attention_metadata)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
@@ -288,35 +287,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             dtype=self.dtype,
             device=self.device)
 
-        # OPTIMIZATION: Cache the tensors rather than creating them every step.
-        # Keep in int64 to avoid overflow with long context
-        self.arange_np = np.arange(max(self.max_num_reqs + 1,
-                                       self.max_model_len,
-                                       self.max_num_tokens),
-                                   dtype=np.int64)
-        # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
-        # a faster version of creating a new tensor every time. Thus, we should
-        # not make any assumptions about the values in these tensors.
-        self.input_ids_cpu = torch.zeros(self.max_num_tokens,
-                                         dtype=torch.int32,
-                                         device="cpu",
-                                         pin_memory=self.pin_memory)
-        self.positions_cpu = torch.zeros(self.max_num_tokens,
-                                         dtype=torch.int64,
-                                         device="cpu",
-                                         pin_memory=self.pin_memory)
-        self.positions_np = self.positions_cpu.numpy()
-        self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
-                                               dtype=torch.int32,
-                                               device="cpu",
-                                               pin_memory=self.pin_memory)
-        self.query_start_loc_np = self.query_start_loc_cpu.numpy()
-        self.seq_lens_cpu = torch.zeros(self.max_num_reqs,
-                                        dtype=torch.int32,
-                                        device="cpu",
-                                        pin_memory=self.pin_memory)
-        self.seq_lens_np = self.seq_lens_cpu.numpy()
-
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
         # means this layer will perform attention using the keys and values
@@ -343,8 +313,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             max_num_reqs=self.max_num_reqs,
         ) if self.supports_mm_inputs \
             else None)
-
-        self.reorder_batch_threshold: Optional[int] = None
 
     def _init_model_kwargs(self, num_tokens: int):
         model_kwargs = dict[str, Any]()
@@ -380,30 +348,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         model_kwargs["token_type_ids"] = torch.concat(token_type_ids).to(
             device=self.device)
         return model_kwargs
-
-    def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
-        """
-        Update the order of requests in the batch based on the attention
-        backend's needs. For example, some attention backends (namely MLA) may
-        want to separate requests based on if the attention computation will be
-        compute-bound or memory-bound.
-
-        Args:
-            scheduler_output: The scheduler output.
-        """
-        # Attention free models have zero kv_cache_goups, however models
-        # like Mamba are also attention free but use the kv_cache for
-        # keeping its internal state. This is why we check the number
-        # of kv_cache groups instead of solely checking
-        # for self.model_config.is_attention_free.
-        if len(self.kv_cache_config.kv_cache_groups) == 0:
-            return
-
-        if self.reorder_batch_threshold is not None:
-            reorder_batch_to_split_decodes_and_prefills(
-                self.input_batch,
-                scheduler_output,
-                decode_threshold=self.reorder_batch_threshold)
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
@@ -620,13 +564,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
             self.input_batch.add_request(req_state)
-
-        # Condense the batched states if there are gaps left by removed requests
-        self.input_batch.condense()
-        # Allow attention backend to reorder the batch, potentially
-        self._may_reorder_batch(scheduler_output)
-        # Refresh batch metadata with any pending updates.
-        self.input_batch.refresh_metadata()
 
     def _extract_mm_kwargs(
         self,
