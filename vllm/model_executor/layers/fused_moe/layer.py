@@ -1335,6 +1335,7 @@ class FusedMoE(CustomOp):
         # with shape (num_logical_experts,), not an expert weight.
         NON_EXPERT_WEIGHTS = {
             "e_score_correction_bias",
+            # skip input scales as they are scalers
             "w13_input_scale",
             "w2_input_scale",
         }
