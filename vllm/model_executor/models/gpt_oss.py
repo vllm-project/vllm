@@ -159,7 +159,7 @@ class MLPBlock(torch.nn.Module):
                                 prefix=f"{prefix}.experts",
                                 apply_router_weight_on_input=False,
                                 has_bias=True,
-                                activation="swiglu_oai")
+                                activation="swigluoai")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         t = self.norm(x)
