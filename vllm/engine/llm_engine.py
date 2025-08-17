@@ -375,7 +375,7 @@ class LLMEngine:
         if self.decoding_config.reasoning_backend is not None:
             reasoner_cls = ReasoningParserManager.get_reasoning_parser(
                 self.decoding_config.reasoning_backend)
-            self.reasoner = reasoner_cls(self.tokenizer.get_lora_tokenizer())
+            self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
