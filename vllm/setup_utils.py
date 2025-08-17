@@ -13,7 +13,8 @@ from torch.utils.cpp_extension import CUDA_HOME
 
 
 def is_sccache_available() -> bool:
-    return which("sccache") is not None
+    return which("sccache") is not None and \
+        not bool(int(os.getenv("VLLM_DISABLE_SCCACHE", "0")))
 
 
 def is_ccache_available() -> bool:
