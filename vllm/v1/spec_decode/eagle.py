@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
 from dataclasses import replace
+from importlib.util import find_spec
 from typing import Optional
 
 import numpy as np
@@ -94,6 +95,20 @@ class EagleProposer:
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=device)
+
+        # Determine allowed attention backends once during initialization.
+        self.allowed_attn_types: tuple[type, ...] = ()
+        if current_platform.is_rocm():
+            rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
+            # vllm.v1.attention.backends.rocm_aiter_fa is an optional backend
+            if find_spec("vllm.v1.attention.backends.rocm_aiter_fa"):
+                from vllm.v1.attention.backends.rocm_aiter_fa import (
+                    AiterFlashAttentionMetadata)
+                rocm_types.append(AiterFlashAttentionMetadata)
+            self.allowed_attn_types = tuple(rocm_types)
+        else:
+            self.allowed_attn_types = (FlashAttentionMetadata,
+                                       TreeAttentionMetadata)
 
         # Parse the speculative token tree.
         spec_token_tree = self.speculative_config.speculative_token_tree
@@ -231,25 +246,7 @@ class EagleProposer:
         # TODO: Currently, MTP module released by deepseek only has
         # one layer. Adapt this code to support multiple layers once
         # there's a multi-layer MTP module.
-
-        # On ROCm, both AiterFlashAttention and TritonAttention
-        # support multi-token eagle spec decode.
-        if current_platform.is_rocm():
-            allowed_types: tuple[type, ...] = (TritonAttentionMetadata,
-                                               FlashAttentionMetadata)
-            try:
-                from vllm.v1.attention.backends.rocm_aiter_fa import (
-                    AiterFlashAttentionMetadata)
-                allowed_types += (AiterFlashAttentionMetadata, )
-            except ImportError:
-                pass
-            assert isinstance(attn_metadata, allowed_types)
-        else:
-            # Currently, only FlashAttention and TreeAttention support
-            # multi-token eagle spec decode. This is because the code below
-            # makes assumptions about attn_metadata attributes available.
-            assert isinstance(attn_metadata,
-                              (FlashAttentionMetadata, TreeAttentionMetadata))
+        assert isinstance(attn_metadata, self.allowed_attn_types)
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
