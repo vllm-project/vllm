@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Callable, Optional, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar
 
 import torch
 
@@ -236,8 +236,8 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
     """Limits the number of tokens allowed inside a 'thinking' section."""
 
-    def __init__(self, reasoning_config: ReasoningConfig, pin_memory: bool,
-                 device: torch.device, max_num_reqs: int):
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
+                 is_pin_memory: bool):
         """
         Args:
           reasoning_config: Configuration for reasoning, which includes
@@ -245,7 +245,8 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
           pin_memory (bool): Whether to use pinned memory for tensors.
           device (torch.device): Device to use for tensor operations.
         """
-        super().__init__()
+        reasoning_config = vllm_config.reasoning_config
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.reasoning_effort_to_token_budget = {
             "low": 1024,
             "medium": 2048,
@@ -265,7 +266,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             reasoning_config, "high_effort_token_budget",
             self.reasoning_effort_to_token_budget['high'])
 
-        self.pin_memory = pin_memory
+        self.pin_memory = is_pin_memory
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
 
@@ -373,11 +374,8 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         if batch_update:
             for (index, params, prompt_tok_ids, output_tok_ids) \
                 in batch_update.added:
-                reasoning_effort = (params.reasoning_effort if isinstance(
-                    params, SamplingParams) else None)
-                thinking_token_budget = (params.thinking_token_budget
-                                         if isinstance(params, SamplingParams)
-                                         else None)
+                reasoning_effort = params.reasoning_effort
+                thinking_token_budget = params.thinking_token_budget
                 resolved_thinking_token_budget = \
                     self._resolve_thinking_token_budget(
                         reasoning_effort, thinking_token_budget)

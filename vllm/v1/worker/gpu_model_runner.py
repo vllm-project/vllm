@@ -24,8 +24,8 @@ from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
-from vllm.config import (CompilationLevel, CUDAGraphMode, ReasoningConfig,
-                         VllmConfig, get_layers_from_vllm_config, update_config)
+from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
+                         get_layers_from_vllm_config, update_config)
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
