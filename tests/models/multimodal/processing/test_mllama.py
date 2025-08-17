@@ -53,7 +53,7 @@ def test_profiling(
         prompt=dummy_mm_data.prompt,
         mm_data=dummy_mm_data.mm_data,
         hf_processor_mm_kwargs=dict(),
-    )["mm_kwargs"]
+    )["mm_kwargs"].get_data()
 
     # Get the actual number of encoder tokens for each sample.
     # Because attn_metadata.encoder_seq_lens only counts the last

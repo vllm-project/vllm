@@ -51,7 +51,7 @@ def test_processor_override(
         prompt = encode_tokens(tokenizer, prompt)
 
     processed_inputs = processor.apply(prompt, mm_data, mm_processor_kwargs)
-    mm_kwargs = processed_inputs["mm_kwargs"]
+    mm_kwargs = processed_inputs["mm_kwargs"].get_data()
 
     # place holder replacements
     prompt_token_ids = processed_inputs["prompt_token_ids"]

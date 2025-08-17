@@ -218,7 +218,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
             # Set encoder prompt length based on the number of tiles.
             # This tells the block manager to allocate correct number
             # of slots for encoder tokens.
-            num_tiles = mm_inputs["mm_kwargs"]["num_tiles"]
+            num_tiles = mm_inputs["mm_kwargs"].get_data()["num_tiles"]
             decode_tiles = num_tiles[num_encode_images:num_images].sum().item()
             num_tokens = decode_tiles * token_per_chunk
             mm_inputs["encoder_prompt_token_ids"] = [image_token_id

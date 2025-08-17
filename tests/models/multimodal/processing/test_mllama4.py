@@ -42,7 +42,7 @@ def test_profiling(model_id: str, max_model_len: int):
         prompt=dummy_mm_data.prompt,
         mm_data=dummy_mm_data.mm_data,
         hf_processor_mm_kwargs=dict(),
-    )["mm_kwargs"]
+    )["mm_kwargs"].get_data()
 
     image_size = hf_config.vision_config.image_size
     patch_size = hf_config.vision_config.patch_size
