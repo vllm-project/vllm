@@ -43,8 +43,9 @@ class MedusaProposer:
         blocks = self.model(target_hidden_states)
         logits = self.model.compute_logits(blocks, None)
 
-        # TODO(woosuk): Return GPU tensor without GPU-CPU synchronization.
         # Get draft tokens and transpose the result
+        # TODO(woosuk): OPTIMIZATION: Return GPU tensor without GPU-CPU
+        # synchronization.
         draft_tokens = [logit.argmax(dim=-1).tolist() for logit in logits]
         return [list(row) for row in zip(*draft_tokens)]
 
