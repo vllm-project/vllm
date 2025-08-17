@@ -62,6 +62,7 @@ if TYPE_CHECKING:
         QuantizationConfig)
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.sample.logits_processor import LogitsProcessor
 
     HfOverrides = Union[dict, Callable[[type], type]]
 else:
@@ -72,6 +73,7 @@ else:
     BaseModelLoader = Any
     LoadFormats = Any
     TensorizerConfig = Any
+    LogitsProcessor = Any
     HfOverrides = Union[dict[str, Any], Callable[[type], type]]
 
     me_quant = LazyLoader("model_executor", globals(),
@@ -465,6 +467,9 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
+    """One or more logits processors' fully-qualified class names or class
+    definitions"""
 
     def compute_hash(self) -> str:
         """
@@ -3600,9 +3605,6 @@ class VllmConfig:
                 logger.info(reason)
             self.scheduler_config.chunked_prefill_enabled = False
             self.scheduler_config.long_prefill_token_threshold = 0
-            self.scheduler_config.max_num_batched_tokens = max(
-                self.scheduler_config.max_model_len,
-                DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False
