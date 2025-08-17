@@ -6,6 +6,7 @@
 
 """Utils for data load, save, and process (e.g., prompt construction)"""
 
+import ast
 import json
 import os
 import re
@@ -190,7 +191,7 @@ def save_args(args, path_dir):
 # DATA PROCESSING
 def construct_prompt(sample, config):
     question = sample["question"]
-    options = eval(sample["options"])
+    options = ast.literal_eval(sample["options"])
     example = ""
     if sample["question_type"] == "multiple-choice":
         start_chr = "A"
