@@ -1338,8 +1338,6 @@ class FusedMoE(CustomOp):
             "w13_input_scale",
             "w2_input_scale",
         }
-        for name, weight in weights:
-            print(f"FusedMoE: {name} {weight.shape} {weight.dtype}")
 
         return [
             weight.view(self.local_num_experts, -1) for name, weight in weights
