@@ -53,12 +53,13 @@ class Request:
         self.arrival_time = arrival_time if arrival_time is not None else \
             time.time()
 
-        self.status = RequestStatus.WAITING
         self.use_structured_output = (sampling_params is not None
                                       and sampling_params.guided_decoding
                                       is not None)
         if self.use_structured_output:
             self.status = RequestStatus.WAITING_FOR_FSM
+        else:
+            self.status = RequestStatus.WAITING
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
 
