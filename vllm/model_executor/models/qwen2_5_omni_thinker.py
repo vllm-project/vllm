@@ -90,7 +90,7 @@ def _qwen2_5_omni_thinker_field_config(hf_inputs: Mapping[str, torch.Tensor]):
 
     # vllm use `second_per_grid_ts` to compute multimodal rotary embedding
     video_second_per_grid = hf_inputs.get("video_second_per_grid", None)
-    if video_second_per_grid:
+    if video_second_per_grid is not None:
         hf_inputs["second_per_grid_ts"] = video_second_per_grid
 
     return dict(
