@@ -958,15 +958,16 @@ class Scheduler(SchedulerInterface):
                 draft_token_ids.req_ids,
                 draft_token_ids.draft_token_ids,
         ):
-            if not spec_token_ids:
-                continue
             request = self.requests.get(req_id)
-            if request is None:
+            if request is None or request.is_finished():
                 # The request may have been finished. Skip.
                 continue
 
             # Add newly generated spec token ids to the request.
-            if self.structured_output_manager.should_advance(request):
+            if not spec_token_ids:
+                # NOTE(woosuk): request.spec_token_ids should be updated.
+                request.spec_token_ids.clear()
+            elif self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 # Needs to happen after new_token_ids are accepted.
                 request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
