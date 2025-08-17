@@ -316,6 +316,11 @@ def make_test_quant_config(
     if quant_dtype == "nvfp4":
         a1_gscale = torch.ones((e, ), device="cuda", dtype=torch.float32)
         a2_gscale = torch.ones((e, ), device="cuda", dtype=torch.float32)
+        a1_scale = a1_gscale
+        a2_scale = a2_gscale
+    else:
+        a1_scale = None
+        a2_scale = None
 
     return w1, w2, FusedMoEQuantConfig.make(
         quant_dtype,
@@ -325,6 +330,8 @@ def make_test_quant_config(
         w2_scale=w2_s,
         a1_gscale=a1_gscale,
         a2_gscale=a2_gscale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
         # TODO: make sure this is handled properly
         g1_alphas=(1 / w1_gs) if w1_gs is not None else None,
         g2_alphas=(1 / w2_gs) if w2_gs is not None else None,

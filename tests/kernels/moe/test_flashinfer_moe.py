@@ -61,7 +61,7 @@ def test_flashinfer_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
             k,
             in_dtype=dtype,
             quant_dtype="nvfp4",
-            block_shape=None,  # use quant_blocksize?
+            block_shape=None,
             per_act_token_quant=False,
         )
 
@@ -70,9 +70,6 @@ def test_flashinfer_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
                                                score,
                                                topk,
                                                renormalize=False)
-
-        a1_gs = torch.ones((e, ), device="cuda", dtype=torch.float32)
-        a2_gs = torch.ones((e, ), device="cuda", dtype=torch.float32)
 
         assert is_valid_flashinfer_cutlass_fused_moe(a, w1_q, w2_q)
 
@@ -84,11 +81,7 @@ def test_flashinfer_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
         flashinfer_output = flashinfer_experts(
             hidden_states=a,
             w1=w1_q,
-            w1_scale=quant_config.w1_scale,
             w2=w2_q,
-            w2_scale=quant_config.w2_scale,
-            a1_scale=a1_gs,
-            a2_scale=a2_gs,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
         )
@@ -109,18 +102,18 @@ def test_flashinfer_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
         w2_d = torch.empty((e, k, n), device="cuda", dtype=dtype)
 
         for idx in range(0, e):
-            w1_d[idx] = dequantize_nvfp4_to_dtype(w1_q[idx],
-                                                  quant_config.w1_scale[idx],
-                                                  quant_config.w1_gs[idx],
-                                                  dtype=dtype,
-                                                  device=w1_q.device,
-                                                  block_size=quant_blocksize)
-            w2_d[idx] = dequantize_nvfp4_to_dtype(w2_q[idx],
-                                                  quant_config.w2_scale[idx],
-                                                  quant_config.w2_gs[idx],
-                                                  dtype=dtype,
-                                                  device=w2_q.device,
-                                                  block_size=quant_blocksize)
+            w1_d[idx] = dequantize_nvfp4_to_dtype(
+                w1_q[idx],
+                quant_config.w1_scale[idx], (1 / quant_config.g1_alphas[idx]),
+                dtype=dtype,
+                device=w1_q.device,
+                block_size=quant_blocksize)
+            w2_d[idx] = dequantize_nvfp4_to_dtype(
+                w2_q[idx],
+                quant_config.w2_scale[idx], (1 / quant_config.g2_alphas[idx]),
+                dtype=dtype,
+                device=w2_q.device,
+                block_size=quant_blocksize)
 
         torch_output = torch_moe(a_in_dtype, w1_d, w2_d, score, topk)
 
