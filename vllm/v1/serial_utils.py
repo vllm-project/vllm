@@ -21,8 +21,8 @@ from vllm.logger import init_logger
 from vllm.multimodal.inputs import (BaseMultiModalField,
                                     MultiModalBatchedField,
                                     MultiModalFieldConfig, MultiModalFieldElem,
-                                    MultiModalFlatField, MultiModalKwargs,
-                                    MultiModalKwargsItem,
+                                    MultiModalFlatField, MultiModalKwargsItem,
+                                    MultiModalKwargsItems,
                                     MultiModalSharedField, NestedTensors)
 from vllm.v1.engine import UtilityResult
 
@@ -116,10 +116,9 @@ class MsgpackEncoder:
         if isinstance(obj, MultiModalKwargsItem):
             return self._encode_mm_item(obj)
 
-        if isinstance(obj, MultiModalKwargs):
+        if isinstance(obj, MultiModalKwargsItems):
             return [
-                self._encode_mm_item(item)
-                for itemlist in obj._items_by_modality.values()
+                self._encode_mm_item(item) for itemlist in obj.values()
                 for item in itemlist
             ]
 
@@ -260,8 +259,9 @@ class MsgpackDecoder:
                 return slice(*obj)
             if issubclass(t, MultiModalKwargsItem):
                 return self._decode_mm_item(obj)
-            if issubclass(t, MultiModalKwargs):
-                return MultiModalKwargs(self._decode_mm_items(obj))
+            if issubclass(t, MultiModalKwargsItems):
+                return MultiModalKwargsItems.from_seq(
+                    self._decode_mm_items(obj))
             if t is UtilityResult:
                 return self._decode_utility_result(obj)
         return obj

@@ -522,7 +522,7 @@ class Sequence:
     @property
     def multi_modal_data(self) -> MultiModalKwargs:
         if self.inputs["type"] == "multimodal":
-            return self.inputs["mm_kwargs"]
+            return self.inputs["mm_kwargs"].get_data()
 
         return MultiModalKwargs()
 

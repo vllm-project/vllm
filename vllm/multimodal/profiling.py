@@ -252,7 +252,7 @@ class MultiModalProfiler(Generic[_I]):
 
         return DummyDecoderData(
             prompt_token_ids=prompt_token_ids,
-            multi_modal_data=mm_inputs["mm_kwargs"],
+            multi_modal_data=mm_inputs["mm_kwargs"].get_data(),
             multi_modal_placeholders=mm_inputs["mm_placeholders"],
         )
 
