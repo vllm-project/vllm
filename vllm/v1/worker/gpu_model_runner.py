@@ -1911,7 +1911,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def propose_ngram_draft_token_ids(
         self,
         sampled_token_ids: list[list[int]],
-    ) -> list[np.ndarray]:
+    ) -> list[list[int]]:
         # TODO(woosuk): Optimize.
         draft_token_ids: list[list[int]] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
