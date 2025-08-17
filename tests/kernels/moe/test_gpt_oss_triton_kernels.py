@@ -27,7 +27,7 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-    BatchedOAITritonExperts, triton_kernel_moe_forward, triton_kernel_moe_forward_with_ep)
+    BatchedOAITritonExperts, triton_kernel_moe_forward, ep_routing_naive, triton_kernel_fused_experts)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.model_executor.layers.utils import shuffle_weight
@@ -327,20 +327,28 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, ep):
     if ep != 1:
         out_triton = torch.zeros_like(x_tri)
         for ep_rank, per_rank_ep_data in enumerate(triton_kernel_data):
-            out_triton_monolithic = triton_kernel_moe_forward_with_ep(
-                hidden_states=x_tri,
-                w1=per_rank_ep_data["w1_tri"],
-                w2=per_rank_ep_data["w2_tri"],
-                gating_output=exp_data_tri,
-                topk=topk,
-                renormalize=True,
-                ep_rank=ep_rank,
-                ep_world=ep,
-                w1_bias=per_rank_ep_data["w1_bias_tri"],
-                w2_bias=per_rank_ep_data["w2_bias_tri"],
-                w1_precision=per_rank_ep_data["pc1"],
-                w2_precision=per_rank_ep_data["pc2"],
-            )
+            # we manually inject ep rank info, so no need for distributed launch
+            routing_data, gather_idx, scatter_idx = ep_routing_naive(exp_data_tri,
+                                                             topk,
+                                                             sm_first=False, ep_rank=ep_rank, ep_size=ep)
+            # no token routed only apply to ep
+            if torch.count_nonzero(routing_data.gate_scal) == 0:
+                out_triton_monolithic =  torch.zeros_like(x_tri)
+            else:
+                out_triton_monolithic = triton_kernel_fused_experts(
+                    None,
+                    x_tri,
+                    per_rank_ep_data["w1_tri"],
+                    per_rank_ep_data["w2_tri"],
+                    routing_data,
+                    gather_idx,
+                    scatter_idx,
+                    apply_router_weight_on_input=False,
+                    w1_bias=per_rank_ep_data["w1_bias_tri"],
+                    w2_bias=per_rank_ep_data["w2_bias_tri"],
+                    w1_precision=per_rank_ep_data["pc1"],
+                    w2_precision=per_rank_ep_data["pc2"],
+                )
             out_triton += out_triton_monolithic
     else:
         rank_data = triton_kernel_data[0]
