@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Union
 
+import numpy as np
 import torch
 
 
@@ -94,9 +95,6 @@ class ModelRunnerOutput:
     # each request due to speculative/jump decoding.
     sampled_token_ids: list[list[int]]
 
-    # num_reqs x num_spec_tokens
-    spec_token_ids: Optional[list[list[int]]]
-
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]
@@ -117,10 +115,18 @@ class ModelRunnerOutput:
     num_nans_in_logits: Optional[dict[str, int]] = None
 
 
+@dataclass
+class DraftTokenIds:
+
+    # [num_reqs]
+    req_ids: list[str]
+    # num_reqs x num_draft_tokens
+    draft_token_ids: Union[list[np.ndarray], np.ndarray]
+
+
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               req_id_to_index={},
                                               sampled_token_ids=[],
-                                              spec_token_ids=None,
                                               logprobs=None,
                                               prompt_logprobs_dict={},
                                               pooler_output=[],

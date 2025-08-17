@@ -126,6 +126,7 @@ class EngineCore:
             > 1,
             log_stats=self.log_stats,
         )
+        self.use_spec_decode = vllm_config.speculative_config is not None
 
         self.mm_input_cache_server = MultiModalInputCacheServer(
             vllm_config.model_config, MULTIMODAL_REGISTRY)
@@ -284,6 +285,13 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
+
+        if self.use_spec_decode:
+            # Get the draft token ids from the PREVIOUS step.
+            draft_token_ids = self.model_executor.get_draft_token_ids()
+            if draft_token_ids is not None:
+                self.scheduler.update_draft_token_ids(draft_token_ids)
+
         scheduler_output = self.scheduler.schedule()
         model_output = self.execute_model_with_error_logging(
             self.model_executor.execute_model,  # type: ignore
