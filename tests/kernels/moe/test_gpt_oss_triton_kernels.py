@@ -27,7 +27,7 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-    BatchedOAITritonExperts, triton_kernel_moe_forward)
+    BatchedOAITritonExperts, triton_kernel_moe_forward, triton_kernel_moe_forward_with_ep)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.model_executor.layers.utils import shuffle_weight
@@ -199,8 +199,8 @@ def init_compute_data(M, K, N, E, EP, a_dtype: str, w_dtype: str, num_warps: int
             triton_kernel_data.append(data_triton)
 
         # import pdb; pdb.set_trace()
-        w1 = torch.stack(ref_torch_data_w1, dim=0).squeeze(0)
-        w2 = torch.stack(ref_torch_data_w2, dim=0).squeeze(0)
+        w1 = torch.cat(ref_torch_data_w1, dim=0)
+        w2 = torch.cat(ref_torch_data_w2, dim=0)
         # tucuate so the rest can run properly
         w1 = w1[..., :K, :2 * N]
         w2 = w2[..., :N, :K]
@@ -303,7 +303,7 @@ class Case:
     ],
 )
 @pytest.mark.parametrize("num_token", [2])
-@pytest.mark.parametrize("tp, ep", [(1, 1)])
+@pytest.mark.parametrize("tp, ep", [(1, 1), (2, 1), (4, 1), (8, 1), (1, 2), (1, 4), (1, 8)])
 def test_equiv(num_token, a_dtype, w_dtype, tp, ep):
     torch.cuda.manual_seed(42)
     M = num_token
@@ -324,20 +324,41 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, ep):
         triton_kernel_data
     ) = init_compute_data(M, K, N, E, ep, a_dtype, w_dtype, num_warps=8)
 
-    for per_rank_ep_data in triton_kernel_data:
-        out_triton_monolithic = triton_kernel_moe_forward(
+    if ep != 1:
+        out_triton = torch.zeros_like(x_tri)
+        for ep_rank, per_rank_ep_data in enumerate(triton_kernel_data):
+            out_triton_monolithic = triton_kernel_moe_forward_with_ep(
+                hidden_states=x_tri,
+                w1=per_rank_ep_data["w1_tri"],
+                w2=per_rank_ep_data["w2_tri"],
+                gating_output=exp_data_tri,
+                topk=topk,
+                renormalize=True,
+                ep_rank=ep_rank,
+                ep_world=ep,
+                w1_bias=per_rank_ep_data["w1_bias_tri"],
+                w2_bias=per_rank_ep_data["w2_bias_tri"],
+                w1_precision=per_rank_ep_data["pc1"],
+                w2_precision=per_rank_ep_data["pc2"],
+            )
+            out_triton += out_triton_monolithic
+    else:
+        rank_data = triton_kernel_data[0]
+        out_triton = triton_kernel_moe_forward(
             hidden_states=x_tri,
-            w1=per_rank_ep_data["w1_tri"],
-            w2=per_rank_ep_data["w2_tri"],
+            w1=rank_data["w1_tri"],
+            w2=rank_data["w2_tri"],
             gating_output=exp_data_tri,
             topk=topk,
             renormalize=True,
-            w1_bias=per_rank_ep_data["w1_bias_tri"],
-            w2_bias=per_rank_ep_data["w2_bias_tri"],
-            w1_precision=per_rank_ep_data["pc1"],
-            w2_precision=per_rank_ep_data["pc2"],
+            w1_bias=rank_data["w1_bias_tri"],
+            w2_bias=rank_data["w2_bias_tri"],
+            w1_precision=rank_data["pc1"],
+            w2_precision=rank_data["pc2"],
         )
-        out_triton = out_triton_monolithic[..., :K]
+
+
+    out_triton = out_triton[..., :K]
 
     out_ref = oai_moe_forward(
         hidden_states=x,

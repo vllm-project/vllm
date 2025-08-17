@@ -38,6 +38,8 @@ def ep_routing_naive(
     ep_size: Optional[int] = None,
     ep_rank: Optional[int] = None,
 ):
+    # pruning the experts data not on this rank
+    # and reconstruct routing_data
     E = logits.shape[1]
     if ep_size is None:
         ep_size = get_ep_group().world_size
@@ -84,6 +86,66 @@ def ep_routing_naive(
             num_local_expert, 
             top_k, 
             expt_data=expt_data), gather_indx,scatter_indx,
+
+
+def triton_kernel_moe_forward_with_ep(
+    hidden_states: torch.Tensor,
+    w1,  # Tensor or triton_kernels.Tensor
+    w2,  # Tensor or triton_kernels.Tensor
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    ep_rank: int,
+    ep_world: int,
+    activation: str = "silu",
+    apply_router_weight_on_input: bool = False,
+    use_fp8_w8a8: bool = False,
+    per_channel_quant: bool = False,
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    w1_bias: Optional[torch.Tensor] = None,
+    w2_bias: Optional[torch.Tensor] = None,
+    w1_precision: Optional["PrecisionConfig"] = None,
+    w2_precision: Optional["PrecisionConfig"] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    block_shape: Optional[list[int]] = None,
+) -> torch.Tensor:
+
+    # routing_data, gather_idx, scatter_idx = routing(gating_output,
+    #                                                 topk,
+    #                                                 sm_first=not renormalize)
+
+    routing_data, gather_idx, scatter_idx = ep_routing_naive(gating_output,
+                                                             topk,
+                                                             sm_first=not renormalize, ep_size=ep_world, ep_rank=ep_rank)
+    if torch.count_nonzero(routing_data.gate_scal) == 0:
+        return torch.zeros_like(hidden_states)
+    return triton_kernel_fused_experts(
+        None,
+        hidden_states,
+        w1,
+        w2,
+        routing_data,
+        gather_idx,
+        scatter_idx,
+        activation=activation,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+        use_fp8_w8a8=use_fp8_w8a8,
+        per_channel_quant=per_channel_quant,
+        global_num_experts=global_num_experts,
+        expert_map=expert_map,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
+        w1_precision=w1_precision,
+        w2_precision=w2_precision,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        block_shape=block_shape)
 
 
 
