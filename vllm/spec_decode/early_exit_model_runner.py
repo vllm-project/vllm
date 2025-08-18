@@ -85,8 +85,8 @@ class EarlyExitModelRunner(ModelRunnerWrapperBase):
             # Calculate global layer index for pipeline parallel
             global_layer_idx = i + pp_rank * layers_per_rank
             
-            # Stop if we've reached the exit layer
-            if global_layer_idx >= self.exit_layer:
+            # Stop if we've reached the exit layer (inclusive semantics)
+            if global_layer_idx > self.exit_layer:
                 break
                 
             layer = layers[i]
