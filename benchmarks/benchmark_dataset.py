@@ -157,7 +157,10 @@ class BenchmarkDataset(ABC):
 
     @abstractmethod
     def sample(
-        self, tokenizer: PreTrainedTokenizerBase, num_requests: int
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        request_id_prefix: str = "",
     ) -> list[SampleRequest]:
         """
         Abstract method to generate sample requests from the dataset.
@@ -169,6 +172,7 @@ class BenchmarkDataset(ABC):
             tokenizer (PreTrainedTokenizerBase): The tokenizer to be used
              for processing the dataset's text.
             num_requests (int): The number of sample requests to generate.
+            request_id_prefix (str) The prefix of request_id.
 
         Returns:
             list[SampleRequest]: A list of sample requests generated from the
@@ -188,7 +192,9 @@ class BenchmarkDataset(ABC):
 
         Args:
             requests (List[SampleRequest]): The current list of sampled
-            requests.  num_requests (int): The target number of requests.
+            requests.
+            num_requests (int): The target number of requests.
+            request_id_prefix (str) The prefix of the request ids.
         """
         if len(requests) < num_requests:
             random.seed(self.random_seed)

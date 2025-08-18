@@ -620,9 +620,6 @@ def main(args: argparse.Namespace):
     model_name = args.served_model_name
     tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
     tokenizer_mode = args.tokenizer_mode
-    request_id_prefix = (
-        args.request_id_prefix if args.request_id_prefix is not None else ""
-    )
 
     # Validate ramp-up arguments
     if args.ramp_up_strategy is not None:
@@ -670,7 +667,7 @@ def main(args: argparse.Namespace):
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
             skip_chat_template=args.custom_skip_chat_template,
-            request_id_prefix=request_id_prefix,
+            request_id_prefix=args.request_id_prefix,
         )
 
     elif args.dataset_name == "sonnet":
@@ -684,7 +681,7 @@ def main(args: argparse.Namespace):
                 prefix_len=args.sonnet_prefix_len,
                 tokenizer=tokenizer,
                 return_prompt_formatted=False,
-                request_id_prefix=request_id_prefix,
+                request_id_prefix=args.request_id_prefix,
             )
         else:
             assert tokenizer.chat_template or tokenizer.default_chat_template, (
@@ -697,7 +694,7 @@ def main(args: argparse.Namespace):
                 prefix_len=args.sonnet_prefix_len,
                 tokenizer=tokenizer,
                 return_prompt_formatted=True,
-                request_id_prefix=request_id_prefix,
+                request_id_prefix=args.request_id_prefix,
             )
 
     elif args.dataset_name == "hf":
@@ -759,7 +756,7 @@ def main(args: argparse.Namespace):
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
             output_len=args.hf_output_len,
-            request_id_prefix=request_id_prefix,
+            request_id_prefix=args.request_id_prefix,
         )
 
     else:
@@ -771,14 +768,14 @@ def main(args: argparse.Namespace):
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 output_len=args.sharegpt_output_len,
-                request_id_prefix=request_id_prefix,
+                request_id_prefix=args.request_id_prefix,
             ),
             "burstgpt": lambda: BurstGPTDataset(
                 random_seed=args.seed, dataset_path=args.dataset_path
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
-                request_id_prefix=request_id_prefix,
+                request_id_prefix=args.request_id_prefix,
             ),
             "random": lambda: RandomDataset(dataset_path=args.dataset_path).sample(
                 tokenizer=tokenizer,
@@ -787,7 +784,7 @@ def main(args: argparse.Namespace):
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
                 range_ratio=args.random_range_ratio,
-                request_id_prefix=request_id_prefix,
+                request_id_prefix=args.request_id_prefix,
             ),
         }
 
