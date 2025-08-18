@@ -136,10 +136,11 @@ class ExecutorBase(ABC):
         return self.collective_rpc(rpc_func)
 
     def execute_model(
-        self, execute_model_req: ExecuteModelRequest
+        self, execute_model_req: ExecuteModelRequest,
+        intermediate_tensors: Optional[IntermediateTensors] = None
     ) -> Optional[Union[List[Union[SamplerOutput, PoolerOutput]], IntermediateTensors]]:
         output = self.collective_rpc("execute_model",
-                                     args=(execute_model_req, ))
+                                     args=(execute_model_req, intermediate_tensors))
         return output[0]
 
     def stop_remote_worker_execution_loop(self) -> None:
@@ -261,9 +262,11 @@ class ExecutorBase(ABC):
 
     async def execute_model_async(
             self,
-            execute_model_req: ExecuteModelRequest) -> Union[List[SamplerOutput], IntermediateTensors]:
+            execute_model_req: ExecuteModelRequest,
+            intermediate_tensors: Optional[IntermediateTensors] = None
+    ) -> Union[List[SamplerOutput], IntermediateTensors]:
         """Executes one model step on the given sequences."""
-        output = await make_async(self.execute_model)(execute_model_req)
+        output = await make_async(self.execute_model)(execute_model_req, intermediate_tensors)
         return output
 
     async def stop_remote_worker_execution_loop_async(self) -> None:
@@ -289,6 +292,7 @@ class DistributedExecutorBase(ExecutorBase):
     def execute_model(
         self,
         execute_model_req: ExecuteModelRequest,
+        intermediate_tensors: Optional[IntermediateTensors] = None
     ) -> Union[List[SamplerOutput], IntermediateTensors]:
         # TODO: unify into collective_rpc
         if self.parallel_worker_tasks is None:
@@ -297,7 +301,7 @@ class DistributedExecutorBase(ExecutorBase):
                 async_run_tensor_parallel_workers_only=True)
 
         # Only the driver worker returns the sampling results.
-        driver_outputs = self._driver_execute_model(execute_model_req)
+        driver_outputs = self._driver_execute_model(execute_model_req, intermediate_tensors)
         assert driver_outputs is not None
         return driver_outputs
 
@@ -305,7 +309,7 @@ class DistributedExecutorBase(ExecutorBase):
         if self.parallel_worker_tasks is None:
             return
 
-        self._driver_execute_model(execute_model_req=None)
+        self._driver_execute_model(execute_model_req=None, intermediate_tensors=None)
         parallel_worker_tasks = self.parallel_worker_tasks
         self.parallel_worker_tasks = None
         # Ensure that workers exit model loop cleanly
@@ -314,7 +318,8 @@ class DistributedExecutorBase(ExecutorBase):
 
     @abstractmethod
     def _driver_execute_model(
-        self, execute_model_req: Optional[ExecuteModelRequest]
+        self, execute_model_req: Optional[ExecuteModelRequest],
+        intermediate_tensors: Optional[IntermediateTensors] = None
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         """Run execute_model in the driver worker.
 
@@ -360,14 +365,16 @@ class DistributedExecutorBase(ExecutorBase):
 
     async def execute_model_async(
             self,
-            execute_model_req: ExecuteModelRequest) -> Union[List[SamplerOutput], IntermediateTensors]:
+            execute_model_req: ExecuteModelRequest,
+            intermediate_tensors: Optional[IntermediateTensors] = None
+    ) -> Union[List[SamplerOutput], IntermediateTensors]:
         if self.parallel_worker_tasks is None:
             # Start model execution loop running in the parallel workers
             self.parallel_worker_tasks = asyncio.create_task(
                 self._start_worker_execution_loop())
 
         # Only the driver worker returns the sampling results.
-        return await self._driver_execute_model_async(execute_model_req)
+        return await self._driver_execute_model_async(execute_model_req, intermediate_tensors)
 
     async def stop_remote_worker_execution_loop_async(self) -> None:
         if self.parallel_worker_tasks is None:
@@ -384,6 +391,7 @@ class DistributedExecutorBase(ExecutorBase):
     async def _driver_execute_model_async(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None
     ) -> Union[List[SamplerOutput], IntermediateTensors]:
         """Execute the model asynchronously in the driver worker.
 

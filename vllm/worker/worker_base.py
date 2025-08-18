@@ -386,6 +386,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
@@ -406,7 +407,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if worker_input.num_seq_groups == 0:
             return []
 
-        intermediate_tensors = None
         orig_model_execute_time = 0.0
         if not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(

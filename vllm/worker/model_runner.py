@@ -1560,7 +1560,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 device=self.device)
 
         intermediate_inputs = None
-        if not get_pp_group().is_first_rank:
+        if not get_pp_group().is_first_rank or self.model_config.model_part in ("middle", ):
             intermediate_inputs = self.model.make_empty_intermediate_tensors(
                 batch_size=max_batch_size,
                 dtype=self.model_config.dtype,
@@ -2553,8 +2553,8 @@ class MiddleModelRunner(GPUModelRunnerBase[ModelInputForGPU]):
         virtual_engine = model_input.virtual_engine
         previous_hidden_states = kwargs.get("previous_hidden_states")
         if prefill_meta is None and decode_meta.use_cuda_graph:
-            assert model_input.input_tokens is not None
-            graph_batch_size = model_input.input_tokens.shape[0]
+            assert intermediate_tensors is not None
+            graph_batch_size = intermediate_tensors.tensors["hidden_states"].shape[0]
             use_inputs_embeds = model_input.inputs_embeds is not None
             model_executable = self.graph_runners[virtual_engine][(
                 graph_batch_size, use_inputs_embeds)]
@@ -2662,50 +2662,6 @@ class MiddleModelRunner(GPUModelRunnerBase[ModelInputForGPU]):
             if model_input.async_callback is not None:
                 model_input.async_callback()
 
-            # Sample the next token.
-            # assert isinstance(self.sampler, Sampler)
-            # orig_include_gpu_probs = self.sampler.include_gpu_probs_tensor
-            # if model_input.inputs_embeds is not None:
-                # self.sampler.include_gpu_probs_tensor = True
-
-            
-            # if (self.observability_config is not None
-            #         and self.observability_config.collect_model_forward_time
-            #         and output is not None):
-            #     model_forward_end.synchronize()
-            #     model_forward_time = model_forward_start.elapsed_time(
-            #         model_forward_end)
-            #     orig_model_forward_time = 0.0
-            #     if intermediate_tensors is not None:
-            #         orig_model_forward_time = intermediate_tensors.tensors.get(
-            #             "model_forward_time", torch.tensor(0.0)).item()
-            #     # If there are multiple workers, we are still tracking the
-            #     # latency from the start time of the driver worker to the end
-            #     # time of the driver worker. The model forward time will then
-            #     # end up covering the communication time as well.
-            #     output.model_forward_time = (orig_model_forward_time +
-            #                                  model_forward_time)
-
-        # if model_input.inputs_embeds is not None:
-        #     if self.is_driver_worker:
-        #         sampled = broadcast_tensor_dict(
-        #             {"token_ids": output.sampled_token_ids})
-        #     else:
-        #         sampled = broadcast_tensor_dict()
-        #     if sampled["token_ids"] is not None:
-        #         sampled_token_embeds = self.model.get_input_embeddings(
-        #             sampled["token_ids"].squeeze(1))
-        #         if self.is_driver_worker:
-        #             self.sampler.include_gpu_probs_tensor = \
-        #                 orig_include_gpu_probs
-
-        #             output.sampled_token_embeds = sampled_token_embeds
-
-        #             for token_embed, sequence_group_output in zip(
-        #                     output.sampled_token_embeds, output.outputs):
-        #                 assert len(sequence_group_output.samples) == 1
-        #                 sequence_group_output.samples[
-        #                     0].output_embed = token_embed
 
         if not self.is_driver_worker:
             return None

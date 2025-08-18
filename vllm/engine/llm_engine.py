@@ -1065,9 +1065,10 @@ class LLMEngine:
                     self.output_processor.process_outputs(
                         seq_group, output, is_async)
             elif self.model_config.model_part == "middle":
-                seq = seq_group.first_seq
-                seq.append_token_id(0, {0: Logprob(0.0)},
-                                        torch.zeros((self.model_config.get_hidden_size(),), device="cuda:0"))
+                if not is_async:
+                    seq = seq_group.first_seq
+                    seq.append_token_id(0, {0: Logprob(0.0)},
+                                            torch.zeros((self.model_config.get_hidden_size(),), device="cuda:0"))
             else:
                 seq_group.pooled_data = output[0].data
             if seq_group.is_finished():
@@ -1394,7 +1395,7 @@ class LLMEngine:
         for scheduler in self.scheduler:
                 scheduler.free_finished_seq_groups()
 
-    def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
+    def step(self, intermediate_tensors: Optional[IntermediateTensors] = None) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         <figure markdown="span">
@@ -1536,7 +1537,7 @@ class LLMEngine:
 
             try:
                 outputs = self.model_executor.execute_model(
-                    execute_model_req=execute_model_req)
+                    execute_model_req=execute_model_req, intermediate_tensors=intermediate_tensors)
                 self._skip_scheduling_next_step = False
                 # print(f"Outputs: {outputs}")
             except InputProcessingError as e:
@@ -1600,7 +1601,7 @@ class LLMEngine:
                         scheduler_outputs.scheduled_seq_groups)
                 elif self.model_config.model_part in ("middle", ):
                     self.advance_to_next_step_middle_block(
-                        torch.randn(self.model_config.get_hidden_size(), device="cuda:0"),
+                        torch.zeros(self.model_config.get_hidden_size(), device="cuda:0"),
                         seq_group_metadata_list,
                         scheduler_outputs.scheduled_seq_groups)
                 # elif self.model_config.model_part in ("decoder"):
@@ -1653,7 +1654,8 @@ class LLMEngine:
         #         # Process the outputs for the middle blocks
         #         self._process_model_outputs(ctx=ctx)
             # return ctx.request_outputs, seq_group_metadata_list, scheduler_outputs.scheduled_seq_groups
-
+        if self.model_config.model_part in ("middle",):
+            return outputs
         return ctx.request_outputs
 
     def _abort_and_cache_schedule(
