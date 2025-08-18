@@ -501,7 +501,7 @@ class OpenAIServingChat(OpenAIServing):
 
         all_previous_token_ids: Optional[list[list[int]]]
         function_name_returned = [False] * num_choices
-        if self.tool_call_id_type == 'kimi-k2':
+        if self.tool_call_id_type == 'kimi_k2':
             history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
         else:
             history_tool_call_cnt = 0
@@ -1344,7 +1344,7 @@ class OpenAIServingChat(OpenAIServing):
                     tool_call_descriptions = []
                     for tool_call in choice.message.tool_calls:
                         if hasattr(tool_call.function, "name") and \
-                                hasattr(tool_call.function, "arguments"): # type: ignore[attr-defined]
+                                hasattr(tool_call.function, "arguments"): # noqa
                             tool_call_descriptions.append(
                                 f"{tool_call.function.name}({tool_call.function.arguments})"
                             )
