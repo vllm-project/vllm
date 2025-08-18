@@ -9,10 +9,10 @@ import torch._dynamo
 from tests.compile.backend import TestBackend
 from tests.models.utils import check_outputs_equal
 from tests.v1.attention.utils import (BatchSpec, _Backend,
-                                      create_common_attn_metadata,
-                                      get_attention_backend)
+                                      create_common_attn_metadata)
 from vllm import LLM, SamplingParams
 from vllm.attention import Attention
+from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.compilation.fusion import QUANT_OPS, QuantKey, kFp8StaticTensorSym
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
@@ -26,7 +26,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp)
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -155,7 +154,6 @@ class TestAttentionStaticQuantPatternModel(torch.nn.Module):
 
     def __init__(self, num_qo_heads: int, num_kv_heads: int, head_size: int,
                  kv_cache_dtype: torch.dtype, device: torch.device,
-                 attn_builder: type[AttentionMetadataBuilder],
                  vllm_config: VllmConfig):
         super().__init__()
         self.num_qo_heads = num_qo_heads
@@ -182,7 +180,7 @@ class TestAttentionStaticQuantPatternModel(torch.nn.Module):
         self.block_size = 16
 
         # Initialize attn MetadataBuilder
-        self.builder = attn_builder(
+        self.builder = self.attn.attn_backend.get_builder_cls()(
             kv_cache_spec=AttentionSpec(
                 block_size=self.block_size,
                 num_kv_heads=self.num_kv_heads,
@@ -242,37 +240,29 @@ class TestAttentionStaticQuantPatternModel(torch.nn.Module):
                                      input_scale=self.scale)
 
 
-@pytest.mark.parametrize("num_heads", [(64, 8), (40, 8)])
+@pytest.mark.parametrize("num_qo_heads, num_kv_heads", [(64, 8), (40, 8)])
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("batch_size", [7, 256, 533])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize(
-    "model_quant_dtype",
+    "model_name, quant_dtype",
     [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", FP8_DTYPE)])
-@pytest.mark.parametrize("backend", ["FLASHINFER"])
+@pytest.mark.parametrize("backend", [_Backend.FLASHINFER])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
 @pytest.mark.skipif(not current_platform.is_device_capability((10, 0)),
                     reason="Only test on SM100(Blackwell)")
-def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
-                                 batch_size: int, dtype: torch.dtype,
-                                 model_quant_dtype: tuple[str, torch.dtype],
-                                 backend: str, monkeypatch, dist_init):
+def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
+                                 head_size: int, batch_size: int,
+                                 dtype: torch.dtype, model_name: str,
+                                 quant_dtype: torch.dtype, backend: _Backend,
+                                 monkeypatch, dist_init):
     """Test AttentionStaticQuantPattern fusion pass"""
 
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
 
     device = torch.device("cuda:0")
     torch.manual_seed(42)
-
-    num_qo_heads, num_kv_heads = num_heads
-    model_name, quant_dtype = model_quant_dtype
-
-    if backend == "FLASHINFER":
-        attn_builder, _ = get_attention_backend(_Backend.FLASHINFER_VLLM_V1)
-    else:
-        raise ValueError(f"Unsupported backend: {backend}")
 
     # The quant op to check the fusion happenes or not
     if quant_dtype == FP8_DTYPE:
@@ -313,10 +303,11 @@ def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
     # Run model directly without compilation and fusion
     vllm_config_unfused = copy.deepcopy(vllm_config)
     with set_current_vllm_config(vllm_config_unfused), set_forward_context(
-            attn_metadata=None, vllm_config=vllm_config_unfused):
+            attn_metadata=None, vllm_config=vllm_config_unfused
+    ), global_force_attn_backend_context_manager(backend):
         model_unfused = TestAttentionStaticQuantPatternModel(
             num_qo_heads, num_kv_heads, head_size, FP8_DTYPE, device,
-            attn_builder, vllm_config_unfused)
+            vllm_config_unfused)
         model_unfused = model_unfused.to(device)
 
         forward_ctx = get_forward_context()
@@ -330,10 +321,11 @@ def test_attention_quant_pattern(num_heads: tuple[int, int], head_size: int,
     vllm_config.compilation_config.pass_config = PassConfig(
         enable_attn_fusion=True, enable_noop=True)
     with set_current_vllm_config(vllm_config), set_forward_context(
-            attn_metadata=None, vllm_config=vllm_config):
+            attn_metadata=None, vllm_config=vllm_config
+    ), global_force_attn_backend_context_manager(backend):
         model_fused = TestAttentionStaticQuantPatternModel(
             num_qo_heads, num_kv_heads, head_size, FP8_DTYPE, device,
-            attn_builder, vllm_config)
+            vllm_config)
         model_fused = model_fused.to(device)
 
         forward_ctx = get_forward_context()
