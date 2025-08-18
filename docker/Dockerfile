@@ -448,7 +448,8 @@ BASH
 COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
 COPY tools/install_nixl.sh install_nixl.sh
 ENV CUDA_HOME=/usr/local/cuda
-RUN bash install_python_libraries.sh \
+RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a+PTX}" \
+    && bash install_python_libraries.sh \
     && bash install_nixl.sh --force
 
 #################### vLLM installation IMAGE ####################
