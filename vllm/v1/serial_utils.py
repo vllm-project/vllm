@@ -18,12 +18,15 @@ from msgspec import msgpack
 
 from vllm import envs
 from vllm.logger import init_logger
+# yapf: disable
 from vllm.multimodal.inputs import (BaseMultiModalField,
                                     MultiModalBatchedField,
                                     MultiModalFieldConfig, MultiModalFieldElem,
                                     MultiModalFlatField, MultiModalKwargs,
                                     MultiModalKwargsItem,
+                                    MultiModalKwargsItems,
                                     MultiModalSharedField, NestedTensors)
+# yapf: enable
 from vllm.v1.engine import UtilityResult
 
 logger = init_logger(__name__)
@@ -116,12 +119,11 @@ class MsgpackEncoder:
         if isinstance(obj, MultiModalKwargsItem):
             return self._encode_mm_item(obj)
 
+        if isinstance(obj, MultiModalKwargsItems):
+            return self._encode_mm_items(obj)
+
         if isinstance(obj, MultiModalKwargs):
-            return [
-                self._encode_mm_item(item)
-                for itemlist in obj._items_by_modality.values()
-                for item in itemlist
-            ]
+            return self._encode_mm_kwargs(obj)
 
         if isinstance(obj, UtilityResult):
             result = obj.result
@@ -183,6 +185,12 @@ class MsgpackEncoder:
         dtype = str(obj.dtype).removeprefix("torch.")
         return dtype, obj.shape, data
 
+    def _encode_mm_items(self, items: MultiModalKwargsItems) -> dict[str, Any]:
+        return {
+            modality: [self._encode_mm_item(item) for item in itemlist]
+            for modality, itemlist in items.items()
+        }
+
     def _encode_mm_item(self,
                         item: MultiModalKwargsItem) -> list[dict[str, Any]]:
         return [self._encode_mm_field_elem(elem) for elem in item.values()]
@@ -198,6 +206,12 @@ class MsgpackEncoder:
                      self._encode_nested_tensors(elem.data)),
             "field":
             self._encode_mm_field(elem.field),
+        }
+
+    def _encode_mm_kwargs(self, kw: MultiModalKwargs) -> dict[str, Any]:
+        return {
+            modality: self._encode_nested_tensors(data)
+            for modality, data in kw.items()
         }
 
     def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
@@ -260,8 +274,10 @@ class MsgpackDecoder:
                 return slice(*obj)
             if issubclass(t, MultiModalKwargsItem):
                 return self._decode_mm_item(obj)
+            if issubclass(t, MultiModalKwargsItems):
+                return self._decode_mm_items(obj)
             if issubclass(t, MultiModalKwargs):
-                return MultiModalKwargs(self._decode_mm_items(obj))
+                return self._decode_mm_kwargs(obj)
             if t is UtilityResult:
                 return self._decode_utility_result(obj)
         return obj
@@ -315,8 +331,11 @@ class MsgpackDecoder:
         # Convert back to proper shape & type
         return arr.view(torch_dtype).view(shape)
 
-    def _decode_mm_items(self, obj: list[Any]) -> list[MultiModalKwargsItem]:
-        return [self._decode_mm_item(v) for v in obj]
+    def _decode_mm_items(self, obj: dict[str, Any]) -> MultiModalKwargsItems:
+        return MultiModalKwargsItems({
+            modality: [self._decode_mm_item(item) for item in itemlist]
+            for modality, itemlist in obj.items()
+        })
 
     def _decode_mm_item(self, obj: list[Any]) -> MultiModalKwargsItem:
         return MultiModalKwargsItem.from_elems(
@@ -338,6 +357,12 @@ class MsgpackDecoder:
 
         obj["field"] = factory_meth(None, *field_args).field
         return MultiModalFieldElem(**obj)
+
+    def _decode_mm_kwargs(self, obj: dict[str, Any]) -> MultiModalKwargs:
+        return MultiModalKwargs({
+            modality: self._decode_nested_tensors(data)
+            for modality, data in obj.items()
+        })
 
     def _decode_nested_tensors(self, obj: Any) -> NestedTensors:
         if isinstance(obj, (int, float)):

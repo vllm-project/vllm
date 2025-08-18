@@ -128,7 +128,7 @@ def create_batched_mm_kwargs(
     )["mm_kwargs"]
     items = [
         item for modality in supported_mm_limits
-        for item in mm_kwargs.get_items(modality)
+        for item in mm_kwargs[modality]
     ]
     return group_mm_kwargs_by_modality(items)
 

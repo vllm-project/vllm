@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Generic, NamedTuple, TypeVar
 if TYPE_CHECKING:
     from vllm.sequence import SequenceGroupMetadata
 
-from .inputs import MultiModalKwargs, NestedTensors, PlaceholderRange
+from .inputs import MultiModalKwargs, PlaceholderRange
 
 _T = TypeVar("_T")
 
@@ -56,8 +56,7 @@ class MultiModalPlaceholderMap:
     @classmethod
     def from_seq_group(
         cls, seq_group: "SequenceGroupMetadata", positions: range
-    ) -> tuple[dict[str, NestedTensors], dict[str,
-                                              "MultiModalPlaceholderMap"]]:
+    ) -> tuple[MultiModalKwargs, dict[str, "MultiModalPlaceholderMap"]]:
         """
         Returns the multi-modal items that intersect with the portion of a
         prompt (``seq_group``) represented by ``positions``, as well as a
@@ -100,7 +99,7 @@ class MultiModalPlaceholderMap:
         seq_mm_placeholders = seq_group.multi_modal_placeholders
 
         if not seq_mm_data or not seq_mm_placeholders:
-            return MultiModalKwargs().get_data(), {}
+            return MultiModalKwargs(), {}
 
         placeholder_maps = dict[str, MultiModalPlaceholderMap]()
 
@@ -117,8 +116,6 @@ class MultiModalPlaceholderMap:
 
             placeholder_maps[modality] = placeholder_map
 
-        seq_mm_data = seq_mm_data if isinstance(
-            seq_mm_data, dict) else seq_mm_data.get_data()
         return seq_mm_data, placeholder_maps
 
     def append_items_from_seq_group(
