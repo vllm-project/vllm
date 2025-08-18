@@ -372,7 +372,7 @@ class LLMEngine:
 
         # Initialize reasoning parser if reasoning backend is set.
         self.reasoner: Optional[ReasoningParser] = None
-        if self.decoding_config.reasoning_backend is not None:
+        if self.decoding_config.reasoning_backend:
             reasoner_cls = ReasoningParserManager.get_reasoning_parser(
                 self.decoding_config.reasoning_backend)
             self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
