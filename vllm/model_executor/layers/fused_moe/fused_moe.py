@@ -949,6 +949,7 @@ def grouped_topk(
     num_expert_group: int = 0,
     topk_group: int = 0,
     scoring_func: str = "softmax",
+    routed_scaling_factor: float = 1.0,
     e_score_correction_bias: Optional[torch.Tensor] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
 
@@ -996,6 +997,7 @@ def grouped_topk(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
+    topk_weights = topk_weights * routed_scaling_factor
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
@@ -1684,6 +1686,7 @@ def fused_moe(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
+    routed_scaling_factor: float = 1.0,
     inplace: bool = False,
     activation: str = "silu",
     is_act_and_mul: bool = True,
@@ -1770,9 +1773,14 @@ def fused_moe(
 
     if use_grouped_topk:
         assert num_expert_group is not None and topk_group is not None
-        topk_weights, topk_ids = grouped_topk(hidden_states, gating_output,
-                                              topk, renormalize,
-                                              num_expert_group, topk_group)
+        topk_weights, topk_ids = grouped_topk(
+            hidden_states,
+            gating_output,
+            topk,
+            renormalize,
+            num_expert_group,
+            topk_group,
+            routed_scaling_factor=routed_scaling_factor)
     elif custom_routing_function is None:
         topk_weights, topk_ids, token_expert_indices = fused_topk(
             hidden_states, gating_output, topk, renormalize)

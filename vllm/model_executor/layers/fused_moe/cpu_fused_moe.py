@@ -31,6 +31,7 @@ class IPEXFusedMOE:
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -65,6 +66,7 @@ class SGLFusedMOE:
         num_expert_group: int = 0,
         topk_group: int = 0,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert hidden_states.shape[0] == gating_output.shape[0], (
@@ -117,6 +119,7 @@ class SGLFusedMOE:
             topk_weights = topk_weights / topk_weights.sum(dim=-1,
                                                            keepdim=True)
 
+        topk_weights = topk_weights * routed_scaling_factor
         return topk_weights, topk_ids.to(torch.int32)
 
     @staticmethod
@@ -130,6 +133,7 @@ class SGLFusedMOE:
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # DeekSeekv2 uses grouped_top_k
@@ -144,6 +148,7 @@ class SGLFusedMOE:
                 num_expert_group=num_expert_group,
                 topk_group=topk_group,
                 scoring_func=scoring_func,
+                routed_scaling_factor=routed_scaling_factor,
                 e_score_correction_bias=e_score_correction_bias)
         elif custom_routing_function is None:
             assert scoring_func == "softmax"
@@ -153,6 +158,7 @@ class SGLFusedMOE:
             topk_weights, topk_ids = torch.topk(topk_weights, top_k, dim=-1)
             if renormalize:
                 topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+            topk_weights = topk_weights * routed_scaling_factor
             topk_ids = topk_ids.to(torch.int32)
         else:
             topk_weights, topk_ids = custom_routing_function(
@@ -177,6 +183,7 @@ class SGLFusedMOE:
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -193,6 +200,7 @@ class SGLFusedMOE:
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
         )
 
