@@ -142,6 +142,7 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
     cached_tokenizer.__class__ = CachedTokenizer
     return cached_tokenizer
 
+
 def get_tokenizer(
     tokenizer_name: Union[str, Path],
     *args,
