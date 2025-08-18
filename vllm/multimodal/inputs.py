@@ -664,7 +664,7 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
     def modality(self) -> str:
         return self._modality
 
-    def get_data(self) -> Mapping[str, NestedTensors]:
+    def get_data(self) -> dict[str, NestedTensors]:
         return {key: elem.data for key, elem in self.items()}
 
 
@@ -720,7 +720,7 @@ class MultiModalKwargs:
         items_by_modality = full_groupby(items, key=lambda x: x.modality)
         self._items_by_modality = dict(items_by_modality)
 
-        self._data: Optional[Mapping[str, NestedTensors]] = None
+        self._data: Optional[dict[str, NestedTensors]] = None
 
     @property
     def modalities(self):
@@ -883,7 +883,7 @@ class MultiModalKwargs:
 
     def get_data(self,
                  *,
-                 pin_memory: bool = False) -> Mapping[str, NestedTensors]:
+                 pin_memory: bool = False) -> dict[str, NestedTensors]:
         if self._data is not None:
             return self._data
 
