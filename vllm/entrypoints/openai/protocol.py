@@ -20,7 +20,14 @@ from openai.types.chat.chat_completion_message import (
 from openai.types.responses import (ResponseFunctionToolCall,
                                     ResponseInputItemParam, ResponseOutputItem,
                                     ResponsePrompt, ResponseReasoningItem,
-                                    ResponseStatus, ResponseTextConfig)
+                                    ResponseStatus)
+# Backward compatibility for OpenAI client versions
+try:  # OpenAI >= version with ResponseTextConfig
+    from openai.types.responses import ResponseTextConfig
+except ImportError:  # Older OpenAI clients expose ResponseFormatTextConfig
+    from openai.types.responses import (
+        ResponseFormatTextConfig as ResponseTextConfig
+    )
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
