@@ -2553,8 +2553,8 @@ class MiddleModelRunner(GPUModelRunnerBase[ModelInputForGPU]):
         virtual_engine = model_input.virtual_engine
         previous_hidden_states = kwargs.get("previous_hidden_states")
         if prefill_meta is None and decode_meta.use_cuda_graph:
-            assert intermediate_tensors is not None
-            graph_batch_size = intermediate_tensors.tensors["hidden_states"].shape[0]
+            assert model_input.input_tokens is not None
+            graph_batch_size = model_input.input_tokens.shape[0]
             use_inputs_embeds = model_input.inputs_embeds is not None
             model_executable = self.graph_runners[virtual_engine][(
                 graph_batch_size, use_inputs_embeds)]
