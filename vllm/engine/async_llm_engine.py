@@ -776,6 +776,7 @@ class AsyncLLMEngine(EngineClient):
         if aborted_requests:
             await self._engine_abort(aborted_requests)
 
+        await asyncio.sleep(0)
         request_outputs = await self.engine.step_async(virtual_engine)
 
         # Put the outputs into the corresponding streams.
@@ -1183,6 +1184,9 @@ class AsyncLLMEngine(EngineClient):
     async def get_lora_config(self) -> LoRAConfig:
         """Get the lora configuration of the vLLM engine."""
         return self.engine.get_lora_config()
+
+    async def get_scheduler_trace(self):
+        return self.engine.get_scheduler_trace()
 
     async def do_log_stats(
             self,

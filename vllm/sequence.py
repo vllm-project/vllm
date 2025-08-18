@@ -447,6 +447,11 @@ class Sequence:
         return (self.get_len() + self.block_size - 1) // self.block_size
 
     @property
+    def required_prompt_block_size(self) -> float:
+        """The required prompt block size for this sequence."""
+        return self.get_prompt_len() / self.block_size
+
+    @property
     def prompt(self) -> Optional[str]:
         return self.inputs.prompt
 
@@ -607,6 +612,9 @@ class Sequence:
 
     def get_num_computed_tokens(self) -> int:
         return self.data.get_num_computed_tokens()
+
+    def get_num_uncomputed_tokens(self) -> int:
+        return self.data.get_num_uncomputed_tokens()
 
     def is_prefill(self) -> bool:
         return self.data.stage == SequenceStage.PREFILL

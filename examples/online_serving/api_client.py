@@ -27,7 +27,6 @@ def post_http_request(prompt: str,
     pload = {
         "prompt": prompt,
         "n": n,
-        "use_beam_search": True,
         "temperature": 0.0,
         "max_tokens": 16,
         "stream": stream,
@@ -51,25 +50,40 @@ def get_streaming_response(response: requests.Response) -> Iterable[list[str]]:
 
 def get_response(response: requests.Response) -> list[str]:
     data = json.loads(response.content)
-    output = data["text"]
-    return output
+    output = data["generated_text"]
+    token_latency = data["per_token_latency"]
+    metrics = {}
+    if 'ttft' in data:
+        metrics['ttft'] = data['ttft']
+    if 'waiting_latency' in data:
+        metrics['waiting_latency'] = data['waiting_latency']
+    if 'inference_latency' in data:
+        metrics['inference_latency'] = data['inference_latency']
+    return output, token_latency, metrics
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--n", type=int, default=4)
+    parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--prompt", type=str, default="San Francisco is a")
     parser.add_argument("--stream", action="store_true")
+    parser.add_argument("--return_scheduler_trace", type=bool, default=True)
     args = parser.parse_args()
     prompt = args.prompt
-    api_url = f"http://{args.host}:{args.port}/generate"
+    api_url = f"http://{args.host}:{args.port}/generate_benchmark"
     n = args.n
     stream = args.stream
+    return_scheduler_trace = args.return_scheduler_trace
 
     print(f"Prompt: {prompt!r}\n", flush=True)
     response = post_http_request(prompt, api_url, n, stream)
+    if return_scheduler_trace:
+        api_url = f"http://{args.host}:{args.port}/schedule_trace"
+        scheduler_response = get_http_request(api_url)
+        trace_data = json.loads(scheduler_response.content)
+        print(f"Scheduler trace: {trace_data}", flush=True)
 
     if stream:
         num_printed_lines = 0
@@ -80,6 +94,9 @@ if __name__ == "__main__":
                 num_printed_lines += 1
                 print(f"Beam candidate {i}: {line!r}", flush=True)
     else:
-        output = get_response(response)
-        for i, line in enumerate(output):
-            print(f"Beam candidate {i}: {line!r}", flush=True)
+        output, token_latency, metrics = get_response(response)
+        print(output)
+        for i in range(len(token_latency)):
+            print(f"latency of {i} token finished at {token_latency[i][0]} and taken {token_latency[i][1]} miliseconds")
+        print(metrics)
+

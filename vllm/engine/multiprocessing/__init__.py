@@ -3,7 +3,7 @@
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Mapping, Optional, Union, overload
+from typing import List, Mapping, Optional, Union, overload, Dict
 
 from typing_extensions import deprecated
 
@@ -39,29 +39,29 @@ class RPCProcessRequest:
 
     @overload
     def __init__(
-        self,
-        prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
-        request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        priority: int = 0,
+            self,
+            prompt: PromptType,
+            params: Union[SamplingParams, PoolingParams],
+            request_id: str,
+            lora_request: Optional[LoRARequest] = None,
+            trace_headers: Optional[Mapping[str, str]] = None,
+            prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+            priority: int = 0,
     ) -> None:
         ...
 
     @overload
     @deprecated("'inputs' will be renamed to 'prompt")
     def __init__(
-        self,
-        *,
-        inputs: PromptType,
-        params: Union[SamplingParams, PoolingParams],
-        request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        priority: int = 0,
+            self,
+            *,
+            inputs: PromptType,
+            params: Union[SamplingParams, PoolingParams],
+            request_id: str,
+            lora_request: Optional[LoRARequest] = None,
+            trace_headers: Optional[Mapping[str, str]] = None,
+            prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+            priority: int = 0,
     ) -> None:
         ...
 
@@ -150,6 +150,17 @@ class RPCIsSleepingResponse:
 
 
 @dataclass
+class RPCSchedulerTracingRequest:
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass
+class RPCSchedulerTracingResponse:
+    request_id: str
+    scheduler_tracing: Dict
+
+
+@dataclass
 class RPCLoadAdapterRequest:
     lora_request: LoRARequest
     # Set the default value of request_id to a new UUID
@@ -164,10 +175,10 @@ class RPCAdapterLoadedResponse:
 RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
                       RPCUProfileRequest, RPCLoadAdapterRequest,
                       RPCResetPrefixCacheRequest, RPCSleepRequest,
-                      RPCWakeUpRequest, RPCIsSleepingRequest]
+                      RPCWakeUpRequest, RPCIsSleepingRequest, RPCSchedulerTracingRequest]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
-                          RPCIsSleepingResponse, RPCError]
+                          RPCIsSleepingResponse, RPCError, RPCSchedulerTracingResponse]
 
 
 def ENGINE_DEAD_ERROR(

@@ -132,14 +132,15 @@ async def lifespan(app: FastAPI):
 
 @asynccontextmanager
 async def build_async_engine_client(
-        args: Namespace) -> AsyncIterator[EngineClient]:
+        args: Namespace, use_for_openai_api=True, engine_args=None) -> AsyncIterator[EngineClient]:
 
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
-    engine_args = AsyncEngineArgs.from_cli_args(args)
+    if engine_args is None:
+        engine_args = AsyncEngineArgs.from_cli_args(args)
 
     async with build_async_engine_client_from_engine_args(
-            engine_args, args.disable_frontend_multiprocessing) as engine:
+            engine_args, args.disable_frontend_multiprocessing, use_for_openai_api) as engine:
         yield engine
 
 
@@ -147,6 +148,7 @@ async def build_async_engine_client(
 async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
     disable_frontend_multiprocessing: bool = False,
+    use_for_openai_api: bool = False,
 ) -> AsyncIterator[EngineClient]:
     """
     Create EngineClient, either:
@@ -157,7 +159,10 @@ async def build_async_engine_client_from_engine_args(
     """
 
     # Create the EngineConfig (determines if we can use V1).
-    usage_context = UsageContext.OPENAI_API_SERVER
+    if use_for_openai_api:
+        usage_context = UsageContext.OPENAI_API_SERVER
+    else:
+        usage_context = UsageContext.API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
     # V1 AsyncLLM.
@@ -444,6 +449,12 @@ async def show_available_models(raw_request: Request):
 async def show_version():
     ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
+
+
+@router.get("/scheduler_trace")
+async def scheduler_trace(raw_request: Request) -> Response:
+    trace = await engine_client(raw_request).get_scheduler_trace()
+    return JSONResponse(trace)
 
 
 @router.post("/v1/chat/completions",
@@ -1013,7 +1024,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     signal.signal(signal.SIGTERM, signal_handler)
 
-    async with build_async_engine_client(args) as engine_client:
+    async with build_async_engine_client(args, True) as engine_client:
         app = build_app(args)
 
         model_config = await engine_client.get_model_config()

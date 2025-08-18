@@ -3,7 +3,7 @@
 import pickle
 import signal
 from contextlib import contextmanager
-from typing import Iterator, List, Optional, Union
+from typing import Iterator, List, Optional, Union, Dict
 
 import cloudpickle
 import zmq
@@ -25,7 +25,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
-                                         RPCUProfileRequest, RPCWakeUpRequest)
+                                         RPCUProfileRequest, RPCWakeUpRequest, RPCSchedulerTracingRequest,
+                                         RPCSchedulerTracingResponse)
 # yapf: enable
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -37,7 +38,7 @@ from vllm.worker.model_runner_base import InputProcessingError
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 10000
-HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
+HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR),)
 
 
 class MQLLMEngine:
@@ -277,6 +278,8 @@ class MQLLMEngine:
                     self.wake_up()
                 elif isinstance(request, RPCIsSleepingRequest):
                     self._handle_is_sleeping_request(request)
+                elif isinstance(request, RPCSchedulerTracingRequest):
+                    self._handle_scheduler_trace_request(request)
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -349,6 +352,13 @@ class MQLLMEngine:
             RPCIsSleepingResponse(request_id=request.request_id,
                                   is_sleeping=is_sleeping))
 
+    def _handle_scheduler_trace_request(self, request: RPCSchedulerTracingRequest):
+        scheduler_trace = self.get_scheduler_trace()
+        self._send_outputs(
+            RPCSchedulerTracingResponse(
+                request_id=request.request_id,
+                scheduler_tracing=scheduler_trace))
+
     def _health_check(self):
         # Send unhealthy if engine has already errored
         if self._errored_with is not None:
@@ -420,6 +430,9 @@ class MQLLMEngine:
 
     def is_sleeping(self) -> bool:
         return self.engine.is_sleeping()
+
+    def get_scheduler_trace(self) -> Dict:
+        return self.engine.get_scheduler_trace()
 
 
 def signal_handler(*_) -> None:

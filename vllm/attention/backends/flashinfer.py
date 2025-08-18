@@ -184,7 +184,7 @@ class FlashInferState(AttentionState):
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
 
-        self.vllm_config = get_current_vllm_config()
+        self.vllm_config = self.runner.vllm_config
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
@@ -610,7 +610,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
 
-        self.vllm_config = get_current_vllm_config()
+        self.vllm_config = self.runner.vllm_config
 
     def prepare(self):
         self.slot_mapping: List[int] = []

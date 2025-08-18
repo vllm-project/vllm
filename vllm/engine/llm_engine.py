@@ -933,6 +933,19 @@ class LLMEngine:
         """Gets the scheduler configuration."""
         return self.scheduler_config
 
+    def get_scheduler_trace(self):
+        scheduler_traces = {}
+        for i, scheduler in enumerate(self.scheduler):
+            scheduler_traces[i] = {}
+            trace = scheduler.get_scheduler_trace()
+            scheduler_traces[i]["swap"] = trace.swap_request_length
+            scheduler_traces[i]["running"] = trace.running_request_length
+            scheduler_traces[i]["waiting"] = trace.waiting_request_length
+            scheduler_traces[i]["free_gpu_blocks"] = scheduler.block_manager.get_num_free_gpu_blocks()
+            scheduler_traces[i]["num_preempted"] = scheduler.num_preempted_requests
+        return scheduler_traces
+
+
     def get_lora_config(self) -> LoRAConfig:
         """Gets the LoRA configuration."""
         return self.lora_config
