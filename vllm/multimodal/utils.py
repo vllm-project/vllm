@@ -9,6 +9,7 @@ from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
 from urllib.parse import ParseResult, urlparse
+from urllib.request import url2pathname
 
 import numpy as np
 import numpy.typing as npt
@@ -108,7 +109,7 @@ class MediaConnector:
             raise RuntimeError("Cannot load local files without "
                                "`--allowed-local-media-path`.")
 
-        filepath = Path(url_spec.path)
+        filepath = Path(url2pathname(url_spec.path))
         if allowed_local_media_path not in filepath.resolve().parents:
             raise ValueError(
                 f"The file path {filepath} must be a subpath "
@@ -401,12 +402,14 @@ def group_mm_kwargs_by_modality(
     for modality, items in groupby(mm_kwargs, key=lambda item: item.modality):
         items_lst = list(items)
 
-        # mm_kwargs_group = MultiModalKwargs.from_items(items_lst,
-        #                                               pin_memory=pin_memory)
+        # mm_kwargs_group = MultiModalKwargs(items_lst) \
+        #    .get_data(pin_memory=pin_memory)
 
         # if device is not None:
-        #     mm_kwargs_group = json_map_leaves(lambda x: x.to(device=device),
-        #                                       mm_kwargs_group.data)
+        #     mm_kwargs_group = json_map_leaves(
+        #         lambda x: x.to(device=device),
+        #         mm_kwargs_group,
+        #     )
 
         # TODO: Once V0 is removed, we can use the merging logic above
         # to avoid creating an extra batch dimension (except for fields
@@ -414,7 +417,7 @@ def group_mm_kwargs_by_modality(
         # We will also need to update each model to remove `flatten_bn`.
         mm_kwargs_group = MultiModalKwargs.as_kwargs(
             MultiModalKwargs.batch(
-                [MultiModalKwargs.from_items([item]) for item in items_lst],
+                [MultiModalKwargs([item]) for item in items_lst],
                 pin_memory=pin_memory,
             ),
             device=device,

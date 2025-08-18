@@ -46,7 +46,7 @@ class MultiModalCache:
     ) -> int:
         # MultiModalKwargs is not a subclass of dict
         if isinstance(leaf, MultiModalKwargs):
-            return cls.get_item_size(leaf.data, debug=debug)
+            return cls.get_item_size(leaf.get_data(), debug=debug)
 
         # MultiModalKwargsItem is not a subclass of dict
         if isinstance(leaf, MultiModalKwargsItem):
