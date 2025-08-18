@@ -849,7 +849,7 @@ def _valid_cutlass_block_scaled_grouped_gemm(
     return True
 
 
-# TODO: combine/integrate with regular cutlass_fp8
+# TODO(bnell): would be nice combine/integrate with regular cutlass_fp8.
 def run_cutlass_block_scaled_fused_experts(
     a: torch.Tensor,
     w1: torch.Tensor,
