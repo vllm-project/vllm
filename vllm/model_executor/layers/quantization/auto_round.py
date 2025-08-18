@@ -241,7 +241,7 @@ class AutoRoundConfig(QuantizationConfig):
 
         if isinstance(layer, FusedMoE):
             if use_marlin:
-                return AWQMoEMethod(quant_args_marlin)
+                return AWQMoEMethod(quant_args_marlin, layer.moe)
             from vllm.model_executor.layers.quantization.moe_wna16 import (
                 MoeWNA16Config)
 
@@ -339,7 +339,7 @@ class AutoRoundConfig(QuantizationConfig):
                 }
                 return MoeWNA16Config.from_config(config).get_quant_method(
                     layer, prefix)
-            return GPTQMarlinMoEMethod(quant_args_marlin)
+            return GPTQMarlinMoEMethod(quant_args_marlin, layer.moe)
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             if use_marlin:

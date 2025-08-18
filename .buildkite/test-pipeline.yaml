@@ -253,6 +253,7 @@ steps:
     - pytest -v -s v1/engine
     - pytest -v -s v1/entrypoints
     - pytest -v -s v1/sample
+    - pytest -v -s v1/logits_processors
     - pytest -v -s v1/worker
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/spec_decode
@@ -399,6 +400,7 @@ steps:
 - label: Kernels MoE Test %N
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
+  - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/
