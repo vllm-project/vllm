@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 
@@ -12,7 +12,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (fp8_m_grouped_gemm_nt_masked,
-                                  is_blackwell_deep_gemm_used)
+                                  is_blackwell_deep_gemm_e8m0_used)
 
 logger = init_logger(__name__)
 
@@ -176,7 +176,7 @@ def silu_mul_fp8_quant_deep_gemm(
         eps,
         fp8_min,
         fp8_max,
-        is_blackwell_deep_gemm_used(),
+        is_blackwell_deep_gemm_e8m0_used(),
         BLOCK=group_size,
         NUM_STAGES=8,
         num_warps=1,
@@ -254,18 +254,28 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         output = (num_experts, max_num_tokens * num_dispatchers, K)
         return (workspace13, workspace2, output, a.dtype)
 
-    def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
-              w1: torch.Tensor, w2: torch.Tensor, topk_weights: torch.Tensor,
-              topk_ids: torch.Tensor, activation: str, global_num_experts: int,
-              expert_map: Optional[torch.Tensor],
-              w1_scale: Optional[torch.Tensor],
-              w2_scale: Optional[torch.Tensor], w1_zp: Optional[torch.Tensor],
-              w2_zp: Optional[torch.Tensor], a1q_scale: Optional[torch.Tensor],
-              a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
-              workspace2: torch.Tensor,
-              expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-              apply_router_weight_on_input: bool,
-              extra_expert_args: Optional[dict[str, Any]]):
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: Optional[torch.Tensor],
+        w1_scale: Optional[torch.Tensor],
+        w2_scale: Optional[torch.Tensor],
+        w1_zp: Optional[torch.Tensor],
+        w2_zp: Optional[torch.Tensor],
+        a1q_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        apply_router_weight_on_input: bool,
+    ):
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
 

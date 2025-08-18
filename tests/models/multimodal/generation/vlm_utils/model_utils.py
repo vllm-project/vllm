@@ -19,7 +19,6 @@ from transformers import (AutoConfig, AutoTokenizer, BatchFeature,
 from transformers.video_utils import VideoMetadata
 
 from vllm.sequence import SampleLogprobs
-from vllm.transformers_utils.tokenizer import patch_padding_side
 from vllm.utils import is_list_of
 
 from .....conftest import HfRunner, ImageAsset, ImageTestAssets
@@ -343,7 +342,6 @@ def gemma3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 def glm4v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for GLM4V."""
     hf_processor = hf_model.processor
-    patch_padding_side(hf_processor)
 
     def processor(*args, text="", images=None, **kwargs):
         if images is None:
@@ -817,4 +815,16 @@ def qwen2_5_omni_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     thinker = hf_model.model.thinker
     thinker.get_output_embeddings = lambda: thinker.lm_head
     hf_model.model = thinker
+    return hf_model
+
+
+def tarsier_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    from vllm.model_executor.models.tarsier import get_vision_encoder_info
+
+    vision_encoder_info = get_vision_encoder_info(hf_model.config)
+
+    hf_processor = hf_model.processor
+    if hf_processor.patch_size is None:
+        hf_processor.patch_size = vision_encoder_info.get_patch_size()
+
     return hf_model
