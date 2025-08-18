@@ -16,13 +16,14 @@
 # limitations under the License.
 """Wrapper around `transformers` models"""
 from collections.abc import Iterable, Mapping
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from typing import Literal, Optional, Union
 
 import regex as re
 import torch
 from torch import nn
-from transformers import AutoModel, PretrainedConfig, PreTrainedModel
+from transformers import (AutoModel, BatchFeature, PretrainedConfig,
+                          PreTrainedModel)
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from vllm.attention import Attention
@@ -40,7 +41,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputs, PlaceholderRange)
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
@@ -90,7 +91,7 @@ def log_replacement(name: str, old_module: nn.Module, new_module: nn.Module):
 def replace_linear_class(
     linear: nn.Linear, style: Literal["colwise", "rowwise"],
     quant_config: QuantizationConfig
-) -> Union[ColumnParallelLinear, RowParallelLinear]:
+) -> Union[ColumnParallelLinear, RowParallelLinear, ReplicatedLinear]:
     """
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
 
@@ -106,10 +107,17 @@ def replace_linear_class(
         raise ValueError(
             f"Unsupported parallel style type {type(style)}, expected str")
 
-    vllm_linear_cls = {
-        "colwise": ColumnParallelLinear,
-        "rowwise": RowParallelLinear,
-    }.get(style, ReplicatedLinear)
+    vllm_linear_cls, vllm_linear_kwargs = {
+        "colwise": (ColumnParallelLinear, {}),
+        "colwise_rep": (ColumnParallelLinear, {
+            "gather_output": True
+        }),
+        "rowwise": (RowParallelLinear, {}),
+        "rowwise_rep": (RowParallelLinear, {
+            "input_is_parallel": False
+        }),
+        "replicate": (ReplicatedLinear, {}),
+    }.get(style, (ReplicatedLinear, {}))
 
     return vllm_linear_cls(
         input_size=linear.in_features,
@@ -117,6 +125,7 @@ def replace_linear_class(
         bias=linear.bias is not None,
         quant_config=quant_config,
         return_bias=False,
+        **vllm_linear_kwargs,
     )
 
 
@@ -228,7 +237,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ):
         """
         Given the original multi-modal items for this modality
@@ -269,7 +278,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-    ):
+    ) -> tuple[list[int], BatchFeature, bool]:
         """
         Apply the HF processor on the prompt text and multi-modal data
         together.
@@ -363,7 +372,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             mm_tokens_per_modality["num_image_patches"]
         ) if "num_image_patches" in mm_tokens_per_modality else None
         processed_data['num_image_patches'] = num_image_patches
-        mm_kwargs = MultiModalKwargs.from_hf_inputs(
+        mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             processed_data,
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs,
                                        num_image_patches),
@@ -379,33 +388,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholders,
         )
-
-
-class ConfigOverride:
-    """Context manager to temporarily override config attributes."""
-
-    def __init__(self, config: PretrainedConfig, **kwargs):
-        self.config = config
-        self.kwargs = kwargs
-        self.kwargs_original = {}
-        self.kwargs_delete = set()
-
-    def __enter__(self):
-        """Override config attributes."""
-        for key, value in self.kwargs.items():
-            if not hasattr(self.config, key):
-                self.kwargs_delete.add(key)
-            self.kwargs_original[key] = getattr(self.config, key, None)
-            setattr(self.config, key, value)
-        return self.config
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        """Restore original config attributes."""
-        for key, value in self.kwargs_original.items():
-            if key in self.kwargs_delete:
-                delattr(self.config, key)
-            else:
-                setattr(self.config, key, value)
 
 
 class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
@@ -433,21 +415,11 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         # To be updated in child classes for use in `load_weights`
         self.skip_prefixes: Optional[list[str]] = None
 
-        # vLLM handles interleaved sliding window attention by creating a new
-        # interleaved_sliding_window attribute and deleting the sliding_window
-        # attribute. This breaks the constructors in Transformers so we
-        # temporarily add the attribute back to construct the model.
-        config_override = nullcontext()
-        if hasattr(self.config, "interleaved_sliding_window"):
-            config_override = ConfigOverride(
-                self.config,
-                sliding_window=self.config.interleaved_sliding_window)
-
         # Set correct attn and init on "meta" to delay allocating GPU tensors
         # TODO: @raushan, use the public `model.set_attn_implementation()`
-        # method after v4.54.0 is released
+        # method once its checks are fixed in Transformers.
         self.text_config._attn_implementation = "vllm"
-        with init_on_device_without_buffers("meta"), config_override:
+        with init_on_device_without_buffers("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(
                 self.config,
                 torch_dtype=self.model_config.dtype,
@@ -520,7 +492,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         for i in range(len(layers)):
             if start_layer <= i and i < end_layer:
                 continue
-            layers[i] = PPMissingLayer(return_tuple=True)
+            layers[i] = PPMissingLayer()
 
         # Layers after module list
         for name in pp_plan[module_list_idx + 1:]:
@@ -533,27 +505,47 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         Apply the model's tensor parallelization plan.
         Currently only supports linear layers.
         """
-        if not self.model.supports_tp_plan:
-            if self.tp_size <= 1:
-                return
+        # Look for tp plans in all of the PreTrainedModels found in self.model
+        is_pretrained_model = lambda m: isinstance(m, PreTrainedModel)
+        supports_tp_plan = lambda m: m.config.base_model_tp_plan is not None
+        pretrained_models = filter(is_pretrained_model, self.model.modules())
+        models_with_tp_plan = filter(supports_tp_plan, pretrained_models)
 
+        if not any(models_with_tp_plan) and self.tp_size > 1:
             raise ValueError(
                 f"{type(self.model)} does not support tensor parallel yet!")
 
-        tp_plan = self.model._tp_plan
+        def _tensor_parallel(module: nn.Module,
+                             prefix: str = "",
+                             tp_plan=None):
+            tp_plan = tp_plan or {}
 
-        def _tensor_parallel(module: nn.Module, prefix: str = ""):
+            # If the current module is a PreTrainedModel, set the tp_plan for
+            # all of its children
+            if isinstance(module, PreTrainedModel):
+                tp_plan = module.config.base_model_tp_plan or {}
+                tp_plan = {
+                    maybe_prefix(prefix, k): v
+                    for k, v in tp_plan.items()
+                }
+
+            # Some weight loaders expect linear layers to inherit from vLLM's
+            # LinearBase class, so we set a default style which causes any
+            # unspecified linear layers to be replaced with ReplicatedLinear
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
-                for pattern, style in tp_plan.items():
-                    if re.match(pattern, qual_name) and isinstance(
-                            child_module, nn.Linear):
-                        new_module = replace_linear_class(
-                            child_module, style, self.quant_config)
-                        setattr(module, child_name, new_module)
-                        log_replacement(qual_name, child_module, new_module)
+                if isinstance(child_module, nn.Linear):
+                    generator = (p for p in tp_plan if re.match(p, qual_name))
+                    pattern = next(generator, None)
+                    style = tp_plan.get(pattern, "replicate")
+                    new_module = replace_linear_class(child_module, style,
+                                                      self.quant_config)
+                    setattr(module, child_name, new_module)
+                    log_replacement(qual_name, child_module, new_module)
                 else:
-                    _tensor_parallel(child_module, prefix=qual_name)
+                    _tensor_parallel(child_module,
+                                     prefix=qual_name,
+                                     tp_plan=tp_plan)
 
         _tensor_parallel(self.model)
 
@@ -571,11 +563,10 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         attention_instances = {}
         for i in range(start, end):
             # Handle interleaved sliding window attention
-            sliding_window = None
-            if (hasattr(self.config, "interleaved_sliding_window")
-                    and hasattr(self.config, "sliding_window_pattern")
-                    and ((i + 1) % self.config.sliding_window_pattern > 0)):
-                sliding_window = self.config.interleaved_sliding_window
+            per_layer_sliding_window = None
+            if (hasattr(self.config, "layer_types")
+                    and self.config.layer_types[i] == "sliding_attention"):
+                per_layer_sliding_window = self.config.sliding_window
 
             attention_instances[i] = Attention(
                 num_heads=num_heads,
@@ -586,7 +577,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
-                per_layer_sliding_window=sliding_window,
+                per_layer_sliding_window=per_layer_sliding_window,
                 prefix=f"{i}.attn")
         return attention_instances
 
@@ -703,6 +694,17 @@ class TransformersForCausalLM(TransformersBase):
         return logits
 
 
+def flatten_and_concat(x: list[torch.Tensor]) -> torch.Tensor:
+    """Flatten until a list of tensors can be concatenated then do concat"""
+
+    def _can_concat(x: list[torch.Tensor]):
+        return len(set(map(lambda _x: _x.shape[1:], x))) == 1
+
+    if _can_concat(x):
+        return torch.concat(x)
+    return flatten_and_concat(flatten_bn(x))
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     MultiModalProcessor,
     info=MultiModalProcessingInfo,
@@ -775,8 +777,7 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
             if isinstance(pixel_values, torch.Tensor):
                 pixel_values = flatten_bn(pixel_values).to(self.dtype)
             elif is_list_of(pixel_values, torch.Tensor):
-                pixel_values = flatten_bn(flatten_bn(pixel_values),
-                                          concat=True).to(self.dtype)
+                pixel_values = flatten_and_concat(pixel_values).to(self.dtype)
             else:
                 raise ValueError(
                     f"Unsupported pixel_values type {type(pixel_values)}. "
