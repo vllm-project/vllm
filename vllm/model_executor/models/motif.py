@@ -19,7 +19,7 @@ from vllm.attention.selector import _Backend
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.layernorm import RMSNorm, PolyNorm
+from vllm.model_executor.layers.layernorm import PolyNorm, RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
@@ -72,17 +72,20 @@ class MotifMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "poly_norm":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only poly_norm is supported for now.")
+            raise NotImplementedError(f"Unsupported activation: {hidden_act}. "
+                                      "Only poly_norm is supported for now.")
         self.act_fn = PolyNorm()
         self.intermediate_size = intermediate_size
-        self.tp_size = get_tensor_model_parallel_world_size()
+        tp_size = get_tensor_model_parallel_world_size()
+        if hidden_act == "poly_norm" and tp_size > 1:
+            raise NotImplementedError(
+                "Tensor parallelism for poly_norm is not supported yet. "
+                "Support will be added in the future.")
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
         x = self.act_fn(
-            x[..., :self.intermediate_size //
-              self.tp_size]) * x[..., self.intermediate_size // self.tp_size:]
+            x[..., :self.intermediate_size]) * x[..., self.intermediate_size:]
         x, _ = self.down_proj(x)
         return x
 
@@ -175,7 +178,7 @@ class MotifAttention(nn.Module):
         self.lambda_k2 = nn.Parameter(
             torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0,
                                                                     std=0.1))
-        self.subln = RMSNorm(2 * self.head_dim, eps=1e-5)
+        self.subln = RMSNorm(2 * self.head_dim, eps=config.attn_rms_norm_eps)
 
         params = {
             'differential_flash_attention_config': {

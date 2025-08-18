@@ -203,7 +203,7 @@ struct alignas(16) _f16VecPN : _f16Vec<scalar_t, width> {
 template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
 poly_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
-                 scalar_t* __restrict__ input,         // [..., hidden_size]
+                 const scalar_t* __restrict__ input,   // [..., hidden_size]
                  const scalar_t* __restrict__ weight,  // [3]
                  const scalar_t* __restrict__ bias,    // [1]
                  const float epsilon, const int hidden_size) {
@@ -215,7 +215,7 @@ poly_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
      not aliased in practice. Argument pointers should not be dereferenced
      in this kernel as that would be undefined behavior */
   auto* __restrict__ input_v =
-      reinterpret_cast<_f16VecPN<scalar_t, width>*>(input);
+      reinterpret_cast<const _f16VecPN<scalar_t, width>*>(input);
   const int vec_hidden_size = hidden_size / width;
   float variance = 0.0f;
   float variance2 = 0.0f;
@@ -231,14 +231,22 @@ poly_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
     variance3 += x6;
   }
 
-  using BlockReduce = cub::BlockReduce<float, 1024>;
-  __shared__ typename BlockReduce::TempStorage reduceStore;
+  float3 thread_variances = make_float3(variance, variance2, variance3);
 
-  variance = BlockReduce(reduceStore).Sum(variance, blockDim.x);
-  __syncthreads();
-  variance2 = BlockReduce(reduceStore).Sum(variance2, blockDim.x);
-  __syncthreads();
-  variance3 = BlockReduce(reduceStore).Sum(variance3, blockDim.x);
+  struct SumOp {
+    __device__ float3 operator()(const float3& a, const float3& b) const {
+      return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
+    }
+  };
+
+  using BlockReduce = cub::BlockReduce<float3, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStore;
+  float3 block_variances =
+      BlockReduce(reduceStore).Reduce(thread_variances, SumOp{}, blockDim.x);
+
+  variance = block_variances.x;
+  variance2 = block_variances.y;
+  variance3 = block_variances.z;
 
   __shared__ float s_w2_inv_std;
   __shared__ float s_w1_inv_std2;
@@ -273,7 +281,7 @@ poly_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
 template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
 poly_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
-                 scalar_t* __restrict__ input,         // [..., hidden_size]
+                 const scalar_t* __restrict__ input,   // [..., hidden_size]
                  const scalar_t* __restrict__ weight,  // [3]
                  const scalar_t* __restrict__ bias,    // [1]
                  const float epsilon, const int hidden_size) {
@@ -292,14 +300,22 @@ poly_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
     variance3 += x6;
   }
 
-  using BlockReduce = cub::BlockReduce<float, 1024>;
-  __shared__ typename BlockReduce::TempStorage reduceStore;
+  float3 thread_variances = make_float3(variance, variance2, variance3);
 
-  variance = BlockReduce(reduceStore).Sum(variance, blockDim.x);
-  __syncthreads();
-  variance2 = BlockReduce(reduceStore).Sum(variance2, blockDim.x);
-  __syncthreads();
-  variance3 = BlockReduce(reduceStore).Sum(variance3, blockDim.x);
+  struct SumOp {
+    __device__ float3 operator()(const float3& a, const float3& b) const {
+      return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
+    }
+  };
+
+  using BlockReduce = cub::BlockReduce<float3, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStore;
+  float3 block_variances =
+      BlockReduce(reduceStore).Reduce(thread_variances, SumOp{}, blockDim.x);
+
+  variance = block_variances.x;
+  variance2 = block_variances.y;
+  variance3 = block_variances.z;
 
   __shared__ float s_w2_inv_std;
   __shared__ float s_w1_inv_std2;
@@ -323,8 +339,9 @@ poly_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
     float x2 = x * x;
     float x3 = x2 * x;
 
-    out[blockIdx.x * hidden_size + idx] = (scalar_t)(
-        x * s_w2_inv_std + x2 * s_w1_inv_std2 + x3 * s_w0_inv_std3 + s_bias);
+    out[blockIdx.x * hidden_size + idx] =
+        (scalar_t)(x * s_w2_inv_std + x2 * s_w1_inv_std2 + x3 * s_w0_inv_std3 +
+                   s_bias);
   }
 }
 

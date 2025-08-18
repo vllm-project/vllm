@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from typing import Optional, Union
 
 import torch
 
@@ -23,8 +22,16 @@ def polynorm_naive(
         return x / torch.sqrt(x.pow(2).mean(-1, keepdim=True) + eps)
 
     x = x.float()
-    return (weight[0] * norm(x**3, eps) + weight[1] * norm(x**2, eps) +
-            weight[2] * norm(x, eps) + bias).to(weight.dtype).view(orig_shape)
+    return (
+        (
+            weight[0] * norm(x**3, eps)
+            + weight[1] * norm(x**2, eps)
+            + weight[2] * norm(x, eps)
+            + bias
+        )
+        .to(weight.dtype)
+        .view(orig_shape)
+    )
 
 
 def polynorm_vllm(
@@ -44,18 +51,14 @@ def polynorm_vllm(
     return output
 
 
-def calculate_diff(batch_size, seq_len, hidden_size):
+def calculate_diff(batch_size, seq_len, hidden_dim):
     dtype = torch.bfloat16
-    x = torch.randn(batch_size,
-                    seq_len,
-                    hidden_size,
-                    dtype=dtype,
-                    device="cuda")
+    x = torch.randn(batch_size, seq_len, hidden_dim, dtype=dtype, device="cuda")
     weight = torch.ones(3, dtype=dtype, device="cuda")
     bais = torch.ones(1, dtype=dtype, device="cuda")
 
-    output_naive = polynorm_naive(x.clone(), weight, bais)
-    output_vllm = polynorm_vllm(x.clone(), weight, bais)
+    output_naive = polynorm_naive(x, weight, bais)
+    output_vllm = polynorm_vllm(x, weight, bais)
 
     if torch.allclose(output_naive, output_vllm, atol=1e-2, rtol=1e-2):
         print("✅ All implementations match")
@@ -65,34 +68,29 @@ def calculate_diff(batch_size, seq_len, hidden_size):
 
 batch_size_range = [2**i for i in range(0, 7, 2)]
 seq_length_range = [2**i for i in range(6, 11, 1)]
-head_num_range = [32, 48]
-configs = list(
-    itertools.product(head_num_range, batch_size_range, seq_length_range))
+dim_range = [2048, 4096]
+configs = list(itertools.product(dim_range, batch_size_range, seq_length_range))
 
 
 def get_benchmark():
-
     @triton.testing.perf_report(
         triton.testing.Benchmark(
-            x_names=["head_num", "batch_size", "seq_len"],
+            x_names=["dim", "batch_size", "seq_len"],
             x_vals=[list(_) for _ in configs],
             line_arg="provider",
             line_vals=["naive", "vllm"],
             line_names=["Naive", "vLLM"],
             styles=[("blue", "-"), ("red", "-")],
             ylabel="us",
-            plot_name=f"polynorm-perf",
+            plot_name="polynorm-perf",
             args={},
-        ))
-    def benchmark(head_num, batch_size, seq_len, provider):
+        )
+    )
+    def benchmark(dim, batch_size, seq_len, provider):
         dtype = torch.bfloat16
-        hidden_size = head_num * 128  # assuming head_dim = 128
+        hidden_dim = dim * 4
 
-        x = torch.randn(batch_size,
-                        seq_len,
-                        hidden_size,
-                        dtype=dtype,
-                        device="cuda")
+        x = torch.randn(batch_size, seq_len, hidden_dim, dtype=dtype, device="cuda")
         weight = torch.ones(3, dtype=dtype, device="cuda")
         bias = torch.ones(1, dtype=dtype, device="cuda")
 
@@ -100,12 +98,12 @@ def get_benchmark():
 
         if provider == "naive":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: polynorm_naive(x.clone(), weight, bias),
+                lambda: polynorm_naive(x, weight, bias),
                 quantiles=quantiles,
             )
         else:
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: polynorm_vllm(x.clone(), weight, bias),
+                lambda: polynorm_vllm(x, weight, bias),
                 quantiles=quantiles,
             )
 
@@ -131,10 +129,10 @@ if __name__ == "__main__":
         help="Sequence length",
     )
     parser.add_argument(
-        "--hidden-size",
+        "--hidden-dim",
         type=int,
-        default=4096,
-        help="Hidden size (2nd dimension) of the sequence",
+        default=8192,
+        help="Intermediate size of MLP",
     )
     parser.add_argument(
         "--save-path",
@@ -149,7 +147,7 @@ if __name__ == "__main__":
     calculate_diff(
         batch_size=args.batch_size,
         seq_len=args.seq_len,
-        hidden_size=args.hidden_size,
+        hidden_dim=args.hidden_dim,
     )
 
     benchmark = get_benchmark()

@@ -258,7 +258,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                           {"tiny": "TitanML/tiny-mixtral"}),  # noqa: E501
     "QuantMixtralForCausalLM": _HfExamplesInfo("mistral-community/Mixtral-8x22B-v0.1-AWQ"),  # noqa: E501
     "MotifForCausalLM": _HfExamplesInfo("Motif-Technologies/Motif-2.6B",
-                                        trust_remote_code=True),
+                                        trust_remote_code=True,
+                                        v0_only=True),
     "MptForCausalLM": _HfExamplesInfo("mpt", is_available_online=False),
     "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b"),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
