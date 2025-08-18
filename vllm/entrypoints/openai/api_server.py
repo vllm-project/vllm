@@ -1051,7 +1051,10 @@ if envs.VLLM_SERVER_DEV_MODE:
         except json.JSONDecodeError as e:
             raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
                                 detail=f"JSON decode error: {e}") from e
-        method = body["method"]
+        method = body.get("method")
+        if method is None:
+            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
+                                detail="Missing 'method' in request body")
         # For security reason, only serialized string args/kwargs are passed.
         # User-defined `method` is responsible for deseralization if needed.
         args: list[str] = body.get("args", [])
