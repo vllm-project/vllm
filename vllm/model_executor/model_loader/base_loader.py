@@ -31,8 +31,10 @@ class BaseModelLoader(ABC):
         inplace weights loading for an already-initialized model"""
         raise NotImplementedError
 
-    def load_model(self, vllm_config: VllmConfig,
-                   model_config: ModelConfig) -> nn.Module:
+    def load_model(self,
+                   vllm_config: VllmConfig,
+                   model_config: ModelConfig,
+                   prefix: str = "") -> nn.Module:
         """Load a model with the given configurations."""
         device_config = vllm_config.device_config
         load_config = vllm_config.load_config
@@ -42,7 +44,8 @@ class BaseModelLoader(ABC):
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = initialize_model(vllm_config=vllm_config,
-                                         model_config=model_config)
+                                         model_config=model_config,
+                                         prefix=prefix)
 
             logger.debug("Loading weights on %s ...", load_device)
             # Quantization does not happen in `load_weights` but after it

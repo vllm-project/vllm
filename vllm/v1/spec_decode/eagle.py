@@ -12,8 +12,9 @@ import torch.nn as nn
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
@@ -44,18 +45,20 @@ class EagleAttentionMetadata(Protocol):
     slot_mapping: torch.Tensor
 
 
-class EagleProposer:
+class SpecDecodeProposer:
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
+        pass_hidden_states_to_model: bool,
         runner=None,
     ):
         self.vllm_config = vllm_config
         self.speculative_config = vllm_config.speculative_config
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
+        self.pass_hidden_states_to_model = pass_hidden_states_to_model
 
         self.runner = runner
         self.dtype = vllm_config.model_config.dtype
@@ -157,6 +160,8 @@ class EagleProposer:
         next_token_ids: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
+        cudagraph_runtime_mode: CUDAGraphMode,
+        batch_descriptor: BatchDescriptor,
         mm_embeds: Optional[list[torch.Tensor]] = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
@@ -169,16 +174,22 @@ class EagleProposer:
                 target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
-        # Shift the input ids by one token.
-        # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
-        self.input_ids[:num_tokens - 1] = target_token_ids[1:]
-        # Replace the last token with the next token.
-        # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
-        self.input_ids[last_token_indices] = next_token_ids
+        if self.method == "draft_model":
+            # Use full input ids, no shifting needed
+            self.input_ids[:num_tokens] = target_token_ids
+        else:
+            # Shift the input ids by one token.
+            # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
+            self.input_ids[:num_tokens - 1] = target_token_ids[1:]
+            # Replace the last token with the next token.
+            # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
+            self.input_ids[last_token_indices] = next_token_ids
 
         assert self.runner is not None
 
         # FIXME: need to consider multiple kv_cache_groups
+        assert len(self.runner.attn_groups) == 1
+        assert len(self.runner.attn_groups[0]) == 1
         attn_metadata = self.runner.attn_groups[0][0].metadata_builder\
             .build_for_drafting(common_attn_metadata=common_attn_metadata,
                                 draft_index=0)
@@ -195,7 +206,9 @@ class EagleProposer:
             num_input_tokens = num_tokens
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions
-        self.hidden_states[:num_tokens] = target_hidden_states
+        if self.pass_hidden_states_to_model:
+            self.hidden_states[:num_tokens] = target_hidden_states
+
         if self.is_multimodal_model:
             input_ids = self.input_ids[:num_tokens]
             inputs_embeds = self.model.get_input_embeddings(
@@ -209,16 +222,22 @@ class EagleProposer:
             inputs_embeds = None
             input_ids = self.input_ids[:num_input_tokens]
 
+        model_kwargs = {
+            "input_ids": input_ids,
+            "positions": self.positions[:num_input_tokens],
+        }
+        if self.pass_hidden_states_to_model:
+            model_kwargs[
+                "hidden_states"] = self.hidden_states[:num_input_tokens]
+            model_kwargs["inputs_embeds"] = inputs_embeds
+
         with set_forward_context(per_layer_attn_metadata,
                                  self.vllm_config,
-                                 num_tokens=num_input_tokens):
-            ret_hidden_states = self.model(
-                input_ids=input_ids,
-                positions=self.positions[:num_input_tokens],
-                hidden_states=self.hidden_states[:num_input_tokens],
-                inputs_embeds=inputs_embeds,
-            )
-            if self.method in ("deepseek_mtp", "ernie_mtp"):
+                                 num_tokens=num_input_tokens,
+                                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                                 batch_descriptor=batch_descriptor):
+            ret_hidden_states = self.model(**model_kwargs)
+            if self.method in ("draft_model", "deepseek_mtp", "ernie_mtp"):
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
             else:
@@ -240,10 +259,22 @@ class EagleProposer:
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
 
-        draft_token_ids = logits.argmax(dim=-1)
+        if self.method == "draft_model":
+            # Reuse the next_token_ids to avoid a potential rejection
+            draft_token_ids = next_token_ids
+        else:
+            draft_token_ids = logits.argmax(dim=-1)
+
+        if self.method == "draft_model":
+            # The draft model runs one forward pass to prefill
+            # the target_token_ids, and another forward pass for decoding
+            # based on the next_token_ids. I.e. it needs 1 more forward pass.
+            n_forward_passes = self.num_speculative_tokens + 1
+        else:
+            n_forward_passes = self.num_speculative_tokens
 
         # Early exit if there is only one draft token to be generated.
-        if self.num_speculative_tokens == 1:
+        if n_forward_passes == 1:
             # [batch_size, 1]
             return draft_token_ids.view(-1, 1)
 
@@ -263,7 +294,7 @@ class EagleProposer:
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
-        for _ in range(self.num_speculative_tokens - 1):
+        for _ in range(n_forward_passes - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
@@ -309,6 +340,7 @@ class EagleProposer:
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
+
             if self.is_multimodal_model:
                 inputs_embeds = self.model.get_input_embeddings(input_ids)
                 self.inputs_embeds[:batch_size] = inputs_embeds
@@ -318,21 +350,43 @@ class EagleProposer:
                 inputs_embeds = None
                 input_ids = self.input_ids[:input_batch_size]
 
+            model_kwargs = {
+                "input_ids": input_ids,
+                "positions": self.positions[:input_batch_size],
+            }
+            if self.pass_hidden_states_to_model:
+                model_kwargs[
+                    "hidden_states"] = self.hidden_states[:input_batch_size]
+                model_kwargs["inputs_embeds"] = inputs_embeds
+
+            batch_descriptor = BatchDescriptor(num_tokens=input_batch_size,
+                                               uniform_decode=True)
+            cudagraph_runtime_mode, batch_descriptor = \
+                self.runner.cudagraph_dispatcher.dispatch(batch_descriptor)
+
             # Run the model.
-            with set_forward_context(per_layer_attn_metadata,
-                                     self.vllm_config,
-                                     num_tokens=input_batch_size):
-                last_hidden_states, hidden_states = self.model(
-                    input_ids=input_ids,
-                    positions=self.positions[:input_batch_size],
-                    hidden_states=self.hidden_states[:input_batch_size],
-                    inputs_embeds=inputs_embeds,
-                )
+            with set_forward_context(
+                    per_layer_attn_metadata,
+                    self.vllm_config,
+                    num_tokens=input_batch_size,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    batch_descriptor=batch_descriptor):
+                ret_hidden_states = self.model(**model_kwargs)
+            if self.method in ("draft_model", "deepseek_mtp", "ernie_mtp"):
+                hidden_states = last_hidden_states = ret_hidden_states
+            else:
+                last_hidden_states, hidden_states = ret_hidden_states
             hidden_states = hidden_states[:batch_size]
+
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
+
+        if self.method == "draft_model":
+            # the first draft_token_ids are identical to next_token_ids, so
+            # they don't need to be returned as proposed tokens
+            draft_token_ids_list = draft_token_ids_list[1:]
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
@@ -611,14 +665,19 @@ class EagleProposer:
 
         from vllm.compilation.backends import set_model_tag
         with set_model_tag("eagle_head"):
-            self.model = get_model(vllm_config=self.vllm_config,
-                                   model_config=draft_model_config)
+            vllm_config_draft = replace(self.vllm_config,
+                                        model_config=draft_model_config)
+            self.model = get_model(vllm_config=vllm_config_draft,
+                                   model_config=draft_model_config,
+                                   prefix="draft_model")
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
 
         self.attn_layer_names = list(draft_attn_layer_names)
+        if self.vllm_config.speculative_config.uses_draft_model():
+            return
 
         if supports_multimodal(target_model):
             # handle multimodality
@@ -654,9 +713,11 @@ class EagleProposer:
     def dummy_run(
         self,
         num_tokens: int,
+        forward_ctx_kwargs: dict,
     ) -> None:
-        with set_forward_context(None, self.vllm_config,
-                                 num_tokens=num_tokens):
+        with set_forward_context(vllm_config=self.vllm_config,
+                                 num_tokens=num_tokens,
+                                 **forward_ctx_kwargs):
             if self.is_multimodal_model:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
@@ -664,12 +725,15 @@ class EagleProposer:
                 input_ids = self.input_ids[:num_tokens]
                 inputs_embeds = None
 
-            self.model(
-                input_ids=input_ids,
-                positions=self.positions[:num_tokens],
-                hidden_states=self.hidden_states[:num_tokens],
-                inputs_embeds=inputs_embeds,
-            )
+            model_kwargs = {
+                "input_ids": input_ids,
+                "positions": self.positions[:num_tokens],
+            }
+            if self.pass_hidden_states_to_model:
+                model_kwargs["hidden_states"] = self.hidden_states[:num_tokens]
+                model_kwargs["inputs_embeds"] = inputs_embeds
+
+            self.model(**model_kwargs)
 
     def validate_same_kv_cache_group(self,
                                      kv_cache_config: KVCacheConfig) -> None:
@@ -689,6 +753,30 @@ class EagleProposer:
                 for layer_name in self.attn_layer_names
             ])
         ) == 1, "All eagle layers should belong to the same kv cache group"
+
+
+class EagleProposer(SpecDecodeProposer):
+
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 device: torch.device,
+                 runner=None):
+        super().__init__(vllm_config=vllm_config,
+                         device=device,
+                         runner=runner,
+                         pass_hidden_states_to_model=True)
+
+
+class DraftModelProposer(SpecDecodeProposer):
+
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 device: torch.device,
+                 runner=None):
+        super().__init__(vllm_config=vllm_config,
+                         device=device,
+                         runner=runner,
+                         pass_hidden_states_to_model=False)
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax

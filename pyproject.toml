@@ -154,6 +154,11 @@ markers = [
     "skip_v1: do not run this test with v1",
     "optional: optional tests that are automatically skipped, include --optional to run them",
 ]
+# Show print statements and logs during test execution
+addopts = "-s --tb=short --log-cli-level=INFO"
+log_cli = true
+log_cli_format = "%(asctime)s [%(levelname)8s] %(name)s: %(message)s"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
 
 [tool.ty.src]
 root = "./vllm"

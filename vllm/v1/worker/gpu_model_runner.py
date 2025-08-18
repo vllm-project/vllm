@@ -75,7 +75,8 @@ from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
-from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.eagle import (DraftModelProposer, EagleProposer,
+                                       SpecDecodeProposer)
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -237,6 +238,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config and get_pp_group().is_last_rank:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.uses_draft_model():
+                self.drafter = DraftModelProposer(self.vllm_config,
+                                                  self.device,
+                                                  self)  # type: ignore
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device,
                                              self)  # type: ignore
@@ -1982,6 +1987,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     aux_hidden_states,
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    batch_descriptor=batch_descriptor,
                 )
 
         with record_function_or_nullcontext("EPLB"):
@@ -2029,6 +2036,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         aux_hidden_states: Optional[torch.Tensor],
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         common_attn_metadata: CommonAttentionMetadata,
+        cudagraph_runtime_mode: CUDAGraphMode,
+        batch_descriptor: BatchDescriptor,
     ) -> Union[list[list[int]], torch.Tensor]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
@@ -2055,8 +2064,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 target_hidden_states=hidden_states,
                 sampling_metadata=sampling_metadata,
             )
-        elif self.speculative_config.use_eagle():
-            assert isinstance(self.drafter, EagleProposer)
+        elif self.speculative_config.use_eagle(
+        ) or self.speculative_config.method == "draft_model":
+            assert isinstance(self.drafter,
+                              (EagleProposer, DraftModelProposer))
             # TODO(woosuk): Refactor the loop.
             req_ids = self.input_batch.req_ids
             next_token_ids: list[int] = []
@@ -2122,6 +2133,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
                 mm_embeds=mm_embeds,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                batch_descriptor=batch_descriptor,
             )
         return draft_token_ids
 
@@ -2634,9 +2647,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 hidden_states = outputs
 
-            if self.speculative_config and self.speculative_config.use_eagle():
-                assert isinstance(self.drafter, EagleProposer)
-                self.drafter.dummy_run(num_tokens)
+            # Execute dummy run for drafter
+            is_eagle = (self.speculative_config
+                        and self.speculative_config.use_eagle())
+            is_draft_model = (self.speculative_config
+                              and self.speculative_config.uses_draft_model())
+            do_draft_dummy_run = is_eagle or is_draft_model
+            if do_draft_dummy_run:
+                assert isinstance(self.drafter, SpecDecodeProposer)
+                forward_ctx_kwargs = {
+                    "attn_metadata": attn_metadata,
+                    "cudagraph_runtime_mode": cudagraph_runtime_mode,
+                    "batch_descriptor": batch_descriptor,
+                }
+                self.drafter.dummy_run(num_tokens,
+                                       forward_ctx_kwargs=forward_ctx_kwargs)
 
         # This is necessary to avoid blocking DP.
         # For dummy runs, we typically skip EPLB since we don't have any real

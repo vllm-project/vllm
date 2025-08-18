@@ -2151,6 +2151,7 @@ class SpeculativeConfig:
                     code_revision=self.code_revision,
                     tokenizer_revision=self.target_model_config.
                     tokenizer_revision,
+                    max_model_len=self.max_model_len,
                     spec_target_max_model_len=self.target_model_config.
                     max_model_len,
                     quantization=self.quantization,
@@ -2192,11 +2193,6 @@ class SpeculativeConfig:
                             )
                 else:
                     self.method = "draft_model"
-                    raise NotImplementedError(
-                        "Speculative decoding with draft model is not "
-                        "supported yet. Please consider using other "
-                        "speculative decoding methods such as ngram, medusa, "
-                        "eagle, or deepseek_mtp.")
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3"):
@@ -2406,6 +2402,9 @@ class SpeculativeConfig:
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp")
+
+    def uses_draft_model(self) -> bool:
+        return self.method == "draft_model"
 
     def __repr__(self) -> str:
         method = self.method
