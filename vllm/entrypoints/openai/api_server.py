@@ -1064,7 +1064,7 @@ if envs.VLLM_SERVER_DEV_MODE:
             method=method, timeout=timeout, args=tuple(args), kwargs=kwargs)
         if results is None:
             return Response(status_code=200)
-        response = []
+        response: list[Any] = []
         for result in results:
             if result is None or isinstance(result, (dict, list)):
                 response.append(result)
