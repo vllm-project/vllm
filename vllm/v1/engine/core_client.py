@@ -1234,7 +1234,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             coro = self._call_utility_async("reinitialize_distributed",
                                             reconfig_request,
                                             engine=engine)
-            reconfig_futures.append(coro)
+            reconfig_futures.append(asyncio.create_task(coro))
 
         logger.info("All reconfigure messages sent, starting engine creation")
 
@@ -1307,7 +1307,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             coro = self._call_utility_async("reinitialize_distributed",
                                             reconfig_request,
                                             engine=engine)
-            reconfig_futures.append(coro)
+            reconfig_futures.append(asyncio.create_task(coro))
 
         for _ in range(new_data_parallel_size, cur_data_parallel_size):
             self.core_engines.pop()
