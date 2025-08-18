@@ -22,6 +22,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 if TYPE_CHECKING:
+    from vllm.multimodal.inputs import NestedTensors
     from vllm.v1.worker.kv_connector_model_runner_mixin import (
         KVConnectorOutput)
 
@@ -978,7 +979,8 @@ class SequenceGroupMetadata(
     state: Optional[SequenceGroupState] = msgspec.field(
         default_factory=lambda: SequenceGroupState())
     token_type_ids: Optional[list[int]] = None
-    multi_modal_data: Optional[Union[MultiModalKwargs, dict]] = None
+    multi_modal_data: Optional[Union[MultiModalKwargs,
+                                     dict[str, NestedTensors]]] = None
     multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[list[int]] = None
