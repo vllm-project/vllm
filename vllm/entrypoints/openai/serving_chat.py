@@ -983,6 +983,11 @@ class OpenAIServingChat(OpenAIServing):
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
+            output_text = output.text
+            if envs.VLLM_DETOKENIZE_ON_OPENAI_SERVER:
+                ids_to_decode: list[int] = list(token_ids) if token_ids else []
+                output_text = tokenizer.decode(ids_to_decode)
+
             if request.logprobs and request.top_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
                 logprobs = self._create_chat_logprobs(
@@ -1006,10 +1011,10 @@ class OpenAIServingChat(OpenAIServing):
                 # tool calls are extracted exclusively from the content.
                 reasoning_content, content = (
                     reasoning_parser.extract_reasoning_content(
-                        output.text, request=request))
+                        output_text, request=request))
             else:
                 reasoning_content = None
-                content = output.text
+                content = output_text
 
             # if auto tools are not enabled, and a named tool choice using
             #   outlines is not being used
