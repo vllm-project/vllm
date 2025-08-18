@@ -297,7 +297,6 @@ def make_test_quant_config(
     in_dtype: torch.dtype,
     quant_dtype: Union[torch.dtype, str, None] = None,
     per_act_token_quant: bool = False,
-    #per_out_ch_quant:bool = False,
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, FusedMoEQuantConfig]:
     (_, w1, w1_s, w1_gs), (_, w2, w2_s, w2_gs) = make_test_weights(
@@ -306,11 +305,11 @@ def make_test_quant_config(
         k,
         in_dtype,
         quant_dtype,
-        per_out_ch_quant=per_act_token_quant,  # TODO: fix
+        per_out_ch_quant=per_act_token_quant,
         block_shape=block_shape,
     )
 
-    # This is a hack
+    # Hacky/trivial scales for nvfp4.
     a1_gscale: Optional[torch.Tensor] = None
     a2_gscale: Optional[torch.Tensor] = None
     if quant_dtype == "nvfp4":

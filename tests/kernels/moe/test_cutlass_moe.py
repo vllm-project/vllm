@@ -11,7 +11,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig, fp8_w8a8_moe_quant_config)
+    FUSED_MOE_UNQUANTIZED_CONFIG, fp8_w8a8_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     cutlass_moe_fp8, run_cutlass_moe_fp8)
 from vllm.model_executor.layers.fused_moe.fused_moe import (fused_experts,
@@ -216,7 +216,9 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
         w2_scale=moe_tensors.w2_scale,
         per_act_token_quant=per_act_token,
         per_out_ch_quant=per_out_ch,
-        a1_scale=None,  # moe_tensors.a_scale, # iff static scales + per tensor
+        # Set to moe_tensors.a_scale iff static scales + per tensor.
+        # This is not currently being tested.
+        a1_scale=None,
     )
 
     kwargs = {
@@ -279,7 +281,7 @@ def test_cutlass_moe_8_bit_no_graph(
         # Note that we are using the dequantized versions of the tensors.
         # Using a, w1 and w2 directly results in minor output differences.
 
-        quant_config = FusedMoEQuantConfig.make()
+        quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
         triton_output = fused_experts(mt.a_d,
                                       mt.w1_d,
                                       mt.w2_d,
@@ -339,7 +341,7 @@ def test_cutlass_moe_8_bit_cuda_graph(
 
         # Note that we are using the dequantized versions of the tensors.
         # Using a, w1 and w2 directly results in minor output differences.
-        quant_config = FusedMoEQuantConfig.make()
+        quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
         triton_output = fused_experts(mt.a_d,
                                       mt.w1_d,
                                       mt.w2_d,

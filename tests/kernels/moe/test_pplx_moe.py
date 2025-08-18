@@ -58,7 +58,7 @@ BATCHED_MOE_MNK_FACTORS = [
 ]
 
 PPLX_COMBOS = [
-    # TODO: figure out why this fails, seems to be test problem
+    # TODO(bnell): figure out why this fails, seems to be test problem
     #(1, 128, 128),
     (2, 128, 512),
     (3, 1024, 2048),
@@ -822,7 +822,7 @@ def test_pplx_moe_slow(
         k,
         quant_dtype=quant_dtype,
         block_shape=block_shape,
-        per_out_ch_quant=per_act_token_quant,  # TODO fix
+        per_out_ch_quant=per_act_token_quant,
     )
 
     parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk, e,
@@ -899,7 +899,7 @@ def _pplx_test_loop(pgi: ProcessGroupInfo, dp_size: int, use_internode: bool,
                 k,
                 quant_dtype=quant_dtype,
                 block_shape=block_shape,
-                per_out_ch_quant=per_act_token_quant,  # TODO: fix/doc
+                per_out_ch_quant=per_act_token_quant,
             )
             args["w1"] = w1
             args["w2"] = w2
