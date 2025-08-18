@@ -164,6 +164,10 @@ class AttnFusionPass(VllmInductorPass):
         self.dump_graph(graph, "before_attn_fusion")
 
         count = self.patterns.apply(graph)
+
+        # TODO: Move this to pass_manager.py after the fx graph broken issue
+        # has been resolved.
+        # see https://github.com/vllm-project/vllm/issues/23091
         graph.eliminate_dead_code()
 
         logger.debug("Fused quantization onto %s attention nodes", count)
