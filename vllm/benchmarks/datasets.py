@@ -547,10 +547,11 @@ class RandomMultiModalDataset(RandomDataset):
                              limit_images_per_prompt)
         # ensure min num images is zero
         min_num_images = max(int(num_images * (1 - num_images_range_ratio)), 0)
-        # assert min_num_images <= max_num_images
-        assert min_num_images <= max_num_images, (
-            "min_num_images must be <= max_num_images"
-        )
+        # raise error if min_num_images > max_num_images
+        if min_num_images > max_num_images:
+            raise ValueError(
+                "min_num_images must be <= max_num_images"
+            )
         # Enforce dimension_range_ratio < 1
         assert dimension_range_ratio < 1.0, (
             "dimension_range_ratio must be < 1.0 to ensure a valid sampling "
