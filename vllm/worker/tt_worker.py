@@ -208,13 +208,18 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         if (("Llama-3.1-8B" in self.model_config.model
              or "Mistral-7B" in self.model_config.model)
-                and num_devices_per_model == 1
-                and is_wormhole):  # Llama8B on N150 and Mistral7B on N150
+                and num_devices_per_model == 1 and is_wormhole):
+            # Llama8B on N150 and Mistral7B on N150
+            max_tokens_all_users = 65536
+        elif (("DeepSeek-R1-Distill-Qwen-14B" in self.model_config.model
+               or "Qwen2.5-14B" in self.model_config.model)
+              and num_devices_per_model == 2 and is_wormhole):
+            # Qwen2.5-14B on N300
             max_tokens_all_users = 65536
         elif ("Llama-3.2-90B" in self.model_config.model
-              and num_devices_per_model == 8
-              and is_wormhole):  # Llama90B on WH T3K
-            max_tokens_all_users = 65536  # [INFO] avoid OOM for Llama-3.2-90B
+              and num_devices_per_model == 8 and is_wormhole):
+            # Llama90B on WH T3K
+            max_tokens_all_users = 65536
         else:
             # Note: includes num vision tokens for multi-modal
             max_tokens_all_users = 131072

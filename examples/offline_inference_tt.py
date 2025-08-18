@@ -163,6 +163,8 @@ def check_tt_model_supported(model):
         "meta-llama/Llama-3.3-70B-Instruct",
         "Qwen/Qwen2.5-7B",
         "Qwen/Qwen2.5-7B-Instruct",
+        "Qwen/Qwen2.5-14B",
+        "Qwen/Qwen2.5-14B-Instruct",
         "Qwen/Qwen2.5-32B",
         "Qwen/Qwen2.5-32B-Instruct",
         "Qwen/Qwen2.5-Coder-32B",
