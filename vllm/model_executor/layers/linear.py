@@ -203,6 +203,12 @@ class UnquantizedLinearMethod(LinearMethodBase):
         set_weight_attrs(weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+<<<<<<< HEAD
+=======
+        # required by torch.compile
+        layer.weight = Parameter(layer.weight.data, requires_grad=False)
+
+>>>>>>> 32f2edfcc (special bias weight loader)
         # special postprocessing for CPU SGL
         if current_platform.is_cpu() and envs.VLLM_CPU_SGL_KERNEL:
             from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
@@ -223,9 +229,6 @@ class UnquantizedLinearMethod(LinearMethodBase):
                     " bf16/fp16/int8 weight, IC and OC are divisible by "
                     "32 and 16.")
                 layer.use_cpu_sgl = False
-
-        # required by torch.compile
-        layer.weight = Parameter(layer.weight.data, requires_grad=False)
 
     def apply(self,
               layer: torch.nn.Module,
