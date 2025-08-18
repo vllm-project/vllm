@@ -27,6 +27,11 @@ def _get_config_dtype_str(
     use_int4_w4a16: bool = False,
     use_mxfp4_w4a4: bool = False,
 ) -> Optional[str]:
+    """
+    Return a string used to construct the filename that contains the
+    tuning info for a particular quantization scheme.  See
+    try_get_optimal_moe_config in fused_moe.py.
+    """
     if use_fp8_w8a8:
         return "fp8_w8a8"
     elif use_int8_w8a16:
@@ -42,34 +47,22 @@ def _get_config_dtype_str(
     return None
 
 
-def _get_config_quant_dtype(
-    use_fp8_w8a8: bool,
-    use_int8_w8a8: bool,
-    use_int8_w8a16: bool,
-    use_int4_w4a16: bool,
-    use_mxfp4_w4a4: bool,
-) -> Union[None, torch.dtype, str]:
-    if use_fp8_w8a8:
-        return torch.float8_e4m3fn
-    elif use_int8_w8a8:
-        return torch.int8
-    elif use_mxfp4_w4a4:
-        return "mxfp4"
-    return None
-
-
 def _quant_flags_to_group_shape(
     quant_dtype: Union[torch.dtype, str, None],
     per_act_token_quant: bool,
     per_out_ch_quant: bool,
     block_shape: Optional[list[int]],
 ) -> tuple[Optional[GroupShape], Optional[GroupShape]]:
+    """
+    Convert MoE quantization flags into more generic GroupShapes.
+    """
     a_shape: Optional[GroupShape]
     w_shape: Optional[GroupShape]
     if block_shape is not None:
         assert not per_act_token_quant
         assert not per_out_ch_quant
-        # This is not quite right since first dim should be 1.
+        # TODO(bnell): this is not quite right for activations since first
+        # dim should be 1.
         a_shape = GroupShape(row=block_shape[0], col=block_shape[1])
         w_shape = GroupShape(row=block_shape[0], col=block_shape[1])
     else:
@@ -87,8 +80,17 @@ def _quant_flags_to_group_shape(
 
 @dataclass
 class FusedMoEQuantDesc:
+    """
+    A quantization descriptor for fused MoE ops. This class can describe
+    either activations or weights.
+    """
+
+    # The quantized type of this parameters.  None means unquantized or
+    # already quantized.
     # TODO (bnell): use scalar_type instead of Union.
     dtype: Union[torch.dtype, str, None] = None
+
+    # A field that describes the quantization group shape, from quant_utils.py.
     #  * (-1, -1)   for per-tensor quantization
     #  * (1, -1)    for per-row quantization
     #  * (-1, 1)    for per-column quantization
@@ -97,25 +99,61 @@ class FusedMoEQuantDesc:
     #               (i.e. per-token-per-group)
     shape: Optional[GroupShape] = None
 
+    # Quantization scales.
     # TODO(bnell): maybe put PrecisionConfigs in subclass of QuantDesc?
     scale: Union[torch.Tensor, "PrecisionConfig", None] = None
 
+    # Quantization alphas or gscales, used for nvfp4 types.
     # TODO(bnell): put some of these in subclasses
-    alpha_or_gscale: Optional[torch.Tensor] = None  # store as 1/gs or gs?
+    alpha_or_gscale: Optional[torch.Tensor] = None
+
+    # Zero points for int4/int8 types
     zp: Optional[torch.Tensor] = None
+
+    # Biases for GPT triton MoE
     bias: Optional[torch.Tensor] = None
 
 
-# TODO: have subclasses for specific moe methods?
+# TODO(bnell): have subclasses for specific moe methods?
 # e.g. for specific arguments bias, precision, etc.
 @dataclass
 class FusedMoEQuantConfig:
+    """
+    The FusedMoEQuantConfig contains all the quantization parameters for
+    a single FusedMoEMethodBase operation.  It consists of four
+    FusedMoEQuantDescs, one for each activation and set of weights.
+
+    Each FusedMoEMethodBase must implement a get_fused_moe_quant_config
+    method to construct a FusedMoEQuantConfig for use with that class.
+
+    FusedMoEQuant configs are only used for modular kernels, fused_experts
+    (from fused_moe.py), cutlass_moe_fp[48], rocm_aiter_fused_experts and
+    triton_kernel_moe_forward.  Other MoE methods can ignore the
+    FusedMoEQuantConfig (for now) and hardcode it to None.
+
+    There are currently some restrictions on what can be expressed:
+    - Most MoE ops only support similar quantization strategies for
+      each parameter, e.g. both weights must have the same GroupShape
+      and both activations must share the same GroupShape.  One exception to
+      this is the cutlass moe which allows per channel quantization on the
+      outputs.  Note: this restrictions are not always rigorously checked.
+    - Not all fused MoE functions support all the parameters, e.g. zero points,
+      global scales, alphas and biases are not universally supported.
+    - Fully general GroupShapes are not allowed.  Activations only support
+      per token, per tensor or K-blocked.
+    - Weights are not required to have a GroupShape since they have already
+      been quantized.
+
+    Other notes:
+    - PrecisionConfigs are specific to GPT OSS Triton.
+    - As a follow up it would probably make sense to subclass FusedMoEQuantDesc
+      or FusedMoEQuantConfig for particular FusedMoEMethodBase subclasses
+      so that only the required quantization parameters are used/stored.
+    """
+
     # TODO(bnell) make sure a1_scales/a2_scales don't interfere with chunking
     _a1: FusedMoEQuantDesc
     _a2: FusedMoEQuantDesc
-
-    # Note: weights are not required to have a GroupShape since
-    # they've already been quantized.
     _w1: FusedMoEQuantDesc
     _w2: FusedMoEQuantDesc
 
@@ -123,15 +161,9 @@ class FusedMoEQuantConfig:
         assert (not self.per_act_token_quant
                 or self.block_shape is None), "illegal quantization"
 
-    # TODO: more doc
-    # - w1_scale (Optional[torch.Tensor]): Optional scale to be used for w1.
-    # - w2_scale (Optional[torch.Tensor]): Optional scale to be used for w2.
-    # - w1_zp (Optional[torch.Tensor]): Optional zero points to be used for
-    #   w1.
-    # - w2_zp (Optional[torch.Tensor]): Optional zero points to be used for
-    #   w2.
-    # - a1_scale (Optional[torch.Tensor]): Optional scale to be used for a1.
-    # - a2_scale (Optional[torch.Tensor]): Optional scale to be used for a2.
+    #
+    # Convenience accessors for various properties.
+    #
 
     @property
     def quant_dtype(self) -> Union[torch.dtype, str, None]:
@@ -263,6 +295,11 @@ class FusedMoEQuantConfig:
         return self.quant_dtype == "nvfp4"
 
     def config_name(self, dtype: torch.dtype) -> Optional[str]:
+        """
+        Return a string used to construct the filename that contains the
+        tuning info for a particular quantization scheme.  See
+        try_get_optimal_moe_config in fused_moe.py.
+        """
         return _get_config_dtype_str(
             use_fp8_w8a8=self.use_fp8_w8a8,
             use_int8_w8a16=self.use_int8_w8a16,
@@ -276,6 +313,10 @@ class FusedMoEQuantConfig:
         max_tokens: int,
         hidden_dim: int,
     ) -> Optional[tuple[int, int]]:
+        """
+        Construct the proper activation scale shape for this
+        config.
+        """
         if self.is_quantized:
             if self.is_block_quantized:
                 assert self.block_shape is not None
@@ -295,6 +336,10 @@ class FusedMoEQuantConfig:
         max_tokens: int,
         hidden_dim: int,
     ) -> Optional[tuple[int, int, int]]:
+        """
+        Construct the proper activation batched scale shape for this
+        config, e.g. (num experts, *scale_shape).
+        """
         if self.is_quantized:
             scale_shape = self.scale_shape(max_tokens, hidden_dim)
             assert scale_shape is not None
@@ -318,7 +363,34 @@ class FusedMoEQuantConfig:
         a2_gscale: Optional[torch.Tensor] = None,
         w1_bias: Optional[torch.Tensor] = None,
         w2_bias: Optional[torch.Tensor] = None,
+        w1_zp: Optional[torch.Tensor] = None,
+        w2_zp: Optional[torch.Tensor] = None,
     ) -> "FusedMoEQuantConfig":
+        """
+        General builder function for a FusedMoEQuantConfig.
+        - quant_dtype: Optional quantization type. None if activations are
+          unquantized or quantized prior to calling.  Note: "nvfp4" and
+          "mxfp4" are the only valid string values for quant_dtype.
+        - per_act_token_quant: Activations have per token quantization.
+        - per_out_ch_quant: Outputs have per channel quantization. (only
+          for cutlass).
+        - block_shape: Optional block size for block-wise quantization.
+          Incompatible with per_act_token and per_out_ch quant.
+        - w1_scale: Optional scale to be used for w1.
+        - w2_scale: Optional scale to be used for w2.
+        - a1_scale: Optional scale to be used for a1.
+        - a2_scale: Optional scale to be used for a2.
+        - g1_alphas: Optional global quantization scales for w1 (for nvfp4).
+        - g2_alphas: Optional global quantization scales for w2 (for nvfp4).
+        - a1_gscale: Optional global quantization scales for a1 (for nvfp4).
+        - a2_gscale: Optional global quantization scales for a2 (for nvfp4).
+        - w1_bias: Optional biases for w1 (GPT OSS Triton).
+        - w2_bias: Optional biases for w1 (GPT OSS Triton).
+        - w1_zp: Optional w1 zero points for int4/int8 quantization.
+        - w2_zp: Optional w2 zero points for int4/int8 quantization.
+        """
+        assert (not isinstance(quant_dtype, str) or quant_dtype == "nvfp4"
+                or quant_dtype == "mxfp4")
         a_shape, w_shape = _quant_flags_to_group_shape(quant_dtype,
                                                        per_act_token_quant,
                                                        per_out_ch_quant,
@@ -327,17 +399,14 @@ class FusedMoEQuantConfig:
             _a1=FusedMoEQuantDesc(quant_dtype, a_shape, a1_scale, a1_gscale),
             _a2=FusedMoEQuantDesc(quant_dtype, a_shape, a2_scale, a2_gscale),
             _w1=FusedMoEQuantDesc(quant_dtype, w_shape, w1_scale, g1_alphas,
-                                  None, w1_bias),
+                                  w1_zp, w1_bias),
             _w2=FusedMoEQuantDesc(quant_dtype, w_shape, w2_scale, g2_alphas,
-                                  None, w2_bias),
+                                  w2_zp, w2_bias),
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
         assert quant_config.per_out_ch_quant == per_out_ch_quant
         assert quant_config.block_shape == block_shape
         return quant_config
-
-
-# TODO better doc
 
 
 def fp8_w8a8_moe_quant_config(
@@ -349,6 +418,9 @@ def fp8_w8a8_moe_quant_config(
     per_out_ch_quant: bool = False,
     block_shape: Optional[list[int]] = None,
 ) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for fp8 activations and fp8 weights.
+    """
     return FusedMoEQuantConfig.make(torch.float8_e4m3fn,
                                     w1_scale=w1_scale,
                                     w2_scale=w2_scale,
@@ -366,6 +438,9 @@ def int8_w8a8_moe_quant_config(
     a2_scale: Optional[torch.Tensor],
     per_act_token_quant: bool = False,
 ) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for int8 activations and int8 weights.
+    """
     return FusedMoEQuantConfig.make(
         torch.int8,
         w1_scale=w1_scale,
@@ -387,6 +462,9 @@ def mxfp4_w4a4_moe_quant_config(
     w2_bias: Optional[torch.Tensor] = None,
     block_shape: Optional[list[int]] = None,
 ) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for mxfp4 activations and mxfp4 weights.
+    """
     return FusedMoEQuantConfig.make(
         "mxfp4",
         w1_scale=w1_scale,
@@ -409,6 +487,9 @@ def nvfp4_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
 ) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for mxfp4 activations and nvp4 weights.
+    """
     return FusedMoEQuantConfig.make(
         "nvfp4",
         w1_scale=w1_scale,
@@ -430,7 +511,10 @@ def int4_w4a16_moe_quant_config(
     w2_zp: Optional[torch.Tensor],
     block_shape: Optional[list[int]] = None,
 ) -> FusedMoEQuantConfig:
-    # Activations are pre-quantized
+    """
+    Construct a quant config for 16-bit float activations and int4 weights.
+    Note: Activations are pre-quantized.
+    """
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(shape=group_shape),
@@ -447,7 +531,10 @@ def int8_w8a16_moe_quant_config(
     w2_zp: Optional[torch.Tensor],
     block_shape: Optional[list[int]] = None,
 ) -> FusedMoEQuantConfig:
-    # Activations are pre-quantized
+    """
+    Construct a quant config for 16-bit float activations and int8 weights.
+    Note: Activations are pre-quantized.
+    """
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(shape=group_shape),
@@ -461,6 +548,9 @@ def biased_moe_quant_config(
     w1_bias: Optional[torch.Tensor],
     w2_bias: Optional[torch.Tensor],
 ) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for unquantized activations with biases.
+    """
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(),
         _a2=FusedMoEQuantDesc(),
@@ -469,6 +559,7 @@ def biased_moe_quant_config(
     )
 
 
+# A FusedMoEQuantConfig constant for an unquantized MoE op.
 FUSED_MOE_UNQUANTIZED_CONFIG: FusedMoEQuantConfig = FusedMoEQuantConfig.make()
 
 

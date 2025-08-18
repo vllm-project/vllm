@@ -7,7 +7,7 @@ import os
 # torch.compile needs typing.List. It will fail torch.library.infer_schema
 # otherwise
 from typing import List  # noqa: UP035
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -18,8 +18,7 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 # yapf: disable
 from vllm.model_executor.layers.fused_moe.config import (
-    FUSED_MOE_UNQUANTIZED_CONFIG, FusedMoEQuantConfig, _get_config_dtype_str,
-    _get_config_quant_dtype)
+    FUSED_MOE_UNQUANTIZED_CONFIG, FusedMoEQuantConfig, _get_config_dtype_str)
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     _valid_cutlass_block_scaled_grouped_gemm,
     run_cutlass_block_scaled_fused_experts)
@@ -1471,6 +1470,29 @@ def fused_experts(
 
 SILU_NO_MUL: str = activation_without_mul("silu")
 GELU_NO_MUL: str = activation_without_mul("gelu")
+
+
+def _get_config_quant_dtype(
+    use_fp8_w8a8: bool,
+    use_int8_w8a8: bool,
+    use_int8_w8a16: bool,
+    use_int4_w4a16: bool,
+    use_mxfp4_w4a4: bool,
+) -> Union[None, torch.dtype, str]:
+    """
+    Get the quantization type based on the quantization strategy flags.
+    We don't have a quant_config at this point so we need to work backwards.
+    A return type of None means no quantization is required because the
+    input is unquantized or has been quantized prior to calling
+    fused_experts_impl.
+    """
+    if use_fp8_w8a8:
+        return torch.float8_e4m3fn
+    elif use_int8_w8a8:
+        return torch.int8
+    elif use_mxfp4_w4a4:
+        return "mxfp4"
+    return None
 
 
 def fused_experts_impl(
