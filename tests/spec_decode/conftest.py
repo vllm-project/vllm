@@ -74,12 +74,29 @@ def hf_postnorm_at_k(model_id: str, input_ids: torch.Tensor, k: int,
     from transformers import AutoModelForCausalLM
     hf = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype).to(device)
     m = hf.model if hasattr(hf, "model") else hf
+    
+    # Create proper inputs for the model
+    batch_size, seq_len = input_ids.shape
+    position_ids = torch.arange(seq_len, dtype=torch.long, device=device).unsqueeze(0).expand(batch_size, -1)
+    
     x = m.embed_tokens(input_ids.to(device))
+    
+    # Get position embeddings if the model uses them
+    position_embeddings = None
+    if hasattr(m, "rotary_emb"):
+        position_embeddings = m.rotary_emb(x, position_ids)
+    
     # Walk to layer k (inclusive)
     layers = getattr(m, "layers", None) or getattr(getattr(m, "decoder", object), "layers", None)
     assert layers is not None, "Unsupported HF model structure for this test."
     for i, layer in enumerate(layers):
-        out = layer(hidden_states=x, attention_mask=None)
+        out = layer(
+            hidden_states=x, 
+            attention_mask=None,
+            position_ids=position_ids,
+            position_embeddings=position_embeddings,
+            use_cache=False
+        )
         x = out[0] if isinstance(out, tuple) else out
         if i >= k:
             break
