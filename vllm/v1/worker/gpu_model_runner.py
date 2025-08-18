@@ -232,8 +232,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # The convention is different.
         # self.cudagraph_batch_sizes sorts in ascending order.
         # The batch sizes in the config are in descending order.
-        self.cudagraph_batch_sizes = list(
-            reversed(self.compilation_config.cudagraph_capture_sizes))
+        if self.compilation_config.cudagraph_capture_sizes and \
+                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            self.cudagraph_batch_sizes = list(
+                reversed(self.compilation_config.cudagraph_capture_sizes))
 
         # Cache the device properties.
         self._init_device_properties()
@@ -1720,7 +1722,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
             hidden_states[:num_scheduled_tokens],
-            scheduler_output,
+            scheduler_output.num_scheduled_tokens,
         )
 
         # Get the valid generated tokens.
@@ -2062,7 +2064,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_prompt_logprobs_dict(
         self,
         hidden_states: torch.Tensor,
-        scheduler_output: "SchedulerOutput",
+        num_scheduled_tokens: dict[str, int],
     ) -> dict[str, Optional[LogprobsTensors]]:
         num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
         if not num_prompt_logprobs_dict:
@@ -2075,8 +2077,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # maintainable loop over optimal performance.
         completed_prefill_reqs = []
         for req_id, num_prompt_logprobs in num_prompt_logprobs_dict.items():
-
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_tokens = num_scheduled_tokens[req_id]
 
             # Get metadata for this request.
             request = self.requests[req_id]
