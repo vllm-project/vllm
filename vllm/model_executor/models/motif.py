@@ -175,7 +175,7 @@ class MotifAttention(nn.Module):
         self.lambda_k2 = nn.Parameter(
             torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0,
                                                                     std=0.1))
-        self.subln = RMSNorm(2 * self.head_dim, eps=1e-5)
+        self.subln = RMSNorm(2 * self.head_dim, eps=config.attn_rms_norm_eps)
 
         params = {
             'differential_flash_attention_config': {
