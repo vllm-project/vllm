@@ -90,13 +90,6 @@ class XPUPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 64
 
-        # FIXME: Temporarily forcing eager mode
-        # remove after t.compile support stabilizes.
-        if (envs.VLLM_USE_V1 and model_config is not None
-                and not vllm_config.model_config.enforce_eager):
-            from vllm.config import CompilationLevel
-            vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION  # noqa: E501
-
         # Instances created using VllmConfig() typically have model_config as
         # None by default. The modification involves adding a check to prevent
         # potential null exceptions check and update model config.
