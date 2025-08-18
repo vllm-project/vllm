@@ -664,7 +664,7 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
     def modality(self) -> str:
         return self._modality
 
-    def get_data(self) -> Mapping[str, NestedTensors]:
+    def get_data(self) -> dict[str, NestedTensors]:
         return {key: elem.data for key, elem in self.items()}
 
 
