@@ -1342,14 +1342,11 @@ class OpenAIServingChat(OpenAIServing):
                 elif choice.message.tool_calls:
                     # For tool calls, log the function name and arguments
                     tool_call_descriptions = []
-                    # mypy: disable-error-code=attr-defined,assignment
-                    for tool_call in choice.message.tool_calls:
-                        if hasattr(tool_call.function, "name") and hasattr(
-                                tool_call.function, "arguments"):
+                    for tc in choice.message.tool_calls:
+                        if hasattr(tc.function, "name") and hasattr(
+                                tc.function, "arguments"):
                             tool_call_descriptions.append(
-                                f"{tool_call.function.name}({tool_call.function.arguments})"
-                            )
-                    # mypy: enable-error-code=attr-defined,assignment
+                                f"{tc.function.name}({tc.function.arguments})")
                     tool_calls_str = ", ".join(tool_call_descriptions)
                     output_text = f"[tool_calls: {tool_calls_str}]"
 
