@@ -230,6 +230,9 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR ASIMD_FOUND OR POWER9_FOUND OR POW
     target_link_libraries(dnnl_ext dnnl)
     target_compile_options(dnnl_ext PRIVATE ${CXX_COMPILE_FLAGS} -fPIC)
     list(APPEND LIBS dnnl_ext)
+    set(USE_ONEDNN ON)
+else()
+    set(USE_ONEDNN OFF)
 endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
@@ -256,7 +259,6 @@ set(VLLM_EXT_SRC
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(VLLM_EXT_SRC
-        "csrc/cpu/quant.cpp"
         "csrc/cpu/shm.cpp"
         ${VLLM_EXT_SRC})
     if (ENABLE_AVX512BF16 AND ENABLE_AVX512VNNI)
@@ -270,14 +272,11 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
             ${VLLM_EXT_SRC})
         add_compile_definitions(-DCPU_CAPABILITY_AVX512)
     endif()
-elseif(POWER10_FOUND)
-    set(VLLM_EXT_SRC
-        "csrc/cpu/quant.cpp"
-        ${VLLM_EXT_SRC})
 endif()
-if (ASIMD_FOUND)
+
+if(USE_ONEDNN)
     set(VLLM_EXT_SRC
-        "csrc/cpu/quant.cpp"
+        "csrc/cpu/dnnl_kernels.cpp"
         ${VLLM_EXT_SRC})
 endif()
 
