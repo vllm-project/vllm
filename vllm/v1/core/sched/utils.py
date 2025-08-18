@@ -34,3 +34,21 @@ def check_stop(request: Request,
         request.stop_reason = last_token_id
         return True
     return False
+
+
+def maybe_update_thinking_state(
+    request: Request,
+    new_token_id: int,
+    think_start_token_id: Optional[int] = None,
+    think_end_token_id: Optional[int] = None,
+) -> None:
+    """
+    Update thinking state of the request based on new token ID.
+    """
+    if think_start_token_id is not None and new_token_id == \
+        think_start_token_id:
+        request.thinking_state = True
+
+    if think_end_token_id is not None and new_token_id == \
+        think_end_token_id:
+        request.thinking_state = False
