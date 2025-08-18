@@ -144,8 +144,8 @@ direct_register_custom_op(
 
 def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype):
     return (torch._C._cpu._is_amx_tile_supported()
-            and (dtype in (torch.bfloat16, torch.half, torch.int8))
-            and k % 32 == 0 and n % 16 == 0)
+            and (dtype in (torch.bfloat16, torch.int8)) and k % 32 == 0
+            and n % 16 == 0)
 
 
 def cpu_unquantized_gemm(layer: torch.nn.Module,
