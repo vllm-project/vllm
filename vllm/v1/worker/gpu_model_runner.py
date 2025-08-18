@@ -2633,11 +2633,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         gc.collect()
 
     def capture_model(self, specific_token_num: Optional[int] = None) -> None:
-        if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL and\
-            specific_token_num:
-            logger.warning(
-                "Lazy CUDA graph capture with FULL mode not implemented")
-            return
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
@@ -2677,14 +2672,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cudagraph_mode.separate_routine():
                 max_num_tokens = self.scheduler_config.max_num_seqs * \
                         self.uniform_decode_query_len
-                decode_cudagraph_batch_sizes = [
-                    x for x in self.cudagraph_batch_sizes if
-                    x <= max_num_tokens and x >= self.uniform_decode_query_len
-                ]
-                compilation_cases_decode = [specific_token_num] if (
-                    specific_token_num and specific_token_num <= max_num_tokens
-                    and specific_token_num >= self.uniform_decode_query_len
-                ) else list(reversed(decode_cudagraph_batch_sizes))
+                if not specific_token_num:
+                    decode_cudagraph_batch_sizes = [
+                        x for x in self.cudagraph_batch_sizes
+                        if x <= max_num_tokens
+                        and x >= self.uniform_decode_query_len
+                    ]
+                else:
+                    decode_cudagraph_batch_sizes = []
+                    if (specific_token_num <= max_num_tokens
+                            and specific_token_num
+                            >= self.uniform_decode_query_len):
+                        decode_cudagraph_batch_sizes = [specific_token_num]
+
+                compilation_cases_decode = list(
+                    reversed(decode_cudagraph_batch_sizes))
                 self._capture_cudagraphs(
                     compilation_cases=compilation_cases_decode,
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,
@@ -2715,6 +2717,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _capture_cudagraphs(self, compilation_cases: list[int],
                             cudagraph_runtime_mode: CUDAGraphMode,
                             uniform_decode: bool):
+        if compilation_cases == []:
+            return
         assert cudagraph_runtime_mode != CUDAGraphMode.NONE and \
             cudagraph_runtime_mode in [CUDAGraphMode.FULL,
                                         CUDAGraphMode.PIECEWISE]
