@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused MoE utilities for GPTQ."""
-import functools
 from typing import Optional
 
 import torch
 
 import vllm._custom_ops as ops
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    moe_align_block_size, try_get_optimal_moe_config)
+from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new, maybe_warn_marlin_atomic_add)
 from vllm.scalar_type import ScalarType, scalar_types
@@ -98,17 +96,11 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     N = w2.shape[1] * 16
     topk = topk_ids.shape[1]
 
-    get_config_func = functools.partial(
-        try_get_optimal_moe_config,
-        w1.shape,
-        w2.shape,
-        topk_ids.shape[1],
-        None,
-        is_marlin=True,
-    )
-    config = get_config_func(M)
-
-    block_size_m = config["BLOCK_SIZE_M"]
+    # M block size selection logic
+    # TODO: tune this further for specific models
+    for block_size_m in [8, 16, 32, 48, 64]:
+        if M * topk / E / block_size_m < 0.9:
+            break
 
     if global_num_experts == -1:
         global_num_experts = E
@@ -169,25 +161,13 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     if activation == "silu":
         torch.ops._C.silu_and_mul(intermediate_cache2,
                                   intermediate_cache1.view(-1, 2 * N))
-    elif activation == "swiglu_oai":
-        # NOTE: in gpt-oss, the gate_proj and up_proj is interleaved
-        # - interleaved: gate, up = gate_up[..., ::2], gate_up[..., 1::2]
-        # - origin: gate, up = gate_up[..., :N], gate_up[..., N:]
-
-        @torch.compile(dynamic=True)
-        def swiglu_oai(gate_up):
-            alpha = 1.702
-            limit = 7.0
-            gate, up = gate_up[..., ::2], gate_up[..., 1::2]
-            gate = gate.clamp(min=None, max=limit)
-            up = up.clamp(min=-limit, max=limit)
-            glu = gate * torch.sigmoid(gate * alpha)
-            return (up + 1) * glu
-
-        intermediate_cache2 = swiglu_oai(intermediate_cache1)
+    elif activation == "swigluoai":
+        # alpha = 1.702, limit = 7.0
+        torch.ops._C.swigluoai_and_mul(intermediate_cache2,
+                                       intermediate_cache1.view(-1, 2 * N))
     else:
         raise ValueError(f"Unsupported activation: {activation}. "
-                         "Only silu and swiglu_oai activations are supported.")
+                         "Only silu and swigluoai activations are supported.")
 
     if expert_map is not None:
         intermediate_cache3.zero_()
