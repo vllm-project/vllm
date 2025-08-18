@@ -604,17 +604,23 @@ class RandomMultiModalDataset(RandomDataset):
         Standard sample method compatible with serve.py and other datasets.
         Returns OpenAI API format for compatibility with serve.py.
         Args:
-            tokenizer: The tokenizer to use for processing
-            num_requests: Number of requests to generate
+            prefix_len: Length of the prefix to add to the prompt
+            range_ratio: Relative half-width of the sampling interval for input
+                and output lengths.
+            input_len: Average input length
+            output_len: Average output length
+            num_images: Number of images per request
             width: Image width in pixels
             height: Image height in pixels
-            num_images: Number of images per request
             num_images_range_ratio: Relative half-width of the sampling
                 interval for number of images.
             dimension_range_ratio: Relative half-width of the sampling
                 interval for image dimensions.
             enable_multimodal_chat: Whether to apply multimodal chat
-                transformation
+                transformation. 
+                NOTE: the serve.py benchmark does not use this
+                option. This option is only provided for completeness given 
+                that the serve.py benchmark does not use it.
             **kwargs: Additional arguments passed to parent sample method
         Returns:
             List of SampleRequest objects with properly formatted OpenAI
@@ -665,9 +671,7 @@ class RandomMultiModalDataset(RandomDataset):
                 min_height,
                 max_height,
             )
-            # Create synthetic images
-            # The process_image returns
-            # {"type": "image_input", "image_url": f"{base64_image}"}
+            # Create synthetic images and apply process_image.
             # This follows the OpenAI API chat completions
             # https://github.com/openai/openai-python
             mm_content = cast(list[dict[str, Any]], [
