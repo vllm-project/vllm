@@ -310,7 +310,7 @@ class Processor:
             sorted_mm_idxs = argsort_mm_positions(decoder_mm_positions)
 
             orig_sorted_mm_inputs = [
-                decoder_mm_inputs.get_item(modality, idx)
+                decoder_mm_inputs[modality][idx]
                 for modality, idx in sorted_mm_idxs
             ]
             sorted_mm_positions = [
