@@ -344,6 +344,10 @@ def processor_only_cache_from_config(
     if not mm_registry.supports_multimodal_inputs(model_config):
         return None
 
+    mm_config = model_config.get_multimodal_config()
+    if mm_config.mm_processor_cache_gb == 0:
+        return None
+
     return MultiModalProcessorOnlyCache(model_config)
 
 
