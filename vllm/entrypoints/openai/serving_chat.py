@@ -1096,7 +1096,10 @@ class OpenAIServingChat(OpenAIServing):
         assert final_res is not None
 
         choices: list[ChatCompletionResponseChoice] = []
-        history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
+        if self.is_kimi_k2:
+            history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
+        else:
+            history_tool_call_cnt = 0
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
