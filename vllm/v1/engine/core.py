@@ -295,8 +295,8 @@ class EngineCore:
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
 
-    def post_step(self) -> None:
-        if self.use_spec_decode:
+    def post_step(self, model_executed: bool) -> None:
+        if self.use_spec_decode and model_executed:
             # Take the draft token ids.
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
@@ -755,7 +755,7 @@ class EngineCoreProc(EngineCore):
         for output in (outputs.items() if outputs else ()):
             self.output_queue.put_nowait(output)
         # Post-step hook.
-        self.post_step()
+        self.post_step(model_executed)
 
         return model_executed
 
