@@ -150,15 +150,15 @@ def create_and_prepopulate_kv_cache(
 
     # Permute the context blocks (excluding block 0 which is null)
     if randomize_blocks:
-        perm = torch.randperm(
-            blocks_end - 1) + 1  # Random permutation starting from block 1
+        # Random permutation starting from block 1
+        perm = torch.randperm(blocks_end - 1) + 1
     else:
-        perm = torch.arange(
-            1, blocks_end)  # Sequential order starting from block 1
+        # Sequential order starting from block 1
+        perm = torch.arange(1, blocks_end)
 
     inv_perm = torch.zeros(blocks_end, dtype=torch.long, device=device)
-    inv_perm[1:] = torch.argsort(
-        perm) + 1  # Add 1 to account for starting from block 1
+    # Add 1 to account for starting from block 1
+    inv_perm[1:] = torch.argsort(perm) + 1
     kv_cache[:, 1:blocks_end, ...] = kv_cache[:, perm, ...]
 
     # Construct the right block table
