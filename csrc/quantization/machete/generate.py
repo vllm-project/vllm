@@ -349,9 +349,12 @@ def to_cute_constant(value: list[int]):
 
 
 def unique_schedules(impl_configs: list[ImplConfig]):
-    return list(
-        set(sch for impl_config in impl_configs
-            for sch in impl_config.schedules))
+    # Use dict over set for deterministic ordering
+    return list({
+        sch: None
+        for impl_config in impl_configs
+        for sch in impl_config.schedules
+    }.keys())
 
 
 def unsigned_type_with_bitwidth(num_bits):
