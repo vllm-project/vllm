@@ -29,7 +29,7 @@ class MultiModalBudget:
         scheduler_config: SchedulerConfig,
         mm_registry: MultiModalRegistry,
         *,
-        cache: Optional[BaseMultiModalProcessorCache],
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> None:
         super().__init__()
 
