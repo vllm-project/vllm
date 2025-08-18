@@ -858,6 +858,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         seq_lens_cpu = self.seq_lens_cpu[:num_reqs]
         num_computed_tokens_cpu = (
             self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
+        spec_decode_common_attn_metadata = None
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
@@ -885,6 +886,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 slot_mapping=slot_mapping,
                 causal=True,
             )
+
+            if self.speculative_config and \
+                spec_decode_common_attn_metadata is None:
+                spec_decode_common_attn_metadata = common_attn_metadata
 
             for attn_group in self.attn_groups[kv_cache_group_id]:
                 # Prepare for cascade attention if enabled & beneficial.
@@ -927,11 +932,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         attn_metadata[layer_name] = fast_prefill_metadata
                         continue
                     attn_metadata[layer_name] = attn_metadata_i
-
-        if self.speculative_config:
-            spec_decode_common_attn_metadata = common_attn_metadata
-        else:
-            spec_decode_common_attn_metadata = None
 
         # Hot-Swap lora model
         if self.lora_config:
