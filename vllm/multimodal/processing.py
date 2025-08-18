@@ -1021,14 +1021,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def allowed_mm_limits(self):
         return self._allowed_mm_limits
 
-    @property
-    def requires_out_mm_kwargs(self) -> bool:
-        """
-        Set this to `True` for models that need to extract data
-        from `out_mm_kwargs` in `_get_prompt_updates`.
-        """
-        return False
-
     def __call__(
         self,
         prompt: str,

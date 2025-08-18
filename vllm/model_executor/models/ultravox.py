@@ -124,10 +124,6 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo]
 class UltravoxMultiModalProcessor(
         BaseMultiModalProcessor[UltravoxProcessingInfo]):
 
-    @property
-    def requires_out_mm_kwargs(self) -> bool:
-        return True
-
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
         return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)

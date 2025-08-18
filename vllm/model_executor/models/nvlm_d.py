@@ -102,10 +102,6 @@ class NVLMDummyInputsBuilder(BaseInternVLDummyInputsBuilder[NVLMProcessingInfo]
 class NVLMMultiModalProcessor(
         BaseInternVLMultiModalProcessor[NVLMProcessingInfo]):
 
-    @property
-    def requires_out_mm_kwargs(self) -> bool:
-        return True
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,

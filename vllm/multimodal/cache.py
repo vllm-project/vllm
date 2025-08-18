@@ -332,10 +332,6 @@ def processor_cache_from_config(
     if not supports_ipc_cache:
         return MultiModalProcessorOnlyCache(model_config)
 
-    if mm_registry.create_processor(model_config).requires_out_mm_kwargs:
-        # The processed data must be cached inside P0
-        return MultiModalProcessorOnlyCache(model_config)
-
     return MultiModalProcessorSenderCache(model_config)
 
 

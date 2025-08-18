@@ -211,10 +211,6 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
 class Qwen2_5OmniThinkerMultiModalProcessor(
         BaseMultiModalProcessor[Qwen2_5OmniThinkerProcessingInfo]):
 
-    @property
-    def requires_out_mm_kwargs(self) -> bool:
-        return True
-
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
         return Qwen2_5OmniThinkerMultiModalDataParser(

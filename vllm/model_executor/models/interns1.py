@@ -281,10 +281,6 @@ class InternS1MultiModalProcessor(
         BaseMultiModalProcessor[InternS1ProcessingInfo]):
     """ Basic image-only MultiModalProcessor for InternS1-style models."""
 
-    @property
-    def requires_out_mm_kwargs(self) -> bool:
-        return True
-
     def _call_hf_processor(
         self,
         prompt: str,
