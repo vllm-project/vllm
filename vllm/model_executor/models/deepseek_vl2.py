@@ -25,7 +25,8 @@ from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, MultiModalHashes,
+                                        BaseProcessingInfo,
+                                        MultiModalProcessingInfo,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
@@ -291,8 +292,7 @@ class DeepseekVL2MultiModalProcessor(
         tokenization_kwargs: Mapping[str, object],
         *,
         return_mm_hashes: bool,
-    ) -> tuple[list[int], MultiModalKwargsItems, Optional[MultiModalHashes],
-               bool]:
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         # The processor logic is different for len(images) <= 2 vs > 2
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
