@@ -7,7 +7,6 @@ from typing import Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
 from transformers import BatchFeature, NougatProcessor
 
 from vllm.config import VllmConfig
@@ -17,7 +16,7 @@ from vllm.model_executor.models.bart import BartParallelLMHead, MBartDecoder
 from vllm.model_executor.models.interfaces import (MultiModalEmbeddings,
                                                    SupportsMultiModal,
                                                    SupportsV0Only)
-from vllm.model_executor.models.swin import SwinVisionTransformer
+from vllm.model_executor.models.swin import SwinModel
 from vllm.model_executor.models.utils import (AutoWeightsLoader,
                                               _flatten_embeddings, flatten_bn)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -264,7 +263,7 @@ class DonutForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.vision_config = config.encoder
         self.processor_config = processor_config
-        self.encoder = SwinVisionTransformer.from_config(config=config.encoder)
+        self.encoder = SwinModel(config=config.encoder)
 
         self.decoder = DonutLanguageForConditionalGeneration(
             vllm_config=vllm_config.with_hf_config(config.decoder),
