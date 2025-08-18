@@ -114,9 +114,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         from vllm.attention.layer import Attention  # Avoid circular import
 
         # Check if the layer is skipped for quantization.
-        # TODO (@robertgshaw2): support module names
-        # TODO: need to move this into qconfig so that
-        # qconfig.ignore does not affect tconfig
+        # TODO (@kylesayrs): support module names
         if isinstance(layer, LinearBase):
             # collect schemes
             quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
