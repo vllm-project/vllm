@@ -48,7 +48,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-
+from vllm.logger import init_logger
+logger = init_logger(__name__)
 from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
@@ -190,9 +191,12 @@ class LlamaAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        logger.info(f"[LlamaAttention] hidden_states shape: {hidden_states.shape}")
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        logger.info(f"[LlamaAttention] q shape: {q.shape}, k shape: {k.shape}, v shape: {v.shape}")
         q, k = self.rotary_emb(positions, q, k)
+        logger.info(f"[LlamaAttention] Interacting with kv_cache object: {self.attn.kv_cache}")
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
