@@ -144,12 +144,12 @@ gputrc2graph.py with the same format as the other json files, like the following
 
 ```json
 {
-  'DEF': {
-      'ABC': { 
-          'H|I': 'gemm',
-          'J|K': 'attn',
-          'CUDA mem': 'non-gpu-H_D_memops',
-          '.*': 'misc'
+  "DEF": {
+      "ABC": { 
+          "H|I": "gemm",
+          "J|K": "attn",
+          "CUDA mem": "non-gpu-H_D_memops",
+          ".*": "misc"
       }
   }
 }
