@@ -501,7 +501,10 @@ class OpenAIServingChat(OpenAIServing):
 
         all_previous_token_ids: Optional[list[list[int]]]
         function_name_returned = [False] * num_choices
-        history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
+        if self.tool_call_id_type == 'kimi-k2':
+            history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
+        else:
+            history_tool_call_cnt = 0
 
         # Always track previous_texts for comprehensive output logging
         previous_texts = [""] * num_choices
