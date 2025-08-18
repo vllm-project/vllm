@@ -159,7 +159,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
       (CUmemGenericAllocationHandle*)malloc(
           sizeof(CUmemGenericAllocationHandle));
   if (!p_memHandle) {
-    cuMemAddressFree(d_mem, alignedSize);
+    CUDA_CHECK(cuMemAddressFree(d_mem, alignedSize));
     return nullptr;
   }
 
@@ -169,7 +169,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
 
     if (!cb) {
       std::cerr << "ERROR: g_python_malloc_callback not set.\n";
-      cuMemAddressFree(d_mem, alignedSize);
+      CUDA_CHECK(cuMemAddressFree(d_mem, alignedSize));
       free(p_memHandle);
       return nullptr;
     }
@@ -179,7 +179,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
         (unsigned long long)d_mem, (unsigned long long)p_memHandle);
 
     if (!arg_tuple) {
-      cuMemAddressFree(d_mem, alignedSize);
+      CUDA_CHECK(cuMemAddressFree(d_mem, alignedSize));
       free(p_memHandle);
       return nullptr;
     }
@@ -190,7 +190,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
 
     if (!py_result) {
       PyErr_Print();
-      cuMemAddressFree(d_mem, alignedSize);
+      CUDA_CHECK(cuMemAddressFree(d_mem, alignedSize));
       free(p_memHandle);
       return nullptr;
     }
@@ -201,7 +201,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   create_and_map(device, alignedSize, d_mem, p_memHandle);
   if (error_code != 0) {
     error_code = no_error;
-    cuMemAddressFree(d_mem, alignedSize);
+    CUDA_CHECK(cuMemAddressFree(d_mem, alignedSize));
     free(p_memHandle);
     return nullptr;
   }
