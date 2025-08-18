@@ -4,6 +4,7 @@
 import gc
 import itertools
 import time
+import threading
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -182,6 +183,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
+        self.encoder_cache_lock: threading.Lock = threading.Lock()
 
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
@@ -323,6 +325,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             dtype=torch.int64,
             device="cpu",
             pin_memory=self.pin_memory)
+        
+        # EPD disaggregation
+        self.epd_disagg_config = vllm_config.epd_disagg_config
+        if self.epd_disagg_config.instance_type == "NoEPD":
+            self.is_mm_encoder_exec_allowed = True
+        else:
+            self.is_mm_encoder_exec_allowed = (
+                self.epd_disagg_config.instance_type == "encode")
 
     def _make_buffer(self, *args, dtype: torch.dtype) -> CpuGpuBuffer:
         return CpuGpuBuffer(*args,
@@ -412,8 +422,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         new/resumed/paused/finished request in the batch.
         """
         # Remove finished requests from the cached states.
-        for req_id in scheduler_output.finished_req_ids:
-            self.requests.pop(req_id, None)
+        with self.encoder_cache_lock:
+            for req_id in scheduler_output.finished_req_ids:
+                self.requests.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -1113,6 +1124,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
+        assert self.is_mm_encoder_exec_allowed, \
+            "Encoder execution is not allowed on this instance"
         # Batch the multi-modal inputs.
         mm_kwargs = list[MultiModalKwargsItem]()
         # list of tuple (mm_hash, position_info)
@@ -1202,7 +1215,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 assert start_idx < end_idx
 
                 mm_hash = mm_hashes[i]
-                encoder_output = self.encoder_cache.get(mm_hash, None)
+                with self.encoder_cache_lock:
+                    encoder_output = self.encoder_cache.get(mm_hash, None)
                 assert encoder_output is not None,\
                     f"Encoder cache miss for {mm_hash}."
 

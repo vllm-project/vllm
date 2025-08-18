@@ -243,6 +243,71 @@ class EncoderCacheManager:
         freed = self.freed
         self.freed = []
         return freed
+    
+    ########################################################################
+    # Encode-Prefill-Decode Disaggregation Related Methods
+    ########################################################################
+    def can_preallocate(self, encoder_cache_size: int) -> bool:
+        """
+        Checks if sufficient space exists for preallocation using only the 
+        request's encoder cache size data.
+
+        Args:
+            encoder_cache_size (int): The size of the encoder cache to be 
+                used for preallocation.
+
+        Returns:
+            bool: True if there is enough space for preallocation, 
+                False otherwise.
+        """
+        return encoder_cache_size <= self.num_free_slots
+
+    def preallocate(self, req_id: str, input_id: int, 
+                    encoder_cache_size: int) -> None:
+        if req_id not in self.preallocated:
+            self.preallocated[req_id] = {}
+        self.preallocated[req_id][input_id] = encoder_cache_size
+        self.num_free_slots -= encoder_cache_size
+
+    def depreallocate(self, req_id: str, input_id: int) -> None:
+        self.num_free_slots += self.preallocated[req_id][input_id]
+        self.preallocated[req_id].pop(input_id)
+        if not self.preallocated[req_id]:
+            self.preallocated.pop(req_id)
+
+    def deallocate(self, req_id: str, input_id: int, encoder_cache_size: int):
+        self.num_free_slots += encoder_cache_size
+        self.cached[req_id].discard(input_id)
+        if len(self.cached[req_id]) == 0:
+            del self.cached[req_id]
+
+    def finalize_allocation(self, req_id: str, input_id: int) -> None:
+        """
+        Completes the two-step allocation by creating the actual cache entry.
+        
+        This method finalizes the allocation process by adding the request-
+        input pair to the cached mapping. It should be called after successful
+        encoder cache injection to complete the allocation that was started
+        with preallocate().
+        
+        Args:
+            req_id (str): Unique identifier for the request that was 
+                preallocated
+            input_id (int): Index of the multimodal input within the request
+                that was preallocated
+                
+        Note:
+            This method assumes preallocate() was previously called for the 
+            same request_id and input_id pair. It only creates the cache 
+            mapping entry without affecting num_free_slots since space was 
+            already reserved during preallocation.
+        """
+        self.preallocated[req_id].pop(input_id)
+        if not self.preallocated[req_id]:
+            self.preallocated.pop(req_id)
+        if req_id not in self.cached:
+            self.cached[req_id] = set()
+        self.cached[req_id].add(input_id)
 
 
 def compute_encoder_budget(

@@ -3339,6 +3339,35 @@ class KVEventsConfig:
     this topic to receive events.
     """
 
+@config
+@dataclass
+class EPDDisaggConfig:
+    """Configuration for the encode-prefill-decode disaggregated execution"""
+
+    instance_type: Literal["NoEPD", "encode", "prefill",
+                           "prefill+decode"] = "NoEPD"
+    """The type of the instance."""
+
+    connector_workers_num: int = 4
+    """Number of workers for receive & send."""
+
+    epd_rank: int = -1
+    """EPD Disagg rank"""
+
+    def compute_hash(self):
+        """
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        factors: list[Any] = []
+        factors.append(self.instance_type)
+        factors.append(self.connector_workers_num)
+        factors.append(self.epd_rank)
+        return hashlib.sha256(str(factors).encode()).hexdigest()
+
 
 @config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
@@ -3387,6 +3416,8 @@ class VllmConfig:
     You can specify the full compilation config like so:
     `{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
     """
+    epd_disagg_config: EPDDisaggConfig = field(default_factory=EPDDisaggConfig)
+    """The configuration for epd disaggregation"""
     kv_transfer_config: Optional[KVTransferConfig] = None
     """The configurations for distributed KV cache transfer."""
     kv_events_config: Optional[KVEventsConfig] = None
@@ -3475,6 +3506,11 @@ class VllmConfig:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
         else:
             vllm_factors.append("None")
+        if self.epd_disagg_config:
+            vllm_factors.append(self.epd_disagg_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+            
         if self.additional_config:
             if isinstance(additional_config := self.additional_config, dict):
                 additional_config_hash = hashlib.md5(
