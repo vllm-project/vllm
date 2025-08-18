@@ -801,7 +801,6 @@ def get_default_config(
     K: int,
     topk: int,
     dtype: Optional[str],
-    is_marlin: bool,
     block_shape: Optional[list[int]] = None,
 ) -> dict[str, int]:
     if dtype == "fp8_w8a8" and block_shape is not None:
@@ -832,11 +831,6 @@ def get_default_config(
             config = {"BLOCK_SIZE_M": 32, "GROUP_SIZE_M": 1}
         else:
             config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1}
-    elif is_marlin:
-        for block_size_m in [8, 16, 32, 48, 64]:
-            if M * topk / E / block_size_m < 0.9:
-                break
-        return {"BLOCK_SIZE_M": block_size_m}
     elif M <= E:
         config = {
             "BLOCK_SIZE_M": 16,
@@ -860,7 +854,6 @@ def try_get_optimal_moe_config(
     top_k: int,
     dtype: Optional[str],
     M: int,
-    is_marlin: bool = False,
     block_shape: Optional[list[int]] = None,
 ) -> dict[str, int]:
     from vllm.model_executor.layers.fused_moe import get_config
@@ -883,7 +876,7 @@ def try_get_optimal_moe_config(
         else:
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
-                                        is_marlin, block_shape)
+                                        block_shape)
     return config
 
 
@@ -1628,17 +1621,6 @@ def fused_experts_impl(
                                 block_shape=block_shape,
                                 B_bias=w1_bias)
 
-        # TODO fused kernel
-        def swiglu_oai(gate_up):
-            alpha = 1.702
-            limit = 7.0
-            gate, up = gate_up[..., ::2], gate_up[..., 1::2]
-            gate = gate.clamp(min=None, max=limit)
-            up = up.clamp(min=-limit, max=limit)
-            glu = gate * torch.sigmoid(gate * alpha)
-            gated_output = (up + 1) * glu
-            return gated_output
-
         # Activation function with multiplication
         if activation == "silu" and is_act_and_mul:
             torch.ops._C.silu_and_mul(intermediate_cache2,
@@ -1646,13 +1628,16 @@ def fused_experts_impl(
         elif activation == "gelu" and is_act_and_mul:
             torch.ops._C.gelu_and_mul(intermediate_cache2,
                                       intermediate_cache1.view(-1, N))
+        elif activation == "swigluoai" and is_act_and_mul:
+            # alpha = 1.702, limit = 7.0
+            torch.ops._C.swigluoai_and_mul(intermediate_cache2,
+                                           intermediate_cache1.view(-1, N))
         # Activation function without multiplication
         elif activation == "silu":
             intermediate_cache2 = F.silu(intermediate_cache1.view(-1, N))
         elif activation == "gelu":
             intermediate_cache2 = F.gelu(intermediate_cache1.view(-1, N))
-        elif activation == "swiglu_oai":
-            intermediate_cache2 = swiglu_oai(intermediate_cache1.view(-1, N))
+
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}, "
                              f"with is_act_and_mul={is_act_and_mul}.")
