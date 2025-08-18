@@ -24,17 +24,20 @@ from openai.types.responses import (ResponseCreatedEvent,
                                     ResponseOutputMessage, ResponseOutputText,
                                     ResponseReasoningItem,
                                     ResponseReasoningTextDeltaEvent,
-                                    ResponseReasoningTextDoneEvent)
+                                    ResponseReasoningTextDoneEvent,
+                                    ToolChoiceFunction)
 # yapf: enable
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent)
 from openai_harmony import Message as OpenAIHarmonyMessage
+from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
-                                         ChatTemplateContentFormatOption)
+                                         ChatTemplateContentFormatOption,
+                                         parse_chat_tool_call)
 from vllm.entrypoints.context import (ConversationContext, HarmonyContext,
                                       SimpleContext, StreamingHarmonyContext)
 from vllm.entrypoints.harmony_utils import (
@@ -44,7 +47,8 @@ from vllm.entrypoints.harmony_utils import (
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.entrypoints.openai.protocol import (ErrorResponse,
+from vllm.entrypoints.openai.protocol import (ErrorResponse, FunctionCall,
+                                              FunctionDefinition,
                                               InputTokensDetails,
                                               OutputTokensDetails,
                                               RequestResponseMetadata,
@@ -57,10 +61,10 @@ from vllm.entrypoints.tool_server import MCPToolServer, ToolServer
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import random_uuid
+from vllm.utils import random_fc_uuid, random_uuid
 
 logger = init_logger(__name__)
 
@@ -84,6 +88,7 @@ class OpenAIServingResponses(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
+        exclude_tools_when_tool_choice_none: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -100,15 +105,8 @@ class OpenAIServingResponses(OpenAIServing):
 
         self.reasoning_parser: Optional[Callable[[AnyTokenizer],
                                                  ReasoningParser]] = None
-        if reasoning_parser:
-            try:
-                self.reasoning_parser = (
-                    ReasoningParserManager.get_reasoning_parser(
-                        reasoning_parser))
-                assert self.reasoning_parser is not None
-            except Exception as e:
-                raise TypeError(
-                    f"{reasoning_parser=} has not been registered") from e
+        self.reasoning_parser = self._get_reasoning_parser(
+            reasoning_parser_name=reasoning_parser)
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -143,14 +141,11 @@ class OpenAIServingResponses(OpenAIServing):
             self.default_sampling_params["stop_token_ids"].extend(
                 get_stop_tokens_for_assistant_actions())
 
-        # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
-        if self.enable_auto_tools:
-            logger.info(
-                "\"auto\" tool choice has been enabled please note that while"
-                " the parallel_tool_calls client option is preset for "
-                "compatibility reasons, it will be ignored.")
-
+        self.tool_parser = self._get_tool_parser(
+            tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools)
+        self.exclude_tools_when_tool_choice_none = (
+            exclude_tools_when_tool_choice_none)
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove responses from the store.
@@ -381,15 +376,20 @@ class OpenAIServingResponses(OpenAIServing):
         prev_response: Optional[ResponsesResponse],
         tokenizer: AnyTokenizer,
     ):
-        if len(request.tools) > 0:
-            raise NotImplementedError(
-                "Tool use is not supported in Responses API without Harmony")
+        if (request.tools is None
+                or (request.tool_choice == "none"
+                    and self.exclude_tools_when_tool_choice_none)):
+            tool_dicts = None
+        else:
+            tool_dicts = [tool.model_dump() for tool in request.tools]
         # Construct the input messages.
         messages = self._construct_input_messages(request, prev_response)
         _, request_prompts, engine_prompts = await self._preprocess_chat(
             request,
             tokenizer,
             messages,
+            tool_dicts=tool_dicts,
+            tool_parser=self.tool_parser,
             chat_template=self.chat_template,
             chat_template_content_format=self.chat_template_content_format,
         )
@@ -524,7 +524,8 @@ class OpenAIServingResponses(OpenAIServing):
                     delta=False,
                 )
 
-        output = []
+        reasoning_item = None
+        message_item = None
         if reasoning_content:
             reasoning_item = ResponseReasoningItem(
                 id=f"rs_{random_uuid()}",
@@ -536,7 +537,6 @@ class OpenAIServingResponses(OpenAIServing):
                 ],
                 status=None,  # NOTE: Only the last output item has status.
             )
-            output.append(reasoning_item)
         if content:
             output_text = ResponseOutputText(
                 text=content,
@@ -544,15 +544,79 @@ class OpenAIServingResponses(OpenAIServing):
                 type="output_text",
                 logprobs=None,  # TODO
             )
-            message = ResponseOutputMessage(
+            message_item = ResponseOutputMessage(
                 id=f"msg_{random_uuid()}",
                 content=[output_text],
                 role="assistant",
                 status="completed",
                 type="message",
             )
-            output.append(message)
-        return output
+        outputs = []
+        function_calls: list[FunctionCall] = []
+        if not self.enable_auto_tools or not self.tool_parser:
+            # Tools are not enabled
+            if reasoning_item:
+                outputs.append(reasoning_item)
+            if message_item:
+                outputs.append(message_item)
+        elif request.tool_choice is None:
+            # No tool calls.
+            if reasoning_item:
+                outputs.append(reasoning_item)
+            if message_item:
+                outputs.append(message_item)
+        elif request.tool_choice and \
+            isinstance(request.tool_choice,
+                        ToolChoiceFunction):
+            # Forced Function Call
+            function_calls.append(
+                FunctionCall(name=request.tool_choice.name, arguments=content))
+        elif request.tool_choice == "required":
+            assert content is not None
+            tool_calls = TypeAdapter(
+                list[FunctionDefinition]).validate_json(content)
+            function_calls.extend([
+                FunctionCall(name=tool_call.name,
+                             arguments=json.dumps(tool_call.parameters,
+                                                  ensure_ascii=False))
+                for tool_call in tool_calls
+            ])
+        elif request.tool_choice == "auto" or request.tool_choice == "none":
+            try:
+                tool_parser = self.tool_parser(tokenizer)
+            except RuntimeError as e:
+                logger.exception("Error in tool parser creation.")
+                raise e
+            tool_call_info = tool_parser.extract_tool_calls(
+                content if content is not None else "", request=request)
+            if tool_call_info is not None and tool_call_info.tools_called:
+                # extract_tool_calls() returns a list of tool calls.
+                function_calls.extend(
+                    FunctionCall(
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    ) for tool_call in tool_call_info.tool_calls)
+            else:
+                # No tool calls.
+                if reasoning_item:
+                    outputs.append(reasoning_item)
+                if message_item:
+                    outputs.append(message_item)
+        else:
+            raise ValueError(f"Invalid tool_choice: {request.tool_choice}")
+
+        if function_calls:
+            outputs.extend([
+                ResponseFunctionToolCall(
+                    id=f"fc_{random_fc_uuid()}",
+                    call_id=f"call_{random_uuid()}",
+                    type="function_call",
+                    status="completed",
+                    name=tool_call.name,
+                    arguments=tool_call.arguments,
+                ) for tool_call in function_calls
+            ])
+        return outputs
 
     def _make_response_output_items_with_harmony(
         self,
@@ -601,7 +665,8 @@ class OpenAIServingResponses(OpenAIServing):
         if isinstance(request.input, str):
             messages.append({"role": "user", "content": request.input})
         else:
-            messages.extend(request.input)  # type: ignore
+            for item in request.input:
+                messages.append(parse_chat_tool_call(item))
         return messages
 
     def _construct_input_messages_with_harmony(
