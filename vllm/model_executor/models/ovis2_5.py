@@ -28,10 +28,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-# from vllm.transformers_utils.configs.ovis2_5 import (IMAGE_TOKEN,
-#                                                      INDICATOR_IDS,
-#                                                      VIDEO_TOKEN,
-#                                                      Ovis2_5Config)
 from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
