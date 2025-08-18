@@ -21,7 +21,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import init_distributed_environment
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig, int4_w4a16_moe_quant_config,
+    FUSED_MOE_UNQUANTIZED_CONFIG, int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, modular_triton_fused_moe)
@@ -190,7 +190,7 @@ def test_fused_moe(
     #
     # Setup test functions
     #
-    quant_config = FusedMoEQuantConfig.make()
+    quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
     m_fused_moe_fn = modular_triton_fused_moe(quant_config)
 
