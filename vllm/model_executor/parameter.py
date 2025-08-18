@@ -20,10 +20,6 @@ __all__ = [
 
 logger = init_logger(__name__)
 
-PartitionId = Union[int, str]
-WeightLoader = Callable[
-    ["BasevLLMParameter", torch.Tensor, Optional[PartitionId]], None]
-
 
 class BasevLLMParameter(Parameter):
     """
@@ -32,13 +28,11 @@ class BasevLLMParameter(Parameter):
     into the parameter when the provided weight loader is called.
     """
 
-    weight_loader: WeightLoader
-
     def __new__(cls, data: Optional[torch.Tensor], **kwargs):
 
         return super().__new__(cls, data=data, requires_grad=False)
 
-    def __init__(self, data: torch.Tensor, weight_loader: WeightLoader):
+    def __init__(self, data: torch.Tensor, weight_loader: Callable):
         """
         Initialize the BasevLLMParameter
 
@@ -63,8 +57,24 @@ class BasevLLMParameter(Parameter):
         self._weight_loader = weight_loader
 
     @property
-    def weight_loader(self):
+    def weight_loader(self) -> Callable:
+        # NOTE(@ksayers) some models such as mamba_mixer2 override the
+        # weight loader to support custom loading. In the future, model-specific
+        # weight loading should be implemented via Model.load_weights. In the
+        # meantime, support deleting and overriding `weight_loader`` attribute
+        if self._weight_loader is None:
+            raise AttributeError(f"{self.__class__.__name__} weight_loader "
+                                 "attribute has been deleted")
+
         return self._weight_loader
+
+    @weight_loader.setter
+    def weight_loader(self, value: Callable):
+        self._weight_loader = value
+
+    @weight_loader.deleter
+    def weight_loader(self):
+        self._weight_loader = None  # type: ignore[assignment]
 
     def _is_1d_and_scalar(self, loaded_weight: torch.Tensor):
         cond1 = self.data.ndim == 1 and self.data.numel() == 1
@@ -88,7 +98,7 @@ class BasevLLMParameter(Parameter):
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         self._assert_and_load(loaded_weight)
 
-    def _shard_id_as_int(self, shard_id: Optional[PartitionId]) -> int:
+    def _shard_id_as_int(self, shard_id: Optional[Union[int, str]]) -> int:
         if isinstance(shard_id, int):
             return shard_id
 
@@ -396,7 +406,8 @@ class PartitionedLinearWeightParameter(BasevLLMParameter):
         return instance
 
     def __init__(self, input_dim: int = 1, output_dim: int = 0, **kwargs):
-        super().__init__(data=None, weight_loader=kwargs.get("weight_loader"))
+        weight_loader: Callable = kwargs.get("weight_loader")
+        super().__init__(data=None, weight_loader=weight_loader)
 
         self.partitions = {}
         self.kwargs = {
@@ -414,21 +425,6 @@ class PartitionedLinearWeightParameter(BasevLLMParameter):
 
     def add_partition(self, index: int, data: torch.Tensor):
         self.partitions[index] = ModelWeightParameter(data=data, **self.kwargs)
-
-    def _weight_loader(self,
-                       param: BasevLLMParameter,
-                       loaded_weight: torch.Tensor,
-                       loaded_shard_id: Optional[int | str] = None):
-        # this is provided for backwards compatibility with weight_loader_v1
-        # this method cannot support tensor parallelism, since this method
-        # does not know if we're column parallel or row parallel, and the
-        # weight loader passed by the parent module is not reliable because
-        # it assumes that the weight is fused, separate tensors
-        key = self._shard_id_as_int(loaded_shard_id)
-        partition = self.partitions[key]
-
-        assert partition.data.shape == loaded_weight.shape
-        partition.data.copy_(loaded_weight)
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         assert len(self.partitions) == 1 and 0 in self.partitions
@@ -491,7 +487,7 @@ class PartitionedLinearWeightParameter(BasevLLMParameter):
 
     def _fake_weight_loader(self, param: BasevLLMParameter,
                             loaded_weight: torch.Tensor,
-                            loaded_weight_shard_id: Optional[PartitionId]):
+                            loaded_weight_shard_id: Optional[Union[str, int]]):
         raise ValueError("When loading partition weights of "
                          f"{self.__class__.__name__}, use methods provided by "
                          f"{self.__class__.__name__}, not partition loader")

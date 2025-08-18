@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Generator
 from itertools import accumulate
-from typing import Callable, Optional
+from typing import Optional
 
 import torch
 from compressed_tensors.transform import (TransformArgs, TransformConfig,
@@ -45,8 +45,9 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
                        input_size_per_partition: int,
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
-                       weight_loader: Callable, **extra_weight_attrs):
+                       **extra_weight_attrs):
 
+        weight_loader = extra_weight_attrs.get("weight_loader")
         self.quant_method.create_weights(
             layer=layer,
             input_size_per_partition=input_size_per_partition,
@@ -54,7 +55,6 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
             input_size=input_size,
             output_size=output_size,
             params_dtype=params_dtype,
-            weight_loader=weight_loader,
             **extra_weight_attrs)
 
         # validate schemes
@@ -173,6 +173,9 @@ def get_linear_transform_schemes(
 def get_schemes_args(
     transform_config: Optional[TransformConfig]
 ) -> Generator[tuple[str, TransformScheme, TransformArgs]]:
+    if transform_config is None:
+        return
+
     for scheme_name, scheme in transform_config.config_groups.items():
         for args in scheme.apply:
             yield (scheme_name, scheme, args)
