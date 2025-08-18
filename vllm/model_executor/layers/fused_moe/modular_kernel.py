@@ -194,10 +194,11 @@ class FusedMoEPrepareAndFinalize(ABC):
           space to the local expert space of the expert parallel shard.
         - apply_router_weight_on_input: When True, apply the weights to the
           activations, before quantization + dispatching.
+        - quant_config: Quantization info provided by the fused experts.
 
         Returns a tuple of:
         - quantized + dispatched a.
-        - quantized + dispatched a1_scales.
+        - Optional quantized + dispatched a1_scales.
         - Optional ExpertTokensMetadata containing gpu/cpu tensors
           as big as the number of local experts with the information about the
           number of tokens assigned to each local expert.
@@ -322,6 +323,9 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         self,
         quant_config: FusedMoEQuantConfig,
     ):
+        """
+        quant_config: Quantization parameters for this experts instance.
+        """
         self.quant_config = quant_config
 
     @property
@@ -333,6 +337,11 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         for the 'apply' method.
         """
         raise NotImplementedError
+
+    #
+    # Various helpers for accessing quantization parameters from the
+    # quant_config.
+    #
 
     @property
     def quant_dtype(self) -> Optional[torch.dtype]:

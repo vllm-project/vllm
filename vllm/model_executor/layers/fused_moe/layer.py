@@ -79,7 +79,6 @@ class FusedMoeWeightScaleSupported(Enum):
 
 class FusedMoEMethodBase(QuantizeMethodBase):
 
-    # TODO(bnell): also pass quant_config?
     def __init__(self, moe: FusedMoEConfig):
         super().__init__()
         self.moe = moe
@@ -208,10 +207,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     # prepare_communication_buffer_for_model.
     def init_prepare_finalize(self, layer: torch.nn.Module):
         assert self.moe is not None
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
 
-        # Stash away for warmup code.
-        layer.moe_quant_config = self.moe_quant_config
+        # We must get the quant config here so that the layer is
+        # completely initialized, i.e. all weights loaded and post
+        # processed.
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
 
         prepare_finalize = self.maybe_make_prepare_finalize()
 

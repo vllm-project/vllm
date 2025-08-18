@@ -33,7 +33,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP)
 from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache, moe_kernel_quantize_input)
+    _resize_cache, activation_without_mul, moe_kernel_quantize_input)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     calculate_tile_tokens_dim)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -1394,7 +1394,6 @@ def fused_experts(
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
     quant_config: Optional[FusedMoEQuantConfig] = None,
-    # TODO: move these somewhere else
     allow_deep_gemm: bool = False,
     allow_cutlass_block_scaled_grouped_gemm: bool = False,
 ) -> torch.Tensor:
@@ -1468,6 +1467,10 @@ def fused_experts(
             block_shape=quant_config.block_shape,
             w1_bias=quant_config.w1_bias,
             w2_bias=quant_config.w2_bias)
+
+
+SILU_NO_MUL: str = activation_without_mul("silu")
+GELU_NO_MUL: str = activation_without_mul("gelu")
 
 
 def fused_experts_impl(
@@ -1652,9 +1655,9 @@ def fused_experts_impl(
             torch.ops._C.swigluoai_and_mul(intermediate_cache2,
                                            intermediate_cache1.view(-1, N))
         # Activation function without multiplication
-        elif activation == "silu_no_mul":
+        elif activation == SILU_NO_MUL:
             intermediate_cache2 = F.silu(intermediate_cache1.view(-1, N))
-        elif activation == "gelu_no_mul":
+        elif activation == GELU_NO_MUL:
             intermediate_cache2 = F.gelu(intermediate_cache1.view(-1, N))
 
         else:
