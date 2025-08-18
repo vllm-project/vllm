@@ -7,17 +7,18 @@ Isolated GSM8K evaluation script for vLLM serve endpoint.
 
 import argparse
 import ast
+import asyncio
 import json
 import os
 import time
 from collections.abc import Generator
-from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Union
 
+import aiohttp
 import numpy as np
 import regex as re
 import requests
-from tqdm import tqdm
+from tqdm.asyncio import tqdm
 
 INVALID = -9999999
 
@@ -75,12 +76,13 @@ def get_answer_value(answer_str: str) -> int:
         return INVALID
 
 
-def call_vllm_api(prompt: str,
-                  temperature: float,
-                  max_tokens: int,
-                  stop: Optional[list[str]] = None,
-                  url: Optional[str] = None,
-                  seed: Optional[int] = None) -> str:
+async def call_vllm_api(session: aiohttp.ClientSession,
+                        prompt: str,
+                        temperature: float,
+                        max_tokens: int,
+                        stop: Optional[list[str]] = None,
+                        url: Optional[str] = None,
+                        seed: Optional[int] = None) -> str:
     """Call vLLM's OpenAI-compatible completions endpoint."""
     data = {
         "prompt": prompt,
@@ -92,11 +94,11 @@ def call_vllm_api(prompt: str,
         data["seed"] = seed
 
     try:
-        response = requests.post(f"{url}/v1/completions",
-                                 json=data,
-                                 timeout=60)
-        response.raise_for_status()
-        return response.json()["choices"][0]["text"]
+        async with session.post(f"{url}/v1/completions",
+                                json=data) as response:
+            response.raise_for_status()
+            result = await response.json()
+            return result["choices"][0]["text"]
     except Exception as e:
         print(f"Error calling vLLM API: {e}")
         return ""
@@ -104,7 +106,6 @@ def call_vllm_api(prompt: str,
 
 def evaluate_gsm8k(num_questions: int = 1319,
                    num_shots: int = 5,
-                   parallel: Optional[int] = None,
                    max_tokens: int = 256,
                    host: str = "http://127.0.0.1",
                    port: int = 8000,
@@ -123,10 +124,6 @@ def evaluate_gsm8k(num_questions: int = 1319,
     # Limit to available test questions
     num_questions = min(num_questions, len(test_data))
 
-    # Submit all questions in parallel by default
-    if parallel is None:
-        parallel = num_questions
-
     # Build few-shot examples from train split (like lm-eval does)
     few_shot_examples = ""
     for i in range(num_shots):
@@ -143,36 +140,35 @@ def evaluate_gsm8k(num_questions: int = 1319,
     assert all(label != INVALID for label in labels), "Some labels are invalid"
 
     # Run evaluation
-    states: list[str] = [""] * num_questions
+    async def run_async_evaluation():
+        states: list[str] = [""] * num_questions
 
-    def get_answer(i: int) -> str:
-        prompt = few_shot_examples + questions[i]
-        answer = call_vllm_api(
-            prompt=prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stop=["Question", "Assistant:", "<|separator|>"],
-            url=base_url,
-            seed=seed,
-        )
-        states[i] = answer
-        return answer
+        async def get_answer(session: aiohttp.ClientSession, i: int) -> str:
+            prompt = few_shot_examples + questions[i]
+            answer = await call_vllm_api(
+                session=session,
+                prompt=prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stop=["Question", "Assistant:", "<|separator|>"],
+                url=base_url,
+                seed=seed,
+            )
+            states[i] = answer
+            return answer
+
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(
+                total=600)) as session:
+            tasks = [get_answer(session, i) for i in range(num_questions)]
+            await tqdm.gather(*tasks, desc="Evaluating")
+
+        return states
 
     print(f"Running GSM8K evaluation: {num_questions} questions, "
-          f"{num_shots}-shot, {parallel} workers")
+          f"{num_shots}-shot")
 
     tic = time.perf_counter()
-
-    if parallel == 1:
-        for i in tqdm(range(num_questions), desc="Evaluating"):
-            get_answer(i)
-    else:
-        with ThreadPoolExecutor(parallel) as executor:
-            list(
-                tqdm(executor.map(get_answer, range(num_questions)),
-                     total=num_questions,
-                     desc="Evaluating"))
-
+    states = asyncio.run(run_async_evaluation())
     latency = time.perf_counter() - tic
 
     # Compute metrics
@@ -187,7 +183,6 @@ def evaluate_gsm8k(num_questions: int = 1319,
         "questions_per_second": num_questions / latency,
         "num_questions": num_questions,
         "num_shots": num_shots,
-        "parallel": parallel,
         "max_tokens": max_tokens,
         "timestamp": time.time(),
     }
@@ -206,10 +201,6 @@ def main() -> None:
                         type=int,
                         default=1319,
                         help="Number of questions to evaluate")
-    parser.add_argument(
-        "--parallel",
-        type=int,
-        help="Number of parallel requests (default: num_questions)")
     parser.add_argument("--max-tokens",
                         type=int,
                         default=256,
@@ -236,7 +227,6 @@ def main() -> None:
     result = evaluate_gsm8k(
         num_questions=args.num_questions,
         num_shots=args.num_shots,
-        parallel=args.parallel,
         max_tokens=args.max_tokens,
         host=args.host,
         port=args.port,
