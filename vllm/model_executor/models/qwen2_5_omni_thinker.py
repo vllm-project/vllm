@@ -59,6 +59,7 @@ from vllm.multimodal.parse import (AudioProcessorItems, DictEmbeddingItems,
                                    ModalityDataItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        MultiModalPromptUpdates,
                                         PlaceholderFeaturesInfo,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
@@ -88,10 +89,7 @@ def _qwen2_5_omni_thinker_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
     video_grid_sizes = video_grid_thw.prod(-1)
 
-    # vllm use `second_per_grid_ts` to compute multimodal rotary embedding
-    video_second_per_grid = hf_inputs.get("video_second_per_grid", None)
-    if video_second_per_grid is not None:
-        hf_inputs["second_per_grid_ts"] = video_second_per_grid
+    num_videos = len(video_grid_sizes)
 
     return dict(
         input_audio_features=MultiModalFieldConfig.flat_from_sizes(
@@ -109,6 +107,7 @@ def _qwen2_5_omni_thinker_field_config(hf_inputs: Mapping[str, torch.Tensor]):
             "video", video_grid_sizes),
         video_grid_thw=MultiModalFieldConfig.batched("video"),
         second_per_grid_ts=MultiModalFieldConfig.batched("video"),
+        use_audio_in_video=MultiModalFieldConfig.shared("video", num_videos),
     )
 
 
@@ -251,6 +250,14 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         if ('audio_feature_lengths' not in hf_inputs
                 and feature_attention_mask is not None):
             hf_inputs['audio_feature_lengths'] = feature_attention_mask.sum(-1)
+
+        video_second_per_grid = hf_inputs.get("video_second_per_grid", None)
+        if video_second_per_grid is not None:
+            hf_inputs["second_per_grid_ts"] = video_second_per_grid
+
+        use_audio_in_video = mm_kwargs.get("use_audio_in_video", False)
+        hf_inputs["use_audio_in_video"] = torch.tensor(use_audio_in_video)
+
         return hf_inputs
 
     def _get_mm_fields_config(
@@ -263,27 +270,21 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
     def _maybe_apply_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
         prompt_ids: list[int],
         mm_kwargs: MultiModalKwargsItems,
+        mm_prompt_updates: MultiModalPromptUpdates,
         is_update_applied: bool,
     ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
         """
         Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`.
         """
-        unbound_prompt_updates = self._get_prompt_updates(
-            mm_items,
-            hf_processor_mm_kwargs,
-            mm_kwargs,
-        )
-        mm_prompt_updates = self._bind_and_group_updates(
-            unbound_prompt_updates)
-
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
 
-        use_audio_in_video = hf_processor_mm_kwargs.get(
-            "use_audio_in_video", False)
+        use_audio_in_video = False
+        if "video" in mm_kwargs:
+            use_audio_in_video &= all(item["use_audio_in_video"].data
+                                      for item in mm_kwargs["video"])
 
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
@@ -315,9 +316,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
 
         tokenizer = self.info.get_tokenizer()
         prompt = decode_tokens(tokenizer, prompt_ids)
-
-        if use_audio_in_video:
-            mm_kwargs["use_audio_in_video"] = True
 
         return prompt_ids, prompt, mm_placeholders
 
