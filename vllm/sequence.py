@@ -980,7 +980,7 @@ class SequenceGroupMetadata(
         default_factory=lambda: SequenceGroupState())
     token_type_ids: Optional[list[int]] = None
     multi_modal_data: Optional[Union[MultiModalKwargs,
-                                     dict[str, NestedTensors]]] = None
+                                     dict[str, "NestedTensors"]]] = None
     multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[list[int]] = None
