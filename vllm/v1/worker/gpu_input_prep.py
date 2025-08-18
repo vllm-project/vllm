@@ -5,7 +5,8 @@ import numpy as np
 from numba import types
 
 
-# Pre-compile the function with numba.jit.
+# NOTE: With the type annotations, this function is pre-compiled
+# before the first call.
 @numba.jit(
     [
         types.int32(
@@ -58,6 +59,8 @@ def prepare_inputs(
     return num_scheduled_tokens.max()
 
 
+# NOTE: With the type annotations, this function is pre-compiled
+# before the first call.
 @numba.jit(
     [
         types.none(
@@ -79,7 +82,7 @@ def compute_slot_mapping(
     block_size: int,
     # Outputs
     slot_mapping: np.ndarray,  # [num_input_tokens]
-):
+) -> None:
     num_reqs = block_table.shape[0]
     for i in range(num_reqs):
         start_idx = query_start_loc[i]
