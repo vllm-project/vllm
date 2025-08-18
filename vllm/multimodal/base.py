@@ -116,7 +116,7 @@ class MultiModalPlaceholderMap:
 
             placeholder_maps[modality] = placeholder_map
 
-        return seq_mm_data, placeholder_maps
+        return seq_mm_data.get_data(), placeholder_maps
 
     def append_items_from_seq_group(
         self,
