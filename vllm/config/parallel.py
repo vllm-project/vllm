@@ -215,6 +215,11 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
+    xfer_handshake_metadata: Optional[dict[int, dict[
+        int, KVConnectorHandshakeMetadata]]] = None
+    """ Metadata for KV transfer handshake between prefill and decode engine
+    processes."""
+
     @property
     def world_size_across_dp(self) -> int:
         """world_size_across_dp is TPxPPxDP, it is the size of the world

@@ -214,7 +214,7 @@ class EngineCore:
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
-        return (num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config)
+        return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_executor.supported_tasks
@@ -629,8 +629,7 @@ class EngineCoreProc(EngineCore):
                 "dp_stats_address": dp_stats_address,
             }
 
-            if (self.xfer_handshake_metadata is not None
-                    and len(self.xfer_handshake_metadata) > 0):
+            if self.xfer_handshake_metadata:
                 # self.xfer_handshake_metadata is list of dicts from workers
                 # Each dict already has structure {dp_rank: {tp_rank: metadata}}
                 # Merge all worker dicts into a single dict

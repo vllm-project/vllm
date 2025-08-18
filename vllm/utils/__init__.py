@@ -3440,8 +3440,8 @@ def build_uri(scheme: str,
 
     # Ensure IPv6 addresses are bracketed
     if (is_valid_ipv6_address(host)
-            and not (host.startswith('[') and host.endswith(']'))):
-        host = f'[{host}]'
+            and not (host.startswith("[") and host.endswith("]"))):
+        host = f"[{host}]"
 
     netloc = f"{host}:{port}" if port else host
     return urlunparse((scheme, netloc, path, params, query, fragment))

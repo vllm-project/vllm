@@ -43,10 +43,9 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (load_chat_template,
                                          resolve_hf_chat_template,
                                          resolve_mistral_chat_template)
+from vllm.entrypoints.kv_handshake import set_up_kv_handshake_server
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.nixl_side_channel_server import (
-    set_up_nixl_side_channel_server)
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
 # yapf conflicts with isort for this block
@@ -1898,10 +1897,10 @@ async def run_server_worker(listen_address,
                     vllm_config.parallel_config._api_process_rank,
                     listen_address)
 
-        nixl_side_channel_server = None
+        kv_conn_metadata_server = None
         try:
-            nixl_side_channel_server = await \
-                set_up_nixl_side_channel_server(vllm_config)
+            kv_conn_metadata_server = await \
+                set_up_kv_handshake_server(vllm_config)
         except Exception as e:
             logger.error("Failed to start NIXL side channel server: %s", e)
             raise
@@ -1930,9 +1929,9 @@ async def run_server_worker(listen_address,
     try:
         await shutdown_task
     finally:
-        if nixl_side_channel_server is not None:
+        if kv_conn_metadata_server is not None:
             try:
-                await nixl_side_channel_server.stop_async()
+                await kv_conn_metadata_server.stop_async()
             except Exception as e:
                 logger.warning("Error stopping NIXL side channel server: %s",
                                e)
