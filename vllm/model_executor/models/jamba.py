@@ -10,7 +10,7 @@ from transformers import JambaConfig
 
 from vllm import envs
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -21,9 +21,8 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateShapeCalculator)
-from vllm.model_executor.layers.pooler import (DispatchPooler, Pooler,
-                                               PoolingType)
+    MambaStateDtypeCalculator, MambaStateShapeCalculator)
+from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
@@ -95,6 +94,7 @@ class JambaMambaDecoderLayer(nn.Module):
     def __init__(self,
                  config: JambaConfig,
                  layer_idx: int,
+                 model_config: Optional[ModelConfig] = None,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  is_lora_enabled: Optional[bool] = False,
@@ -115,6 +115,8 @@ class JambaMambaDecoderLayer(nn.Module):
                                 rms_norm_eps=config.rms_norm_eps,
                                 activation=config.hidden_act,
                                 is_lora_enabled = self.is_lora_enabled,
+                                model_config=model_config,
+                                cache_config=cache_config,
                                 prefix=f"{prefix}.mixer",
                                 )
 
@@ -165,6 +167,7 @@ class JambaAttentionDecoderLayer(nn.Module):
     def __init__(self,
                  config: JambaConfig,
                  layer_idx: int,
+                 model_config: Optional[ModelConfig] = None,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "",
@@ -281,6 +284,7 @@ class JambaModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
@@ -305,6 +309,7 @@ class JambaModel(nn.Module):
                 config.layers_block_type[layer_idx]]
             return layer_class(config,
                                layer_idx,
+                               model_config,
                                cache_config,
                                quant_config=quant_config,
                                prefix=prefix,
@@ -521,9 +526,11 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                     self.vllm_config.parallel_config, LayerBlockType.mamba)
                 state_shape = self.get_mamba_state_shape_from_config(
                     self.vllm_config)
+                state_dtype = self.get_mamba_state_dtype_from_config(
+                    self.vllm_config)
                 self.mamba_cache = MambaCacheManager(self.vllm_config,
-                                                     self.lm_head.weight.dtype,
-                                                     num_layers, *state_shape)
+                                                     num_layers, *state_shape,
+                                                     *state_dtype)
 
             mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
@@ -537,6 +544,18 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype]:
+
+        return MambaStateDtypeCalculator.mamba1_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
 
     @classmethod
     def get_mamba_state_shape_from_config(
@@ -604,6 +623,5 @@ class JambaForSequenceClassification(JambaForCausalLM):
             Pooler.for_classify(
                 pooler_config,
                 classifier=self.score,
-                default_pooling_type=PoolingType.LAST,
             ),
         })

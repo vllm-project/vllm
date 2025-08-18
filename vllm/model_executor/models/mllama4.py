@@ -44,7 +44,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -646,13 +646,8 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptUpdate]:
-        assert (
-            mm_items.get_count("image", strict=False) == 0
-            or "aspect_ratios" in out_mm_kwargs
-        ), "Transformers expect to include aspect_ratios in out_mm_kwargs"
-
         config = self.info.get_hf_config()
         vision_config = config.vision_config
 
@@ -662,7 +657,8 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
         img_patch_token = hf_processor.img_patch_token
 
         def get_replacement(item_idx: int):
-            aspect_ratio = out_mm_kwargs["aspect_ratios"][item_idx]
+            out_item = out_mm_kwargs["image"][item_idx]
+            aspect_ratio = out_item["aspect_ratios"].data
 
             repl = hf_processor._prompt_split_image(
                 aspect_ratio=aspect_ratio,
@@ -737,16 +733,20 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
-        self.vision_model = Llama4VisionModel(
-            config.vision_config,
-            None,
-            prefix=maybe_prefix(prefix, "vision_model"),
-            use_data_parallel=self.use_data_parallel,
-        )
-        self.multi_modal_projector = Llama4MultiModalProjector(
-            self.config,
-            None,
-            prefix=maybe_prefix(prefix, "multi_modal_projector"))
+        if multimodal_config.get_limit_per_prompt("image"):
+            self.vision_model = Llama4VisionModel(
+                config.vision_config,
+                None,
+                prefix=maybe_prefix(prefix, "vision_model"),
+                use_data_parallel=self.use_data_parallel,
+            )
+            self.multi_modal_projector = Llama4MultiModalProjector(
+                self.config,
+                None,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"))
+        else:
+            self.vision_model = None
+            self.multi_modal_projector = None
         self.language_model = initialize_model(
             vllm_config=vllm_config.with_hf_config(config.text_config,
                                                    ["LlamaForCausalLM"]),
@@ -783,6 +783,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _process_image_input(
             self, image_input: Llama4ImagePatchInputs) -> MultiModalEmbeddings:
+
+        assert self.vision_model and self.multi_modal_projector
         flat_data = image_input["flat_data"]
         patches_per_image = image_input["patches_per_image"].tolist()
 
@@ -1047,6 +1049,10 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Separate and rename weights
         language_model_weights, other_weights = (
             self._separate_and_rename_weights(weights))
+
+        # Skip loading vision model and projector if they're not initialized.
+        if self.vision_model is None and self.multi_modal_projector is None:
+            other_weights = []
 
         # Handle expert scale parameters
         regular_weights, expert_scale_weights, updated_params_from_experts = (

@@ -365,7 +365,14 @@ async def benchmark(
         input_requests[0].multi_modal_data,
     )
 
-    assert test_mm_content is None or isinstance(test_mm_content, dict)
+    assert (
+        test_mm_content is None
+        or isinstance(test_mm_content, dict)
+        or (
+            isinstance(test_mm_content, list)
+            and all(isinstance(item, dict) for item in test_mm_content)
+        )
+    ), "multi_modal_data must be a dict or list[dict]"
     test_input = RequestFuncInput(
         model=model_id,
         model_name=model_name,
