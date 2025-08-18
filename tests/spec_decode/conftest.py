@@ -46,9 +46,23 @@ def hf_tiny_llama_id():
 @pytest.fixture(scope="session")
 def dummy_target_config():
     # Minimal target_model_config-like object that SpeculativeConfig inspects
+    hf_conf = SimpleNamespace(num_hidden_layers=12, model_type="llama")
     return SimpleNamespace(
-        hf_config=SimpleNamespace(num_hidden_layers=12, model_type="llama"),
+        hf_config=hf_conf,          # many places read this
+        hf_text_config=hf_conf,     # some releases read this instead
         model=TINY_LLAMA_HF,
+        # Fields forwarded into draft ModelConfig construction
+        tokenizer=None,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        allowed_local_media_path="",
+        dtype="auto",
+        seed=0,
+        max_model_len=2048,
+        enforce_eager=False,
+        max_seq_len_to_capture=8192,
+        max_logprobs=20,
+        tokenizer_revision=None,
     )
 
 
