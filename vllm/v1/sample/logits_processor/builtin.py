@@ -247,6 +247,11 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         """
         reasoning_config = vllm_config.reasoning_config
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+
+        # Check if thinking is enabled
+        self.is_enabled = (reasoning_config is not None
+                           and reasoning_config.is_thinking_enabled())
+
         self.reasoning_effort_to_token_budget = {
             "low": 1024,
             "medium": 2048,
@@ -371,6 +376,8 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         return False
 
     def update_state(self, batch_update: Optional[BatchUpdate]):
+        if not self.is_enabled:
+            return
         if batch_update:
             for (index, params, prompt_tok_ids, output_tok_ids) \
                 in batch_update.added:
@@ -398,7 +405,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             self._update_think_state(state)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
-        if not self._state:
+        if not self.is_enabled or not self._state:
             return logits
 
         batch_size = logits.size(0)
