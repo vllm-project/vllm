@@ -77,6 +77,7 @@ Internal data structures.
 - [vllm.multimodal.inputs.MultiModalFieldElem][]
 - [vllm.multimodal.inputs.MultiModalFieldConfig][]
 - [vllm.multimodal.inputs.MultiModalKwargsItem][]
+- [vllm.multimodal.inputs.MultiModalKwargsItems][]
 - [vllm.multimodal.inputs.MultiModalKwargs][]
 - [vllm.multimodal.inputs.MultiModalInputs][]
 

@@ -16,7 +16,7 @@ from vllm.utils import LazyLoader, is_list_of
 from .audio import AudioResampler
 from .inputs import (AudioItem, HfAudioItem, HfImageItem, HfVideoItem,
                      ImageItem, ModalityData, MultiModalDataDict,
-                     MultiModalFieldConfig, MultiModalKwargs, VideoItem)
+                     MultiModalFieldConfig, MultiModalKwargsItems, VideoItem)
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
@@ -157,19 +157,16 @@ class DictEmbeddingItems(ModalityDataItems[Mapping[str, torch.Tensor],
         self.fields_config = fields_config
         self.required_fields = required_fields
 
-        self._kwargs = MultiModalKwargs.from_hf_inputs(
+        self._kwargs = MultiModalKwargsItems.from_hf_inputs(
             BatchFeature(dict(data)),
             fields_config,
         )
 
     def get_count(self) -> int:
-        return self._kwargs.get_item_count(self.modality)
+        return len(self._kwargs[self.modality])
 
     def get(self, index: int) -> Mapping[str, torch.Tensor]:
-        return {
-            k: v.data
-            for k, v in self._kwargs.get_item(self.modality, index).items()
-        }
+        return self._kwargs[self.modality][index].get_data()
 
     def get_processor_data(self) -> Mapping[str, object]:
         return {}

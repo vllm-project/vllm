@@ -45,7 +45,8 @@ def test_processor_override(
     video_token_id = tokenizer.convert_tokens_to_ids(hf_processor.video_token)
     video_tok_count = processed_inputs["prompt_token_ids"].count(
         video_token_id)
-    grid_t, _, _ = processed_inputs["mm_kwargs"]["video_grid_thw"][0]
+    grid_t, _, _ = processed_inputs["mm_kwargs"].get_data(
+    )["video_grid_thw"][0]
 
     assert grid_t == expected_grid_t
     assert video_tok_count == expected_toks_per_frame * grid_t
