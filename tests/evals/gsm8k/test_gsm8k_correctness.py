@@ -64,7 +64,8 @@ def test_gsm8k_correctness_param(config_filename, tp_size):
 
     # Launch server and run evaluation
     with RemoteOpenAIServer(eval_config["model_name"],
-                            server_args) as remote_server:
+                            server_args,
+                            max_wait_seconds=480) as remote_server:
         server_url = remote_server.url_for("v1")
 
         results = launch_gsm8k_eval(eval_config, server_url, tp_size)
