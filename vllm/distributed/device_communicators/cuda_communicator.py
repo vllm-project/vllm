@@ -41,6 +41,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce)
+        import vllm.distributed.device_communicators.pynccl # noqa
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
         from vllm.distributed.device_communicators.quick_all_reduce import (
@@ -94,15 +95,21 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
     def all_reduce(self, input_, output_=None):
-        if (
-            self.pynccl_comm is not None
-            and hasattr(input_, "symmetric_memory")
-            and input_.symmetric_memory
-            and output_ is not None
-        ):
-            # TODO(asamani): this is under change_state in sglang, double check!
-            output_ = self.pynccl_comm.all_reduce(input_, output_)
-            return output_
+        # if (
+        #     self.pynccl_comm is not None
+        #     and hasattr(input_, "symmetric_memory")
+        #     and input_.symmetric_memory
+        #     and output_ is not None
+        # ):
+        #     # TODO(asamani): this is under change_state in sglang, double check!
+        #     output_ = self.pynccl_comm.all_reduce(input_, output_)
+        #     return output_
+        # TODO(asamani): do symmetric all reduce
+        if (self.pynccl_comm is not None):
+            output_ = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
+            if output_ is not None:
+                return output_
+
         # always try quick reduce first, then custom allreduce,
         # and then pynccl. (quick reduce just for ROCM MI3*)
         qr_comm = self.qr_comm
