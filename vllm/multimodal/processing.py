@@ -974,6 +974,18 @@ A collection of hashes with a similar structure as
 [`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems].
 """
 
+MultiModalPromptUpdates = dict[str, Sequence[BoundPromptUpdate]]
+"""
+A collection of prompt updates with a similar structure as
+[`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems].
+"""
+
+
+class MultiModalProcessingInfo(NamedTuple):
+    kwargs: MultiModalKwargsItems
+    hashes: Optional[MultiModalHashes]
+    prompt_updates: MultiModalPromptUpdates
+
 
 class BaseMultiModalProcessor(ABC, Generic[_I]):
     """
@@ -1358,7 +1370,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_hashes: MultiModalHashes,
         mm_is_cached: dict[str, list[bool]],
         mm_missing_kwargs: MultiModalKwargsItems,
-    ) -> dict[str, list[Optional[MultiModalKwargsItem]]]:
+    ) -> MultiModalKwargsItems:
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
         merged_items = defaultdict[str,
@@ -1378,7 +1390,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 )
                 merged_items[modality].append(kw_item)
 
-        return dict(merged_items)
+        return MultiModalKwargsItems(merged_items)
 
     def _apply_hf_processor(
         self,
@@ -1388,8 +1400,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         tokenization_kwargs: Mapping[str, object],
         *,
         return_mm_hashes: bool,
-    ) -> tuple[list[int], MultiModalKwargsItems, Optional[MultiModalHashes],
-               bool]:
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         (
             prompt_ids,
             mm_processed_data,
@@ -1412,7 +1423,21 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                                          tokenization_kwargs)
                      if return_mm_hashes else None)
 
-        return prompt_ids, mm_kwargs, mm_hashes, is_update_applied
+        unbound_prompt_updates = self._get_prompt_updates(
+            mm_data_items,
+            hf_processor_mm_kwargs,
+            mm_kwargs,
+        )
+        mm_prompt_updates = self._bind_and_group_updates(
+            unbound_prompt_updates)
+
+        mm_info = MultiModalProcessingInfo(
+            kwargs=mm_kwargs,
+            hashes=mm_hashes,
+            prompt_updates=mm_prompt_updates,
+        )
+
+        return prompt_ids, mm_info, is_update_applied
 
     def _cached_apply_hf_processor(
         self,
@@ -1422,8 +1447,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         tokenization_kwargs: Mapping[str, object],
         *,
         return_mm_hashes: bool,
-    ) -> tuple[list[int], MultiModalKwargsItems, Optional[MultiModalHashes],
-               bool]:
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         """
         Apply the HF processor on the full prompt text,
         caching the results and reusing cached results.
@@ -1473,13 +1497,27 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
 
         mm_kwargs = self._merge_mm_kwargs(
-            cache=cache,
+            cache,
             mm_hashes=mm_hashes,
             mm_is_cached=mm_is_cached,
             mm_missing_kwargs=mm_missing_kwargs,
         )
 
-        return prompt_ids, mm_kwargs, mm_hashes_to_return, is_update_applied
+        unbound_prompt_updates = self._get_prompt_updates(
+            mm_data_items,
+            hf_processor_mm_kwargs,
+            mm_kwargs,
+        )
+        mm_prompt_updates = self._bind_and_group_updates(
+            unbound_prompt_updates)
+
+        mm_info = MultiModalProcessingInfo(
+            kwargs=mm_kwargs,
+            hashes=mm_hashes_to_return,
+            prompt_updates=mm_prompt_updates,
+        )
+
+        return prompt_ids, mm_info, is_update_applied
 
     def _bind_and_group_updates(
         self,
@@ -1619,19 +1657,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def _maybe_apply_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
         prompt_ids: list[int],
         mm_kwargs: MultiModalKwargsItems,
+        mm_prompt_updates: MultiModalPromptUpdates,
         is_update_applied: bool,
     ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
-        unbound_prompt_updates = self._get_prompt_updates(
-            mm_items,
-            hf_processor_mm_kwargs,
-            mm_kwargs,
-        )
-        mm_prompt_updates = self._bind_and_group_updates(
-            unbound_prompt_updates)
-
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
 
@@ -1687,8 +1717,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         (
             prompt_ids,
-            mm_kwargs,
-            mm_hashes,
+            mm_info,
             is_update_applied,
         ) = self._cached_apply_hf_processor(
             prompt,
@@ -1701,9 +1730,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         # NOTE: tokenization_kwargs are not required to init processor
         prompt_ids, prompt, mm_placeholders = self._maybe_apply_prompt_updates(
             mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             prompt_ids=prompt_ids,
-            mm_kwargs=mm_kwargs,
+            mm_kwargs=mm_info.kwargs,
+            mm_prompt_updates=mm_info.prompt_updates,
             is_update_applied=is_update_applied,
         )
 
@@ -1716,8 +1745,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             type="multimodal",
             prompt=prompt,
             prompt_token_ids=prompt_ids,
-            mm_kwargs=mm_kwargs,
-            mm_hashes=mm_hashes,
+            mm_kwargs=mm_info.kwargs,
+            mm_hashes=mm_info.hashes,
             mm_placeholders=mm_placeholder_ranges,
         )
 
