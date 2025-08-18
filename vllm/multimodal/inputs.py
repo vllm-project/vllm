@@ -883,7 +883,7 @@ class MultiModalKwargs:
 
     def get_data(self,
                  *,
-                 pin_memory: bool = False) -> Mapping[str, NestedTensors]:
+                 pin_memory: bool = False) -> dict[str, NestedTensors]:
         if self._data is not None:
             return self._data
 
