@@ -252,7 +252,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
-            self._workspace_buffer = torch.empty(
+            self._workspace_buffer = torch.zeros(
                 FLASHINFER_WORKSPACE_BUFFER_SIZE,
                 dtype=torch.uint8,
                 device=self.device)
@@ -642,9 +642,6 @@ class FlashInferImpl(AttentionImpl):
                     f"heads in the layer. Expected {num_heads}, but got "
                     f"{sinks.shape[0]}."
                 )
-            # Cast sinks to float32 if needed (FlashInfer requirement)
-            if sinks.dtype != torch.float32:
-                sinks = sinks.to(torch.float32)
             self.sinks = sinks
 
     def forward(
