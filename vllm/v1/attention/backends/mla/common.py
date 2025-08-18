@@ -1096,6 +1096,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             return_softmax_lse=has_context,
         )
 
+        breakpoint()
+
         if has_context:
             suffix_output, suffix_lse = output
             context_output, context_lse = self._compute_prefill_context( \
