@@ -24,7 +24,7 @@ docker run \
     -v /dev/dri/by-path:/dev/dri/by-path \
     --entrypoint="" \
     -e "HF_TOKEN=${HF_TOKEN}" \
-    -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK}"
+    -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK}" \
     --name "${container_name}" \
     "${image_name}" \
     sh -c '
