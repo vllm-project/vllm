@@ -3,7 +3,7 @@
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, Iterable, Mapping, Optional, Union
+from typing import AsyncGenerator, Iterable, Mapping, Optional, Union
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import DecodingConfig, ModelConfig, VllmConfig
@@ -317,15 +317,6 @@ class EngineClient(ABC):
     @abstractmethod
     async def is_sleeping(self) -> bool:
         """Check whether the engine is sleeping"""
-        ...
-
-    @abstractmethod
-    async def collective_rpc(self,
-                             method: str,
-                             timeout: Optional[float] = None,
-                             args: tuple = (),
-                             kwargs: Optional[dict] = None) -> list[Any]:
-        """Perform a collective RPC call to the given path."""
         ...
 
     @abstractmethod

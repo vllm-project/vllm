@@ -1060,13 +1060,6 @@ if envs.VLLM_SERVER_DEV_MODE:
         args: list[str] = body.get("args", [])
         kwargs: dict[str, str] = body.get("kwargs", {})
         timeout: Optional[float] = body.get("timeout")
-        logger.info(
-            "collective_rpc: %s, %s, %s, %s",
-            method,
-            timeout,
-            args,
-            kwargs,
-        )
         results = await engine_client(raw_request).collective_rpc(
             method=method, timeout=timeout, args=tuple(args), kwargs=kwargs)
         if results is None:
