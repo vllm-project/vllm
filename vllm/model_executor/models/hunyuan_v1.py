@@ -31,6 +31,7 @@ import regex as re
 import torch
 from torch import nn
 from transformers import PretrainedConfig
+
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -392,10 +393,13 @@ class HunYuanSparseMoeBlock(nn.Module):
 
         self.n_logical_experts = self.n_routed_experts
         self.n_redundant_experts = parallel_config.num_redundant_experts
-        self.n_physical_experts = (self.n_logical_experts + self.n_redundant_experts)
+        self.n_physical_experts = (self.n_logical_experts +
+                                   self.n_redundant_experts)
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = (self.ep_rank * self.n_local_physical_experts)
-        self.physical_expert_end = (self.physical_expert_start + self.n_local_physical_experts)
+        self.physical_expert_start = (self.ep_rank *
+                                      self.n_local_physical_experts)
+        self.physical_expert_end = (self.physical_expert_start +
+                                    self.n_local_physical_experts)
 
         self.experts = FusedMoE(
             num_experts=self.n_routed_experts,
@@ -940,10 +944,10 @@ class HunYuanV1Base(nn.Module, SupportsLoRA, MixtureOfExperts):
             if isinstance(layer.mlp, HunYuanSparseMoeBlock):
                 example_layer = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
-        
+
         if example_layer is None:
             raise RuntimeError("No HunYuanMoE layer found in model.layers.")
-        
+
         self.num_moe_layers = len(self.moe_layers)
         self.num_logical_experts = example_layer.n_logical_experts
         self.num_physical_experts = example_layer.n_physical_experts
@@ -952,10 +956,10 @@ class HunYuanV1Base(nn.Module, SupportsLoRA, MixtureOfExperts):
         self.num_redundant_experts = example_layer.n_redundant_experts
 
     def set_eplb_state(
-            self,
-            expert_load_view: torch.Tensor,
-            logical_to_physical_map: torch.Tensor,
-            logical_replica_count: torch.Tensor,
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
     ) -> None:
         for layer_idx, layer in enumerate(self.moe_layers):
             self.expert_weights.append(layer.get_expert_weights())
@@ -968,14 +972,15 @@ class HunYuanV1Base(nn.Module, SupportsLoRA, MixtureOfExperts):
             )
 
     def update_physical_experts_metadata(
-            self,
-            num_physical_experts: int,
-            num_local_physical_experts: int,
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
     ) -> None:
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = (num_physical_experts - self.num_logical_experts)
+        self.num_redundant_experts = (num_physical_experts -
+                                      self.num_logical_experts)
         for layer in self.model.layers:
             if isinstance(layer.mlp, HunYuanSparseMoeBlock):
                 moe = layer.mlp
