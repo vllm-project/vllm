@@ -453,10 +453,10 @@ def patch_load_weights(self: "Worker"):
                             setattr(module, f'hacked_{attr}', getattr(module, attr))
             
             existing_params = dict(model.named_parameters())
-            
+                        
             hacked_data_dict = {}
-            for name, param in existing_params.items():
-                hacked_data_dict[name] = param.data
+            for name, p in existing_params.items():
+                hacked_data_dict[name] = p.data
             
             assert hasattr(model, "hacked_original_weights_rebuild_keys")
             
@@ -481,8 +481,7 @@ def patch_load_weights(self: "Worker"):
                 setattr(model, 'hacked_not_need_process_weights_after_loading', False)
             
             skipped_params = list()
-            print("I'm inside the hacked load weights, yay")
-            for name, p in existing_params.items():
+            for name, p in model.named_parameters():
                 assert name in hacked_data_dict, f'param {name} is not in hacked_data dict'
                 assert hacked_data_dict[name].dtype == p.data.dtype, f'param {name} dtype mismatch: {hacked_data_dict[name].dtype} vs {p.data.dtype}'
                 assert hacked_data_dict[name].numel() == p.data.numel(), f'param {name} numel() mismatch: {hacked_data_dict[name].numel()} vs {p.data.numel()}'
