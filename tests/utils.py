@@ -103,7 +103,7 @@ class RemoteOpenAIServer:
                  seed: Optional[int] = 0,
                  auto_port: bool = True,
                  max_wait_seconds: Optional[float] = None,
-                 override_hf_configs: Optional[dict[str, str]] = None) -> None:
+                 override_hf_configs: Optional[dict[str, Any]] = None) -> None:
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
                 raise ValueError("You have manually specified the port "
