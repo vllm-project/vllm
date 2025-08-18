@@ -1,7 +1,8 @@
 [
     {
         "test_name": "serving_llama8B_tp1_sharegpt",
-        "qps_list": [1, 4, 16, "inf"],
+        "qps_list": ["inf"],
+        "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200],
         "server_environment_variables": {
             "VLLM_RPC_TIMEOUT": 100000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
@@ -10,7 +11,7 @@
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 1,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -23,17 +24,17 @@
             "load_format": "dummy"
         },
         "client_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-	    "max_concurrency": 60,
             "num_prompts": 200
         }
     },
     {
         "test_name": "serving_llama8B_tp2_sharegpt",
-        "qps_list": [1, 4, 16, "inf"],
+        "qps_list": ["inf"],
+        "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200],
         "server_environment_variables": {
             "VLLM_RPC_TIMEOUT": 100000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
@@ -42,7 +43,7 @@
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 2,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -55,17 +56,17 @@
             "load_format": "dummy"
         },
         "client_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-	    "max_concurrency": 60,
             "num_prompts": 200
         }
     },
     {
         "test_name": "serving_llama8B_tp4_sharegpt",
-        "qps_list": [1, 4, 16, "inf"],
+        "qps_list": ["inf"],
+        "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200],
         "server_environment_variables": {
             "VLLM_RPC_TIMEOUT": 100000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
@@ -74,7 +75,7 @@
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 4,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -87,17 +88,17 @@
             "load_format": "dummy"
         },
         "client_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-	    "max_concurrency": 60,
             "num_prompts": 200
         }
     },
     {
         "test_name": "serving_llama8B_tp1_random_128_128",
-        "qps_list": [1, 4, 16, "inf"],
+        "qps_list": ["inf"],
+        "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200, 1000],
         "server_environment_variables": {
             "VLLM_RPC_TIMEOUT": 100000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
@@ -106,7 +107,7 @@
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 1,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -120,19 +121,19 @@
             "load_format": "dummy"
         },
         "client_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "backend": "vllm",
             "dataset_name": "random",
 	    "random-input-len": 128,
 	    "random-output-len": 128,
 	    "ignore-eos": "",
-	    "max_concurrency": 1000,
             "num_prompts": 1000
         }
     },
     {
         "test_name": "serving_llama8B_tp2_random_128_128",
-        "qps_list": [1, 4, 16, "inf"],
+        "qps_list": ["inf"],
+        "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200, 1000],
         "server_environment_variables": {
             "VLLM_RPC_TIMEOUT": 100000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
@@ -141,7 +142,7 @@
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 2,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -155,19 +156,19 @@
             "load_format": "dummy"
         },
         "client_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "backend": "vllm",
             "dataset_name": "random",
 	    "random-input-len": 128,
 	    "random-output-len": 128,
 	    "ignore-eos": "",
-	    "max_concurrency": 1000,
             "num_prompts": 1000
         }
     },
     {
         "test_name": "serving_llama8B_tp4_random_128_128",
-        "qps_list": [1, 4, 16, "inf"],
+        "qps_list": ["inf"],
+        "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200, 1000],
         "server_environment_variables": {
             "VLLM_RPC_TIMEOUT": 100000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
@@ -176,7 +177,7 @@
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 4,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -190,13 +191,11 @@
             "load_format": "dummy"
         },
         "client_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
             "backend": "vllm",
             "dataset_name": "random",
 	    "random-input-len": 128,
 	    "random-output-len": 128,
-	    "ignore-eos": "",
-	    "max_concurrency": 1000,
             "num_prompts": 1000
         }
     }
