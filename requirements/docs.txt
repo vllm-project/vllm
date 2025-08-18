@@ -18,7 +18,7 @@ cbor2
 cloudpickle
 fastapi
 msgspec
-openai
+openai < 1.100.0
 openai-harmony
 partial-json-parser
 pillow
