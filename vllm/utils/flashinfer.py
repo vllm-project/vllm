@@ -148,6 +148,31 @@ def has_nvidia_artifactory() -> bool:
         return False
 
 
+@functools.cache
+def supports_trtllm_attention() -> tuple[bool, Optional[str]]:
+    """Cache result which only depends on the environment"""
+    # This is a lambda, call it once
+    env_value = envs.VLLM_USE_TRTLLM_ATTENTION
+
+    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
+    if not (current_platform.is_device_capability(100)
+            and has_nvidia_artifactory()):
+        return False, env_value
+
+    if env_value is not None:
+        logger.info_once("VLLM_USE_TRTLLM_ATTENTION is set to %s", env_value)
+        # Environment variable is set - respect it
+        # Making the conditional check for zero because
+        # the path is automatically enabled if the batch size condition
+        # is satisfied.
+        use_trtllm = (env_value == "1")
+        if use_trtllm:
+            logger.info_once("Using TRTLLM attention.")
+        return use_trtllm, env_value
+
+    return True, None
+
+
 def use_trtllm_attention(
     num_tokens: int,
     max_seq_len: int,
@@ -157,9 +182,8 @@ def use_trtllm_attention(
     attn_head_size: Optional[int],
     has_sinks: bool = False,
 ) -> bool:
-    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
-    if not (current_platform.is_device_capability(100)
-            and has_nvidia_artifactory()):
+    use_trtllm, env_value = supports_trtllm_attention()
+    if not use_trtllm:
         return False
 
     # Check if the dimensions are supported by TRTLLM decode attention
@@ -174,24 +198,16 @@ def use_trtllm_attention(
             "Using TRTLLM attention (required for attention sinks).")
         return True
 
-    env_value = envs.VLLM_USE_TRTLLM_ATTENTION
-    if env_value is not None:
-        logger.info_once("VLLM_USE_TRTLLM_ATTENTION is set to %s", env_value)
-        # Environment variable is set - respect it
-        # Making the conditional check for zero because
-        # the path is automatically enabled if the batch size condition
-        # is satisfied.
-        use_trtllm = (env_value == "1")
-        if use_trtllm:
-            logger.info_once("Using TRTLLM attention.")
-        return use_trtllm
-    else:
+    if env_value is None:
         # Environment variable not set - use auto-detection
         use_trtllm = (num_tokens <= 256 and max_seq_len < 131072
                       and kv_cache_dtype == "auto")
         if use_trtllm:
             logger.warning_once("Using TRTLLM attention (auto-detected).")
         return use_trtllm
+
+    # Environment variable is set to 1 - respect it
+    return True
 
 
 if has_flashinfer():
