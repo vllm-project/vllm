@@ -527,6 +527,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 gating_output=router_logits,
                 topk=top_k,
                 renormalize=renormalize,
+                use_ep=self.moe.use_ep,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
                 w1_bias=layer.w13_bias,
