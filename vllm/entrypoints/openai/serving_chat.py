@@ -20,8 +20,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          ConversationMessage,
                                          get_history_tool_calls_cnt,
-                                         make_kimi_k2_tool_id,
-                                         random_tool_call_id)
+                                         make_tool_call_id)
 from vllm.entrypoints.harmony_utils import (
     get_developer_message, get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant, get_system_message, parse_chat_input,
@@ -135,7 +134,10 @@ class OpenAIServingChat(OpenAIServing):
             source = "model" if source == "auto" else source
             logger.info("Using default chat sampling params from %s: %s",
                         source, self.default_sampling_params)
-        self.is_kimi_k2 = self.model_config.hf_config.model_type == 'kimi_k2'
+        if self.model_config.hf_config.model_type == 'kimi_k2':
+            self.tool_call_id_type = 'kimi_k2'
+        else:
+            self.tool_call_id_type = 'random'
 
         self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
@@ -428,14 +430,10 @@ class OpenAIServingChat(OpenAIServing):
                         current_tool_call = obj[-2]
 
                     function_name_returned = True
-                    if self.is_kimi_k2:
-                        assert tool_call_idx is not None, \
-                            "tool_call_idx must be provided for kimi-k2 models"
-                        tool_call_id = make_kimi_k2_tool_id(
-                            func_name=current_tool_call["name"],
-                            idx=tool_call_idx)
-                    else:
-                        tool_call_id = random_tool_call_id()
+                    tool_call_id = make_tool_call_id(
+                        id_type=self.tool_call_id_type,
+                        func_name=current_tool_call["name"],
+                        idx=tool_call_idx)
                     delta_message = DeltaMessage(tool_calls=[
                         DeltaToolCall(id=tool_call_id,
                                       function=DeltaFunctionCall(
@@ -740,7 +738,7 @@ class OpenAIServingChat(OpenAIServing):
                                     index=i)
                             else:
                                 delta_tool_call = DeltaToolCall(
-                                    id=random_tool_call_id(),
+                                    id=make_tool_call_id(),
                                     type="function",
                                     function=DeltaFunctionCall(
                                         name=tool_choice_function_name,
@@ -1096,7 +1094,7 @@ class OpenAIServingChat(OpenAIServing):
         assert final_res is not None
 
         choices: list[ChatCompletionResponseChoice] = []
-        if self.is_kimi_k2:
+        if self.tool_call_id_type == 'kimi_k2':
             history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
         else:
             history_tool_call_cnt = 0
@@ -1205,26 +1203,23 @@ class OpenAIServingChat(OpenAIServing):
                 assert content is not None
                 tool_calls = TypeAdapter(
                     list[FunctionDefinition]).validate_json(content)
-                if self.is_kimi_k2:
-                    tool_call_ids = []
-                    for tool_call in tool_calls:
-                        tool_call_ids.append(
-                            make_kimi_k2_tool_id(func_name=tool_call.name,
-                                                 idx=history_tool_call_cnt))
-                        history_tool_call_cnt += 1
-                else:
-                    tool_call_ids = None
+                tool_call_ids = []
+                for tool_call in tool_calls:
+                    tool_call_ids.append(
+                        make_tool_call_id(id_type=self.tool_call_id_type,
+                                          func_name=tool_call.name,
+                                          idx=history_tool_call_cnt))
+                    history_tool_call_cnt += 1
                 message = ChatMessage(
                     role=role,
                     content="",
                     tool_calls=[
-                        tool_call_class(
-                            id=tool_call_ids[i]
-                            if tool_call_ids else random_tool_call_id(),
-                            function=FunctionCall(name=tool_call.name,
-                                                  arguments=json.dumps(
-                                                      tool_call.parameters,
-                                                      ensure_ascii=False)))
+                        tool_call_class(id=tool_call_ids[i],
+                                        function=FunctionCall(
+                                            name=tool_call.name,
+                                            arguments=json.dumps(
+                                                tool_call.parameters,
+                                                ensure_ascii=False)))
                         for i, tool_call in enumerate(tool_calls)
                     ],
                     reasoning_content=reasoning_content)
