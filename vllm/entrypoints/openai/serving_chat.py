@@ -918,7 +918,7 @@ class OpenAIServingChat(OpenAIServing):
                             delta=delta_message,
                             logprobs=logprobs,
                             finish_reason=None,
-                            token_ids=(list(output.token_ids)
+                            token_ids=(as_list(output.token_ids)
                                        if request.return_token_ids else None))
 
                     # if the model is finished generating
@@ -981,7 +981,7 @@ class OpenAIServingChat(OpenAIServing):
                             finish_reason=output.finish_reason
                             if not auto_tools_called else "tool_calls",
                             stop_reason=output.stop_reason,
-                            token_ids=(list(output.token_ids)
+                            token_ids=(as_list(output.token_ids)
                                        if request.return_token_ids else None))
 
                         finish_reason_sent[i] = True
@@ -1270,7 +1270,7 @@ class OpenAIServingChat(OpenAIServing):
                 finish_reason="tool_calls" if auto_tools_called else
                 output.finish_reason if output.finish_reason else "stop",
                 stop_reason=output.stop_reason,
-                token_ids=(list(output.token_ids)
+                token_ids=(as_list(output.token_ids)
                            if request.return_token_ids else None),
             )
 

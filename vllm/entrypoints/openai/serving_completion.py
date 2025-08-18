@@ -42,7 +42,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import merge_async_iterators
+from vllm.utils import as_list, merge_async_iterators
 
 logger = init_logger(__name__)
 
@@ -441,7 +441,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                 finish_reason=finish_reason,
                                 stop_reason=stop_reason,
                                 prompt_token_ids=prompt_token_ids_to_return,
-                                token_ids=(list(output.token_ids) if
+                                token_ids=(as_list(output.token_ids) if
                                            request.return_token_ids else None),
                             )
                         ],
@@ -565,7 +565,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     prompt_logprobs=final_res.prompt_logprobs,
                     prompt_token_ids=(prompt_token_ids
                                       if request.return_token_ids else None),
-                    token_ids=(list(output.token_ids)
+                    token_ids=(as_list(output.token_ids)
                                if request.return_token_ids else None),
                 )
                 choices.append(choice_data)
