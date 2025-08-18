@@ -26,7 +26,7 @@
 ### Multimodal Language Models
 | Model                                               | Architecture                        | Supported | Issues |
 |-----------------------------------------------------|-------------------------------------|-----------|--------|
-| Qwen/Qwen2.5-VL-7B                                  | Qwen2_5_VLForConditionalGeneration  | ❌||
+| Qwen/Qwen2.5-VL-7B                                  | Qwen2_5_VLForConditionalGeneration  | ❌ | |
 
 
 ✅ Runs and optimized.  
