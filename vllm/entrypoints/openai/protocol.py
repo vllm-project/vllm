@@ -569,7 +569,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
     return_token_ids: Optional[bool] = Field(
-        default=False,
+        default=None,
         description=(
             "If specified, the result will include token IDs alongside the "
             "generated text. In streaming mode, prompt_token_ids is included "
@@ -1063,7 +1063,7 @@ class CompletionRequest(OpenAIBaseModel):
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
     return_token_ids: Optional[bool] = Field(
-        default=False,
+        default=None,
         description=(
             "If specified, the result will include token IDs alongside the "
             "generated text. In streaming mode, prompt_token_ids is included "
