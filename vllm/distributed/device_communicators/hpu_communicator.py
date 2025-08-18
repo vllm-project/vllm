@@ -16,13 +16,10 @@ if current_platform.is_hpu():
 
 class HpuCommunicator(DeviceCommunicatorBase):
 
-    def all_reduce(
-        self, input_: torch.Tensor, output_: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         # FIXME(kzawora): this is a workaround for a bug in Habana PT bridge
         # occurring when PT_HPU_ENABLE_LAZY_COLLECTIVES=true env var is used
         # (which is required for tensor parallel HPUGraph inference)
-        assert output_ is None, "output_ is not supported for HPU"
         htorch.core.mark_step()
         dist.all_reduce(input_, group=self.device_group)
         return input_

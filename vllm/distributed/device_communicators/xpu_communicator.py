@@ -19,10 +19,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
                  unique_name: str = ""):
         super().__init__(cpu_group, device, device_group, unique_name)
 
-    def all_reduce(
-        self, input_: torch.Tensor, output_: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        assert output_ is None, "output_ is not supported for XPU"
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)
         return input_
 

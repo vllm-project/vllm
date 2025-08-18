@@ -29,8 +29,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
                     "init_shm_manager") and unique_name.startswith("tp"):
             self.dist_module = _CPUSHMDistributed(self)
 
-    def all_reduce(self, input_, output_: Optional[torch.Tensor] = None):
-        assert output_ is None, "output_ is not supported for CPU"
+    def all_reduce(self, input_):
         self.dist_module.all_reduce(input_, group=self.device_group)
         return input_
 

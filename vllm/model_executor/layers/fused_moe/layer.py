@@ -34,8 +34,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op, has_deep_ep, has_pplx
-from vllm.distributed.communication_op import( 
-    tensor_model_parallel_use_symmetric_memory,)
+
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
     from .fused_moe import TritonExperts, fused_experts
@@ -1362,7 +1361,7 @@ class FusedMoE(torch.nn.Module):
                 or self.use_deepep_ll_kernels)
 
     def maybe_all_reduce_tensor_model_parallel(
-            self, final_hidden_states: torch.Tensor, is_symm: bool = False):
+            self, final_hidden_states: torch.Tensor):
         """
         The pplx combine kernel reduces across GPU ranks by default.
         """
@@ -1370,12 +1369,7 @@ class FusedMoE(torch.nn.Module):
                 or self.use_deepep_ll_kernels):
             return final_hidden_states
         else:
-            if is_symm:
-                return tensor_model_parallel_all_reduce(
-                    final_hidden_states,
-                    final_hidden_states)
-            else:
-                return tensor_model_parallel_all_reduce(final_hidden_states)
+            return tensor_model_parallel_all_reduce(final_hidden_states)
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):

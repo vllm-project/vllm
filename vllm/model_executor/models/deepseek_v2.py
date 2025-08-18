@@ -37,8 +37,6 @@ from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
                          get_current_vllm_config)
 from vllm.distributed import (get_ep_group, get_pp_group,
                               get_tensor_model_parallel_world_size)
-from vllm.distributed.device_communicators.pynccl_allocator import( 
-    is_symmetric_memory_enabled,)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -55,8 +53,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.distributed.communication_op import (
-    tensor_model_parallel_use_symmetric_memory,)
+
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -196,29 +193,17 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = self.experts(hidden_states=hidden_states,
                                                router_logits=router_logits)
         if shared_output is not None:
-            with tensor_model_parallel_use_symmetric_memory() as sm:
-                final_hidden_states_out = torch.empty_like(final_hidden_states)
             if hidden_states.dtype != torch.float16:
-                torch.add(
-                    final_hidden_states,
-                    shared_output,
-                    out=final_hidden_states_out,
-                )
-                final_hidden_states = final_hidden_states_out
+                final_hidden_states = final_hidden_states + shared_output
             else:
                 # Fix FP16 overflow
                 # See DeepseekV2DecoderLayer for more details.
-                torch.add(
-                    final_hidden_states,
-                    shared_output * (1. / self.routed_scaling_factor),
-                    out=final_hidden_states_out,
-                )
-                final_hidden_states = final_hidden_states_out
-            sm.tag(final_hidden_states)
+                final_hidden_states = final_hidden_states + shared_output \
+                    * (1. / self.routed_scaling_factor)
         if self.tp_size > 1:
             final_hidden_states = (
                 self.experts.maybe_all_reduce_tensor_model_parallel(
-                    final_hidden_states, is_symm=is_symmetric_memory_enabled()))
+                    final_hidden_states))
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 

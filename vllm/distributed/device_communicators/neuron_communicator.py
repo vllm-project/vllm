@@ -15,10 +15,7 @@ if current_platform.is_neuron():
 
 class NeuronCommunicator(DeviceCommunicatorBase):
 
-    def all_reduce(
-        self, x: torch.Tensor, output_: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        assert output_ is None, "output_ is not supported for Neuron"
+    def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
         return xm.all_reduce(xm.REDUCE_SUM, x)
 
     def all_gather(self, x: torch.Tensor, dim: int = -1) -> torch.Tensor:

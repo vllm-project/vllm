@@ -84,10 +84,7 @@ class TpuCommunicator(DeviceCommunicatorBase):
         xr._init_world_size_ordinal()
         self.groups = create_optimized_replica_groups()
 
-    def all_reduce(
-        self, input_: torch.Tensor, output_: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        assert output_ is None, "output_ is not supported for TPU"
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         # TODO: Remove the groups specification after XLA compiler can support
         # auto-reordering the ring order for all-reduce.
         return xm.all_reduce(xm.REDUCE_SUM, input_, groups=self.groups)

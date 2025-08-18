@@ -94,7 +94,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             else:
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
-    def all_reduce(self, input_, output_=None):
+    def all_reduce(self, input_):
         # if (
         #     self.pynccl_comm is not None
         #     and hasattr(input_, "symmetric_memory")
@@ -106,9 +106,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         #     return output_
         # TODO(asamani): do symmetric all reduce
         if (self.pynccl_comm is not None):
-            output_ = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
-            if output_ is not None:
-                return output_
+            out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
+            if out is not None:
+                return out
 
         # always try quick reduce first, then custom allreduce,
         # and then pynccl. (quick reduce just for ROCM MI3*)
@@ -126,7 +126,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             return out
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
-        out = pynccl_comm.all_reduce(input_, output_)
+        out = pynccl_comm.all_reduce(input_)
         if out is None:
             # fall back to the default all-reduce using PyTorch.
             # this usually happens during testing.
@@ -292,8 +292,3 @@ class CudaCommunicator(DeviceCommunicatorBase):
         assert self.all2all_manager is not None
         hidden_states = self.all2all_manager.combine(hidden_states)
         return hidden_states
-
-    def get_symm_buffer(self, shape, dtype):
-        with torch.cuda.use_mem_pool(get_nccl_mem_pool()):
-            new_buffer = torch.empty(shape, dtype=dtype, device=self.device)
-        return new_buffer

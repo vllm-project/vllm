@@ -272,10 +272,6 @@ class GroupCoordinator:
         self.use_custom_op_call = (current_platform.is_cuda_alike()
                                    or current_platform.is_tpu())
 
-        # Initialize symmetric buffer cache
-        self._symm_buffer_cache: dict[torch.dtype, torch.Tensor] = {}
-
-
     @property
     def first_rank(self):
         """Return the global rank of the first process in the group"""
@@ -339,31 +335,7 @@ class GroupCoordinator:
         with torch.cuda.stream(stream), maybe_ca_context:
             yield graph_capture_context
 
-    def maybe_get_symm_buffer(self, shape, dtype):
-        from vllm.distributed.device_communicators.cuda_communicator import (
-            CudaCommunicator,
-        )
-
-        if self.use_device_communicator and isinstance(
-            self.device_communicator, CudaCommunicator
-        ):
-            requested_numel = torch.Size(shape).numel()
-            # Check if we have a cached buffer with enough elements with the 
-            # requested dtype
-            if dtype in self._symm_buffer_cache:
-                cached_buffer = self._symm_buffer_cache[dtype]
-                if cached_buffer.numel() >= requested_numel:
-                    return cached_buffer.view(shape)
-
-            new_buffer = self.device_communicator.get_symm_buffer(shape, dtype)
-            self._symm_buffer_cache[dtype] = new_buffer
-            return new_buffer
-        else:
-            return torch.empty(shape, dtype=dtype, device=self.device)
-
-    def all_reduce(
-        self, input_: torch.Tensor, output_: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         """
         User-facing all-reduce function before we actually call the
         all-reduce operation.
@@ -383,16 +355,13 @@ class GroupCoordinator:
             return input_
 
         if self.use_custom_op_call:
-            assert output_ is None, "output_ is not supported for custom op"
             return torch.ops.vllm.all_reduce(input_,
                                              group_name=self.unique_name)
         else:
-            return self._all_reduce_out_place(input_, output_)
+            return self._all_reduce_out_place(input_)
 
-    def _all_reduce_out_place(
-        self, input_: torch.Tensor, output_: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        return self.device_communicator.all_reduce(input_, output_)
+    def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
+        return self.device_communicator.all_reduce(input_)
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
