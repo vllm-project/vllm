@@ -8,11 +8,11 @@ import torch
 
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.multimodal.cache import (MultiModalCache,
+                                   MultiModalProcessorCacheItemProxy,
                                    processor_cache_from_config,
                                    receiver_cache_from_config)
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargsItem,
-                                    MultiModalKwargsItemProxy,
                                     MultiModalKwargsItems,
                                     MultiModalSharedField)
 from vllm.multimodal.processing import PromptInsertion
@@ -85,7 +85,7 @@ def test_cache_item_size(item, expected_size):
     prompt_update = PromptInsertion("dummy", "target", "insertion") \
         .bind(mock_tokenizer)
 
-    cache[""] = MultiModalKwargsItemProxy.from_item(item, prompt_update)
+    cache[""] = MultiModalProcessorCacheItemProxy(item, prompt_update)
     assert cache.currsize == expected_size
 
 
@@ -135,9 +135,7 @@ def _compare_caches(
     ]
 
     # Should not be used since there is nothing to convert to text
-    mock_tokenizer = cast(AnyTokenizer, object())
-    prompt_update = PromptInsertion("dummy", "target", "insertion") \
-        .bind(mock_tokenizer)
+    prompt_update = PromptInsertion("dummy", "target", "insertion")
 
     for it in range(n_iter):
         num_items_to_select = rng.randint(0, max_items_per_iter)
@@ -153,7 +151,7 @@ def _compare_caches(
                 cache_0_p0.is_cached(selected_hashes)
             cache_0_p0_out = [
                 item for item, _ in cache_0_p0.get_and_update(
-                    [(item, prompt_update) for item in selected_items],
+                    [(item, prompt_update.content) for item in selected_items],
                     selected_hashes,
                 )
             ]
@@ -165,7 +163,7 @@ def _compare_caches(
                 cache_1_p0.is_cached(selected_hashes)
             cache_1_p0_out = [
                 item for item, _ in cache_1_p0.get_and_update(
-                    [(item, prompt_update) for item in selected_items],
+                    [(item, prompt_update.content) for item in selected_items],
                     selected_hashes,
                 )
             ]

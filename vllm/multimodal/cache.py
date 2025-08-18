@@ -13,8 +13,8 @@ from vllm.utils import GiB_bytes, LRUCache
 from vllm.utils.jsontree import json_map_leaves, json_reduce_leaves
 
 from .inputs import (MultiModalFieldElem, MultiModalKwargs,
-                     MultiModalKwargsItem, MultiModalKwargsItemProxy,
-                     MultiModalKwargsItems, NestedTensors)
+                     MultiModalKwargsItem, MultiModalKwargsItems,
+                     NestedTensors)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -24,14 +24,47 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
+class MultiModalProcessorCacheItem:
+    """Used for `MultiModalProcessorSenderCache`."""
+
+    def __init__(
+        self,
+        item: MultiModalKwargsItem,
+        prompt_update: "BoundPromptUpdate",
+    ) -> None:
+        super().__init__()
+
+        self.item = item
+        self.prompt_update = prompt_update
+
+
+class MultiModalProcessorCacheItemProxy:
+    """
+    Used for `MultiModalProcessorOnlyCache`.
+
+    By only storing the metadata, we avoid keeping the data itself in
+    memory inside P0.
+    """
+
+    def __init__(
+        self,
+        item: MultiModalKwargsItem,
+        prompt_update: "BoundPromptUpdate",
+    ) -> None:
+        super().__init__()
+
+        self.item_size = MultiModalCache.get_item_size(item)
+        self.prompt_update = prompt_update
+
+
 MultiModalCacheValue = Union[
+    MultiModalProcessorCacheItem,
+    MultiModalProcessorCacheItemProxy,
     MultiModalKwargsItems,
     MultiModalKwargsItem,
-    MultiModalKwargsItemProxy,
     MultiModalKwargs,
     Mapping[str, NestedTensors],
-    "BoundPromptUpdate",
-    tuple[MultiModalKwargsItem, "BoundPromptUpdate"],
 ]
 
 _V = TypeVar("_V", bound=MultiModalCacheValue)
@@ -46,6 +79,11 @@ class MultiModalCache:
         *,
         debug: bool = False,
     ) -> int:
+        if isinstance(leaf, MultiModalProcessorCacheItem):
+            return cls.get_leaf_size(leaf.item)
+        if isinstance(leaf, MultiModalProcessorCacheItemProxy):
+            return leaf.item_size
+
         # These are not subclasses of dict
         if isinstance(leaf, MultiModalKwargsItems):
             return cls.get_item_size(leaf.data)  # type: ignore
@@ -56,14 +94,6 @@ class MultiModalCache:
 
         if isinstance(leaf, MultiModalFieldElem):
             return cls.get_item_size(leaf.data)  # type: ignore
-
-        from .processing import BoundPromptUpdate
-
-        if isinstance(leaf, BoundPromptUpdate):
-            return cls.get_leaf_size(leaf.content)
-
-        if isinstance(leaf, MultiModalKwargsItemProxy):
-            return leaf.cache_size
 
         # sys.getsizeof doesn't work for tensors
         if isinstance(leaf, torch.Tensor):
@@ -185,11 +215,10 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
         raise NotImplementedError
 
 
-class BaseMultiModalProcessorCache(
-        BaseMultiModalCache[
-            Optional[tuple[MultiModalKwargsItem, "BoundPromptUpdate"]],
-            tuple[Optional[MultiModalKwargsItem], "BoundPromptUpdate"],
-        ], ):
+class BaseMultiModalProcessorCache(BaseMultiModalCache[
+        Optional[tuple[MultiModalKwargsItem, "BoundPromptUpdate"]],
+        tuple[Optional[MultiModalKwargsItem], "BoundPromptUpdate"],
+]):
     """The required interface for caches on P0."""
 
     @abstractmethod
@@ -239,7 +268,7 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
 
         self._cache = MultiModalCache.get_lru_cache(
             mm_config.mm_processor_cache_gb,
-            tuple[MultiModalKwargsItem, "BoundPromptUpdate"],
+            MultiModalProcessorCacheItem,
         )
 
     @override
@@ -253,11 +282,11 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
         mm_hash: str,
     ) -> tuple[Optional[MultiModalKwargsItem], "BoundPromptUpdate"]:
         if (cached_item := self._cache.get(mm_hash)) is not None:
-            return cached_item
+            return cached_item.item, cached_item.prompt_update
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
-        self._cache[mm_hash] = mm_item
+        self._cache[mm_hash] = MultiModalProcessorCacheItem(*mm_item)
 
         return mm_item
 
@@ -286,7 +315,7 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
 
         self._cache = MultiModalCache.get_lru_cache(
             mm_config.mm_processor_cache_gb,
-            MultiModalKwargsItemProxy,
+            MultiModalProcessorCacheItemProxy,
         )
 
     @override
@@ -304,7 +333,7 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
-        self._cache[mm_hash] = MultiModalKwargsItemProxy.from_item(*mm_item)
+        self._cache[mm_hash] = MultiModalProcessorCacheItemProxy(*mm_item)
 
         return mm_item
 

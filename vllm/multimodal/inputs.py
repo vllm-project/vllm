@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     from transformers.feature_extraction_utils import BatchFeature
 
     from .hasher import MultiModalHashDict
-    from .processing import BoundPromptUpdate
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -667,36 +666,6 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
 
     def get_data(self) -> dict[str, NestedTensors]:
         return {key: elem.data for key, elem in self.items()}
-
-
-class MultiModalKwargsItemProxy:
-    """
-    Used for `MultiModalProcessorSenderCache`.
-
-    By only storing the metadata, we avoid keeping the data itself in
-    memory inside P0.
-    """
-
-    @staticmethod
-    def from_item(item: MultiModalKwargsItem,
-                  prompt_update: "BoundPromptUpdate"):
-        from .cache import MultiModalCache
-
-        return MultiModalKwargsItemProxy(
-            # prompt_update should not be counted in the size
-            cache_size=MultiModalCache.get_item_size(item),
-            prompt_update=prompt_update,
-        )
-
-    def __init__(
-        self,
-        cache_size: int,
-        prompt_update: "BoundPromptUpdate",
-    ) -> None:
-        super().__init__()
-
-        self.cache_size = cache_size
-        self.prompt_update = prompt_update
 
 
 _I = TypeVar(
