@@ -86,7 +86,6 @@ class XPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
-        vllm_config.compilation_config.use_cudagraph = False
         # in V1(or with ipex chunked prefill) block_size is 64
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 64
@@ -114,6 +113,22 @@ class XPUPlatform(Platform):
             logger.info("[XPU] CUDA graph is not supported on XPU, "
                         "disabling cudagraphs.")
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+        # diable cuda graphs since it is not supported on XPU platform
+        compilation_config.use_cudagraph = False
+        compilation_config.cudagraph_capture_sizes = []
+
+        from vllm.config import CompilationLevel
+        if compilation_config.level == CompilationLevel.PIECEWISE:
+            logger.info("Piecewise compilation level is not supported on XPU, "
+                        "switching to Dynamo(DYNAMO_ONECE) compilation with "
+                        "the Inductor backend.")
+            compilation_config.level = CompilationLevel.DYNAMO_ONCE
+            compilation_config.backend = "inductor"
+
+            if compilation_config.use_inductor:
+                # diable all custom ops for piecewise compilation
+                compilation_config.custom_ops = ["none"]
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
