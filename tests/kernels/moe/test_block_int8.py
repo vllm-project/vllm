@@ -118,13 +118,14 @@ def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
 
-    _, w1, w1_s, _, w2, w2_s = make_test_weights(E,
-                                                 N,
-                                                 K,
-                                                 dtype,
-                                                 torch.int8,
-                                                 per_act_token_quant=False,
-                                                 block_shape=block_size)
+    (_, w1, w1_s, _), (_, w2, w2_s,
+                       _) = make_test_weights(E,
+                                              N,
+                                              K,
+                                              dtype,
+                                              torch.int8,
+                                              per_act_token_quant=False,
+                                              block_shape=block_size)
 
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
