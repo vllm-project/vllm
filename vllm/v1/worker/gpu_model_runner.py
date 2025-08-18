@@ -760,17 +760,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Note: pad query_start_loc to be non-decreasing, as kernels
         # like FlashAttention requires that
         self.query_start_loc_np[num_reqs + 1:].fill(cu_num_tokens[-1])
+        self.query_start_loc.copy_(self.query_start_loc_cpu, non_blocking=True)
         query_start_loc = self.query_start_loc[:num_reqs + 1]
-        query_start_loc.copy_(self.query_start_loc_cpu[:num_reqs + 1],
-                              non_blocking=True)
 
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
         # Fill unused with 0 for full cuda graph mode.
         self.seq_lens_np[num_reqs:].fill(0)
+        self.seq_lens.copy_(self.seq_lens_cpu, non_blocking=True)
         seq_lens = self.seq_lens[:num_reqs]
-        seq_lens.copy_(self.seq_lens_cpu[:num_reqs], non_blocking=True)
 
         # Copy the tensors to the GPU.
         self.input_ids[:total_num_scheduled_tokens].copy_(
