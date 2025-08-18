@@ -976,6 +976,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if not self.allow_flashinfer:
             return super().maybe_make_prepare_finalize(moe)
 
+        if self.fused_experts is not None:
+            return None
+
         prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
             moe,
             a1_gscale=self.layer.w13_input_scale_quant,
@@ -1294,6 +1297,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             del layer.w2_input_scale_quant
             del layer.w13_blockscale_swizzled
             del layer.w2_blockscale_swizzled
+
+        if self.allow_flashinfer:
+            self.init_prepare_finalize()
 
     def apply(
         self,
