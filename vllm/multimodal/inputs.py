@@ -720,7 +720,7 @@ class MultiModalKwargs:
         items_by_modality = full_groupby(items, key=lambda x: x.modality)
         self._items_by_modality = dict(items_by_modality)
 
-        self._data: Optional[Mapping[str, NestedTensors]] = None
+        self._data: Optional[dict[str, NestedTensors]] = None
 
     @property
     def modalities(self):
