@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from typing import Optional, Union
 
 import torch
 
@@ -23,8 +22,16 @@ def polynorm_naive(
         return x / torch.sqrt(x.pow(2).mean(-1, keepdim=True) + eps)
 
     x = x.float()
-    return (weight[0] * norm(x**3, eps) + weight[1] * norm(x**2, eps) +
-            weight[2] * norm(x, eps) + bias).to(weight.dtype).view(orig_shape)
+    return (
+        (
+            weight[0] * norm(x**3, eps)
+            + weight[1] * norm(x**2, eps)
+            + weight[2] * norm(x, eps)
+            + bias
+        )
+        .to(weight.dtype)
+        .view(orig_shape)
+    )
 
 
 def polynorm_vllm(
@@ -46,11 +53,7 @@ def polynorm_vllm(
 
 def calculate_diff(batch_size, seq_len, hidden_size):
     dtype = torch.bfloat16
-    x = torch.randn(batch_size,
-                    seq_len,
-                    hidden_size,
-                    dtype=dtype,
-                    device="cuda")
+    x = torch.randn(batch_size, seq_len, hidden_size, dtype=dtype, device="cuda")
     weight = torch.ones(3, dtype=dtype, device="cuda")
     bais = torch.ones(1, dtype=dtype, device="cuda")
 
@@ -66,12 +69,10 @@ def calculate_diff(batch_size, seq_len, hidden_size):
 batch_size_range = [2**i for i in range(0, 7, 2)]
 seq_length_range = [2**i for i in range(6, 11, 1)]
 head_num_range = [32, 48]
-configs = list(
-    itertools.product(head_num_range, batch_size_range, seq_length_range))
+configs = list(itertools.product(head_num_range, batch_size_range, seq_length_range))
 
 
 def get_benchmark():
-
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=["head_num", "batch_size", "seq_len"],
@@ -81,18 +82,15 @@ def get_benchmark():
             line_names=["Naive", "vLLM"],
             styles=[("blue", "-"), ("red", "-")],
             ylabel="us",
-            plot_name=f"polynorm-perf",
+            plot_name="polynorm-perf",
             args={},
-        ))
+        )
+    )
     def benchmark(head_num, batch_size, seq_len, provider):
         dtype = torch.bfloat16
         hidden_size = head_num * 128  # assuming head_dim = 128
 
-        x = torch.randn(batch_size,
-                        seq_len,
-                        hidden_size,
-                        dtype=dtype,
-                        device="cuda")
+        x = torch.randn(batch_size, seq_len, hidden_size, dtype=dtype, device="cuda")
         weight = torch.ones(3, dtype=dtype, device="cuda")
         bias = torch.ones(1, dtype=dtype, device="cuda")
 

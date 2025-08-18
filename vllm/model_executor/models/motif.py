@@ -19,7 +19,7 @@ from vllm.attention.selector import _Backend
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.layernorm import RMSNorm, PolyNorm
+from vllm.model_executor.layers.layernorm import PolyNorm, RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
@@ -73,13 +73,14 @@ class MotifMLP(nn.Module):
         )
         if hidden_act != "poly_norm":
             raise NotImplementedError(f"Unsupported activation: {hidden_act}. "
-                             "Only poly_norm is supported for now.")
+                                      "Only poly_norm is supported for now.")
         self.act_fn = PolyNorm()
         self.intermediate_size = intermediate_size
         tp_size = get_tensor_model_parallel_world_size()
         if hidden_act == "poly_norm" and tp_size > 1:
-            raise NotImplementedError(f"Tensor parallelism for poly_norm is not supported yet. "
-                             "Support will be added in the future.")
+            raise NotImplementedError(
+                "Tensor parallelism for poly_norm is not supported yet. "
+                "Support will be added in the future.")
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)

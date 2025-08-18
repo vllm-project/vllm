@@ -317,8 +317,9 @@ poly_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
     float x2 = x * x;
     float x3 = x2 * x;
 
-    out[blockIdx.x * hidden_size + idx] = (scalar_t)(
-        x * s_w2_inv_std + x2 * s_w1_inv_std2 + x3 * s_w0_inv_std3 + s_bias);
+    out[blockIdx.x * hidden_size + idx] =
+        (scalar_t)(x * s_w2_inv_std + x2 * s_w1_inv_std2 + x3 * s_w0_inv_std3 +
+                   s_bias);
   }
 }
 

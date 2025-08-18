@@ -6,7 +6,7 @@ import torch
 
 from tests.kernels.quant_utils import FP8_DTYPE
 from tests.kernels.utils import opcheck
-from vllm.model_executor.layers.layernorm import RMSNorm, PolyNorm
+from vllm.model_executor.layers.layernorm import PolyNorm, RMSNorm
 from vllm.platforms import current_platform
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
