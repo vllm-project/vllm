@@ -60,6 +60,9 @@ def ep_routing_naive(
     expt_indx, sort_indices = torch.sort(expt_indx, dim=1, stable=True)
     expt_scal = torch.gather(expt_scal, 1, sort_indices)
 
+    assert E % ep_size == 0, "gpt-oss Triton kernel only \
+                              support even sharded experts"
+
     num_local_expert = E // ep_size
 
     # we assume experts are assigned contiguously
@@ -107,6 +110,7 @@ def triton_kernel_moe_forward(
     topk: int,
     renormalize: bool,
     activation: str = "silu",
+    use_ep: bool = False,
     apply_router_weight_on_input: bool = False,
     use_fp8_w8a8: bool = False,
     per_channel_quant: bool = False,
@@ -124,7 +128,7 @@ def triton_kernel_moe_forward(
 ) -> torch.Tensor:
 
     # we only use expert_map tp test if ep is enabled
-    if expert_map is not None:
+    if use_ep:
         routing_data, gather_idx, scatter_idx = ep_routing_naive(
             gating_output, topk, sm_first=not renormalize)
         # no token routed only apply to ep
