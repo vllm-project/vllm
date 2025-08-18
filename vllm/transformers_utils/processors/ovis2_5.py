@@ -16,6 +16,8 @@ from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 __all__ = ['Ovis2_5Processor']
 IMAGE_TOKEN = "<image>"
 VIDEO_TOKEN = "<video>"
+MIN_PIXELS = 448 * 448
+MAX_PIXELS = 1344 * 1792
 
 
 class Ovis2_5ProcessorKwargs(ProcessingKwargs,
@@ -26,13 +28,13 @@ class Ovis2_5ProcessorKwargs(ProcessingKwargs,
         },
         "images_kwargs": {
             'convert_to_rgb': True,
-            'min_pixels': 448 * 448,
-            'max_pixels': 1344 * 1792,
+            'min_pixels': MIN_PIXELS,
+            'max_pixels': MAX_PIXELS,
         },
         "videos_kwargs": {
             'convert_to_rgb': True,
-            'min_pixels': 448 * 448,
-            'max_pixels': 1344 * 1792,
+            'min_pixels': MIN_PIXELS,
+            'max_pixels': MAX_PIXELS,
         }
     }
 
@@ -290,8 +292,8 @@ class Ovis2_5Processor(ProcessorMixin):
                      height: int,
                      width: int,
                      factor: int = 28,
-                     min_pixels: int = 448 * 448,
-                     max_pixels: int = 1344 * 1792):
+                     min_pixels: int = MIN_PIXELS,
+                     max_pixels: int = MAX_PIXELS):
         """Rescales the image so that the following conditions are met:
         1. Both dimensions (height and width) are divisible by 'factor'.
         2. The total number of pixels is within the range 
@@ -376,8 +378,8 @@ class Ovis2_5Processor(ProcessorMixin):
         images: Optional[Union[PIL.Image.Image, list[PIL.Image.Image]]] = None,
         video: Optional[Union[list[PIL.Image.Image], np.ndarray]] = None,
         convert_to_rgb: Optional[bool] = True,
-        min_pixels: int = 448 * 448,
-        max_pixels: int = 1344 * 1792,
+        min_pixels: int = MIN_PIXELS,
+        max_pixels: int = MAX_PIXELS,
         return_tensors: Optional[str] = 'pt',
     ):
         is_video = False
@@ -394,8 +396,8 @@ class Ovis2_5Processor(ProcessorMixin):
                     images.append(image)
             elif isinstance(video, list):
                 images = video
-        min_pixels = min(max_pixels if max_pixels is not None else 1344 * 1792,
-                         min_pixels if min_pixels is not None else 448 * 448)
+        min_pixels = min(max_pixels if max_pixels is not None else MAX_PIXELS,
+                         min_pixels if min_pixels is not None else MIN_PIXELS)
         images = [
             image.convert("RGB")
             if convert_to_rgb and image.mode != 'RGB' else image
