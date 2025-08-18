@@ -622,7 +622,7 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=model_utils.ovis_patch_hf_runner,
     ),
     "ovis2_5": VLMTestInfo(
-        models=["AIDC-AI/Ovis2.5-9B"],
+        models=["AIDC-AI/Ovis2.5-2B"],
         test_type=(
             VLMTestType.IMAGE,
             VLMTestType.MULTI_IMAGE,
