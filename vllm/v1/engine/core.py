@@ -432,6 +432,7 @@ class EngineCore:
             request.mm_kwargs = self.mm_input_cache_server.get_and_update(
                 request.mm_kwargs, request.mm_hashes)
 
+        print('Request!!!', request)
         req = Request.from_engine_core_request(request,
                                                self.request_block_hasher)
         if req.use_structured_output:
