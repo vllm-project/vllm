@@ -10,8 +10,8 @@ import torch
 from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import (MultiModalKwargs, MultiModalKwargsItem,
-                                    PlaceholderRange)
+from vllm.multimodal.inputs import (MultiModalKwargsItem,
+                                    MultiModalKwargsItems, PlaceholderRange)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
@@ -57,8 +57,10 @@ class CachedRequestState:
     @property
     @deprecated("`mm_inputs` is superseded by `mm_kwargs` and will be "
                 "removed in v0.13. Please use `mm_kwargs` instead.")
-    def mm_inputs(self) -> list[MultiModalKwargs]:
-        return [MultiModalKwargs([item]) for item in self.mm_kwargs]
+    def mm_inputs(self) -> list[MultiModalKwargsItems]:
+        return [
+            MultiModalKwargsItems.from_seq([item]) for item in self.mm_kwargs
+        ]
 
     def get_token_id(self, idx: int) -> int:
         if idx < self.num_prompt_tokens:

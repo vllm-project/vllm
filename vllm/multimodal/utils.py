@@ -32,11 +32,13 @@ _M = TypeVar("_M")
 
 if TYPE_CHECKING:
     from .inputs import (BatchedTensorInputs, MultiModalKwargs,
-                         MultiModalKwargsItem, MultiModalPlaceholderDict)
+                         MultiModalKwargsItem, MultiModalKwargsItems,
+                         MultiModalPlaceholderDict)
 else:
     BatchedTensorInputs = Any
     MultiModalKwargs = Any
     MultiModalKwargsItem = Any
+    MultiModalKwargsItems = Any
     MultiModalPlaceholderDict = Any
 
 global_thread_pool = ThreadPoolExecutor(
@@ -359,18 +361,20 @@ def argsort_mm_positions(
             "`group_mm_kwargs_by_modality` and will be removed in v0.13. "
             "Please use `group_mm_kwargs_by_modality` instead.")
 def group_mm_inputs_by_modality(
-        mm_inputs: list[MultiModalKwargs]) -> list[list[MultiModalKwargs]]:
+    mm_inputs: list[MultiModalKwargsItems]
+) -> list[list[MultiModalKwargsItems]]:
     if not mm_inputs:
         return []
 
-    def modality_group_func(mm_input: MultiModalKwargs) -> Union[str, int]:
+    def modality_group_func(
+            mm_input: MultiModalKwargsItems) -> Union[str, int]:
         # If the input has multiple modalities, return a id as the unique key
         # for the mm_input input.
-        if len(mm_input.modalities) > 1:
+        if len(mm_input) > 1:
             return id(mm_input)
 
-        elif len(mm_input.modalities) == 1:
-            return list(mm_input.modalities)[0]
+        elif len(mm_input) == 1:
+            return next(iter(mm_input.keys()))
 
         # FIXME(Isotr0py): Modality of mm_input from legacy pipeline is empty,
         # this is used to make InternVL with legacy pipeline still work with v1.
@@ -397,12 +401,12 @@ def group_mm_kwargs_by_modality(
     Yields:
         A tuple `(modality, num_items, grouped_kwargs)`.
     """
-    from vllm.multimodal.inputs import MultiModalKwargs
+    from vllm.multimodal.inputs import MultiModalKwargs, MultiModalKwargsItems
 
     for modality, items in groupby(mm_kwargs, key=lambda item: item.modality):
         items_lst = list(items)
 
-        # mm_kwargs_group = MultiModalKwargs(items_lst) \
+        # mm_kwargs_group = MultiModalKwargsItems.from_items(items_lst) \
         #    .get_data(pin_memory=pin_memory)
 
         # if device is not None:
@@ -417,7 +421,10 @@ def group_mm_kwargs_by_modality(
         # We will also need to update each model to remove `flatten_bn`.
         mm_kwargs_group = MultiModalKwargs.as_kwargs(
             MultiModalKwargs.batch(
-                [MultiModalKwargs([item]) for item in items_lst],
+                [
+                    MultiModalKwargsItems.from_seq([item]).get_data()
+                    for item in items_lst
+                ],
                 pin_memory=pin_memory,
             ),
             device=device,

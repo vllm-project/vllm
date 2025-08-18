@@ -370,10 +370,16 @@ def _assert_inputs_equal(
     if ignore_mm_keys is None:
         ignore_mm_keys = set()
 
-    assert "mm_kwargs" in a and "mm_kwargs" in b, msg
+    a_rest = {k: v for k, v in a.items() if k != "mm_kwargs"}
+    b_rest = {k: v for k, v in b.items() if k != "mm_kwargs"}
+
+    assert a_rest == b_rest, msg
+
+    a_data = a["mm_kwargs"].get_data()
+    b_data = b["mm_kwargs"].get_data()
 
     for key in ignore_mm_keys:
-        a["mm_kwargs"].pop(key, None)
-        b["mm_kwargs"].pop(key, None)
+        a_data.pop(key, None)
+        b_data.pop(key, None)
 
-    assert a == b, msg
+    assert a_data == b_data, msg
