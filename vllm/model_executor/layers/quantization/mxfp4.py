@@ -25,7 +25,7 @@ from vllm.utils import next_power_of_2, round_up
 
 if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
         or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
-    # from flashinfer.fused_moe import cutlass_fused_moe
+    from flashinfer.fused_moe import cutlass_fused_moe
     from flashinfer import (mxfp8_quantize, shuffle_matrix_a,
                             shuffle_matrix_sf_a, trtllm_fp4_block_scale_moe)
 
@@ -192,7 +192,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer):
         if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16) and current_platform.is_device_capability(100):
             layer.gemm1_alpha = Parameter(torch.tensor(
                 [1.702] * self.num_experts, dtype=torch.float32).cuda(),
                                           requires_grad=False)
@@ -313,6 +313,49 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.w2_bias = Parameter(torch.stack(gemm2_bias_shuffled).reshape(
                 self.num_experts, -1),
                                       requires_grad=False)
+        elif envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16 and current_platform.is_device_capability(90):
+            assert layer.w13_weight.dtype == torch.uint8, f"layer.w13_weight.dtype: {layer.w13_weight.dtype}, expected: {torch.uint8}"
+            assert layer.w2_weight.dtype == torch.uint8, f"layer.w2_weight.dtype: {layer.w2_weight.dtype}, expected: {torch.uint8}"
+            assert layer.w13_weight_scale.dtype == torch.uint8, f"layer.w13_weight_scale.dtype: {layer.w13_weight_scale.dtype}, expected: {torch.uint8}"
+            assert layer.w2_weight_scale.dtype == torch.uint8, f"layer.w2_weight_scale.dtype: {layer.w2_weight_scale.dtype}, expected: {torch.uint8}"
+            assert layer.w13_bias.dtype == torch.bfloat16, f"layer.w13_bias.dtype: {layer.w13_bias.dtype}, expected: {torch.bfloat16}"
+            assert layer.w2_bias.dtype == torch.bfloat16, f"layer.w2_bias.dtype: {layer.w2_bias.dtype}, expected: {torch.bfloat16}"
+            
+            layer.gemm1_alpha = Parameter(torch.tensor(
+                [1.702] * self.num_experts, dtype=torch.float32).cuda(),
+                                          requires_grad=False)
+            layer.gemm1_beta = Parameter(torch.tensor(
+                [1.0] * self.num_experts, dtype=torch.float32).cuda(),
+                                         requires_grad=False)
+            layer.gemm1_clamp_limit = Parameter(torch.tensor(
+                [7.0] * self.num_experts, dtype=torch.float32).cuda(),
+                                                requires_grad=False)
+            sf_block_size = 32  # mxfp4 block size
+
+            assert (layer.w13_weight.dim() == 3
+                    and layer.w13_weight.shape[0] == self.num_experts
+                    and layer.w13_weight.shape[1] == self.intermediate_size * 2
+                    and layer.w13_weight.shape[2] == self.hidden_size // 2)
+            assert (layer.w13_weight_scale.dim() == 3
+                    and layer.w13_weight_scale.shape[0] == self.num_experts
+                    and layer.w13_weight_scale.shape[1]
+                    == self.intermediate_size * 2
+                    and layer.w13_weight_scale.shape[2]
+                    == self.hidden_size // sf_block_size)
+            assert (layer.w2_weight.dim() == 3
+                    and layer.w2_weight.shape[0] == self.num_experts
+                    and layer.w2_weight.shape[1] == self.hidden_size and
+                    layer.w2_weight.shape[2] == self.intermediate_size // 2)
+            assert (layer.w2_weight_scale.dim() == 3
+                    and layer.w2_weight_scale.shape[1] == self.hidden_size
+                    and layer.w2_weight_scale.shape[2]
+                    == self.intermediate_size // sf_block_size)
+            assert (layer.w13_bias.dim() == 2
+                    and layer.w13_bias.shape[0] == self.num_experts
+                    and layer.w13_bias.shape[1] == self.intermediate_size * 2)
+            assert (layer.w2_bias.dim() == 2
+                    and layer.w2_bias.shape[0] == self.num_experts
+                    and layer.w2_bias.shape[1] == self.hidden_size)
         else:
             from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
@@ -408,7 +451,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                                       with this configuration.")
 
         if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16) and current_platform.is_device_capability(100):
             assert not self.moe.use_ep, (
                 "EP is not supported for flashinfer mxfp4 moe backend yet.")
             if envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16:
@@ -448,6 +491,47 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 True,  # do finalize
             )[0]
             return trtllm_gen_output
+        elif (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16) and current_platform.is_device_capability(90):
+
+            assert x.dtype == torch.bfloat16
+
+            quant_scales = [
+                layer.w13_weight_scale.view(torch.int32),
+                layer.w2_weight_scale.view(torch.int32),
+            ]
+
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+            )
+
+            output = torch.zeros_like(x)
+
+            _ = cutlass_fused_moe(
+                input=x,
+                token_selected_experts=topk_ids,
+                token_final_scales=topk_weights,
+                fc1_expert_weights=layer.w13_weight,
+                fc2_expert_weights=layer.w2_weight,
+                output_dtype=torch.bfloat16,
+                quant_scales=quant_scales,
+                fc1_expert_biases=layer.w13_bias,
+                fc2_expert_biases=layer.w2_bias,
+                swiglu_alpha=layer.gemm1_alpha,
+                swiglu_beta=layer.gemm1_beta,
+                swiglu_limit=layer.gemm1_clamp_limit,
+                use_w4_group_scaling=True,
+                output=output,
+            )
+            return output
         else:
             return triton_kernel_moe_forward(
                 hidden_states=x,
