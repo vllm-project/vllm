@@ -19,6 +19,7 @@ from vllm.v1.outputs import KVConnectorOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -65,9 +66,11 @@ class MultiConnector(KVConnectorBase_V1):
         # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(self,
+                           kv_caches: dict[str, torch.Tensor],
+                           kv_cache_config: Optional["KVCacheConfig"] = None):
         for c in self._connectors:
-            c.register_kv_caches(kv_caches)
+            c.register_kv_caches(kv_caches, kv_cache_config)
 
     # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the

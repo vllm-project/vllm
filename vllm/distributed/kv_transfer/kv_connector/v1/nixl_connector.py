@@ -32,6 +32,7 @@ from vllm.platforms import _Backend, current_platform
 from vllm.utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
@@ -70,7 +71,7 @@ class NixlAgentMetadata(
         dict=True):
     engine_id: str
     agent_metadata: bytes
-    kv_caches_base_addr: list[int]
+    kv_caches_base_addr: set[int]
     num_blocks: int
     block_len: int
     attn_backend_name: str
@@ -190,9 +191,10 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
     # Worker Side Methods
     ############################################################
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor],
+                           kv_cache_config: KVCacheConfig):
         assert self.connector_worker is not None
-        self.connector_worker.register_kv_caches(kv_caches)
+        self.connector_worker.register_kv_caches(kv_caches, kv_cache_config)
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         assert self.connector_worker is not None
@@ -483,7 +485,7 @@ class NixlConnectorWorker:
 
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
         # rank will still only pull from a single remote TP worker.
-        self.kv_caches_base_addr: dict[EngineId, list[int]] = {}
+        self.kv_caches_base_addr: dict[EngineId, set[int]] = {}
 
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
@@ -683,11 +685,9 @@ class NixlConnectorWorker:
 
         fut.add_done_callback(request_ready)
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor],
+                           kv_cache_config: KVCacheConfig):
         """Register the KV Cache data in nixl."""
-
-        _, first_kv_cache = next(iter(kv_caches.items()))
-        kv_elem_size = first_kv_cache.element_size()
 
         if self.use_host_buffer:
             self.initialize_host_xfer_buffer(kv_caches=kv_caches)
@@ -701,66 +701,31 @@ class NixlConnectorWorker:
                 "host_xfer_buffer should not be initialized when "
                 f"kv_buffer_device is {self.kv_buffer_device}")
 
-        # TODO(tms): Find a more robust way to detect and handle MLA
-        # NOTE (NickLucche) To move blocks efficiently with NIXL, the expected
-        # KV memory layout is HND, as opposed to the default NHD. Note that it
-        # will only affects the strides. For MLA instead, we make require no
-        # such thing and resort to the standard layout.
-        use_mla = len(first_kv_cache.shape) == 3
-        if self.device_type == "tpu":
-            assert not use_mla, f"{self.kv_buffer_device} does not support MLA."
-            assert self._use_pallas_v1, f"attn backend: {self.backend_name}"
-            # tpu (v1) kv shape per layer:
-            # (num_blocks, block_size, num_kv_heads * 2, head_size)
-            self.num_blocks = first_kv_cache.shape[0]
-            block_rank = 3  # [block_size, kv_heads, head_dim]
-            block_shape = first_kv_cache.shape[-block_rank:]
-            block_size, n_kv_heads_x_2, head_dim = block_shape
-            self.slot_size_bytes = kv_elem_size * n_kv_heads_x_2 * head_dim
-        elif self.device_type == "cuda":
-            assert use_mla == self.use_mla
-            # TODO (NickLucche) not compatible with hybrid allocator.
-            # Enforce check once it goes live, as a single kv layout
-            # is expected for xfers.
-            if use_mla:
-                # MLA case.
-                self.num_blocks = first_kv_cache.shape[0]
-                block_rank = 2  # [block_size, latent_dim]
-                block_shape = first_kv_cache.shape[-block_rank:]
-                block_size, kv_latent_dim = block_shape
-                self.slot_size_bytes = kv_elem_size * kv_latent_dim
-            else:
-                # [2 (k and v), num_blocks, ...]
-                if self._use_flashinfer:
-                    # FlashInfer swaps 2<->num_blocks dimensions.
-                    self.num_blocks = first_kv_cache.shape[0]
-                    block_rank = 4  # [2, block_size, kv_heads, head_dim]
-                else:
-                    self.num_blocks = first_kv_cache.shape[1]
-                    block_rank = 3  # [block_size, kv_heads, head_dim]
-                block_shape = first_kv_cache.shape[-block_rank:]
-                block_size, n_kv_heads, head_dim = block_shape[-3:]
-                # head size in bytes.
-                self.slot_size_bytes = kv_elem_size * n_kv_heads * head_dim
-            assert block_size == self.block_size
-        else:
-            raise RuntimeError(
-                f"{self.device_type} ({self.backend_name}) is not supported.")
+        if not kv_cache_config.kv_cache_tensors:
+            raise ValueError(
+                "KV cache config must contain at least one tensor")
 
-        # TODO(tms): self.block_len needs to be per-layer for sliding window,
-        # hybrid attn, etc
-        # block size in bytes
-        self.block_len = kv_elem_size * math.prod(block_shape)
-        logger.info(
-            "Registering KV_Caches. use_mla: %s, kv_buffer_device: %s, "
-            "use_host_buffer: %s, num_blocks: %s, block_shape: %s, "
-            "per_layer_kv_cache_shape: %s", use_mla, self.kv_buffer_device,
-            self.use_host_buffer, self.num_blocks, block_shape,
-            first_kv_cache.shape)
+        self.num_blocks = kv_cache_config.num_blocks
+        tensor_size_bytes_config = kv_cache_config.kv_cache_tensors[0].size
+        if tensor_size_bytes_config % self.num_blocks != 0:
+            raise ValueError(
+                f"Tensor size ({tensor_size_bytes_config}) must be divisible by"
+                f" number of blocks ({self.num_blocks})")
+        self.block_len = tensor_size_bytes_config // self.num_blocks
         self.dst_num_blocks[self.engine_id] = self.num_blocks
         self.device_kv_caches = kv_caches
-        kv_caches_base_addr = []
+        use_mla = self.model_config.use_mla
+
+        logger.info(
+            "Registering KV_Caches. use_mla: %s, kv_buffer_device: %s, "
+            "use_host_buffer: %s, num_blocks: %s", use_mla,
+            self.kv_buffer_device, self.use_host_buffer, self.num_blocks)
+
         caches_data = []
+        # With hybrid allocator, layers can share a kv cache tensor
+        seen_base_addresses = set()
+        xfer_buffers = (self.host_xfer_buffers
+                        if self.use_host_buffer else kv_caches)
 
         # Note(tms): I modified this from the original region setup code.
         # K and V are now in different regions. Advantage is that we can
@@ -770,24 +735,63 @@ class NixlConnectorWorker:
         # (roughly 8KB vs 5KB).
         # Conversely for FlashInfer, K and V are transferred in the same tensor
         # to better exploit the memory layout (ie num_blocks is the first dim).
-        for cache_or_caches in xfer_buffers.values():
-            # Normalize to always be a list of caches
-            cache_list = [cache_or_caches] if use_mla \
-                         or self._use_pallas_v1 or self._use_flashinfer \
-                         else cache_or_caches
+        split_k_and_v = not (use_mla or self._use_pallas_v1
+                             or self._use_flashinfer)
+        for layer_name, cache_or_caches in xfer_buffers.items():
+            cache_list = cache_or_caches if split_k_and_v else [
+                cache_or_caches
+            ]
+
             for cache in cache_list:
                 base_addr = cache.data_ptr()
-                region_len = self.num_blocks * self.block_len
-                # NOTE: use tp_rank for device_id since multi-node TP
-                # is rarely used.
-                caches_data.append((base_addr, region_len, self.tp_rank, ""))
-                kv_caches_base_addr.append(base_addr)
-        self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
+                if base_addr not in seen_base_addresses:
+                    seen_base_addresses.add(base_addr)
+                    tensor_size_bytes = cache.numel() * cache.element_size()
+                    caches_data.append(
+                        (base_addr, tensor_size_bytes, self.tp_rank, ""))
+
+        self.kv_caches_base_addr[self.engine_id] = seen_base_addresses
         self.num_regions = len(caches_data)
         self.num_layers = len(xfer_buffers.keys())
 
-        # TODO(mgoin): remove this once we have hybrid memory allocator
-        # Optimization for models with local attention (Llama 4)
+        descs = self.nixl_wrapper.get_reg_descs(caches_data,
+                                                self.nixl_memory_type)
+        logger.debug("Registering descs: %s", caches_data)
+        self.nixl_wrapper.register_memory(descs)
+        logger.debug("Done registering descs")
+        self._registered_descs.append(descs)
+
+        # When K and V are in different regions, the num of bytes per block
+        # is halved.
+        self.block_len = (self.block_len //
+                          2 if split_k_and_v else self.block_len)
+
+        # Register local/src descr for NIXL xfer.
+        blocks_data = []
+        for base_addr in seen_base_addresses:
+            # NOTE With heter-TP, more blocks are prepared than what are
+            # needed as self.num_blocks >= nixl_agent_meta.num_blocks. We
+            # could create fewer, but then _get_block_descs_ids needs to
+            # select agent_meta.num_blocks instead of self.num_blocks for
+            # local descr, and that makes handling regular flow less clean.
+            for block_id in range(self.num_blocks):
+                block_offset = block_id * self.block_len
+                addr = base_addr + block_offset
+                # (addr, len, device id)
+                # TODO: does device_id matter to DRAM?
+                blocks_data.append((addr, self.block_len, self.tp_rank))
+        logger.debug("Created %s blocks for src engine %s and rank %s",
+                     len(blocks_data), self.engine_id, self.tp_rank)
+
+        # Register with NIXL.
+        descs = self.nixl_wrapper.get_xfer_descs(blocks_data,
+                                                 self.nixl_memory_type)
+        # NIXL_INIT_AGENT to be used for preparations of local descs.
+        self.src_xfer_side_handle = self.nixl_wrapper.prep_xfer_dlist(
+            "NIXL_INIT_AGENT", descs)
+
+        # TODO(mgoin): Hybrid memory allocator is currently diabled for
+        # models with local attention (Llama 4). Can remove this once enabled.
         if self.vllm_config.model_config.hf_config.model_type == "llama4":
             from transformers import Llama4TextConfig
             assert isinstance(self.vllm_config.model_config.hf_text_config,
@@ -805,36 +809,6 @@ class NixlConnectorWorker:
             logger.debug("Llama 4 block window per layer mapping: %s",
                          self.block_window_per_layer)
             assert len(self.block_window_per_layer) == self.num_layers
-
-        descs = self.nixl_wrapper.get_reg_descs(caches_data,
-                                                self.nixl_memory_type)
-        logger.debug("Registering descs: %s", caches_data)
-        self.nixl_wrapper.register_memory(descs)
-        logger.debug("Done registering descs")
-        self._registered_descs.append(descs)
-
-        # Register local/src descr for NIXL xfer.
-        blocks_data = []
-        for base_addr in self.kv_caches_base_addr[self.engine_id]:
-            # NOTE With heter-TP, more blocks are prepared than what are
-            # needed as self.num_blocks >= nixl_agent_meta.num_blocks. We
-            # could create fewer, but then _get_block_descs_ids needs to
-            # select agent_meta.num_blocks instead of self.num_blocks for
-            # local descr, and that makes handling regular flow less clean.
-            for block_id in range(self.num_blocks):
-                block_offset = block_id * self.block_len
-                addr = base_addr + block_offset
-                # (addr, len, device id)
-                # TODO: does device_id matter to DRAM?
-                blocks_data.append((addr, self.block_len, self.tp_rank))
-        logger.debug("Created %s blocks for src engine %s and rank %s",
-                     len(blocks_data), self.engine_id, self.tp_rank)
-
-        descs = self.nixl_wrapper.get_xfer_descs(blocks_data,
-                                                 self.nixl_memory_type)
-        # NIXL_INIT_AGENT to be used for preparations of local descs.
-        self.src_xfer_side_handle = self.nixl_wrapper.prep_xfer_dlist(
-            "NIXL_INIT_AGENT", descs)
 
         # After KV Caches registered, listen for new connections.
         metadata = NixlAgentMetadata(
