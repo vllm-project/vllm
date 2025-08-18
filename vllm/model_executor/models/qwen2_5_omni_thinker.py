@@ -54,7 +54,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import (AudioProcessorItems, DictEmbeddingItems,
                                    ModalityDataItems, MultiModalDataItems,
                                    MultiModalDataParser)
@@ -265,7 +265,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         prompt_ids: list[int],
-        mm_kwargs: MultiModalKwargs,
+        mm_kwargs: MultiModalKwargsItems,
         is_update_applied: bool,
     ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
         """
@@ -325,7 +325,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
@@ -340,8 +340,9 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         image_token_id = vocab[image_token]
         video_token_id = vocab[video_token]
 
-        audio_feature_lengths = out_mm_kwargs.get("audio_feature_lengths")
-        feature_attention_mask = out_mm_kwargs.get("feature_attention_mask")
+        out_mm_data = out_mm_kwargs.get_data()
+        audio_feature_lengths = out_mm_data.get("audio_feature_lengths")
+        feature_attention_mask = out_mm_data.get("feature_attention_mask")
         if audio_feature_lengths is None and feature_attention_mask is None:
             audio_output_lengths = []
         elif audio_feature_lengths is not None:
@@ -371,7 +372,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             return [audio_token_id] * num_features
 
         def get_replacement_qwen2_vision(item_idx: int, modality: str):
-            grid_thw = out_mm_kwargs[f"{modality}_grid_thw"][item_idx]
+            grid_thw = out_mm_data[f"{modality}_grid_thw"][item_idx]
             assert isinstance(grid_thw, torch.Tensor)
             merge_length = image_processor.merge_size**2
 
@@ -387,7 +388,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
 
             audio_num_features = audio_output_lengths[audio_in_video_item_idx +
                                                       item_idx]
-            video_grid_thw = out_mm_kwargs["video_grid_thw"][item_idx]
+            video_grid_thw = out_mm_data["video_grid_thw"][item_idx]
 
             audio_in_video_item_idx += 1
 
