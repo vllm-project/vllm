@@ -681,6 +681,13 @@ class TransformersForCausalLM(TransformersBase):
     MultiModalProcessor,
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder)
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": -1,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    })  # set `positions` to last dim to support Qwen-mrope
 class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
     # Backwards compatibility for prev released models. State dicts back then
     # had different formats and cannot be loaded with `AutoModel` mapping as is
