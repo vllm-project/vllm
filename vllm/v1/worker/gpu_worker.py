@@ -5,6 +5,7 @@ import gc
 import os
 from typing import TYPE_CHECKING, Optional
 
+import ray
 import torch
 import torch.distributed
 import torch.nn as nn
@@ -77,6 +78,11 @@ class Worker(WorkerBase):
                     torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
+        
+        from vllm.model_executor.layers.patch import patch_vllm_process_weights_after_loading, fanout_existing_imports
+        patch_vllm_process_weights_after_loading()
+        fanout_existing_imports()
+
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
@@ -130,6 +136,11 @@ class Worker(WorkerBase):
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
             self.device = torch.device(f"cuda:{self.local_rank}")
+            logger.info(f"{self.local_rank} came here in my code")
+            logger.info(f"{self.local_rank} torch device count: {torch.cuda.device_count()}")
+            logger.info(f"{self.local_rank} CUDA visible devices I can see: {os.environ.get('CUDA_VISIBLE_DEVICES', 'CANTSET')}")
+            logger.info(f"GPU ids available: {ray.get_gpu_ids()}")
+            logger.info(f"{self.local_rank} using device: {self.device}")
             torch.cuda.set_device(self.device)
 
             _check_if_gpu_supports_dtype(self.model_config.dtype)
@@ -183,6 +194,15 @@ class Worker(WorkerBase):
             context = nullcontext()
         with context:
             self.model_runner.load_model()
+        
+        from vllm.model_executor.layers.patch import patch_load_weights
+        patch_load_weights(self)
+        # from transformers import AutoModelForCausalLM
+        # test_model = AutoModelForCausalLM.from_pretrained("LiyuanLucasLiu/Qwen2.5-0.5B-Instruct-VERL")
+        # print("dump params: ", [name for name, _ in test_model.named_parameters()])
+        # self.model_runner.model.load_weights(
+        #     weights=((name, param.to(self.device)) for name, param in test_model.named_parameters())
+        # )
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:

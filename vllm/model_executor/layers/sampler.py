@@ -36,8 +36,120 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+def apply_top_k_top_p(logits, k, p) -> torch.Tensor:
+    """copied from vllm
+    """
+    if k is None and p is None:
+        return logits
+    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
+
+    if k is not None:
+        # Apply top-k.
+        top_k_mask = logits_sort.size(1) - k.to(torch.long)  # shape: B
+        # Get all the top_k values.
+        top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
+        top_k_mask = logits_sort < top_k_mask
+        logits_sort.masked_fill_(top_k_mask, -float("inf"))
+
+    if p is not None:
+        # Apply top-p.
+        probs_sort = logits_sort.softmax(dim=-1)
+        probs_sum = probs_sort.cumsum(dim=-1)
+        top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
+        # at least one
+        top_p_mask[:, -1] = False
+        logits_sort.masked_fill_(top_p_mask, -float("inf"))
+
+    # Re-sort the probabilities.
+    logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
+    return logits
+
+def patch_vllm_logprob_compute():
+    try:
+        from vllm.v1.sample.sampler import Sampler
+        from vllm.v1.outputs import SamplerOutput
+
+        if not hasattr(Sampler, 'beforeflashrl_forward'):
+            # Store the original LLM init function
+            original_forward = Sampler.forward
+            Sampler.beforeflashrl_forward = original_forward
+
+            def hacked_logprob_forward(
+                self,
+                logits: torch.Tensor,
+                sampling_metadata,
+            ):
+                # Use float32 for the logits.
+                logits = logits.to(torch.float32)
+                
+                # Apply temperature.
+                if (
+                    isinstance(sampling_metadata.temperature, torch.Tensor) 
+                    and torch.any(sampling_metadata.temperature != 1.0)
+                ) or (
+                    isinstance(sampling_metadata.temperature, float)
+                    and sampling_metadata.temperature != 1.0
+                ):
+                    logits = self.apply_temperature(logits, sampling_metadata.temperature)
+                    
+                # Apply topk and/or topp.
+                logits = apply_top_k_top_p(logits, sampling_metadata.top_k, sampling_metadata.top_p)
+                
+                if sampling_metadata.all_random:
+                    greedy_sampled = None
+                else:
+                    greedy_sampled = logits.argmax(dim=-1).view(-1)
+                    
+                if sampling_metadata.all_greedy:
+                    sampled = greedy_sampled
+                else:
+                    # Sampling
+                    sampled = self.topk_topp_sampler(
+                        logits,
+                        sampling_metadata.generators,
+                        None,
+                        None,
+                    )
+                    
+                    if greedy_sampled is not None:
+                        sampled = torch.where(
+                            sampling_metadata.temperature < 1e-5,
+                            greedy_sampled,
+                            sampled,
+                            out=greedy_sampled,  # Reuse tensor
+                        )
+
+                if sampling_metadata.max_num_logprobs is not None:
+                    processed_logprobs = self.compute_logprobs(logits)
+                    logprobs_tensors = self.gather_logprobs(processed_logprobs, 0, token_ids=sampled.long())
+                else:
+                    logprobs_tensors = None
+                
+                sampler_output = SamplerOutput(
+                    sampled_token_ids=sampled.to(torch.int32).unsqueeze(-1),
+                    logprobs_tensors=logprobs_tensors,
+                )
+                return sampler_output
+            
+            # Patch the LLM init function
+            Sampler.forward = hacked_logprob_forward
+            
+            logger.debug("Successfully patched Sampler at init")
+        else:
+            logger.debug("vllm Sampler already patched")
+            
+        status = True
+    
+    except Exception as e:
+        logger.error(f"Error patching Sampler forward: {e}")
+        status = False
+
+    return status
 
 def get_sampler() -> torch.nn.Module:
+    import os
+    if os.environ.get("FLASHRL_CONFIG", None):
+        patch_vllm_logprob_compute()
     if envs.VLLM_USE_V1:
         # Lazy import: the v1 package isn't distributed
         from vllm.v1.sample.sampler import Sampler as V1Sampler
