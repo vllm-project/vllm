@@ -188,7 +188,7 @@ class Ovis2_5ProcessingInfo(BaseProcessingInfo):
         temporal_patch_size = vit_config.temporal_patch_size
         # NOTE: Frames are padded to be divisible by `temporal_patch_size`
         # https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/qwen2_vl/image_processing_qwen2_vl.py#L294
-        padded_num_frames = num_frames + num_frames % temporal_patch_size
+        padded_num_frames = num_frames + (-num_frames % temporal_patch_size)
         grid_t = max(padded_num_frames // temporal_patch_size, 1)
         grid_h = image_height // patch_size
         grid_w = image_width // patch_size

@@ -621,6 +621,21 @@ VLM_TEST_SETTINGS = {
         hf_model_kwargs={"llm_attn_implementation": "sdpa"},
         patch_hf_runner=model_utils.ovis_patch_hf_runner,
     ),
+    "ovis2_5": VLMTestInfo(
+        models=["AIDC-AI/Ovis2.5-9B"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO
+        ),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>\n", # noqa: E501
+        video_idx_to_prompt=lambda idx: "<video>\n",
+        max_model_len=4096,
+        max_num_seqs=2,
+        dtype="half",
+        patch_hf_runner=model_utils.ovis_patch_hf_runner,
+    ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),

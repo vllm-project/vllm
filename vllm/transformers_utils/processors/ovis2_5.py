@@ -290,8 +290,8 @@ class Ovis2_5Processor(ProcessorMixin):
                      height: int,
                      width: int,
                      factor: int = 28,
-                     min_pixels: int = 56 * 56,
-                     max_pixels: int = 14 * 14 * 4 * 1280):
+                     min_pixels: int = 448 * 448,
+                     max_pixels: int = 1344 * 1792):
         """Rescales the image so that the following conditions are met:
         1. Both dimensions (height and width) are divisible by 'factor'.
         2. The total number of pixels is within the range 
@@ -421,9 +421,9 @@ class Ovis2_5Processor(ProcessorMixin):
 
         patches = np.array(processed_images)
         if patches.shape[0] % self.temporal_patch_size != 0:
-            repeats = np.repeat(patches[-1][np.newaxis],
-                                self.temporal_patch_size - 1,
-                                axis=0)
+            num_to_pad = self.temporal_patch_size - (patches.shape[0] %
+                                                     self.temporal_patch_size)
+            repeats = np.repeat(patches[-1][np.newaxis], num_to_pad, axis=0)
             patches = np.concatenate([patches, repeats], axis=0)
         channel = patches.shape[1]
         grid_t = patches.shape[0] // self.temporal_patch_size

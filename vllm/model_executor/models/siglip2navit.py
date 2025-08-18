@@ -257,30 +257,30 @@ class Siglip2Attention(nn.Module):
         elif self.attn_backend == _Backend.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
             batch_size = cu_seqlens.shape[0] - 1
-            queries_ = queries.view(batch_size, max_seqlen, self.num_heads,
-                                    self.head_dim)
-            keys_ = keys.view(batch_size, max_seqlen, self.num_heads,
-                              self.head_dim)
-            values_ = values.view(batch_size, max_seqlen, self.num_heads,
-                                  self.head_dim)
             outputs = []
-            for i in range(1, len(cu_seqlens)):
-                start_idx = cu_seqlens[i - 1]
-                end_idx = cu_seqlens[i]
-                q_i = queries_[:, start_idx:end_idx]
-                k_i = keys_[:, start_idx:end_idx]
-                v_i = values_[:, start_idx:end_idx]
-                q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
-                                 for x in [q_i, k_i, v_i])
+            cu = cu_seqlens.tolist()
+            for i in range(batch_size):
+                start_idx = cu[i]
+                end_idx = cu[i + 1]
+
+                # Each sequence is processed independently.
+                q_i = queries[start_idx:end_idx].unsqueeze(0)
+                k_i = keys[start_idx:end_idx].unsqueeze(0)
+                v_i = values[start_idx:end_idx].unsqueeze(0)
+
+                # (1, seq_len, num_heads, head_dim) ->
+                # (1, num_heads, seq_len, head_dim)
+                q_i, k_i, v_i = [x.transpose(1, 2) for x in (q_i, k_i, v_i)]
+
                 output_i = F.scaled_dot_product_attention(q_i,
                                                           k_i,
                                                           v_i,
                                                           dropout_p=0.0)
-                output_i = rearrange(output_i, "b h s d -> b s h d ")
+                # (1, num_heads, seq_len, head_dim) -> (seq_len, embed_dim)
+                output_i = output_i.transpose(1, 2).reshape(-1, self.embed_dim)
                 outputs.append(output_i)
-            attn_output = torch.cat(outputs, dim=1)
-            attn_output = rearrange(attn_output,
-                                    "b s h d -> (s b) (h d)").contiguous()
+
+            attn_output = torch.cat(outputs, dim=0)
         attn_output = self.out_proj(attn_output)
         return attn_output
 
