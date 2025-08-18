@@ -405,6 +405,14 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                             size_n, size_k)
 
 
+# rtn_marlin
+def rtn_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
+                    b_scales: torch.Tensor, workspace: torch.Tensor,
+                    size_m: int, size_n: int, size_k: int) -> torch.Tensor:
+    return torch.ops._C.rtn_marlin_gemm(a, b_q_weight, b_scales, workspace,
+                                        size_m, size_n, size_k)
+
+
 if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
 
     @register_fake("_C::gptq_marlin_24_gemm")
@@ -500,6 +508,13 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
             group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
         return torch.empty_like(b_q_weight,
                                 memory_format=torch.contiguous_format)
+
+    @register_fake("_C::rtn_marlin_gemm")
+    def _rtn_marlin_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
+                              b_scales: torch.Tensor, workspace: torch.Tensor,
+                              size_m: torch.SymInt, size_n: torch.SymInt,
+                              size_k: torch.SymInt) -> torch.Tensor:
+        return torch.empty((size_m, size_n), dtype=a.dtype, device=a.device)
 
 
 if hasattr(torch.ops._C, "allspark_w8a16_gemm"):

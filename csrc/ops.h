@@ -274,6 +274,13 @@ void per_token_group_quant_int8(const torch::Tensor& input,
                                 torch::Tensor& output_q,
                                 torch::Tensor& output_s, int64_t group_size,
                                 double eps, double int8_min, double int8_max);
+
+torch::Tensor rtn_marlin_gemm(const torch::Tensor& a,
+                              const torch::Tensor& b_q_weight,
+                              const torch::Tensor& b_scales,
+                              torch::Tensor& workspace, int64_t size_m,
+                              int64_t size_n, int64_t size_k);
+
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,

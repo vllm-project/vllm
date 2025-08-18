@@ -227,6 +227,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       {stride_tag});
   ops.impl("awq_dequantize", torch::kCUDA, &awq_dequantize);
 
+  // Quantized GEMM for RTN.
+  ops.def(
+      "rtn_marlin_gemm(Tensor a, Tensor b_q_weight,"
+      "Tensor b_scales, Tensor workspace,"
+      "SymInt size_m, SymInt size_n, SymInt size_k) -> Tensor",
+      {stride_tag});
+  ops.impl("rtn_marlin_gemm", torch::kCUDA, &rtn_marlin_gemm);
+
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
   // But since they are set back to zero once the kernel is finished we can

@@ -5,10 +5,11 @@
 import os
 from typing import Any, Callable, Optional
 
+import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
@@ -17,16 +18,17 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    marlin_make_workspace)
 
 logger = init_logger(__name__)
 """By default, use 8 bit as target precision, but it can be 
 overridden by setting the RTN_NUM_BITS envvar
 """
 NUM_BITS = os.getenv('RTN_NUM_BITS', "8")
-"""By default, use group size of 128 parameters, but it can be 
-overridden by setting the RTN_GROUP_SIZE envvar
+"""For now, the CUDA kernels only support the group size of 128 parameters
 """
-GROUP_SIZE = os.getenv('RTN_GROUP_SIZE', "128")
+GROUP_SIZE = 128
 
 
 class RTNConfig(QuantizationConfig):
@@ -147,6 +149,8 @@ class RTNLinearMethod(LinearMethodBase):
         quant_config: The RTN quantization config.
     """
 
+    workspace = None
+
     def __init__(self, quant_config: RTNConfig):
         self.quant_config = quant_config
 
@@ -192,6 +196,41 @@ class RTNLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         fix_weights(layer, "weight")
+        """ Repack weights and scales for Marlin kernels.
+        """
+        qweight = layer.weight
+        scale = layer.scale
+        device = qweight.device
+        weight_bits = self.quant_config.weight_bits
+
+        if weight_bits == 4:
+            """Unpack two 4-bit values from each byte.
+            """
+            qweight_unpacked = torch.empty(
+                (qweight.shape[0] * 2, qweight.shape[1]),
+                dtype=torch.uint8,
+                device=device)
+            for i in range(2):
+                qweight_unpacked[:, i::2] = \
+                    ((qweight << 4 * (1 - i)) >> 4).reshape(
+                        qweight.shape[0] * 2, qweight.shape[1] // 2)
+        else:
+            qweight_unpacked = qweight
+
+        qweight_repacked, scale_repacked = pack_for_marlin(
+            qweight_unpacked, scale, weight_bits)
+
+        qweight.copy_(qweight_repacked.reshape(qweight.shape))
+        scale.copy_(scale_repacked.reshape(scale.shape))
+
+        if RTNLinearMethod.workspace is None or \
+            RTNLinearMethod.workspace.numel() < layer.output_size_per_partition:
+            """Allocate a workspace buffer large enough to be sufficient for
+            the largest GEMM operation.
+            """
+            del RTNLinearMethod.workspace
+            RTNLinearMethod.workspace = marlin_make_workspace(
+                layer.output_size_per_partition, device)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -199,10 +238,12 @@ class RTNLinearMethod(LinearMethodBase):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         qweight = layer.weight
         scale = layer.scale
+        factor = 1 if self.quant_config.weight_bits == 8 else 2
 
-        weight = rtn_dequantize(qweight, scale)
-        out = F.linear(x, weight)
-        del weight
+        out = ops.rtn_marlin_gemm(x, qweight, scale, RTNLinearMethod.workspace,
+                                  x.shape[0], qweight.shape[0] * factor,
+                                  x.shape[1])
+
         if bias is not None:
             out.add_(bias)
 
@@ -452,3 +493,78 @@ def fix_weights(layer: torch.nn.Module,
         data = data.reshape(old_weight.shape[0], old_weight.shape[1] * 2, -1)
     new_weight = Parameter(data=data, requires_grad=False)
     layer.register_parameter(param_name, new_weight)
+
+
+def _get_perms():
+    perm = []
+    for i in range(32):
+        perm1 = []
+        col = i // 4
+        for block in [0, 1]:
+            for row in [
+                    2 * (i % 4), 2 * (i % 4) + 1, 2 * (i % 4 + 4),
+                    2 * (i % 4 + 4) + 1
+            ]:
+                perm1.append(16 * row + col + 8 * block)
+        for j in range(4):
+            perm.extend([p + 256 * j for p in perm1])
+
+    perm_arr = np.array(perm)
+    interleave = np.array([0, 2, 4, 6, 1, 3, 5, 7])
+    perm_arr = perm_arr.reshape((-1, 8))[:, interleave].ravel()
+    perm_tensor = torch.from_numpy(perm_arr)
+    scale_perm = []
+    for i in range(8):
+        scale_perm.extend([i + 8 * j for j in range(8)])
+    scale_perm_single = []
+    for i in range(4):
+        scale_perm_single.extend(
+            [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
+    return perm_tensor, scale_perm, scale_perm_single
+
+
+_perm, _scale_perm, _scale_perm_single = _get_perms()
+
+
+def pack_for_marlin(weight, scales, qbits):
+    n = weight.size(0)
+    k = weight.size(1)
+    groupsize = k // scales.size(1)
+
+    tile = 16
+    s = scales.t()
+    w = weight.t()
+    if groupsize != k:
+        w = w.reshape((-1, groupsize, n))
+        w = w.permute(1, 0, 2)
+        w = w.reshape((groupsize, -1))
+        s = s.reshape((1, -1))
+
+    if groupsize != k:
+        w = w.reshape((groupsize, -1, n))
+        w = w.permute(1, 0, 2)
+        w = w.reshape((k, n)).contiguous()
+        s = s.reshape((-1, len(_scale_perm)))[:, _scale_perm]
+    else:
+        s = s.reshape((-1, len(_scale_perm_single)))[:, _scale_perm_single]
+    s = s.reshape((-1, n)).contiguous()
+    w = w.reshape((k // tile, tile, n // tile, tile))
+    w = w.permute((0, 2, 1, 3))
+    w = w.reshape((k // tile, n * tile))
+    res = w
+    res = res.reshape((-1, _perm.numel()))[:, _perm].reshape(res.shape)
+    if qbits == 4:
+        q = torch.zeros((res.shape[0], res.shape[1] // 2),
+                        dtype=torch.int8,
+                        device=w.device)
+        for i in range(2):
+            q |= res[:, i::2] << 4 * i
+        q = q.reshape(-1, n).contiguous()
+    else:
+        q = res.clone()
+        q[:, 2::8] = res[:, 4::8]
+        q[:, 3::8] = res[:, 5::8]
+        q[:, 4::8] = res[:, 2::8]
+        q[:, 5::8] = res[:, 3::8]
+        q = q.reshape(-1, n).to(torch.int8).contiguous()
+    return q, s
