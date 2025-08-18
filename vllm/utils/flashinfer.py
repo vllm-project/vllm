@@ -328,4 +328,5 @@ __all__ = [
     "has_nvidia_artifactory",
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
+    "flashinfer_scaled_fp8_mm",
 ]
