@@ -91,6 +91,10 @@ class ParallelConfig:
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
     """
+    eplb_policy_type: int = 0
+    """
+    Choose the EPLB algorithm.
+    """
 
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
