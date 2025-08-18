@@ -22,6 +22,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 if TYPE_CHECKING:
+    from vllm.multimodal.inputs import NestedTensors
     from vllm.v1.worker.kv_connector_model_runner_mixin import (
         KVConnectorOutput)
 
@@ -524,7 +525,7 @@ class Sequence:
         if self.inputs["type"] == "multimodal":
             return self.inputs["mm_kwargs"]
 
-        return MultiModalKwargs({})
+        return MultiModalKwargs()
 
     @property
     def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
@@ -780,7 +781,7 @@ class SequenceGroup:
             return self.first_seq.multi_modal_data
         elif self.encoder_seq is not None:
             return self.encoder_seq.multi_modal_data
-        return MultiModalKwargs({})
+        return MultiModalKwargs()
 
     @property
     def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
@@ -793,35 +794,6 @@ class SequenceGroup:
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
-
-    def init_multi_step(self, num_steps: int) -> None:
-        self.state.num_steps = num_steps
-        self.state.current_step = 0
-
-    def init_multi_step_from_lookahead_slots(self, num_lookahead_slots: int,
-                                             num_scheduler_steps: int,
-                                             is_multi_step: bool,
-                                             enable_chunking: bool) -> None:
-
-        if not is_multi_step:
-            self.init_multi_step(num_steps=num_scheduler_steps)
-            return
-
-        # Multi-Step case
-        is_prefill = self.is_prefill()
-
-        # The asserts below reflect the expectations of the current system.
-        if is_prefill and enable_chunking:
-            assert num_lookahead_slots == num_scheduler_steps
-            self.init_multi_step(num_steps=num_lookahead_slots)
-        else:
-            is_decode: bool = not is_prefill
-            # If it is a prefill, num_lookahead_slots must be 0
-            assert num_lookahead_slots == 0 or is_decode
-            # If it is a decode, num_lookahead_slots + 1 must match
-            # the scheduler steps.
-            assert num_lookahead_slots + 1 == num_scheduler_steps or is_prefill
-            self.init_multi_step(num_steps=num_lookahead_slots + 1)
 
     def set_last_token_time(self, now: float) -> None:
         """Sets the last token time for Request level timings."""
@@ -1007,7 +979,8 @@ class SequenceGroupMetadata(
     state: Optional[SequenceGroupState] = msgspec.field(
         default_factory=lambda: SequenceGroupState())
     token_type_ids: Optional[list[int]] = None
-    multi_modal_data: Optional[MultiModalKwargs] = None
+    multi_modal_data: Optional[Union[MultiModalKwargs,
+                                     dict[str, "NestedTensors"]]] = None
     multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[list[int]] = None
@@ -1366,15 +1339,6 @@ class ExecuteModelRequest(
     last_sampled_token_ids: Optional[torch.Tensor] = None
     # Async callback
     async_callback: Optional[Callable] = None
-
-    @property
-    def is_first_multi_step(self) -> bool:
-        # TODO(will) make this be able to handle batches with variable number of
-        # steps
-        assert len(self.seq_group_metadata_list) > 0
-        first_seq_group = self.seq_group_metadata_list[0]
-        assert first_seq_group.state is not None
-        return first_seq_group.state.current_step == 0
 
     @property
     def is_last_step(self) -> bool:

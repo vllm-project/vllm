@@ -17,7 +17,7 @@ from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.flashinfer import use_trtllm_attention
@@ -183,8 +183,8 @@ class FlashInferMetadata:
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
-    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.PURE_DECODE_ONLY
+    cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     reorder_batch_threshold: ClassVar[int] = 1
 
@@ -203,7 +203,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                      self.kv_cache_spec.block_size)
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
-        self.enable_cuda_graph = self.compilation_config.full_cuda_graph
+        self.enable_cuda_graph = self.compilation_config.cudagraph_mode.\
+            decode_mode() == CUDAGraphMode.FULL
         if self.enable_cuda_graph:
             # For full cudagraph capture, one `decode_wrapper` for each batch
             # size is needed for FlashInfer.
@@ -251,7 +252,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
-            self._workspace_buffer = torch.empty(
+            self._workspace_buffer = torch.zeros(
                 FLASHINFER_WORKSPACE_BUFFER_SIZE,
                 dtype=torch.uint8,
                 device=self.device)
@@ -523,14 +524,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_kv_heads = self.kv_cache_spec.num_kv_heads
         head_dim = self.kv_cache_spec.head_size
 
+        # Check if any layer uses sinks (requires TRTLLM attention)
+        has_sinks = self.global_hyperparameters.has_sinks
+
         # currently prefill trtllm attention does not support fp8 kv cache
         prefill_use_trtllm = not cache_dtype.startswith("fp8") \
                                 and use_trtllm_attention(
                                 num_prefill_tokens, max_seq_len, cache_dtype,
-                                num_qo_heads, num_kv_heads, head_dim)
+                                num_qo_heads, num_kv_heads, head_dim, has_sinks)
         decode_use_trtllm = use_trtllm_attention(
                                 num_decode_tokens, max_seq_len, cache_dtype,
-                                num_qo_heads, num_kv_heads, head_dim)
+                                num_qo_heads, num_kv_heads, head_dim, has_sinks)
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -582,10 +586,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         m.max_query_len = 1  # decode-only
 
         return self.build(0, m)
-
-    def can_run_in_cudagraph(
-            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        return common_attn_metadata.max_query_len == 1
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:
@@ -642,9 +642,6 @@ class FlashInferImpl(AttentionImpl):
                     f"heads in the layer. Expected {num_heads}, but got "
                     f"{sinks.shape[0]}."
                 )
-            if sinks.dtype != torch.float32:
-                raise ValueError("Sinks must be of type float32, but got "
-                                 f"{sinks.dtype}.")
             self.sinks = sinks
 
     def forward(
