@@ -40,6 +40,7 @@ from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
 from vllm.config.speculative_config import SpeculativeConfig
+from vllm.config.speech_to_text_config import SpeechToTextConfig
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -3825,36 +3826,6 @@ def get_layers_from_vllm_config(
         if isinstance(forward_context[layer_name], layer_type)
     }
 
-
-@config
-@dataclass
-class SpeechToTextConfig:
-    """Configuration for speech-to-text models."""
-
-    sample_rate: float = 16_000
-    """Sample rate (Hz) to resample input audio to. Most speech models expect
-    16kHz audio input. The input audio will be automatically resampled to this
-    rate before processing."""
-
-    max_audio_clip_s: int = 30
-    """Maximum duration in seconds for a single audio clip without chunking.
-    Audio longer than this will be split into smaller chunks if
-    `allow_audio_chunking` evaluates to True, otherwise it will be rejected."""
-
-    overlap_chunk_second: int = 1
-    """Overlap duration in seconds between consecutive audio chunks when
-    splitting long audio. This helps maintain context across chunk boundaries
-    and improves transcription quality at split points."""
-
-    min_energy_split_window_size: Optional[int] = 1600
-    """Window size in samples for finding low-energy (quiet) regions to split
-    audio chunks. The algorithm looks for the quietest moment within this
-    window to minimize cutting through speech. Default 1600 samples ≈ 100ms
-    at 16kHz. If None, no chunking will be done."""
-
-    @property
-    def allow_audio_chunking(self) -> bool:
-        return self.min_energy_split_window_size is not None
 
 
 def update_config(config: DataclassInstanceT,
