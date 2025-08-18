@@ -245,8 +245,8 @@ class TestAttentionStaticQuantPatternModel(torch.nn.Module):
 @pytest.mark.parametrize("batch_size", [7, 256, 533])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize(
-    "model_name, quant_dtype",
-    [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", FP8_DTYPE)])
+    "model_name, quant_key",
+    [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", kFp8StaticTensorSym)])
 @pytest.mark.parametrize("backend", [_Backend.FLASHINFER])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
@@ -255,7 +255,7 @@ class TestAttentionStaticQuantPatternModel(torch.nn.Module):
 def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
                                  head_size: int, batch_size: int,
                                  dtype: torch.dtype, model_name: str,
-                                 quant_dtype: torch.dtype, backend: _Backend,
+                                 quant_key: QuantKey, backend: _Backend,
                                  monkeypatch, dist_init):
     """Test AttentionStaticQuantPattern fusion pass"""
 
@@ -263,12 +263,6 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
 
     device = torch.device("cuda:0")
     torch.manual_seed(42)
-
-    # The quant op to check the fusion happenes or not
-    if quant_dtype == FP8_DTYPE:
-        quant_key = kFp8StaticTensorSym
-    else:
-        raise ValueError(f"Unsupported quant_dtype: {quant_dtype}")
 
     vllm_config = VllmConfig(
         model_config=ModelConfig(

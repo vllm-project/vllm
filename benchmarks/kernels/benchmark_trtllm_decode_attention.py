@@ -162,21 +162,7 @@ def benchmark_decode(
         )
 
     baseline_mean, baseline_std = time_fn(baseline_decode)
-    if o_quant_dtype == FP8_DTYPE:
-        _, o_scale = to_float8(output_baseline)
     trtllm_mean, trtllm_std = time_fn(trtllm_decode)
-
-    # if o_quant_dtype == FP8_DTYPE:
-    #     output_trtllm = output_trtllm.to(dtype) * o_scale
-
-    # if q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP8_DTYPE:
-    #     rtol, atol = 5e-2, 7e-2
-    # else:
-    #     rtol, atol = 1e-2, 1e-2
-
-    # torch.testing.assert_close(
-    #     output_baseline, output_trtllm, atol=atol, rtol=rtol), \
-    #     f"{torch.max(torch.abs(output_baseline - output_trtllm))}"
 
     # Calculate percentage speedup (positive means TRT is faster)
     speedup_percent = (baseline_mean - trtllm_mean) / baseline_mean
