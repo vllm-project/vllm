@@ -200,10 +200,12 @@ class DeepseekV2MoE(nn.Module):
                 # See DeepseekV2DecoderLayer for more details.
                 final_hidden_states = final_hidden_states + shared_output \
                     * (1. / self.routed_scaling_factor)
+
         if self.tp_size > 1:
             final_hidden_states = (
                 self.experts.maybe_all_reduce_tensor_model_parallel(
                     final_hidden_states))
+
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 

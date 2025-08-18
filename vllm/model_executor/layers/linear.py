@@ -29,8 +29,6 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
 # yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.distributed.communication_op import (
-    tensor_model_parallel_use_symmetric_memory,)
 
 logger = init_logger(__name__)
 
