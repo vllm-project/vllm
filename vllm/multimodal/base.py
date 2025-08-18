@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Generic, NamedTuple, TypeVar
 
@@ -56,8 +56,8 @@ class MultiModalPlaceholderMap:
     @classmethod
     def from_seq_group(
         cls, seq_group: "SequenceGroupMetadata", positions: range
-    ) -> tuple[Mapping[str, NestedTensors], dict[str,
-                                                 "MultiModalPlaceholderMap"]]:
+    ) -> tuple[dict[str, NestedTensors], dict[str,
+                                              "MultiModalPlaceholderMap"]]:
         """
         Returns the multi-modal items that intersect with the portion of a
         prompt (``seq_group``) represented by ``positions``, as well as a

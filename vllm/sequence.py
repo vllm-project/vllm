@@ -978,7 +978,7 @@ class SequenceGroupMetadata(
     state: Optional[SequenceGroupState] = msgspec.field(
         default_factory=lambda: SequenceGroupState())
     token_type_ids: Optional[list[int]] = None
-    multi_modal_data: Optional[MultiModalKwargs] = None
+    multi_modal_data: Optional[Union[MultiModalKwargs, dict]] = None
     multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[list[int]] = None
