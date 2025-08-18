@@ -223,14 +223,14 @@ class InputRegistry:
         The model is identified by ``model_config``.
         """
         # Avoid circular import
-        from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+        from vllm.multimodal.cache import processor_only_cache_from_config
         from vllm.sequence import SequenceData
 
         if not model_config.is_multimodal_model:
             seq_data = SequenceData.from_prompt_token_counts((0, seq_len))
             return DummyData(seq_data=seq_data)
 
-        cache = MultiModalProcessorOnlyCache(model_config)
+        cache = processor_only_cache_from_config(model_config, mm_registry)
 
         # Encoder dummy data does not contain multi-modal data
         if is_encoder_data:

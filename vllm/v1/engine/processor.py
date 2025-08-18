@@ -409,3 +409,6 @@ class Processor:
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
+
+    def clear_cache(self) -> None:
+        self.input_preprocessor.clear_cache()

@@ -317,6 +317,7 @@ def processor_cache_from_config(
     vllm_config: "VllmConfig",
     mm_registry: "MultiModalRegistry",
 ) -> Optional[BaseMultiModalProcessorCache]:
+    """Get the cache to use by P0."""
     model_config = vllm_config.model_config
 
     if not mm_registry.supports_multimodal_inputs(model_config):
@@ -335,29 +336,21 @@ def processor_cache_from_config(
     return MultiModalProcessorSenderCache(model_config)
 
 
+def processor_only_cache_from_config(
+    model_config: "ModelConfig",
+    mm_registry: "MultiModalRegistry",
+):
+    """As `processor_cache_from_config` but without IPC involved."""
+    if not mm_registry.supports_multimodal_inputs(model_config):
+        return None
+
+    return MultiModalProcessorOnlyCache(model_config)
+
+
 class BaseMultiModalReceiverCache(
         BaseMultiModalCache[Optional[MultiModalKwargsItem],
                             MultiModalKwargsItem]):
     """The required interface for caches on P1."""
-
-
-class MultiModalReceiverDisabledCache(BaseMultiModalReceiverCache):
-    """Return the passed items without applying any caching."""
-
-    @override
-    def get_and_update_item(
-        self,
-        mm_item: Optional[MultiModalKwargsItem],
-        mm_hash: str,
-    ) -> MultiModalKwargsItem:
-        assert mm_item is not None, ("MultiModalProcessorSenderCache should "
-                                     "not be used when caching is disabled")
-
-        return mm_item
-
-    @override
-    def clear_cache(self) -> None:
-        pass
 
 
 class MultiModalReceiverCache(BaseMultiModalReceiverCache):
@@ -400,20 +393,21 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
 def receiver_cache_from_config(
     vllm_config: "VllmConfig",
     mm_registry: "MultiModalRegistry",
-) -> BaseMultiModalReceiverCache:
+) -> Optional[BaseMultiModalReceiverCache]:
+    """Get the cache to use by P1."""
     model_config = vllm_config.model_config
 
     if not mm_registry.supports_multimodal_inputs(model_config):
-        return MultiModalReceiverDisabledCache()
+        return None
 
     mm_config = model_config.get_multimodal_config()
     if mm_config.mm_processor_cache_gb == 0:
-        return MultiModalReceiverDisabledCache()
+        return None
 
     parallel_config = vllm_config.parallel_config
     supports_ipc_cache = (parallel_config.data_parallel_size == 1
                           or parallel_config.data_parallel_external_lb)
     if not supports_ipc_cache:
-        return MultiModalReceiverDisabledCache()
+        return None
 
     return MultiModalReceiverCache(model_config)

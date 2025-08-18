@@ -363,7 +363,8 @@ class EngineCore:
             logger.warning("Resetting the multi-modal cache when requests are "
                            "in progress may lead to desynced internal caches.")
 
-        self.mm_receiver_cache.clear_cache()
+        if self.mm_receiver_cache is not None:
+            self.mm_receiver_cache.clear_cache()
 
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
@@ -430,8 +431,9 @@ class EngineCore:
             # Note on thread safety: no race condition.
             # `mm_receiver_cache` is reset at the end of LLMEngine init,
             # and will only accessed in the input processing thread afterwards.
-            request.mm_kwargs = self.mm_receiver_cache.get_and_update(
-                request.mm_kwargs, request.mm_hashes)
+            if self.mm_receiver_cache is not None:
+                request.mm_kwargs = self.mm_receiver_cache.get_and_update(
+                    request.mm_kwargs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request,
                                                self.request_block_hasher)

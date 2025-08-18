@@ -901,3 +901,7 @@ class InputPreprocessor:
             lora_request=lora_request,
             return_mm_hashes=return_mm_hashes,
         )
+
+    def clear_cache(self) -> None:
+        if self.mm_processor_cache is not None:
+            self.mm_processor_cache.clear_cache()

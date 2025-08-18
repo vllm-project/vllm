@@ -44,7 +44,7 @@ from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import (BaseMultiModalProcessorCache,
-                                   MultiModalProcessorOnlyCache)
+                                   processor_only_cache_from_config)
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem,
                                     PlaceholderRange)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
@@ -343,7 +343,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.model_config,
             self.scheduler_config,
             self.mm_registry,
-            cache=MultiModalProcessorOnlyCache(self.model_config),
+            cache=processor_only_cache_from_config(self.model_config,
+                                                   self.mm_registry),
         ) if self.supports_mm_inputs else None)
         self.reorder_batch_threshold: Optional[int] = None
 

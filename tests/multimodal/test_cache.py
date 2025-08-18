@@ -170,10 +170,17 @@ def _compare_caches(
                 )
             ]
 
-        cache_0_p1_out = cache_0_p1.get_and_update(cache_0_p0_out,
-                                                   selected_hashes)
-        cache_1_p1_out = cache_1_p1.get_and_update(cache_1_p0_out,
-                                                   selected_hashes)
+        if cache_0_p1 is None:
+            cache_0_p1_out = cache_0_p0_out
+        else:
+            cache_0_p1_out = cache_0_p1.get_and_update(cache_0_p0_out,
+                                                       selected_hashes)
+
+        if cache_1_p1 is None:
+            cache_1_p1_out = cache_1_p0_out
+        else:
+            cache_1_p1_out = cache_1_p1.get_and_update(cache_1_p0_out,
+                                                       selected_hashes)
 
         assert cache_0_p1_out == cache_1_p1_out, f"Failed at {it=}"
 

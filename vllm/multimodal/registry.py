@@ -12,7 +12,8 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                cached_tokenizer_from_config)
 from vllm.utils import ClassRegistry
 
-from .cache import BaseMultiModalProcessorCache, MultiModalProcessorOnlyCache
+from .cache import (BaseMultiModalProcessorCache,
+                    processor_only_cache_from_config)
 from .processing import BaseMultiModalProcessor, BaseProcessingInfo
 from .profiling import (BaseDummyInputsBuilder, DummyDecoderData,
                         DummyEncoderData, MultiModalProfiler)
@@ -184,7 +185,7 @@ class MultiModalRegistry:
         Get the maximum number of tokens from each modality
         for profiling the memory usage of a model.
         """
-        cache = MultiModalProcessorOnlyCache(model_config)
+        cache = processor_only_cache_from_config(model_config, self)
         mm_limits = self.get_mm_limits_per_prompt(model_config, cache=cache)
         max_tokens_per_item = self.get_max_tokens_per_item_by_modality(
             model_config,
