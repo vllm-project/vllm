@@ -6,6 +6,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
+from vllm.v1.worker.gpu_input_prep import compute_slot_mapping
 
 logger = init_logger(__name__)
 
@@ -81,29 +82,29 @@ class BlockTable:
 
         self.block_table_np[[src, tgt]] = self.block_table_np[[tgt, src]]
 
-    def compute_slot_mapping(self, req_indices: np.ndarray,
-                             positions: np.ndarray) -> None:
-        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
-        # where K is the max_num_blocks_per_req and the block size is 2.
-        # NOTE(woosuk): We can't simply use `token_indices // block_size`
-        # here because M (max_model_len) is not necessarily divisible by
-        # block_size.
-        block_table_indices = (req_indices * self.max_num_blocks_per_req +
-                               positions // self.block_size)
-        block_numbers = self.block_table_np.ravel()[block_table_indices]
-        block_offsets = positions % self.block_size
-        np.add(block_numbers * self.block_size,
-               block_offsets,
-               out=self.slot_mapping_np[:req_indices.shape[0]])
+    def compute_slot_mapping(
+        self,
+        num_reqs: int,
+        query_start_loc: np.ndarray,
+        positions: np.ndarray,
+    ) -> None:
+        compute_slot_mapping(
+            positions,
+            query_start_loc,
+            self.block_table_np[:num_reqs],
+            self.block_size,
+            self.slot_mapping_np,
+        )
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table[:num_reqs].copy_(self.block_table_cpu[:num_reqs],
                                           non_blocking=True)
 
-    def commit_slot_mapping(self, num_tokens: int) -> None:
-        self.slot_mapping[:num_tokens].copy_(
-            self.slot_mapping_cpu[:num_tokens], non_blocking=True)
+    def commit_slot_mapping(self) -> None:
+        # NOTE(woosuk): We should copy the whole slot_mapping tensor
+        # because it may include some necessary padding. The overhead
+        # should be negligible as the tensor is small.
+        self.slot_mapping.copy_(self.slot_mapping_cpu, non_blocking=True)
 
     def clear(self) -> None:
         self.block_table.fill_(0)
@@ -152,18 +153,23 @@ class MultiGroupBlockTable:
         for block_table in self.block_tables:
             block_table.swap_row(src, tgt)
 
-    def compute_slot_mapping(self, req_indices: np.ndarray,
-                             positions: np.ndarray) -> None:
+    def compute_slot_mapping(
+        self,
+        num_reqs: int,
+        query_start_loc: np.ndarray,
+        positions: np.ndarray,
+    ) -> None:
         for block_table in self.block_tables:
-            block_table.compute_slot_mapping(req_indices, positions)
+            block_table.compute_slot_mapping(num_reqs, query_start_loc,
+                                             positions)
 
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:
             block_table.commit_block_table(num_reqs)
 
-    def commit_slot_mapping(self, num_tokens: int) -> None:
+    def commit_slot_mapping(self) -> None:
         for block_table in self.block_tables:
-            block_table.commit_slot_mapping(num_tokens)
+            block_table.commit_slot_mapping()
 
     def clear(self) -> None:
         for block_table in self.block_tables:
