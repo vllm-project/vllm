@@ -29,11 +29,12 @@ from typing_extensions import Self, assert_never, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
-from vllm.config.cache import (BlockSize, CacheConfig, CacheDType,
+from vllm.config.cache import (BlockSize, CacheConfig, CacheDType, MambaDType,
                                PrefixCachingHashAlgo)
 from vllm.config.compilation import (CompilationConfig, CompilationLevel,
-                                     PassConfig)
+                                     CUDAGraphMode, PassConfig)
 from vllm.config.parallel import DistributedExecutorBackend, ParallelConfig
+from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -47,14 +48,8 @@ from vllm.transformers_utils.config import (
     try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
-# yapf conflicts with isort for this block
-# yapf: disable
-from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
-                        MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
-                        POOLING_MODEL_MAX_NUM_BATCHED_TOKENS, LayerBlockType,
+from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS, LayerBlockType,
                         LazyLoader, common_broadcastable_dtype, random_uuid)
-
-# yapf: enable
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -67,6 +62,7 @@ if TYPE_CHECKING:
         QuantizationConfig)
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.sample.logits_processor import LogitsProcessor
 
     HfOverrides = Union[dict, Callable[[type], type]]
 else:
@@ -77,6 +73,7 @@ else:
     BaseModelLoader = Any
     LoadFormats = Any
     TensorizerConfig = Any
+    LogitsProcessor = Any
     HfOverrides = Union[dict[str, Any], Callable[[type], type]]
 
     me_quant = LazyLoader("model_executor", globals(),
@@ -403,6 +400,10 @@ class ModelConfig:
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string. Defaults to False."""
+    skip_mm_profiling: bool = False
+    """When enabled, skips multimodal memory profiling and only profiles with
+    language backbone model during engine initialization.
+    """
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Additional args passed to process media inputs, keyed by modalities.
     For example, to set num_frames for video, set
@@ -476,6 +477,9 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
+    """One or more logits processors' fully-qualified class names or class
+    definitions"""
 
     def compute_hash(self) -> str:
         """
@@ -852,7 +856,8 @@ class ModelConfig:
                 media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 mm_processor_cache_gb=self.mm_processor_cache_gb,
-                interleave_mm_strings=self.interleave_mm_strings)
+                interleave_mm_strings=self.interleave_mm_strings,
+                skip_mm_profiling=self.skip_mm_profiling)
 
         return None
 
@@ -1179,8 +1184,18 @@ class ModelConfig:
                     "non-quantized models.", self.quantization)
 
     def _verify_cuda_graph(self) -> None:
+        # The `max_seq_len_to_capture` was incorrectly
+        # based on the encoder's input length (448)
+        # but not the decoder's larger input length (1500).
+        # This change ensures the CUDA Graph captures the correct,
+        # larger sequence length, allowing it to work as intended.
+        effective_max_seq_len = self.max_model_len
+        if self.is_encoder_decoder:
+            effective_max_seq_len = max(
+                effective_max_seq_len,
+                getattr(self.hf_config, "max_source_positions", 0))
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
-                                          self.max_model_len)
+                                          effective_max_seq_len)
         # CUDAGraph capture not supported for enc-dec models and mllama on ROCm
         ROCM_UNSUPPORTED_MODELS = ['mllama']
         unsupported_rocm = (self.hf_config.model_type
@@ -1828,313 +1843,6 @@ class LoadConfig:
                 self.ignore_patterns)
         else:
             self.ignore_patterns = ["original/**/*"]
-
-
-PreemptionMode = Literal["swap", "recompute"]
-SchedulerPolicy = Literal["fcfs", "priority"]
-
-
-@config
-@dataclass
-class SchedulerConfig:
-    """Scheduler configuration."""
-
-    runner_type: RunnerType = "generate"
-    """The runner type to launch for the model."""
-
-    max_num_batched_tokens: SkipValidation[int] = None  # type: ignore
-    """Maximum number of tokens to be processed in a single iteration.
-
-    This config has no static default. If left unspecified by the user, it will
-    be set in `EngineArgs.create_engine_config` based on the usage context."""
-
-    max_num_seqs: SkipValidation[int] = None  # type: ignore
-    """Maximum number of sequences to be processed in a single iteration.
-
-    This config has no static default. If left unspecified by the user, it will
-    be set in `EngineArgs.create_engine_config` based on the usage context."""
-
-    max_model_len: SkipValidation[int] = None  # type: ignore
-    """Maximum length of a sequence (including prompt and generated text). This
-    is primarily set in `ModelConfig` and that value should be manually
-    duplicated here."""
-
-    max_num_partial_prefills: int = 1
-    """For chunked prefill, the maximum number of sequences that can be
-    partially prefilled concurrently."""
-
-    max_long_partial_prefills: int = 1
-    """For chunked prefill, the maximum number of prompts longer than
-    long_prefill_token_threshold that will be prefilled concurrently. Setting
-    this less than max_num_partial_prefills will allow shorter prompts to jump
-    the queue in front of longer prompts in some cases, improving latency."""
-
-    long_prefill_token_threshold: int = 0
-    """For chunked prefill, a request is considered long if the prompt is
-    longer than this number of tokens."""
-
-    num_lookahead_slots: int = 0
-    """The number of slots to allocate per sequence per
-    step, beyond the known token ids. This is used in speculative
-    decoding to store KV activations of tokens which may or may not be
-    accepted.
-
-    NOTE: This will be replaced by speculative config in the future; it is
-    present to enable correctness tests until then."""
-
-    cuda_graph_sizes: list[int] = field(default_factory=list)
-    """Cuda graph capture sizes
-    1. if none provided, then default set to [min(max_num_seqs * 2, 512)]
-    2. if one value is provided, then the capture list would follow the
-    pattern: [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
-    3. more than one value (e.g. 1 2 128) is provided, then the capture list
-    will follow the provided list."""
-
-    delay_factor: float = 0.0
-    """Apply a delay (of delay factor multiplied by previous
-    prompt latency) before scheduling next prompt."""
-
-    enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
-    """If True, prefill requests can be chunked based
-    on the remaining max_num_batched_tokens."""
-
-    is_multimodal_model: bool = False
-    """True if the model is multimodal."""
-
-    # TODO (ywang96): Make this configurable.
-    max_num_encoder_input_tokens: int = field(init=False)
-    """Multimodal encoder compute budget, only used in V1.
-
-    NOTE: This is not currently configurable. It will be overridden by
-    max_num_batched_tokens in case max multimodal embedding size is larger."""
-
-    # TODO (ywang96): Make this configurable.
-    encoder_cache_size: int = field(init=False)
-    """Multimodal encoder cache size, only used in V1.
-
-    NOTE: This is not currently configurable. It will be overridden by
-    max_num_batched_tokens in case max multimodal embedding size is larger."""
-
-    preemption_mode: Optional[PreemptionMode] = None
-    """Whether to perform preemption by swapping or
-    recomputation. If not specified, we determine the mode as follows:
-    We use recomputation by default since it incurs lower overhead than
-    swapping. However, when the sequence group has multiple sequences
-    (e.g., beam search), recomputation is not currently supported. In
-    such a case, we use swapping instead."""
-
-    num_scheduler_steps: int = 1
-    """Maximum number of forward steps per scheduler call."""
-
-    multi_step_stream_outputs: bool = True
-    """If False, then multi-step will stream outputs at the end of all steps"""
-
-    send_delta_data: bool = False
-    """Private API. If used, scheduler sends delta data to
-    workers instead of an entire data. It should be enabled only
-    when SPMD worker architecture is enabled. I.e.,
-    VLLM_USE_RAY_SPMD_WORKER=1"""
-
-    policy: SchedulerPolicy = "fcfs"
-    """The scheduling policy to use:\n
-    - "fcfs" means first come first served, i.e. requests are handled in order
-    of arrival.\n
-    - "priority" means requests are handled based on given priority (lower
-    value means earlier handling) and time of arrival deciding any ties)."""
-
-    chunked_prefill_enabled: bool = field(init=False)
-    """True if chunked prefill is enabled."""
-
-    disable_chunked_mm_input: bool = False
-    """If set to true and chunked prefill is enabled, we do not want to
-    partially schedule a multimodal item. Only used in V1
-    This ensures that if a request has a mixed prompt
-    (like text tokens TTTT followed by image tokens IIIIIIIIII) where only
-    some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
-    it will be scheduled as TTTT in one step and IIIIIIIIII in the next."""
-
-    # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
-    # or "mod.custom_class".
-    scheduler_cls: Union[str, type[object]] = "vllm.core.scheduler.Scheduler"
-    """The scheduler class to use. "vllm.core.scheduler.Scheduler" is the
-    default scheduler. Can be a class directly or the path to a class of form
-    "mod.custom_class"."""
-
-    disable_hybrid_kv_cache_manager: bool = False
-    """If set to True, KV cache manager will allocate the same size of KV cache
-    for all attention layers even if there are multiple type of attention layers
-    like full attention and sliding window attention.
-    """
-
-    async_scheduling: bool = False
-    """EXPERIMENTAL: If set to True, perform async scheduling. This may help
-    reduce the CPU overheads, leading to better latency and throughput. However,
-    async scheduling is currently not supported with some features such as
-    structured outputs, speculative decoding, and pipeline parallelism.
-    """
-
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
-        return hash_str
-
-    def __post_init__(self) -> None:
-        if self.max_model_len is None:
-            self.max_model_len = 8192
-
-        if self.max_num_seqs is None:
-            self.max_num_seqs = 128
-
-        if self.max_num_batched_tokens is None:
-            if self.enable_chunked_prefill:
-                if self.num_scheduler_steps > 1:
-                    # Multi-step Chunked-Prefill doesn't allow prompt-chunking
-                    # for now. Have max_num_batched_tokens set to max_model_len
-                    # so we don't reject sequences on account of a short
-                    # max_num_batched_tokens.
-                    self.max_num_batched_tokens = max(
-                        self.max_model_len, DEFAULT_MAX_NUM_BATCHED_TOKENS)
-                else:
-                    self.max_num_batched_tokens = (
-                        DEFAULT_MAX_NUM_BATCHED_TOKENS)
-            else:
-                # If max_model_len is too short, use
-                # DEFAULT_MAX_NUM_BATCHED_TOKENS as the default value
-                # for higher throughput.
-                self.max_num_batched_tokens = max(
-                    self.max_model_len, DEFAULT_MAX_NUM_BATCHED_TOKENS)
-
-            if self.runner_type == "pooling":
-                # Choose specific value for higher throughput
-                self.max_num_batched_tokens = max(
-                    self.max_num_batched_tokens,
-                    POOLING_MODEL_MAX_NUM_BATCHED_TOKENS,
-                )
-            if self.is_multimodal_model:
-                # The value needs to be at least the number of multimodal tokens
-                self.max_num_batched_tokens = max(
-                    self.max_num_batched_tokens,
-                    MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
-                )
-
-            # When using default settings,
-            # Ensure max_num_batched_tokens does not exceed model limit.
-            # Some models (e.g., Whisper) have embeddings tied to max length.
-            self.max_num_batched_tokens = min(
-                self.max_num_seqs * self.max_model_len,
-                self.max_num_batched_tokens)
-
-        self.max_num_encoder_input_tokens = self.max_num_batched_tokens
-        self.encoder_cache_size = self.max_num_batched_tokens
-
-        if self.enable_chunked_prefill:
-            logger.info(
-                "Chunked prefill is enabled with max_num_batched_tokens=%d.",
-                self.max_num_batched_tokens)
-
-        self.chunked_prefill_enabled = self.enable_chunked_prefill
-        if self.max_num_partial_prefills > 1:
-            if self.long_prefill_token_threshold == 0:
-                self.long_prefill_token_threshold = int(self.max_model_len *
-                                                        0.04)
-
-            logger.info(
-                "Concurrent partial prefills enabled with "
-                "max_num_partial_prefills=%d, max_long_partial_prefills=%d, "
-                "long_prefill_token_threshold=%d",
-                self.max_num_partial_prefills, self.max_long_partial_prefills,
-                self.long_prefill_token_threshold)
-
-        # NOTE: Default set cuda_graph_sizes to [min(max_num_seqs * 2, 512)].
-        # This avoids OOM in tight memory scenarios with small max_num_seqs,
-        # and prevents capture of many large graphs (>512) that would greatly
-        # increase startup time with limited performance benefit.
-        if not self.cuda_graph_sizes:
-            self.cuda_graph_sizes = [min(self.max_num_seqs * 2, 512)]
-
-        if self.async_scheduling:
-            self.scheduler_cls = (
-                "vllm.v1.core.sched.async_scheduler.AsyncScheduler")
-
-    @model_validator(mode='after')
-    def _verify_args(self) -> Self:
-        if (self.max_num_batched_tokens < self.max_model_len
-                and not self.chunked_prefill_enabled):
-            raise ValueError(
-                f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
-                f"smaller than max_model_len ({self.max_model_len}). "
-                "This effectively limits the maximum sequence length to "
-                "max_num_batched_tokens and makes vLLM reject longer "
-                "sequences. Please increase max_num_batched_tokens or "
-                "decrease max_model_len.")
-
-        if self.max_num_batched_tokens < self.max_num_seqs:
-            raise ValueError(
-                f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
-                "be greater than or equal to max_num_seqs "
-                f"({self.max_num_seqs}).")
-
-        if self.max_num_batched_tokens > self.max_num_seqs * self.max_model_len:
-            logger.warning(
-                "max_num_batched_tokens (%d) exceeds max_num_seqs "
-                "* max_model_len (%d). This may lead to unexpected behavior.",
-                self.max_num_batched_tokens,
-                self.max_num_seqs * self.max_model_len)
-
-        if self.num_lookahead_slots < 0:
-            raise ValueError(
-                "num_lookahead_slots "
-                f"({self.num_lookahead_slots}) must be greater than or "
-                "equal to 0.")
-
-        if self.num_scheduler_steps < 1:
-            raise ValueError(
-                "num_scheduler_steps "
-                f"({self.num_scheduler_steps}) must be greater than or "
-                "equal to 1.")
-
-        if self.max_num_partial_prefills < 1:
-            raise ValueError(
-                f"max_num_partial_prefills ({self.max_num_partial_prefills}) "
-                "must be greater than or equal to 1.")
-        elif self.max_num_partial_prefills > 1:
-            if not self.chunked_prefill_enabled:
-                raise ValueError("Chunked prefill must be enabled to set "
-                                 "max_num_partial_prefills > 1.")
-
-            if self.long_prefill_token_threshold > self.max_model_len:
-                raise ValueError(
-                    "long_prefill_token_threshold "
-                    f"({self.long_prefill_token_threshold}) cannot be greater "
-                    f"than the max_model_len ({self.max_model_len}).")
-
-        if (self.max_long_partial_prefills
-                < 1) or (self.max_long_partial_prefills
-                         > self.max_num_partial_prefills):
-            raise ValueError(
-                f"max_long_partial_prefills ({self.max_long_partial_prefills}) "
-                "must be greater than or equal to 1 and less than or equal to "
-                f"max_num_partial_prefills ({self.max_num_partial_prefills}).")
-
-        return self
-
-    @property
-    def is_multi_step(self) -> bool:
-        return self.num_scheduler_steps > 1
 
 
 Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu"]
@@ -2823,6 +2531,16 @@ class MultiModalConfig:
     Enable fully interleaved support for multimodal prompts.
     """
 
+    skip_mm_profiling: bool = False
+    """
+    When enabled, skips multimodal memory profiling and only profiles with 
+    language backbone model during engine initialization.
+
+    This reduces engine startup time but shifts the responsibility to users for
+    estimating the peak memory usage of the activation of multimodal encoder and
+    embedding cache.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2908,6 +2626,25 @@ class PoolerConfig:
     A list of indices for the vocabulary dimensions to be extracted,
     such as the token IDs of ``good_token`` and ``bad_token`` in the
     ``math-shepherd-mistral-7b-prm`` model.
+    """
+
+    enable_chunked_processing: Optional[bool] = None
+    """
+    Whether to enable chunked processing for long inputs that exceed the model's
+    maximum position embeddings. When enabled, long inputs will be split into
+    chunks, processed separately, and then aggregated using weighted averaging.
+    This allows embedding models to handle arbitrarily long text without CUDA
+    errors. Defaults to False.
+    """
+
+    max_embed_len: Optional[int] = None
+    """
+    Maximum input length allowed for embedding generation. When set, allows 
+    inputs longer than max_embed_len to be accepted for embedding models.
+    This parameter enables accepting long inputs without requiring 
+    VLLM_ALLOW_LONG_MAX_MODEL_LEN environment variable. When an input exceeds
+    max_embed_len, it will be handled according to the original max_model_len
+    validation logic. Defaults to None (i.e. set to max_model_len).
     """
 
     def compute_hash(self) -> str:
@@ -3807,6 +3544,7 @@ class VllmConfig:
                 else:
                     self.compilation_config.level = \
                             CompilationLevel.NO_COMPILATION
+
             else:
                 # NB: Passing both --enforce-eager and a compilation level
                 # in V0 means the compilation level wins out.
@@ -3819,14 +3557,29 @@ class VllmConfig:
                 True
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
-        if envs.VLLM_USE_V1 and self.model_config is not None and \
-            not self.model_config.enforce_eager:
-            # By default, V1 uses piecewise CUDA graphs. If full_cuda_graph
-            # is set to True, full CUDA graphs will be used.
-            self.compilation_config.cudagraph_num_of_warmups = 1
-            self.compilation_config.set_splitting_ops_for_v1()
 
-        self._set_cudagraph_sizes()
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+            # if cudagraph_mode is not explicitly set by users, set default
+            # value
+            if self.compilation_config.cudagraph_mode is None:
+                if envs.VLLM_USE_V1 and self.compilation_config.level \
+                    == CompilationLevel.PIECEWISE:
+                    self.compilation_config.cudagraph_mode = \
+                        CUDAGraphMode.PIECEWISE
+                else:
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+            # disable cudagraph when enforce eager execution
+            if self.model_config is not None and \
+                    self.model_config.enforce_eager:
+                logger.info("Cudagraph is disabled under eager mode")
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            elif envs.VLLM_USE_V1:
+                self.compilation_config.cudagraph_num_of_warmups = 1
+
+            self._set_cudagraph_sizes()
+        else:
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if self.cache_config.cpu_offload_gb > 0 and \
             self.compilation_config.level != CompilationLevel.NO_COMPILATION \
@@ -3843,12 +3596,6 @@ class VllmConfig:
                 "LoRA for V0 is not supported with `torch.compile` yet. "
                 "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
-
-        if self.compilation_config.full_cuda_graph and \
-            not self.model_config.disable_cascade_attn:
-            logger.info("full_cuda_graph is not supported with "
-                        "cascade attention. Disabling cascade attention.")
-            self.model_config.disable_cascade_attn = True
 
         disable_chunked_prefill_reasons: list[str] = []
 
@@ -3868,9 +3615,6 @@ class VllmConfig:
                 logger.info(reason)
             self.scheduler_config.chunked_prefill_enabled = False
             self.scheduler_config.long_prefill_token_threshold = 0
-            self.scheduler_config.max_num_batched_tokens = max(
-                self.scheduler_config.max_model_len,
-                DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False
@@ -3890,8 +3634,31 @@ class VllmConfig:
                            "to True to enable.")
         current_platform.check_and_update_config(self)
 
+        # final check of cudagraph mode after platform-specific update
+        if envs.VLLM_USE_V1 and current_platform.is_cuda_alike():
+            if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL \
+                and self.model_config is not None and \
+                not self.model_config.disable_cascade_attn:
+                logger.info("CUDAGraphMode.FULL is not supported with "
+                            "cascade attention currently. Disabling cascade"
+                            "attention.")
+                self.model_config.disable_cascade_attn = True
+
+            if self.compilation_config.cudagraph_mode\
+                .requires_piecewise_compilation():
+                assert self.compilation_config.level == \
+                    CompilationLevel.PIECEWISE, \
+                    "Compilation level should be CompilationLevel.PIECEWISE "\
+                    "when cudagraph_mode piecewise cudagraphs is used, "\
+                    f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
+
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
+
+        # Do this after all the updates to compilation_config.level
+        if envs.VLLM_USE_V1 and \
+            self.compilation_config.level == CompilationLevel.PIECEWISE:
+            self.compilation_config.set_splitting_ops_for_v1()
 
         if (envs.VLLM_USE_V1
                 and not self.scheduler_config.disable_hybrid_kv_cache_manager):
@@ -4091,8 +3858,6 @@ class VllmConfig:
             f"observability_config={self.observability_config!r}, "
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "
-            f"num_scheduler_steps={self.scheduler_config.num_scheduler_steps}, "
-            f"multi_step_stream_outputs={self.scheduler_config.multi_step_stream_outputs}, "  # noqa
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "

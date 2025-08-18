@@ -60,7 +60,8 @@ MAIN_CUDA_VERSION = "12.8"
 
 
 def is_sccache_available() -> bool:
-    return which("sccache") is not None
+    return which("sccache") is not None and \
+        not bool(int(os.getenv("VLLM_DISABLE_SCCACHE", "0")))
 
 
 def is_ccache_available() -> bool:
@@ -684,7 +685,7 @@ setup(
                   "mistral_common[audio]"],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         # FlashInfer should be updated together with the Dockerfile
-        "flashinfer": ["flashinfer-python==0.2.10"],
+        "flashinfer": ["flashinfer-python==0.2.11"],
     },
     cmdclass=cmdclass,
     package_data=package_data,

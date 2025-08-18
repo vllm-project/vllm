@@ -57,6 +57,13 @@ V1_SUPPORTED_MODELS = [
 # Avoid OOM
 MAX_NUM_SEQS = 4
 
+# Once we add support for FCG in Mamba1, this list will be removed and tests
+# all test cases will use enforce_eager=False
+ENFORCE_EAGER_MODELS_V1 = [
+    "state-spaces/mamba-130m-hf",
+    "ai21labs/Jamba-tiny-dev",
+]
+
 
 @pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
@@ -94,13 +101,19 @@ def test_models(
             example_prompts, max_tokens, num_logprobs)
 
     if model in V1_SUPPORTED_MODELS:
+        enforce_eager = False
         with monkeypatch.context() as m:
             m.setenv("VLLM_USE_V1", "1")
             if model in HYBRID_MODELS:
                 # required due to reorder_batch behaviour
                 m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
+
+            if model in ENFORCE_EAGER_MODELS_V1:
+                enforce_eager = True
+
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
+                             enforce_eager=enforce_eager,
                              enable_prefix_caching=False) as vllm_model:
                 vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                     example_prompts, max_tokens, num_logprobs)
@@ -331,32 +344,6 @@ def test_state_cleanup(
                     "could be related to finished_requests_ids")
 
 
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
-@pytest.mark.parametrize("max_tokens", [64])
-def test_multistep_correctness(
-    vllm_runner,
-    example_prompts,
-    model: str,
-    max_tokens: int,
-) -> None:
-    with vllm_runner(model, num_scheduler_steps=8,
-                     max_num_seqs=2) as vllm_model:
-        vllm_outputs_multistep = vllm_model.generate_greedy(
-            example_prompts, max_tokens)
-
-    with vllm_runner(model, num_scheduler_steps=1,
-                     max_num_seqs=2) as vllm_model:
-        vllm_outputs_single_step = vllm_model.generate_greedy(
-            example_prompts, max_tokens)
-
-    check_outputs_equal(
-        outputs_0_lst=vllm_outputs_multistep,
-        outputs_1_lst=vllm_outputs_single_step,
-        name_0="vllm_outputs_multistep",
-        name_1="vllm_outputs_single_step",
-    )
-
-
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
@@ -425,6 +412,68 @@ def test_full_cuda_graph(
         with vllm_runner(model,
                          max_num_seqs=MAX_NUM_SEQS,
                          compilation_config={'full_cuda_graph': True},
+                         enable_prefix_caching=False) as vllm_model:
+            vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens, num_logprobs)
+
+    if hf_outputs is not None:
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=vllm_v0_outputs,
+            name_0="hf",
+            name_1="vllm-v0",
+        )
+
+    ref_outputs = hf_outputs if hf_outputs is not None else vllm_v0_outputs
+    check_logprobs_close(
+        outputs_0_lst=ref_outputs,
+        outputs_1_lst=vllm_v1_outputs,
+        name_0="hf" if hf_outputs is not None else "vllm-v0",
+        name_1="vllm-v1",
+    )
+
+
+@pytest.mark.parametrize("model", ["Zyphra/Zamba2-1.2B-instruct"])
+@pytest.mark.parametrize("max_tokens", [64])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_fp32_state(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    monkeypatch,
+    model: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
+
+    try:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+        model_info.check_available_online(on_fail="skip")
+        model_info.check_transformers_version(on_fail="skip")
+    except ValueError:
+        pass
+
+    with hf_runner(model) as hf_model:
+        if model not in HF_UNSUPPORTED_MODELS:
+            hf_outputs = hf_model.generate_greedy_logprobs_limit(
+                example_prompts, max_tokens, num_logprobs)
+        else:
+            hf_outputs = None
+
+    with vllm_runner(model,
+                     max_num_seqs=MAX_NUM_SEQS,
+                     mamba_ssm_cache_dtype="float32") as vllm_model:
+        vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        if model in HYBRID_MODELS:
+            # required due to reorder_batch behaviour
+            m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
+        with vllm_runner(model,
+                         max_num_seqs=MAX_NUM_SEQS,
+                         mamba_ssm_cache_dtype="float32",
                          enable_prefix_caching=False) as vllm_model:
             vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, num_logprobs)
