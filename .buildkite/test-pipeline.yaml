@@ -31,16 +31,6 @@
 steps:
 ##### fast check tests  #####
 
-- label: Documentation Build # 2min
-  mirror_hardwares: [amdexperimental]
-  working_dir: "/vllm-workspace/test_docs"
-  fast_check: true
-  no_gpu: True
-  commands:
-  - pip install -r ../requirements/docs.txt
-  # TODO: add `--strict` once warnings in docstrings are fixed
-  - mkdocs build
-
 - label: Pytorch Nightly Dependency Override Check # 2min
   # if this test fails, it means the nightly torch version is not compatible with some
   # of the dependencies. Please check the error message and add the package to whitelist
@@ -263,6 +253,7 @@ steps:
     - pytest -v -s v1/engine
     - pytest -v -s v1/entrypoints
     - pytest -v -s v1/sample
+    - pytest -v -s v1/logits_processors
     - pytest -v -s v1/worker
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/spec_decode
@@ -409,6 +400,7 @@ steps:
 - label: Kernels MoE Test %N
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
+  - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/

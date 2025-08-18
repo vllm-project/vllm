@@ -58,8 +58,7 @@ class TritonAttentionMetadata:
 
 class TritonAttentionMetadataBuilder(
         AttentionMetadataBuilder[TritonAttentionMetadata]):
-    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.ALWAYS
+    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -131,11 +130,6 @@ class TritonAttentionMetadataBuilder(
             prefix_scheduler_metadata=prefix_scheduler_metadata,
         )
         return attn_metadata
-
-    def can_run_in_cudagraph(
-            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        # Full CUDA Graph always supported
-        return True
 
 
 class TritonAttentionBackend(AttentionBackend):
