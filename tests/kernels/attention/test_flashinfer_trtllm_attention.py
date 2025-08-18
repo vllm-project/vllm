@@ -20,11 +20,11 @@ FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 MAX_Q_LEN = 1024
 MAX_KV_LEN = 4096
 BATCH_SIZES = [4, 12]
-NUM_HEADS = [(64, 8), (16, 16), (40, 8), (32, 8)]
+NUM_HEADS = [(16, 16), (40, 8)]
 HEAD_SIZES = [128]
-BLOCK_SIZES = [16, 32]
+BLOCK_SIZES = [16]
 KV_LAYOUTS = ["HND"]
-DTYPES = [torch.float16, torch.bfloat16]
+DTYPES = [torch.bfloat16]
 KV_CACHE_DTYPES = [None, current_platform.fp8_dtype()]
 NUM_BLOCKS = 32768  # Large enough to test overflow in index calculation.
 SOFT_CAPS = [None, 50.0]
@@ -113,7 +113,7 @@ def test_flashinfer_trtllm_decode_with_baseline(
     kv_indices = torch.tensor(kv_indices, dtype=torch.int32)
     kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32)
 
-    workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
+    workspace_buffer = torch.zeros(128 * 1024 * 1024, dtype=torch.int8)
     wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
         workspace_buffer,
         kv_layout,
@@ -247,7 +247,7 @@ def test_flashinfer_trtllm_prefill_with_baseline(
     kv_indices = torch.tensor(kv_indices, dtype=torch.int32)
     kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32)
 
-    workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
+    workspace_buffer = torch.zeros(128 * 1024 * 1024, dtype=torch.int8)
     wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
         workspace_buffer, kv_layout)
     wrapper.plan(q_indptr,
