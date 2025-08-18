@@ -68,6 +68,8 @@ def parse_args():
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--custom-mm-prompts", action="store_true")
+    parser.add_argument("--no-spec-decode", action="store_true")
+    parser.add_argument("--async-scheduling", action="store_true")
     return parser.parse_args()
 
 
@@ -127,11 +129,12 @@ def main():
         enable_chunked_prefill=args.enable_chunked_prefill,
         enforce_eager=args.enforce_eager,
         gpu_memory_utilization=0.8,
-        speculative_config=speculative_config,
+        speculative_config=speculative_config if not args.no_spec_decode else None,
         disable_log_stats=False,
         max_model_len=16384,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
+        async_scheduling=args.async_scheduling,
     )
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
