@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
+from typing import Callable, Optional
 
 import pytest
 import torch
 
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes, sha256, sha256_cbor_64bit
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -16,7 +17,7 @@ from vllm.v1.core.kv_cache_utils import (
     FreeKVCacheBlockQueue, KVCacheBlock, PrefixCachingMetrics,
     estimate_max_model_len, generate_block_hash_extra_keys,
     get_kv_cache_config, get_max_concurrency_for_kv_cache_config,
-    hash_block_tokens, hash_request_tokens, init_none_hash,
+    get_request_block_hasher, hash_block_tokens, init_none_hash,
     is_kv_cache_type_uniform, unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
@@ -27,28 +28,32 @@ from vllm.v1.request import Request
 # yapf: enable
 
 
-def make_request(request_id,
-                 prompt_token_ids,
-                 mm_positions=None,
-                 mm_hashes=None,
-                 cache_salt=None):
+def make_request(
+    request_id: str,
+    prompt_token_ids: list[int],
+    block_size: int = 3,
+    hash_fn: Callable = hash,
+    mm_positions: Optional[list[PlaceholderRange]] = None,
+    mm_hashes: Optional[list[str]] = None,
+    cache_salt: Optional[str] = None,
+):
     if mm_positions is None:
-        multi_modal_inputs = None
+        mm_kwargs = None
     else:
-        multi_modal_inputs = [MultiModalKwargs({})] * len(mm_positions)
+        mm_item = MultiModalKwargsItem.dummy("dummy_m")
+        mm_kwargs = [mm_item] * len(mm_positions)
 
-    return Request(
-        request_id=request_id,
-        prompt_token_ids=prompt_token_ids,
-        multi_modal_inputs=multi_modal_inputs,
-        multi_modal_hashes=mm_hashes,
-        multi_modal_placeholders=mm_positions,
-        sampling_params=SamplingParams(max_tokens=17),
-        pooling_params=None,
-        eos_token_id=100,
-        lora_request=None,
-        cache_salt=cache_salt,
-    )
+    return Request(request_id=request_id,
+                   prompt_token_ids=prompt_token_ids,
+                   multi_modal_kwargs=mm_kwargs,
+                   multi_modal_hashes=mm_hashes,
+                   multi_modal_placeholders=mm_positions,
+                   sampling_params=SamplingParams(max_tokens=17),
+                   pooling_params=None,
+                   eos_token_id=100,
+                   lora_request=None,
+                   cache_salt=cache_salt,
+                   block_hasher=get_request_block_hasher(block_size, hash_fn))
 
 
 def new_kv_cache_spec(block_size=16,
@@ -112,9 +117,9 @@ def test_kv_cache_block():
     assert block.block_hash is None
 
     # Test reference count manipulation
-    block.incr_ref()
+    block.ref_cnt += 1
     assert block.ref_cnt == 1
-    block.decr_ref()
+    block.ref_cnt -= 1
     assert block.ref_cnt == 0
 
     # Test block hash setting and resetting
@@ -316,7 +321,7 @@ def test_free_kv_cache_block_queue_get_all_free_blocks():
 
 def test_generate_block_hash_extra_keys():
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(20)],
         mm_positions=[
             PlaceholderRange(offset=0, length=5),
@@ -348,7 +353,7 @@ def test_generate_block_hash_extra_keys():
 
 def test_generate_block_hash_extra_keys_no_mm_inputs():
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=None,
         mm_hashes=None,
@@ -361,7 +366,7 @@ def test_generate_block_hash_extra_keys_no_mm_inputs():
 
 def test_generate_block_hash_extra_keys_cache_salt():
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=None,
         mm_hashes=None,
@@ -382,7 +387,7 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # works together with other extra keys
     request_mm = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(20)],
         mm_positions=[
             PlaceholderRange(offset=0, length=5),
@@ -416,12 +421,14 @@ def test_hash_block_tokens(hash_fn):
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
-def test_hash_request_tokens(hash_fn):
+def test_request_block_hasher(hash_fn):
     import vllm.v1.core.kv_cache_utils
     init_none_hash(hash_fn)
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
+        block_size=3,
+        hash_fn=hash_fn,
         mm_positions=[
             PlaceholderRange(offset=0, length=3),
             PlaceholderRange(offset=3, length=3),
@@ -429,9 +436,7 @@ def test_hash_request_tokens(hash_fn):
         mm_hashes=["hash1", "hash2"],
     )
 
-    block_size = 3
-    block_hashes = hash_request_tokens(hash_fn, block_size, request)
-
+    block_hashes = request.block_hashes
     assert len(block_hashes) == 2
     assert isinstance(block_hashes[0], vllm.v1.core.kv_cache_utils.BlockHash)
     assert isinstance(block_hashes[1], vllm.v1.core.kv_cache_utils.BlockHash)
@@ -450,8 +455,10 @@ def test_hash_tokens_different_mm_input(hash_fn):
     init_none_hash(hash_fn)
 
     request1 = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
+        block_size=3,
+        hash_fn=hash_fn,
         mm_positions=[
             PlaceholderRange(offset=0, length=3),
             PlaceholderRange(offset=3, length=3),
@@ -459,7 +466,7 @@ def test_hash_tokens_different_mm_input(hash_fn):
         mm_hashes=["hash1", "hash2"],
     )
     request2 = make_request(
-        request_id=1,
+        request_id="1",
         prompt_token_ids=[_ for _ in range(6)],
         mm_positions=[
             PlaceholderRange(offset=0, length=3),
@@ -467,9 +474,8 @@ def test_hash_tokens_different_mm_input(hash_fn):
         ],
         mm_hashes=["hash3", "hash2"],
     )
-    block_size = 3
-    block_hashes1 = hash_request_tokens(hash_fn, block_size, request1)
-    block_hashes2 = hash_request_tokens(hash_fn, block_size, request2)
+    block_hashes1 = request1.block_hashes
+    block_hashes2 = request2.block_hashes
     assert block_hashes1[0] != block_hashes2[0]
     assert block_hashes1[1] != block_hashes2[1]
 
@@ -479,14 +485,15 @@ def test_hash_request_tokens_no_mm_inputs(hash_fn):
     init_none_hash(hash_fn)
 
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
+        block_size=3,
+        hash_fn=hash_fn,
         mm_positions=None,
         mm_hashes=None,
     )
 
-    block_size = 3
-    block_hashes = hash_request_tokens(hash_fn, block_size, request)
+    block_hashes = request.block_hashes
 
     assert len(block_hashes) == 2
     assert block_hashes[0].token_ids == (0, 1, 2)
@@ -844,8 +851,9 @@ def test_allocate_with_lookahead():
     )
 
     request = make_request(
-        request_id=0,
+        request_id="0",
         prompt_token_ids=[],
+        block_size=block_size,
         mm_positions=None,
         mm_hashes=None,
     )
