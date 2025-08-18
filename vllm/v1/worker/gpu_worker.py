@@ -19,8 +19,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               set_custom_all_reduce)
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           get_kv_transfer_group,
-                                          has_kv_transfer_group,
-                                          is_v1_kv_transfer_group)
+                                          has_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -313,11 +312,6 @@ class Worker(WorkerBase):
             return None
 
         connector = get_kv_transfer_group()
-        if not is_v1_kv_transfer_group(connector):
-            logger.warning("The KV connector is not a v1 connector. "
-                           "This method is only supported for v1 connectors.")
-            return None
-
         metadata = connector.get_handshake_metadata()
         if metadata is None:
             logger.warning(

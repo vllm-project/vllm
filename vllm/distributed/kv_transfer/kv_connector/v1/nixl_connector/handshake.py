@@ -45,7 +45,7 @@ class HandshakeStrategy(ABC):
     communication protocols.
     """
 
-    def __init__(self, nixl_wrapper, tp_rank: int, tp_size: int,
+    def __init__(self, nixl_wrapper: NixlWrapper, tp_rank: int, tp_size: int,
                  side_channel_port: int, engine_id: str):
         self.nixl_wrapper = nixl_wrapper
         self.tp_rank = tp_rank

@@ -93,18 +93,6 @@ class KVConnectorHandshakeMetadata(
             cls, core_schema.dict_schema())
 
 
-class KVConnectorTransferMetadata(
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        dict=True):
-    """
-    Wrapper for transfer handshake metadata sent between engine and utils.
-    """
-    tensor_parallel_rank: int
-    data_parallel_rank: int
-    content: Optional[dict]
-
-
 class KVConnectorMetadata(ABC):  # noqa: B024
     """
     Abstract Metadata used to communicate between the
@@ -122,10 +110,6 @@ class KVConnectorBase_V1(ABC):
         self._connector_metadata: Optional[KVConnectorMetadata] = None
         self._vllm_config = vllm_config
         self._role = role
-        # Optional handshake metadata used for connector init between
-        # workers. This is not used by default, just used for connections
-        # that need to be initialized out of band.
-        self._handshake_metadata: Optional[KVConnectorHandshakeMetadata] = None
 
     @property
     def role(self) -> KVConnectorRole:
@@ -273,6 +257,19 @@ class KVConnectorBase_V1(ABC):
         completed and the connector is cleaned up properly.
         """
         return None
+
+    def get_handshake_metadata() -> Optional[KVConnectorHandshakeMetadata]:
+        """
+        Get the KVConnector handshake metadata for this connector.
+        This metadata is used for out-of-band connector handshake
+        between P/D workers.
+
+        Returns:
+            KVConnectorHandshakeMetadata: the handshake metadata.
+            None if no handshake metadata is available.
+        """
+        return None
+
 
     # ==============================
     # Scheduler-side methods
