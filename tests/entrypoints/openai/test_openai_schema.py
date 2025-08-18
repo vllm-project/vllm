@@ -31,6 +31,8 @@ def server():
         "--trust-remote-code",
         "--limit-mm-per-prompt",
         json.dumps({"image": MAXIMUM_IMAGES}),
+        "--gpu-memory-utilization",
+        "0.5",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -40,10 +42,12 @@ def server():
 @pytest.fixture(scope="module")
 def get_schema(server):
     # avoid generating null (\x00) bytes in strings during test case generation
-    return schemathesis.openapi.from_uri(
+    schema = schemathesis.openapi.from_uri(
         f"{server.url_root}/openapi.json",
         generation_config=GenerationConfig(allow_x00=False),
     )
+    print(schema)
+    return schema
 
 
 schema = schemathesis.from_pytest_fixture("get_schema")
