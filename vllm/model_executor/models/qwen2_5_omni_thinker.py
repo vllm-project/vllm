@@ -88,6 +88,11 @@ def _qwen2_5_omni_thinker_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
     video_grid_sizes = video_grid_thw.prod(-1)
 
+    # vllm use `second_per_grid_ts` to compute multimodal rotary embedding
+    video_second_per_grid = hf_inputs.get("video_second_per_grid", None)
+    if video_second_per_grid is not None:
+        hf_inputs["second_per_grid_ts"] = video_second_per_grid
+
     return dict(
         input_audio_features=MultiModalFieldConfig.flat_from_sizes(
             "audio", audio_feature_lengths, dim=1),
