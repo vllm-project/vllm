@@ -929,7 +929,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         continue
                     attn_metadata[layer_name] = attn_metadata_i
 
-        if use_spec_decode:
+        if self.speculative_config:
             spec_decode_common_attn_metadata = common_attn_metadata
         else:
             spec_decode_common_attn_metadata = None
