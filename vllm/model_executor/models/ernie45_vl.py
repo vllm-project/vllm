@@ -849,39 +849,6 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(use_fast=True, **kwargs)
 
-    def _get_image_processor_kwargs(
-        self,
-        *,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        size: Optional[dict[str, int]] = None,
-        **kwargs: object,
-    ):
-        mm_config = self.ctx.model_config.get_multimodal_config()
-        if mm_config.mm_processor_kwargs:
-            kwargs.update(mm_config.mm_processor_kwargs)
-
-        if min_pixels is not None:
-            kwargs["min_pixels"] = min_pixels
-
-            if size is None:
-                size = {"shortest_edge": min_pixels}
-            else:
-                size["shortest_edge"] = min_pixels
-
-        if max_pixels is not None:
-            kwargs["max_pixels"] = max_pixels
-
-            if size is None:
-                size = {"longest_edge": max_pixels}
-            else:
-                size["longest_edge"] = max_pixels
-
-        if size is not None:
-            kwargs["size"] = size
-
-        return kwargs
-
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
 
