@@ -7,9 +7,9 @@ from typing import TypeVar, Union
 
 import torch
 
-from vllm.jsontree import json_map_leaves, json_reduce_leaves
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, LRUCache
+from vllm.utils.jsontree import json_map_leaves, json_reduce_leaves
 
 from .inputs import MultiModalKwargs, MultiModalKwargsItem, NestedTensors
 
@@ -46,7 +46,7 @@ class MultiModalCache:
     ) -> int:
         # MultiModalKwargs is not a subclass of dict
         if isinstance(leaf, MultiModalKwargs):
-            return cls.get_item_size(leaf.data, debug=debug)
+            return cls.get_item_size(leaf.get_data(), debug=debug)
 
         # MultiModalKwargsItem is not a subclass of dict
         if isinstance(leaf, MultiModalKwargsItem):
