@@ -72,17 +72,19 @@ class MotifMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "poly_norm":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
+            raise NotImplementedError(f"Unsupported activation: {hidden_act}. "
                              "Only poly_norm is supported for now.")
         self.act_fn = PolyNorm()
         self.intermediate_size = intermediate_size
-        self.tp_size = get_tensor_model_parallel_world_size()
+        tp_size = get_tensor_model_parallel_world_size()
+        if hidden_act == "poly_norm" and tp_size > 1:
+            raise NotImplementedError(f"Tensor parallelism for poly_norm is not supported yet. "
+                             "Support will be added in the future.")
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
         x = self.act_fn(
-            x[..., :self.intermediate_size //
-              self.tp_size]) * x[..., self.intermediate_size // self.tp_size:]
+            x[..., :self.intermediate_size]) * x[..., self.intermediate_size:]
         x, _ = self.down_proj(x)
         return x
 
