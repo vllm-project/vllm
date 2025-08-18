@@ -35,7 +35,7 @@ def check_stop(request: Request,
     if last_token_id in (sampling_params.stop_token_ids or ()):
         if reasoner is not None and not reasoner.is_reasoning_end(
                 request.all_token_ids):
-            # Reasoning it not ended yet, not to stop
+            # Reasoning is not ended yet, not to stop
             return False
 
         request.status = RequestStatus.FINISHED_STOPPED

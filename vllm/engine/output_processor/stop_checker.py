@@ -73,7 +73,7 @@ class StopChecker:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 
-        # ignore stop tokens or stop strings if still in a reasoning stage
+        # Ignore stop tokens or stop strings if still in a reasoning stage
         if self.reasoner is not None and \
             not self.reasoner.is_reasoning_end(seq.get_token_ids()):
             return
