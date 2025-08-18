@@ -122,8 +122,8 @@ class DonutLanguageForConditionalGeneration(nn.Module, SupportsV0Only):
             else:
                 if "final_logits_bias" in name:
                     continue
-                if self.config.tie_word_embeddings and "embed_tokens" in name:
-                    continue
+                # if self.config.tie_word_embeddings and "embed_tokens" in name:
+                #     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
