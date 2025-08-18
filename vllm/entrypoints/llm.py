@@ -477,6 +477,8 @@ class LLM:
         truncate_prompt_tokens = None
         if isinstance(sampling_params, SamplingParams):
             truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
+        if isinstance(sampling_params, list):
+            truncate_prompt_tokens = sampling_params[0].truncate_prompt_tokens
 
         _validate_truncation_size(model_config.max_model_len,
                                   truncate_prompt_tokens, tokenization_kwargs)
