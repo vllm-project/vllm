@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 from dataclasses import dataclass
+from importlib.util import find_spec
 from typing import ClassVar, Optional
 
 import torch
@@ -17,7 +18,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 _PARTITION_SIZE_ROCM = 256
 
-if current_platform.is_rocm():
+if current_platform.is_rocm() and find_spec("aiter"):
     import aiter
 
     from vllm.triton_utils import tl, triton
