@@ -27,7 +27,7 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-    BatchedOAITritonExperts, ep_routing_naive, triton_kernel_fused_experts,
+    BatchedOAITritonExperts, ep_routing_naive, triton_kernel_fused_experts, ep_routing_triton,
     triton_kernel_moe_forward)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
@@ -302,6 +302,7 @@ class Case:
 @pytest.mark.parametrize("num_token", [2])
 @pytest.mark.parametrize("tp, ep", [(1, 1), (2, 1), (4, 1), (8, 1), (1, 2),
                                     (1, 4), (1, 8)])
+# @pytest.mark.skip("now")
 def test_equiv(num_token, a_dtype, w_dtype, tp, ep):
     torch.cuda.manual_seed(42)
     M = num_token
@@ -377,6 +378,16 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, ep):
     )
     assert_close(ref=out_ref, tri=out_triton, maxtol=0.025, rmstol=0.005)
 
+
+# def test_routing():
+#     logits = torch.randn(2, 128, dtype=torch.bfloat16, device="cuda")
+#     topk=4
+#     routing_data, gather_idx, scatter_idx = ep_routing_naive(
+#             logits, topk, sm_first=False, ep_rank=0, ep_size=2)
+#     routing_data_1, gather_idx_1, scatter_idx_1 = ep_routing_triton(
+#             logits, topk, sm_first=False, ep_rank=0, ep_size=2)
+#     import pdb; pdb.set_trace()
+    
 
 def batched_moe(
     a: torch.Tensor,
