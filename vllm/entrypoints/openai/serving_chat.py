@@ -552,6 +552,8 @@ class OpenAIServingChat(OpenAIServing):
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).
                 if first_iteration:
+                    # some pointless changes to trigger the tests
+                    assert first_iteration
                     num_cached_tokens = res.num_cached_tokens
                     # Send first response for each request.n (index) with
                     # the role
