@@ -1432,7 +1432,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
         elif (self.allow_flashinfer
               and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS):
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                 flashinfer_cutlass_moe_fp4)
 
             out = flashinfer_cutlass_moe_fp4(
