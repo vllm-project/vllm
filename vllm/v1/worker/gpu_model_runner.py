@@ -776,21 +776,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.positions_cpu[:total_num_scheduled_tokens],
                 non_blocking=True)
 
-        self.query_start_loc[:num_reqs + 1].copy_(
-            self.query_start_loc_cpu[:num_reqs + 1], non_blocking=True)
-        self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
-                                       non_blocking=True)
-
-        # Fill unused with 0 for full cuda graph mode.
-        self.seq_lens[num_reqs:].fill_(0)
+        query_start_loc = self.query_start_loc[:num_reqs + 1]
+        query_start_loc.copy_(self.query_start_loc_cpu[:num_reqs + 1],
+                              non_blocking=True)
         # Note: pad query_start_loc to be non-decreasing, as kernels
         # like FlashAttention requires that
-        self.query_start_loc[num_reqs + 1:].fill_(
-            self.query_start_loc_cpu[num_reqs].item())
+        self.query_start_loc[num_reqs + 1:].fill_(cu_num_tokens[-1])
 
-        query_start_loc = self.query_start_loc[:num_reqs + 1]
-
-        spec_decode_common_attn_metadata = None
+        seq_lens = self.seq_lens[:num_reqs]
+        seq_lens.copy_(self.seq_lens_cpu[:num_reqs], non_blocking=True)
+        # Fill unused with 0 for full cuda graph mode.
+        self.seq_lens[num_reqs:].fill_(0)
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -860,6 +856,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         per_layer_metadata[layer_name]
                     attn_metadata[layer_name] = encoder_attn_metadata
 
+        # Used in the below loop.
+        query_start_loc_cpu = self.query_start_loc_cpu[:num_reqs + 1]
+        seq_lens_cpu = self.seq_lens_cpu[:num_reqs]
+        num_computed_tokens_cpu = (
+            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
+
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -874,12 +876,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             blk_table.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
 
             common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=self.query_start_loc[:num_reqs + 1],
-                query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
-                seq_lens=self.seq_lens[:num_reqs],
-                seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
-                num_computed_tokens_cpu=self.input_batch.
-                num_computed_tokens_cpu_tensor[:num_reqs],
+                query_start_loc=query_start_loc,
+                query_start_loc_cpu=query_start_loc_cpu,
+                seq_lens=seq_lens,
+                seq_lens_cpu=seq_lens_cpu,
+                num_computed_tokens_cpu=num_computed_tokens_cpu,
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
@@ -887,10 +888,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 slot_mapping=slot_mapping,
                 causal=True,
             )
-
-            if self.speculative_config and \
-                spec_decode_common_attn_metadata is None:
-                spec_decode_common_attn_metadata = common_attn_metadata
 
             for attn_group in self.attn_groups[kv_cache_group_id]:
                 # Prepare for cascade attention if enabled & beneficial.
@@ -933,6 +930,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         attn_metadata[layer_name] = fast_prefill_metadata
                         continue
                     attn_metadata[layer_name] = attn_metadata_i
+
+        if use_spec_decode:
+            spec_decode_common_attn_metadata = common_attn_metadata
+        else:
+            spec_decode_common_attn_metadata = None
 
         # Hot-Swap lora model
         if self.lora_config:
