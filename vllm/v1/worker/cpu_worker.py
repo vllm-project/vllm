@@ -132,7 +132,7 @@ class CPUWorker(Worker):
         """
 
         allowed_numa_nodes, logical_cpu_list = \
-            CpuPlatform.get_allowed_cpu_memory_node_list()
+            CpuPlatform.get_allowed_cpu_core_node_list()
         assert len(allowed_numa_nodes) >= self.parallel_config.world_size, (
             f"No enough allowed NUMA nodes to bind threads of "
             f"{self.parallel_config.world_size} CPUWorkers. "
