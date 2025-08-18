@@ -25,8 +25,9 @@ class KVConnHandshakeServer:
         self._setup_routes()
 
     def _get_connector_name(self) -> str:
-        return (self.vllm_config.kv_transfer_config.kv_connector
-                if self.vllm_config.kv_transfer_config else "Unknown")
+        if self.vllm_config.kv_transfer_config is None:
+            return "Unknown"
+        return self.vllm_config.kv_transfer_config.kv_connector or "Unknown"
 
     def _setup_routes(self):
 
@@ -123,6 +124,9 @@ def should_start_kv_handshake_server(vllm_config: VllmConfig) -> bool:
 
 def _get_handshake_server_config(vllm_config: VllmConfig) -> tuple[str, int]:
     """get host and port for the handshake server based on connector type."""
+    if vllm_config.kv_transfer_config is None:
+        raise RuntimeError(
+            "KV transfer config is None but tried to start handshake server")
     connector_name = vllm_config.kv_transfer_config.kv_connector
 
     if connector_name == "NixlConnector":
@@ -140,6 +144,8 @@ async def set_up_kv_handshake_server(
 
     side_channel_host, side_channel_port = _get_handshake_server_config(
         vllm_config)
+
+    assert vllm_config.kv_transfer_config is not None
     connector_name = vllm_config.kv_transfer_config.kv_connector
 
     logger.info("Starting %s handshake server on %s:%d", connector_name,
