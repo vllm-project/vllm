@@ -191,7 +191,8 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
     # Worker Side Methods
     ############################################################
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor],
+    def register_kv_caches(self,
+                           kv_caches: dict[str, torch.Tensor],
                            kv_cache_config: Optional[KVCacheConfig] = None):
         assert self.connector_worker is not None
         assert kv_cache_config is not None, (
@@ -704,17 +705,19 @@ class NixlConnectorWorker:
                 f"kv_buffer_device is {self.kv_buffer_device}")
 
         if not kv_cache_config.kv_cache_groups:
-            raise ValueError(
-                "KV cache config must contain at least one group")
+            raise ValueError("KV cache config must contain at least one group")
 
         self.device_kv_caches = kv_caches
         self.num_blocks = kv_cache_config.num_blocks
         self.dst_num_blocks[self.engine_id] = self.num_blocks
-        
+
         split_k_and_v = not (self.model_config.use_mla or self._use_pallas_v1
                              or self._use_flashinfer)
-        self.block_len = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
-        self.block_len = self.block_len // 2 if split_k_and_v else self.block_len
+        self.block_len = kv_cache_config.kv_cache_groups[
+            0].kv_cache_spec.page_size_bytes
+        if split_k_and_v:
+            assert self.block_len % 2 == 0
+            self.block_len = self.block_len // 2
         self.slot_size_bytes = self.block_len // self.block_size
 
         logger.info(
