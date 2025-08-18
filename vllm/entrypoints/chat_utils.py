@@ -1350,7 +1350,7 @@ def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):
     for msg in conversation:
         if msg['role'] == 'assistant':
             tool_calls = msg.get('tool_calls')
-            idx += len(tool_calls) if tool_calls is not None else 0 # noqa
+            idx += len(list(tool_calls)) if tool_calls is not None else 0 # noqa
     return idx
 
 def make_tool_call_id(id_type:str='random', func_name=None, idx=None):
