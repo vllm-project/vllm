@@ -98,20 +98,6 @@ class BasevLLMParameter(Parameter):
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         self._assert_and_load(loaded_weight)
 
-    def _shard_id_as_int(self, shard_id: Optional[Union[int, str]]) -> int:
-        if isinstance(shard_id, int):
-            return shard_id
-
-        if shard_id is None:
-            return 0
-
-        # if not int, assume shard_id for qkv
-        # map to int and return
-        mapping = {"q": 0, "k": 1, "v": 2}
-        assert isinstance(shard_id, str)
-        assert shard_id in mapping
-        return mapping[shard_id]
-
 
 class _ColumnvLLMParameter(BasevLLMParameter):
     """
@@ -255,6 +241,20 @@ class PerTensorScaleParameter(BasevLLMParameter):
     for each quantization config specifically, within 
     process_weights_after_loading 
     """
+
+    def __init__(self, **kwargs):
+        self.qkv_idxs = {"q": 0, "k": 1, "v": 2}
+        super().__init__(**kwargs)
+
+    def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
+        if isinstance(shard_id, int):
+            return shard_id
+
+        # if not int, assume shard_id for qkv
+        # map to int and return
+        assert isinstance(shard_id, str)
+        assert shard_id in self.qkv_idxs
+        return self.qkv_idxs[shard_id]
 
     # For row parallel layers, no sharding needed
     # load weight into parameter as is
