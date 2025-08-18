@@ -1343,8 +1343,8 @@ class OpenAIServingChat(OpenAIServing):
                     # For tool calls, log the function name and arguments
                     tool_call_descriptions = []
                     for tool_call in choice.message.tool_calls:
-                        if hasattr(tool_call.function, "name") and hasattr(
-                                tool_call.function, "arguments"):
+                        if hasattr(tool_call.function, "name") and \
+                                hasattr(tool_call.function, "arguments"): # type: ignore[attr-defined]
                             tool_call_descriptions.append(
                                 f"{tool_call.function.name}({tool_call.function.arguments})"
                             )

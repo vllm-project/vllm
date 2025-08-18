@@ -148,6 +148,8 @@ def server():  # noqa: F811
         "hermes",
         "--reasoning-parser",
         "qwen3",
+        "--gpu-memory-utilization",
+        "0.4"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -229,6 +231,8 @@ def k2_server():  # noqa: F811
         "hermes",
         "--reasoning-parser",
         "qwen3",
+        "--gpu-memory-utilization",
+        "0.4",
     ]
     # hack to test kimi_k2 tool use tool_id format.
     # avoid error in is_deepseek_mla check by setting kv_lora_rank=null
