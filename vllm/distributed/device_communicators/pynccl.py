@@ -123,18 +123,16 @@ class PyNcclCommunicator:
             f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {in_tensor.device}")
         if out_tensor is None:
-            output = torch.empty_like(in_tensor)
-        else:
-            output = out_tensor
+            out_tensor = torch.empty_like(in_tensor)
         if stream is None:
             stream = current_stream()
         self.nccl.ncclAllReduce(buffer_type(in_tensor.data_ptr()),
-                                buffer_type(output.data_ptr()),
+                                buffer_type(out_tensor.data_ptr()),
                                 in_tensor.numel(),
                                 ncclDataTypeEnum.from_torch(in_tensor.dtype),
                                 ncclRedOpTypeEnum.from_torch(op), self.comm,
                                 cudaStream_t(stream.cuda_stream))
-        return output
+        return out_tensor
 
     def all_gather(self,
                    output_tensor: torch.Tensor,
