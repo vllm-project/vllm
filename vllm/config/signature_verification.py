@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 import os
 from collections.abc import Iterable
 from dataclasses import field
@@ -103,6 +104,8 @@ class SignatureVerificationConfig:
         log_fingerprints: bool,
     ) -> None:
         """Verify using a certificate chain"""
+        if log_fingerprints:
+            logging.getLogger("model_signing").setLevel(logging.INFO)
         try:
             model_signing.verifying.Config().use_certificate_verifier(
                 certificate_chain=certificate_chain,
@@ -117,6 +120,8 @@ class SignatureVerificationConfig:
             raise ValueError(
                 "Signature verification with certificate failed "
                 "on %s", model_path) from err
+        finally:
+            logging.getLogger("model_signing").setLevel(logging.WARNING)
 
     def _verify_private_key(
         self,
