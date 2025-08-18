@@ -22,7 +22,7 @@ from openai.types.responses import (ResponseFunctionToolCall,
                                     ResponsePrompt, ResponseReasoningItem,
                                     ResponseStatus)
 # Backward compatibility for OpenAI client versions
-try:  # OpenAI >= version with ResponseTextConfig
+try:  # For older openai versions (< 1.100.0)
     from openai.types.responses import ResponseTextConfig
 except ImportError:  # Older OpenAI clients expose ResponseFormatTextConfig
     from openai.types.responses import (
