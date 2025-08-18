@@ -11,8 +11,8 @@ from vllm.multimodal.cache import (CachedMultiModalInputExchanger,
                                    MultiModalCache,
                                    MultiModalCacheItemMetadata)
 from vllm.multimodal.hasher import MultiModalHasher
-from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargs,
-                                    MultiModalKwargsItem,
+from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargsItem,
+                                    MultiModalKwargsItems,
                                     MultiModalSharedField)
 from vllm.multimodal.registry import MultiModalRegistry
 
@@ -49,12 +49,12 @@ def _dummy_item(
     ])
 
 
-def _dummy_kw(
+def _dummy_items(
     size_by_key_modality: dict[str, dict[str, int]],
     *,
     rng: Optional[np.random.RandomState] = None,
 ):
-    return MultiModalKwargs.from_items([
+    return MultiModalKwargsItems.from_seq([
         _dummy_item(modality, size_by_key, rng=rng)
         for modality, size_by_key in size_by_key_modality.items()
     ])
@@ -66,7 +66,8 @@ def _dummy_kw(
     [
         (_dummy_item("a", {"a1": 100}), 100),
         (_dummy_item("a", {"a1": 100, "a2": 110}), 210),
-        (_dummy_kw({"a": {"a1": 100, "a2": 110}, "b": {"b1": 120, "b2": 130}}), 460),  # noqa: E501
+        (_dummy_items({"a": {"a1": 100, "a2": 110}, "b": {"b1": 120, "b2": 130}}), 460),  # noqa: E501
+        (_dummy_items({"a": {"a1": 100, "a2": 110}, "b": {"b1": 120, "b2": 130}}).get_data(), 460),  # noqa: E501
     ],
 )
 # yapf: enable

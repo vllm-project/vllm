@@ -13,7 +13,9 @@ from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, LRUCache
 from vllm.utils.jsontree import json_map_leaves, json_reduce_leaves
 
-from .inputs import MultiModalKwargs, MultiModalKwargsItem, NestedTensors
+from .inputs import (MultiModalFieldElem, MultiModalKwargs,
+                     MultiModalKwargsItem, MultiModalKwargsItems,
+                     NestedTensors)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -33,8 +35,9 @@ class MultiModalCacheItemMetadata:
 
 
 MultiModalCacheValue = Union[
-    MultiModalKwargs,
+    MultiModalKwargsItems,
     MultiModalKwargsItem,
+    MultiModalKwargs,
     Mapping[str, NestedTensors],
     MultiModalCacheItemMetadata,
 ]
@@ -51,14 +54,16 @@ class MultiModalCache:
         *,
         debug: bool = False,
     ) -> int:
-        # MultiModalKwargs is not a subclass of dict
-        if isinstance(leaf, MultiModalKwargs):
-            return cls.get_item_size(leaf.data, debug=debug)
+        if isinstance(leaf, MultiModalFieldElem):
+            return cls.get_item_size(leaf.data)  # type: ignore
 
-        # MultiModalKwargsItem is not a subclass of dict
+        # These are not subclasses of dict
+        if isinstance(leaf, MultiModalKwargsItems):
+            return cls.get_item_size(leaf.data)  # type: ignore
         if isinstance(leaf, MultiModalKwargsItem):
-            leaf_data = {k: v.data for k, v in leaf.items()}
-            return cls.get_item_size(leaf_data, debug=debug)
+            return cls.get_item_size(leaf.data)  # type: ignore
+        if isinstance(leaf, MultiModalKwargs):
+            return cls.get_item_size(leaf.data)  # type: ignore
 
         # sys.getsizeof doesn't work for tensors
         if isinstance(leaf, torch.Tensor):

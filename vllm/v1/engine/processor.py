@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any, Literal, Optional, Union
 
 from vllm.config import VllmConfig
@@ -298,8 +298,7 @@ class Processor:
             pooling_params = params.clone()
 
         # Multimodal related.
-        sorted_mm_inputs: Optional[Sequence[
-            Optional[MultiModalKwargsItem]]] = None
+        sorted_mm_inputs: Optional[list[Optional[MultiModalKwargsItem]]] = None
         sorted_mm_positions: Optional[list[PlaceholderRange]] = None
         sorted_mm_hashes: Optional[list[str]] = None
         if decoder_inputs["type"] == "multimodal":
@@ -313,7 +312,7 @@ class Processor:
             sorted_mm_idxs = argsort_mm_positions(decoder_mm_positions)
 
             sorted_mm_inputs = [
-                decoder_mm_inputs.get_item(modality, idx)
+                decoder_mm_inputs[modality][idx]
                 for modality, idx in sorted_mm_idxs
             ]
             sorted_mm_positions = [
