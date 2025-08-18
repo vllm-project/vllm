@@ -387,8 +387,8 @@ class Worker(WorkerBase):
         assert isinstance(output, ModelRunnerOutput)
         return output
 
-    def get_draft_token_ids(self) -> Optional[DraftTokenIds]:
-        return self.model_runner.get_draft_token_ids()
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        return self.model_runner.take_draft_token_ids()
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:

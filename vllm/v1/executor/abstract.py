@@ -88,8 +88,8 @@ class Executor(ExecutorBase):
                                      args=(scheduler_output, ))
         return output[0]
 
-    def get_draft_token_ids(self) -> Optional[DraftTokenIds]:
-        output = self.collective_rpc("get_draft_token_ids")
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        output = self.collective_rpc("take_draft_token_ids")
         return output[0]
 
     @property

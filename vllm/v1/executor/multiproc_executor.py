@@ -191,9 +191,9 @@ class MultiprocExecutor(Executor):
                 outputs, self.output_rank)
         return self.kv_output_aggregator.aggregate(outputs, self.output_rank)
 
-    def get_draft_token_ids(self) -> Optional[DraftTokenIds]:
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
-        outputs = self.collective_rpc("get_draft_token_ids",
+        outputs = self.collective_rpc("take_draft_token_ids",
                                       unique_reply_rank=self.output_rank)
         return outputs[0]
 

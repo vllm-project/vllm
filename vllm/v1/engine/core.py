@@ -297,8 +297,8 @@ class EngineCore:
 
     def post_step(self) -> None:
         if self.use_spec_decode:
-            # Get the draft token ids.
-            draft_token_ids = self.model_executor.get_draft_token_ids()
+            # Take the draft token ids.
+            draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
 
