@@ -2656,7 +2656,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # can reuse the memory pool allocated for the large shapes.
         gc_collect = (
             not specific_token_num) if specific_token_num is not None else True
-        set_cudagraph_capturing_enabled(True)
+        set_cudagraph_capturing_enabled(
+            True) if not specific_token_num else None
         with freeze_gc(gc_collect), graph_capture(device=self.device):
             cudagraph_mode = self.compilation_config.cudagraph_mode
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
@@ -2680,8 +2681,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     x for x in self.cudagraph_batch_sizes if
                     x <= max_num_tokens and x >= self.uniform_decode_query_len
                 ]
-                compilation_cases_decode = list(
-                    reversed(decode_cudagraph_batch_sizes))
+                compilation_cases_decode = [specific_token_num] if (
+                    specific_token_num and specific_token_num <= max_num_tokens
+                    and specific_token_num >= self.uniform_decode_query_len
+                ) else list(reversed(decode_cudagraph_batch_sizes))
                 self._capture_cudagraphs(
                     compilation_cases=compilation_cases_decode,
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,
@@ -2692,7 +2695,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Note: We don't put it into graph_capture context manager because
         # we may doing lazy capturing in future that still allows capturing
         # after here.
-        set_cudagraph_capturing_enabled(False)
+        set_cudagraph_capturing_enabled(
+            False) if not specific_token_num else None
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
