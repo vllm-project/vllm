@@ -1383,9 +1383,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                                     list[Optional[MultiModalKwargsItem]]](list)
         merged_prompt_updates = defaultdict[str, list[BoundPromptUpdate]](list)
         for modality, hashes in mm_hashes.items():
-            for i, hash in enumerate(hashes):
+            for hash_ in hashes:
                 item: Optional[tuple[MultiModalKwargsItem, BoundPromptUpdate]]
-                if not cache.is_cached_item(hash):
+                if not cache.is_cached_item(hash_):
                     kwargs = mm_missing_kwargs[modality][
                         mm_missing_next_idx[modality]]
                     prompt_update = mm_missing_prompt_updates[modality][
@@ -1396,9 +1396,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 else:
                     item = None
 
-                kwargs, prompt_update = cache.get_and_update_item(item, hash)
-                merged_kwargs[modality].append(kwargs)
-                merged_prompt_updates[modality].append(prompt_update)
+                new_kwargs, new_prompt_update = cache.get_and_update_item(
+                    item, hash_)
+                merged_kwargs[modality].append(new_kwargs)
+                merged_prompt_updates[modality].append(new_prompt_update)
 
         mm_kwargs = MultiModalKwargsItems(merged_kwargs)
         mm_prompt_updates = MultiModalPromptUpdates(merged_prompt_updates)

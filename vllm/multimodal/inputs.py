@@ -758,7 +758,7 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
             raise KeyError(f"Modality {modality!r} not found. "
                            f"Available modalities: {set(self.keys())}")
 
-        return super().__getitem__(modality)
+        return super().__getitem__(modality)  # type: ignore[return-value]
 
     def get_data(self, *, pin_memory: bool = False) -> "MultiModalKwargs":
         elems_by_key = defaultdict[str, list[MultiModalFieldElem]](list)
