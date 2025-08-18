@@ -48,6 +48,11 @@ DEFAULT_LOGGING_CONFIG = {
             "level": "DEBUG",
             "propagate": False,
         },
+        "model_signing": {
+            "handlers": ["vllm"],
+            "level": "WARNING",
+            "propagate": False,
+        }
     },
     "version": 1,
     "disable_existing_loggers": False
