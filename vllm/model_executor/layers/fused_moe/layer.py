@@ -208,6 +208,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     # prepare_communication_buffer_for_model.
     def init_prepare_finalize(self, layer: torch.nn.Module):
         assert self.moe is not None
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+
+        # Stash away for warmup code.
+        layer.moe_quant_config = self.moe_quant_config
+
         prepare_finalize = self.maybe_make_prepare_finalize()
 
         if prepare_finalize is not None:
@@ -960,6 +965,7 @@ class FusedMoE(CustomOp):
             has_bias=has_bias,
         )
         self.moe_config = moe
+        self.moe_quant_config: Optional[FusedMoEQuantConfig] = None
         self.quant_config = quant_config
 
         # Note: get_quant_method will look at the layer's local_num_experts
@@ -971,11 +977,6 @@ class FusedMoE(CustomOp):
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
-        self.quant_method.moe_quant_config = (
-            quant_method.get_fused_moe_quant_config(self))
-
-        # Stash away for warmup code.
-        self.moe_quant_config = self.quant_method.moe_quant_config
 
         if self.enable_eplb:
             from vllm.model_executor.layers.quantization.fp8 import (
