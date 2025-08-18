@@ -1066,10 +1066,8 @@ if envs.VLLM_SERVER_DEV_MODE:
             return Response(status_code=200)
         response = []
         for result in results:
-            if result is None:
-                response.append(None)
-            elif isinstance(result, pydantic.BaseModel):
-                response.append(result.model_dump())
+            if result is None or isinstance(result, (dict, list)):
+                response.append(result)
             else:
                 response.append(str(result))
         return JSONResponse(content={"results": response})

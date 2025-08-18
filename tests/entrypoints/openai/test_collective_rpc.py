@@ -1,19 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import pytest
 import requests
-from pydantic import BaseModel
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-
-
-class EchoResult(BaseModel):
-    args: list[str]
-    kwargs: dict[str, str]
-    total_items: int
 
 
 class TestWorkerExtension:
@@ -22,9 +17,9 @@ class TestWorkerExtension:
         """Test non-pydantic return type."""
         return MODEL_NAME
 
-    def echo_args_kwargs(self, *args, **kwargs) -> EchoResult:
+    def echo_args_kwargs(self, *args, **kwargs) -> dict[str, Any]:
         """Echo back both args and kwargs."""
-        return EchoResult(
+        return dict(
             args=list(args),
             kwargs=kwargs,
             total_items=len(args) + len(kwargs),
@@ -76,7 +71,7 @@ def test_return_none(server):
 
 
 def test_echo_args_kwargs(server):
-    """Test args, kwargs, and pydantic response"""
+    """Test args, kwargs, and dict response"""
     args = ["arg1", "arg2"]
     kwargs = {"key1": "value1", "key2": "value2"}
     response = requests.post(server.url_for("collective_rpc"),
