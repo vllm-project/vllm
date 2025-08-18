@@ -197,7 +197,7 @@ struct alignas(16) _f16VecPN : _f16Vec<scalar_t, width> {
 template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
 poly_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
-                 scalar_t* __restrict__ input,         // [..., hidden_size]
+                 const scalar_t* __restrict__ input,   // [..., hidden_size]
                  const scalar_t* __restrict__ weight,  // [3]
                  const scalar_t* __restrict__ bias,    // [1]
                  const float epsilon, const int hidden_size) {
@@ -209,7 +209,7 @@ poly_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
      not aliased in practice. Argument pointers should not be dereferenced
      in this kernel as that would be undefined behavior */
   auto* __restrict__ input_v =
-      reinterpret_cast<_f16VecPN<scalar_t, width>*>(input);
+      reinterpret_cast<const _f16VecPN<scalar_t, width>*>(input);
   const int vec_hidden_size = hidden_size / width;
   float variance = 0.0f;
   float variance2 = 0.0f;
@@ -267,7 +267,7 @@ poly_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
 template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
 poly_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
-                 scalar_t* __restrict__ input,         // [..., hidden_size]
+                 const scalar_t* __restrict__ input,   // [..., hidden_size]
                  const scalar_t* __restrict__ weight,  // [3]
                  const scalar_t* __restrict__ bias,    // [1]
                  const float epsilon, const int hidden_size) {
