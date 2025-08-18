@@ -246,7 +246,7 @@ if has_flashinfer():
         A_scale: torch.Tensor,
         B_scale: torch.Tensor,
         dtype: torch.dtype,
-        backend: str = "cublas",
+        backend: str,
     ) -> torch.Tensor:
         from flashinfer import bmm_fp8 as bmm_fp8_
         return bmm_fp8_(A, B, A_scale, B_scale, dtype, None, backend)
