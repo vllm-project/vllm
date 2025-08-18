@@ -268,7 +268,7 @@ class CpuPlatform(Platform):
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
     @classmethod
-    def get_allowed_cpu_memory_node_list(
+    def get_allowed_cpu_core_node_list(
             cls) -> tuple[list[int], list[LogicalCPUInfo]]:
         assert platform.system() == "Linux"
 
