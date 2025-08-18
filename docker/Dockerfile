@@ -398,8 +398,8 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
         TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
             uv pip install --system --no-build-isolation --force-reinstall . \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
-        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \ 
-            python3 -m flashinfer --download-cubin
+        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+            python3 -m flashinfer --download-cubin || echo "WARNING: Failed to download flashinfer cubins. Some features like TRTLLM attention may not be available."
     popd
     rm -rf flashinfer
 BASH
