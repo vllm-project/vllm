@@ -192,8 +192,10 @@ class NixlConnector(KVConnectorBase_V1):
     # Worker Side Methods
     ############################################################
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor],
-                           kv_cache_config: KVCacheConfig):
+                           kv_cache_config: Optional[KVCacheConfig] = None):
         assert self.connector_worker is not None
+        assert kv_cache_config is not None, (
+            "NixlConnector requires a KVCacheConfig to be provided.")
         self.connector_worker.register_kv_caches(kv_caches, kv_cache_config)
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
@@ -701,24 +703,23 @@ class NixlConnectorWorker:
                 "host_xfer_buffer should not be initialized when "
                 f"kv_buffer_device is {self.kv_buffer_device}")
 
-        if not kv_cache_config.kv_cache_tensors:
+        if not kv_cache_config.kv_cache_groups:
             raise ValueError(
-                "KV cache config must contain at least one tensor")
+                "KV cache config must contain at least one group")
 
-        self.num_blocks = kv_cache_config.num_blocks
-        tensor_size_bytes_config = kv_cache_config.kv_cache_tensors[0].size
-        if tensor_size_bytes_config % self.num_blocks != 0:
-            raise ValueError(
-                f"Tensor size ({tensor_size_bytes_config}) must be divisible by"
-                f" number of blocks ({self.num_blocks})")
-        self.block_len = tensor_size_bytes_config // self.num_blocks
-        self.dst_num_blocks[self.engine_id] = self.num_blocks
         self.device_kv_caches = kv_caches
-        use_mla = self.model_config.use_mla
+        self.num_blocks = kv_cache_config.num_blocks
+        self.dst_num_blocks[self.engine_id] = self.num_blocks
+        
+        split_k_and_v = not (self.model_config.use_mla or self._use_pallas_v1
+                             or self._use_flashinfer)
+        self.block_len = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
+        self.block_len = self.block_len // 2 if split_k_and_v else self.block_len
+        self.slot_size_bytes = self.block_len // self.block_size
 
         logger.info(
             "Registering KV_Caches. use_mla: %s, kv_buffer_device: %s, "
-            "use_host_buffer: %s, num_blocks: %s", use_mla,
+            "use_host_buffer: %s, num_blocks: %s", self.model_config.use_mla,
             self.kv_buffer_device, self.use_host_buffer, self.num_blocks)
 
         caches_data = []
@@ -735,13 +736,10 @@ class NixlConnectorWorker:
         # (roughly 8KB vs 5KB).
         # Conversely for FlashInfer, K and V are transferred in the same tensor
         # to better exploit the memory layout (ie num_blocks is the first dim).
-        split_k_and_v = not (use_mla or self._use_pallas_v1
-                             or self._use_flashinfer)
         for layer_name, cache_or_caches in xfer_buffers.items():
             cache_list = cache_or_caches if split_k_and_v else [
                 cache_or_caches
             ]
-
             for cache in cache_list:
                 base_addr = cache.data_ptr()
                 if base_addr not in seen_base_addresses:
@@ -761,11 +759,6 @@ class NixlConnectorWorker:
         logger.debug("Done registering descs")
         self._registered_descs.append(descs)
 
-        # When K and V are in different regions, the num of bytes per block
-        # is halved.
-        self.block_len = (self.block_len //
-                          2 if split_k_and_v else self.block_len)
-
         # Register local/src descr for NIXL xfer.
         blocks_data = []
         for base_addr in seen_base_addresses:
@@ -783,7 +776,6 @@ class NixlConnectorWorker:
         logger.debug("Created %s blocks for src engine %s and rank %s",
                      len(blocks_data), self.engine_id, self.tp_rank)
 
-        # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data,
                                                  self.nixl_memory_type)
         # NIXL_INIT_AGENT to be used for preparations of local descs.
