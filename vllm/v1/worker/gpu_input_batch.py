@@ -46,6 +46,10 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
 
+    # Bootstrap eagle and MTP related hidden states
+    # support caching last hidden states for partial prefill
+    prefill_hidden_states: Optional[torch.Tensor] = None
+
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
 
