@@ -101,10 +101,9 @@ class AttentionBackend(ABC):
     ) -> None:
         raise NotImplementedError
 
-    def advance_step(self, model_input: "ModelRunnerInputBase",
-                     sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int, num_seqs: int, num_queries: int) -> None:
-        raise NotImplementedError
+    @classmethod
+    def full_cls_name(cls) -> tuple[str, str]:
+        return (cls.__module__, cls.__qualname__)
 
 
 @dataclass

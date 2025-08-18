@@ -29,7 +29,8 @@ from vllm.distributed.utils import divide
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.platforms import _Backend, current_platform
-from vllm.utils import make_zmq_path, make_zmq_socket, round_down
+from vllm.utils import make_zmq_path, make_zmq_socket
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
@@ -73,6 +74,7 @@ class NixlAgentMetadata(
     num_blocks: int
     block_len: int
     attn_backend_name: str
+    kv_cache_layout: str
 
 
 @dataclass
@@ -275,10 +277,7 @@ class NixlConnectorScheduler:
 
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
-            assert num_computed_tokens % self.block_size == 0
-            rounded_num_prompt_tokens = round_down(
-                len(request.prompt_token_ids), self.block_size)
-            count = max(rounded_num_prompt_tokens - num_computed_tokens, 0)
+            count = len(request.prompt_token_ids) - num_computed_tokens
             if count > 0:
                 return count, True
 
@@ -301,18 +300,16 @@ class NixlConnectorScheduler:
             # NOTE: when accelerator is not directly supported by Nixl,
             # prefilled blocks need to be saved to host memory before transfer.
 
-            # figure out full computed blocks to save
+            # save all blocks
             block_ids = blocks.get_block_ids()[0]
-            all_full = request.num_tokens % self.block_size == 0
-            full_block_ids = (block_ids if all_full else block_ids[:-1])
             # TODO: skip the blocks that are already in the host xfer buffer.
             # Currently, the host xfer buffer block is 1-to-1 mapped to device
             # kv blocks, so host blocks won't be flushed as long as its device
             # block is not overwritten; and it will be safe to skip saving them
             # to host xfer buffer.
-            if full_block_ids:
+            if block_ids:
                 self._reqs_need_save[request.request_id] = \
-                    (request, full_block_ids)
+                    (request, block_ids)
         elif params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host",
@@ -401,12 +398,9 @@ class NixlConnectorScheduler:
                 or request.status != RequestStatus.FINISHED_LENGTH_CAPPED):
             return False, None
 
-        # Get computed blocks.
-        all_full = request.num_computed_tokens % self.block_size == 0
-        computed_block_ids = block_ids if all_full else block_ids[:-1]
-
-        # If prompt < block_size, no xfer so free blocks immediately.
-        delay_free_blocks = len(computed_block_ids) > 0
+        # TODO: check whether block_ids actually ever be 0. If not we could
+        # remove the conditional below
+        delay_free_blocks = len(block_ids) > 0
 
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
@@ -416,7 +410,7 @@ class NixlConnectorScheduler:
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
-            remote_block_ids=computed_block_ids,
+            remote_block_ids=block_ids,
             remote_engine_id=self.engine_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
@@ -546,7 +540,9 @@ class NixlConnectorWorker:
         attn_backend = backend_name_to_enum(self.backend_name)
         self._use_flashinfer = attn_backend == _Backend.FLASHINFER_VLLM_V1
         self._use_pallas_v1 = attn_backend == _Backend.PALLAS_VLLM_V1
+        self.kv_cache_layout = get_kv_cache_layout()
         logger.debug("Detected attention backend %s", self.backend_name)
+        logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
         # With heterogeneous TP, P must wait for all assigned D TP workers to
@@ -847,7 +843,8 @@ class NixlConnectorWorker:
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
             num_blocks=self.num_blocks,
             block_len=self.block_len,
-            attn_backend_name=self.backend_name)
+            attn_backend_name=self.backend_name,
+            kv_cache_layout=self.kv_cache_layout)
         ready_event = threading.Event()
         self._nixl_handshake_listener_t = threading.Thread(
             target=self._nixl_handshake_listener,
@@ -908,8 +905,7 @@ class NixlConnectorWorker:
             self._tp_size[engine_id] = remote_tp_size
         else:
             assert self._tp_size[engine_id] == remote_tp_size
-        # We may eventually enable this after asserting equality in cache
-        # layout and close outputs.
+        # TODO We may eventually want to skip enforcing the same attn backend.
         assert nixl_agent_meta.attn_backend_name == self.backend_name
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
@@ -938,6 +934,9 @@ class NixlConnectorWorker:
             if self._use_flashinfer:
                 # Account for joint KV in FlashInfer.
                 remote_block_size //= 2
+            if tp_ratio > 1:
+                # Heterogeneous TP expects same kv_cache_layout.
+                assert nixl_agent_meta.kv_cache_layout == self.kv_cache_layout
 
             assert nixl_agent_meta.block_len == self.block_len * tp_ratio, (
                 "Remote P worker KV layer cache must be of shape [2, N, "

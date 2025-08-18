@@ -3,7 +3,6 @@
 import os
 import queue
 import signal
-import sys
 import threading
 import time
 from collections import deque
@@ -19,16 +18,18 @@ import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
-from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import (make_zmq_socket, resolve_obj_by_qualname,
-                        set_process_title)
-from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
+from vllm.utils import (decorate_logs, get_hash_fn_by_name, make_zmq_socket,
+                        resolve_obj_by_qualname, set_process_title)
+from vllm.v1.core.kv_cache_utils import (BlockHash, get_kv_cache_config,
+                                         get_request_block_hasher,
+                                         init_none_hash,
                                          unify_kv_cache_configs)
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -37,7 +38,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
                             ReconfigureDistributedRequest, ReconfigureRankType,
                             UtilityOutput, UtilityResult)
-from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
+from vllm.v1.engine.mm_input_cache import MultiModalInputCacheServer
 from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -126,9 +127,8 @@ class EngineCore:
             log_stats=self.log_stats,
         )
 
-        # Setup MM Input Mapper.
-        self.mm_input_cache_server = MirroredProcessingCache(
-            vllm_config.model_config)
+        self.mm_input_cache_server = MultiModalInputCacheServer(
+            vllm_config.model_config, MULTIMODAL_REGISTRY)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -141,6 +141,19 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
+
+        self.request_block_hasher: Optional[Callable[[Request],
+                                                     list[BlockHash]]] = None
+        if (self.vllm_config.cache_config.enable_prefix_caching
+                or self.scheduler.get_kv_connector() is not None):
+
+            block_size = vllm_config.cache_config.block_size
+            caching_hash_fn = get_hash_fn_by_name(
+                vllm_config.cache_config.prefix_caching_hash_algo)
+            init_none_hash(caching_hash_fn)
+
+            self.request_block_hasher = get_request_block_hasher(
+                block_size, caching_hash_fn)
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -411,14 +424,16 @@ class EngineCore:
         request initialization running in parallel with Model forward
         """
         if request.mm_hashes is not None:
-            assert request.mm_inputs is not None
+            assert request.mm_kwargs is not None
+
             # Note on thread safety: no race condition.
             # `mm_input_cache_server` is reset at the end of LLMEngine init,
             # and will only accessed in the input processing thread afterwards.
-            request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
-                request.mm_inputs, request.mm_hashes)
+            request.mm_kwargs = self.mm_input_cache_server.get_and_update(
+                request.mm_kwargs, request.mm_hashes)
 
-        req = Request.from_engine_core_request(request)
+        req = Request.from_engine_core_request(request,
+                                               self.request_block_hasher)
         if req.use_structured_output:
             # Note on thread safety: no race condition.
             # `grammar_init` is only invoked in input processing thread. For
@@ -463,8 +478,11 @@ class EngineCoreProc(EngineCore):
             self.has_coordinator = addresses.coordinator_output is not None
             self.frontend_stats_publish_address = (
                 addresses.frontend_stats_publish_address)
+            logger.debug("Has DP Coordinator: %s, stats publish address: %s",
+                         self.has_coordinator,
+                         self.frontend_stats_publish_address)
             # Only publish request queue stats to coordinator for "internal"
-            # LB mode.
+            # and "hybrid" LB modes .
             self.publish_dp_lb_stats = (
                 self.has_coordinator
                 and not vllm_config.parallel_config.data_parallel_external_lb)
@@ -474,24 +492,37 @@ class EngineCoreProc(EngineCore):
             super().__init__(vllm_config, executor_class, log_stats,
                              executor_fail_callback)
 
+            # Background Threads and Queues for IO. These enable us to
+            # overlap ZMQ socket IO with GPU since they release the GIL,
+            # and to overlap some serialization/deserialization with the
+            # model forward pass.
+            # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+            ready_event = threading.Event()
+            input_thread = threading.Thread(target=self.process_input_sockets,
+                                            args=(addresses.inputs,
+                                                  addresses.coordinator_input,
+                                                  identity, ready_event),
+                                            daemon=True)
+            input_thread.start()
+
+            self.output_thread = threading.Thread(
+                target=self.process_output_sockets,
+                args=(addresses.outputs, addresses.coordinator_output,
+                      self.engine_index),
+                daemon=True)
+            self.output_thread.start()
+
+            # Don't complete handshake until DP coordinator ready message is
+            # received.
+            while not ready_event.wait(timeout=10):
+                if not input_thread.is_alive():
+                    raise RuntimeError(
+                        "Input socket thread died during startup")
+                assert addresses.coordinator_input is not None
+                logger.info("Waiting for READY message from DP Coordinator...")
+
         self.step_fn = (self.step if self.batch_queue is None else
                         self.step_with_batch_queue)
-
-        # Background Threads and Queues for IO. These enable us to
-        # overlap ZMQ socket IO with GPU since they release the GIL,
-        # and to overlap some serialization/deserialization with the
-        # model forward pass.
-        # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        threading.Thread(target=self.process_input_sockets,
-                         args=(addresses.inputs, addresses.coordinator_input,
-                               identity),
-                         daemon=True).start()
-        self.output_thread = threading.Thread(
-            target=self.process_output_sockets,
-            args=(addresses.outputs, addresses.coordinator_output,
-                  self.engine_index),
-            daemon=True)
-        self.output_thread.start()
 
     @contextmanager
     def _perform_handshakes(
@@ -507,10 +538,10 @@ class EngineCoreProc(EngineCore):
 
         For DP=1 or offline mode, this is with the colocated front-end process.
 
-        For DP>1 with internal loadbalancing this is with the shared front-end
+        For DP>1 with internal load-balancing this is with the shared front-end
         process which may reside on a different node.
 
-        For DP>1 with external or hybrid loadbalancing, two handshakes are
+        For DP>1 with external or hybrid load-balancing, two handshakes are
         performed:
             - With the rank 0 front-end process which retrieves the
               DP Coordinator ZMQ addresses and DP process group address.
@@ -649,12 +680,14 @@ class EngineCoreProc(EngineCore):
                 "vllm_config"].parallel_config
             if parallel_config.data_parallel_size > 1 or dp_rank > 0:
                 set_process_title("DPEngineCore", str(dp_rank))
+                decorate_logs()
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
                 parallel_config.data_parallel_rank_local = local_dp_rank
                 engine_core = DPEngineCoreProc(*args, **kwargs)
             else:
                 set_process_title("EngineCore")
+                decorate_logs()
                 engine_core = EngineCoreProc(*args, **kwargs)
 
             engine_core.run_busy_loop()
@@ -772,7 +805,7 @@ class EngineCoreProc(EngineCore):
 
     def process_input_sockets(self, input_addresses: list[str],
                               coord_input_address: Optional[str],
-                              identity: bytes):
+                              identity: bytes, ready_event: threading.Event):
         """Input socket IO thread."""
 
         # Msgpack serialization decoding.
@@ -809,9 +842,14 @@ class EngineCoreProc(EngineCore):
                 # back to us.
                 input_socket.send(b'')
                 poller.register(input_socket, zmq.POLLIN)
+
             if coord_socket is not None:
+                # Wait for ready message from coordinator.
+                assert coord_socket.recv() == b"READY"
                 poller.register(coord_socket, zmq.POLLIN)
 
+            ready_event.set()
+            del ready_event
             while True:
                 for input_socket, _ in poller.poll():
                     # (RequestType, RequestData)
@@ -905,11 +943,9 @@ class DPEngineCoreProc(EngineCoreProc):
         log_stats: bool,
         client_handshake_address: Optional[str] = None,
     ):
-        self._decorate_logs()
-
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
-        self.counter = 0
+        self.step_counter = 0
         self.current_wave = 0
         self.last_counts = (0, 0)
 
@@ -918,15 +954,6 @@ class DPEngineCoreProc(EngineCoreProc):
         super().__init__(vllm_config, local_client, handshake_address,
                          executor_class, log_stats, client_handshake_address,
                          dp_rank)
-
-    def _decorate_logs(self):
-        # Add process-specific prefix to stdout and stderr before
-        # we initialize the engine.
-        from multiprocessing import current_process
-        process_name = current_process().name
-        pid = os.getpid()
-        _add_prefix(sys.stdout, process_name, pid)
-        _add_prefix(sys.stderr, process_name, pid)
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
 
@@ -989,7 +1016,9 @@ class DPEngineCoreProc(EngineCoreProc):
         counts = self.scheduler.get_request_counts()
         if counts != self.last_counts:
             self.last_counts = counts
-            stats = SchedulerStats(*counts)
+            stats = SchedulerStats(*counts,
+                                   step_counter=self.step_counter,
+                                   current_wave=self.current_wave)
             self.output_queue.put_nowait(
                 (-1, EngineCoreOutputs(scheduler_stats=stats)))
 
@@ -1031,15 +1060,16 @@ class DPEngineCoreProc(EngineCoreProc):
                     self.output_queue.put_nowait(
                         (client_index,
                          EngineCoreOutputs(wave_complete=self.current_wave)))
+                # Increment wave count and reset step counter.
                 self.current_wave += 1
+                self.step_counter = 0
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
 
         # Optimization - only perform finish-sync all-reduce every 32 steps.
-        self.counter += 1
-        if self.counter != 32:
+        self.step_counter += 1
+        if self.step_counter % 32 != 0:
             return True
-        self.counter = 0
 
         return ParallelConfig.has_unfinished_dp(self.dp_group,
                                                 local_unfinished)
@@ -1148,9 +1178,6 @@ class DPEngineCoreActor(DPEngineCoreProc):
                 f"local range: [{local_dp_rank * world_size}, "
                 f"{(local_dp_rank + 1) * world_size}) "
                 f"base value: \"{os.getenv(device_control_env_var)}\"") from e
-
-    def _decorate_logs(self):
-        pass
 
     @contextmanager
     def _perform_handshakes(self, handshake_address: str, identity: bytes,

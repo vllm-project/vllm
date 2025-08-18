@@ -311,44 +311,12 @@ def apply_repetition_penalties(logits: torch.Tensor, prompt_mask: torch.Tensor,
         output_mask: A boolean tensor indicating which tokens appear in the output.
         repetition_penalties: The repetition penalties of shape (num_seqs, ).
     """
-    if current_platform.is_cuda() and logits.is_contiguous():
+    if logits.is_cuda and logits.is_contiguous():
         apply_repetition_penalties_cuda(logits, prompt_mask, output_mask,
                                         repetition_penalties)
     else:
         apply_repetition_penalties_torch(logits, prompt_mask, output_mask,
                                          repetition_penalties)
-
-
-def advance_step_flashattn(num_seqs: int, num_queries: int, block_size: int,
-                           input_tokens: torch.Tensor,
-                           sampled_token_ids: torch.Tensor,
-                           input_positions: torch.Tensor,
-                           seq_lens: torch.Tensor, slot_mapping: torch.Tensor,
-                           block_tables: torch.Tensor) -> None:
-    """Advance a step on GPU for existing inputs for a multi-step runner"""
-    return torch.ops._C.advance_step_flashattn(num_seqs, num_queries,
-                                               block_size, input_tokens,
-                                               sampled_token_ids,
-                                               input_positions, seq_lens,
-                                               slot_mapping, block_tables)
-
-
-def advance_step_flashinfer(num_seqs: int, num_queries: int, block_size: int,
-                            input_tokens: torch.Tensor,
-                            sampled_token_ids: torch.Tensor,
-                            input_positions: torch.Tensor,
-                            seq_lens: torch.Tensor, slot_mapping: torch.Tensor,
-                            block_tables: torch.Tensor,
-                            paged_kv_indices: torch.Tensor,
-                            paged_kv_indptr: torch.Tensor,
-                            paged_kv_last_page_len: torch.Tensor,
-                            block_table_bound: torch.Tensor) -> None:
-
-    return torch.ops._C.advance_step_flashinfer(
-        num_seqs, num_queries, block_size, input_tokens, sampled_token_ids,
-        input_positions, seq_lens, slot_mapping, block_tables,
-        paged_kv_indices, paged_kv_indptr, paged_kv_last_page_len,
-        block_table_bound)
 
 
 # fused quant layer norm ops
@@ -452,6 +420,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     def _gptq_marlin_gemm_fake(a: torch.Tensor,
                                c: Optional[torch.Tensor],
                                b_q_weight: torch.Tensor,
+                               b_bias: Optional[torch.Tensor],
                                b_scales: torch.Tensor,
                                global_scale: Optional[torch.Tensor],
                                b_zeros: Optional[torch.Tensor],
@@ -506,32 +475,6 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
         return torch.empty((split_k_iters, num_in_feats, qweight.size(1) * 8),
                            dtype=input.dtype,
                            device=input.device).sum(0)
-
-    @register_fake("_C::aqlm_gemm")
-    def _aqlm_gemm_fake(input: torch.Tensor, codes: torch.Tensor,
-                        codebooks: torch.Tensor, scales: torch.Tensor,
-                        codebook_partition_sizes: list[int],
-                        bias: Optional[torch.Tensor]) -> torch.Tensor:
-        out_features = codes.size(0) * codebooks.size(2)
-        flat_input = input.reshape((-1, input.size(-1)))
-        flat_output = torch.empty((flat_input.size(0), out_features),
-                                  dtype=input.dtype,
-                                  device=input.device)
-
-        output_sizes = list(input.shape)
-        output_sizes.pop()
-        output_sizes.append(-1)
-        return flat_output.reshape(tuple(output_sizes))
-
-    @register_fake("_C::aqlm_dequant")
-    def _aqlm_dequant_fake(
-            codes: torch.Tensor, codebooks: torch.Tensor,
-            codebook_partition_sizes: list[int]) -> torch.Tensor:
-        in_features = codes.size(1) * 8
-        out_features = codes.size(0)
-        return torch.empty((out_features, in_features),
-                           dtype=codebooks.dtype,
-                           device=codebooks.device)
 
     @register_fake("_C::machete_mm")
     def machete_mm_fake(
@@ -710,23 +653,25 @@ def cutlass_scaled_mm(a: torch.Tensor,
         scale_b.shape * [128, 128] == b.shape
     """
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
-    assert bias is None or bias.shape[0] == b.shape[
-        1] and bias.dtype == out_dtype
+    assert bias is None or bias.numel(
+    ) == b.shape[1] and bias.dtype == out_dtype
 
-    m = a.shape[0]
-    n = b.shape[1]
+    # Massage the input to be 2D
+    target_shape = (*a.shape[:-1], b.shape[1])
+    a = a.view(-1, a.shape[-1])
 
     cutlass_compatible_b = (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     if current_platform.is_rocm() or not cutlass_compatible_b:
         from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa
             triton_scaled_mm)
-        return triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
+        out = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
+    else:
+        out = torch.empty((a.shape[0], b.shape[1]),
+                          dtype=out_dtype,
+                          device=a.device)
+        torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
-    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-
-    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
-
-    return out
+    return out.view(*target_shape)
 
 
 def cutlass_scaled_mm_azp(a: torch.Tensor,
@@ -746,15 +691,18 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
     assert bias is None or bias.numel(
     ) == b.shape[1] and bias.dtype == out_dtype
+
+    # Massage the input to be 2D
+    target_shape = (*a.shape[:-1], b.shape[1])
+    a = a.view(-1, a.shape[-1])
     assert azp is None or azp.numel() == a.shape[0]
 
-    m = a.shape[0]
-    n = b.shape[1]
-    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-
+    out = torch.empty((a.shape[0], b.shape[1]),
+                      dtype=out_dtype,
+                      device=a.device)
     torch.ops._C.cutlass_scaled_mm_azp(out, a, b, scale_a, scale_b, azp_adj,
                                        azp, bias)
-    return out
+    return out.view(*target_shape)
 
 
 def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
@@ -983,21 +931,6 @@ def cutlass_fp4_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
                                              sf_offsets)
 
 
-# aqlm
-def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
-              codebooks: torch.Tensor, scales: torch.Tensor,
-              codebook_partition_sizes: list[int],
-              bias: Optional[torch.Tensor]) -> torch.Tensor:
-    return torch.ops._C.aqlm_gemm(input, codes, codebooks, scales,
-                                  codebook_partition_sizes, bias)
-
-
-def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
-                 codebook_partition_sizes: list[int]) -> torch.Tensor:
-    return torch.ops._C.aqlm_dequant(codes, codebooks,
-                                     codebook_partition_sizes)
-
-
 # gptq_marlin
 def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                        size_k: int, size_n: int,
@@ -1043,6 +976,7 @@ def awq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
 def gptq_marlin_gemm(a: torch.Tensor,
                      c: Optional[torch.Tensor],
                      b_q_weight: torch.Tensor,
+                     b_bias: Optional[torch.Tensor],
                      b_scales: torch.Tensor,
                      global_scale: Optional[torch.Tensor],
                      b_zeros: Optional[torch.Tensor],
@@ -1057,7 +991,7 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      use_atomic_add: bool = False,
                      use_fp32_reduce: bool = False,
                      is_zp_float: bool = False) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_scales,
+    return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_bias, b_scales,
                                          global_scale, b_zeros, g_idx, perm,
                                          workspace, b_q_type.id, size_m,
                                          size_n, size_k, is_k_full,
@@ -1279,14 +1213,13 @@ def scaled_fp8_quant(
                                 device=input.device,
                                 dtype=torch.float32)
             torch.ops._C.dynamic_per_token_scaled_fp8_quant(
-                output, input.contiguous(), scale, scale_ub)
+                output, input, scale, scale_ub)
         else:
-            scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_scaled_fp8_quant(output, input.contiguous(),
-                                                  scale)
+            scale = torch.empty(1, device=input.device, dtype=torch.float32)
+            torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         assert scale.numel() == 1, f"{scale.shape}"
-        torch.ops._C.static_scaled_fp8_quant(output, input.contiguous(), scale)
+        torch.ops._C.static_scaled_fp8_quant(output, input, scale)
 
     return output, scale
 
@@ -1536,7 +1469,9 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
 
 
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
-                          b_qweight: torch.Tensor, b_scales: torch.Tensor,
+                          b_qweight: torch.Tensor,
+                          b_bias: Optional[torch.Tensor],
+                          b_scales: torch.Tensor,
                           global_scale: Optional[torch.Tensor],
                           b_qzeros: Optional[torch.Tensor],
                           g_idx: Optional[torch.Tensor],
@@ -1552,11 +1487,11 @@ def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
                           use_fp32_reduce: bool,
                           is_zp_float: bool) -> torch.Tensor:
     return torch.ops._moe_C.moe_wna16_marlin_gemm(
-        input, output, b_qweight, b_scales, global_scale, b_qzeros, g_idx,
-        perm, workspace, sorted_token_ids, expert_ids, num_tokens_past_padded,
-        topk_weights, moe_block_size, top_k, mul_topk_weights, is_ep,
-        b_q_type.id, size_m, size_n, size_k, is_k_full, use_atomic_add,
-        use_fp32_reduce, is_zp_float)
+        input, output, b_qweight, b_bias, b_scales, global_scale, b_qzeros,
+        g_idx, perm, workspace, sorted_token_ids, expert_ids,
+        num_tokens_past_padded, topk_weights, moe_block_size, top_k,
+        mul_topk_weights, is_ep, b_q_type.id, size_m, size_n, size_k,
+        is_k_full, use_atomic_add, use_fp32_reduce, is_zp_float)
 
 
 if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):

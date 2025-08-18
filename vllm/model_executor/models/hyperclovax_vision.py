@@ -25,8 +25,7 @@ import torch
 import torch.nn as nn
 from timm.layers import LayerNorm, LayerNorm2d
 from timm.models.regnet import RegStage
-from transformers import (AutoProcessor, BatchFeature, CLIPVisionConfig,
-                          SiglipVisionConfig)
+from transformers import BatchFeature, CLIPVisionConfig, SiglipVisionConfig
 from transformers.modeling_utils import no_init_weights
 
 from vllm.config import VllmConfig
@@ -35,7 +34,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, ProcessingCache,
@@ -80,25 +79,8 @@ HCXVisionMultimodalInputs = Union[HCXVisionMultimodalPixelInputs]
 
 class HCXVisionProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_config(self):
-        return self.ctx.get_hf_config()
-
     def get_vision_encoder_info(self):
         return get_vision_encoder_info(self.get_hf_config())
-
-    def get_hf_processor(
-        self,
-        **kwargs: object,
-    ):
-        processor_cls = type(
-            AutoProcessor.from_pretrained(
-                self.ctx.model_config.model,
-                trust_remote_code=self.ctx.model_config.trust_remote_code,
-            ))
-        return self.ctx.get_hf_processor(
-            processor_cls,
-            **kwargs,
-        )
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
@@ -313,7 +295,7 @@ class HCXVisionMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         placeholder = {
@@ -324,21 +306,22 @@ class HCXVisionMultiModalProcessor(
         def get_replacement_hyperclovax(
             item_idx: int,
             modality: str,
-            out_mm_kwargs: MultiModalKwargs,
+            out_mm_kwargs: MultiModalKwargsItems,
         ):
-            num_tokens = None
+            out_item = out_mm_kwargs[modality][item_idx]
+
             if modality == "image":
+                lens = out_item["vision_query_lengths_images"].data
                 num_tokens = self.info.get_num_image_tokens(
-                    vision_query_length=out_mm_kwargs[
-                        "vision_query_lengths_images"][item_idx], )
-            if modality == "video":
+                    vision_query_length=lens)
+            elif modality == "video":
+                lens = out_item["vision_query_lengths_videos"].data
                 num_tokens = self.info.get_num_video_tokens(
-                    vision_query_length=out_mm_kwargs[
-                        "vision_query_lengths_videos"][item_idx], )
-            assert isinstance(num_tokens, int)
-            return [
-                placeholder[modality],
-            ] * num_tokens
+                    vision_query_length=lens)
+            else:
+                raise NotImplementedError(modality)
+
+            return [placeholder[modality]] * num_tokens
 
         return [
             PromptReplacement(
