@@ -3622,7 +3622,6 @@ class VllmConfig:
                            "but the scheduler is configured to publish them."
                            "Modify KVEventsConfig.enable_kv_cache_events"
                            "to True to enable.")
-        current_platform.check_and_update_config(self)
 
         # final check of cudagraph mode after platform-specific update
         if envs.VLLM_USE_V1 and current_platform.is_cuda_alike():
@@ -3682,6 +3681,9 @@ class VllmConfig:
                     # Hybrid KV cache manager is not yet supported with chunked
                     # local attention.
                     self.scheduler_config.disable_hybrid_kv_cache_manager = True
+        # NOTE: Keep me at last in `__post_init__` to make sure the `VllmConfig`
+        # could be updated in platform as expected
+        current_platform.check_and_update_config(self)
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
